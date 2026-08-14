@@ -1,0 +1,82 @@
+schema_version = 1
+
+[suite]
+id = "quick"
+description = "Short performance screen between smoke validation and the full core suite."
+
+[[cases]]
+id = "decode-128"
+kind = "decode"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 128
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "prefill-repeat-256"
+kind = "prefill"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 256
+
+[[cases]]
+id = "prefill-repeat-2048"
+kind = "prefill"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 2048
+
+[[cases]]
+id = "prefill-repeat-8192"
+kind = "prefill"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 8192
+
+[[cases]]
+id = "concurrency-2"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 1
+repetitions = 2
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 2
+prompt_repetitions = 0
+
+[[cases]]
+id = "concurrency-4"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 1
+repetitions = 2
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 4
+prompt_repetitions = 0
+
+[[cases]]
+id = "long-context-needle-8192"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 8192

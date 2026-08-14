@@ -1,0 +1,38 @@
+schema_version = 1
+
+[suite]
+id = "vision"
+description = "Deterministic vision correctness and image-resolution latency cases."
+
+[[cases]]
+id = "vision-red-64"
+kind = "capability"
+requires = ["chat", "vision"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 16
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 64
+
+[[cases]]
+id = "vision-red-512"
+kind = "capability"
+requires = ["chat", "vision"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 16
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 512
+
+[[cases]]
+id = "vision-red-1024"
+kind = "capability"
+requires = ["chat", "vision"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 16
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 1024

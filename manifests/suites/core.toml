@@ -1,0 +1,192 @@
+schema_version = 1
+
+[suite]
+id = "core"
+description = "Comparable steady-state decode, prefill, and concurrency matrix."
+
+[[cases]]
+id = "decode-256"
+kind = "decode"
+requires = ["chat"]
+warmups = 2
+repetitions = 5
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "decode-1024"
+kind = "decode"
+requires = ["chat"]
+warmups = 2
+repetitions = 5
+max_output_tokens = 1024
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "prefill-repeat-128"
+kind = "prefill"
+requires = ["chat"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 128
+
+[[cases]]
+id = "prefill-repeat-1024"
+kind = "prefill"
+requires = ["chat"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 1024
+
+[[cases]]
+id = "prefill-repeat-4096"
+kind = "prefill"
+requires = ["chat"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 4096
+
+[[cases]]
+id = "prefill-repeat-16384"
+kind = "prefill"
+requires = ["chat"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 16384
+
+[[cases]]
+id = "prefill-repeat-32768"
+kind = "prefill"
+requires = ["chat"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 32768
+
+[[cases]]
+id = "concurrency-1"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "concurrency-2"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 2
+prompt_repetitions = 0
+
+[[cases]]
+id = "concurrency-4"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 4
+prompt_repetitions = 0
+
+[[cases]]
+id = "concurrency-8"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 8
+prompt_repetitions = 0
+
+[[cases]]
+id = "long-context-needle-16384"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 16384
+
+[[cases]]
+id = "json-structured-output"
+kind = "capability"
+requires = ["chat", "json"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 128
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "tool-call"
+kind = "capability"
+requires = ["chat", "tools"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 128
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "vision-correctness"
+kind = "capability"
+requires = ["chat", "vision"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "embeddings-throughput"
+kind = "capability"
+requires = ["embeddings"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 512
+
+[[cases]]
+id = "rerank-candidates"
+kind = "capability"
+requires = ["rerank"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 32

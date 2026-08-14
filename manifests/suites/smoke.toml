@@ -1,0 +1,71 @@
+schema_version = 1
+
+[suite]
+id = "smoke"
+description = "Fast endpoint and capability checks before measured workloads."
+
+[[cases]]
+id = "chat-smoke"
+kind = "decode"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "json-smoke"
+kind = "capability"
+requires = ["chat", "json"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "tools-smoke"
+kind = "capability"
+requires = ["chat", "tools"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "vision-smoke"
+kind = "capability"
+requires = ["chat", "vision"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "embeddings-smoke"
+kind = "capability"
+requires = ["embeddings"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "rerank-smoke"
+kind = "capability"
+requires = ["rerank"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0

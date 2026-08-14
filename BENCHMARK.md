@@ -84,3 +84,49 @@ prefill was rejected by vLLM because a non-chunked scheduler must set
 NVFP4 KV cache is present in this vLLM build but its FlashInfer backend is
 restricted to the SM100 family; the GB10 is SM121, so FP8 remains the supported
 KV-cache format here.
+
+## SparkBench quick-suite concurrency profile
+
+A later cached-only run exercised the reproducible `quick.toml` suite with the
+`qwen38-27b-nvfp4-mtp3-throughput` profile. It used the exact NVFP4 revision in
+`manifests/models.toml`, MTP depth 3, FP8 KV cache, a 32,768-token served
+context, eight sequence slots, 8,192 scheduled tokens, and temperature zero.
+Thinking was disabled. Each case followed one warm-up request; decode and
+prefill used three measured repetitions, while each concurrency level used two
+measured bursts. The sample counts are too small for p95 claims.
+
+| Workload | Measured requests | Tokens/request (prompt → output) | Median TTFT | Median E2E | Aggregate output | Median client decode estimate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Single stream | 3 | 79 → 128 | 0.366 s | 7.556 s | 17.27 tok/s | 17.68 tok/s |
+| Concurrency 2 | 4 | 79 → 64 | 0.609 s | 4.474 s | 27.90 tok/s | 16.58 tok/s |
+| Concurrency 4 | 8 | 79 → 64 | 0.561 s | 4.473 s | **53.93 tok/s** | 16.47 tok/s |
+
+The concurrency figures use total completed output tokens divided by measured
+case wall time, including minor harness time between bursts. Four-way serving
+delivered 1.93 times the concurrency-two aggregate throughput with essentially
+unchanged median E2E latency (4.4731 versus 4.4738 seconds). The streaming server
+bundled multiple tokens in some SSE emissions, so the per-request decode column
+is explicitly an estimate; use aggregate output throughput as the primary
+concurrency result.
+
+| Actual prompt tokens | Median TTFT | Client-TTFT prefill approximation |
+| ---: | ---: | ---: |
+| 324 | 0.292 s | 1,111 tok/s |
+| 2,117 | 0.992 s | 2,134 tok/s |
+| 8,261 | 4.311 s | 1,916 tok/s |
+
+The separate long-context check admitted 8,284 prompt tokens, returned the
+hidden key correctly, and reached first output in 4.444 seconds. All seven suite
+cases completed without validation failures. This single probe does not validate
+the full 32K served context or the checkpoint's 262K native limit.
+
+Cached-only process startup took 453.44 seconds, including 173.21 seconds for
+model loading plus compilation, graph setup, and FP4 autotuning. vLLM reported
+24.97 GiB of model memory and 64.97 GiB available for KV cache: 1,139,598 tokens,
+or a theoretical 34.78 concurrent 32K requests before scheduler and workload
+limits. Minimum system-available memory during measured cases was 13.02 GiB.
+Startup peaked at 100.64 W and 81 °C in sampled GPU telemetry. The compiled and
+autotuned artifacts were persisted, but this run did not measure a subsequent
+warm-start time. This remains an exploratory serving profile. vLLM also warned
+that FP8 KV-cache scales defaulted to 1.0 without calibration, so the run
+validates performance and its one retrieval probe—not broad model accuracy.

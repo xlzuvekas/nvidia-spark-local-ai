@@ -1,0 +1,49 @@
+schema_version = 1
+
+[suite]
+id = "embeddings"
+description = "Embedding latency, input length, and batch-throughput cases."
+
+[[cases]]
+id = "embed-length-32-batch-1"
+kind = "capability"
+requires = ["embeddings"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 32
+
+[[cases]]
+id = "embed-length-512-batch-1"
+kind = "capability"
+requires = ["embeddings"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 512
+
+[[cases]]
+id = "embed-length-32-batch-8"
+kind = "capability"
+requires = ["embeddings"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 8
+prompt_repetitions = 32
+
+[[cases]]
+id = "embed-length-32-batch-32"
+kind = "capability"
+requires = ["embeddings"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 32
+prompt_repetitions = 32
