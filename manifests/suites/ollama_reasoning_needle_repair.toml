@@ -1,0 +1,18 @@
+schema_version = 1
+
+[suite]
+id = "ollama-reasoning-needle-repair"
+description = "Targeted 8K needle rerun with enough completion budget for a reasoning-capable model to return the key in visible content."
+
+# Validation remains content-only: finding the deterministic key in hidden
+# reasoning does not count as a user-visible success.
+[[cases]]
+id = "long-context-needle-8192"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 128
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 8192

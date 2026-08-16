@@ -1,0 +1,16 @@
+schema_version = 1
+
+[suite]
+id = "multimodal-embeddings"
+description = "Qwen3-VL cross-modal embedding validation with a local synthetic image."
+
+[[cases]]
+id = "red-image-cross-modal"
+kind = "capability"
+requires = ["embeddings", "vision"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 64

@@ -1,0 +1,16 @@
+schema_version = 1
+
+[suite]
+id = "ocr"
+description = "Deterministic exact transcription of a local high-contrast token image; image payloads are never journaled."
+
+[[cases]]
+id = "ocr-exact-token"
+kind = "capability"
+requires = ["chat", "vision", "ocr"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0

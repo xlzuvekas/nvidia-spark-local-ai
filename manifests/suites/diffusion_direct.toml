@@ -1,0 +1,27 @@
+schema_version = 1
+
+[suite]
+id = "diffusion-direct"
+description = "Offline native block-generation measurements for Nemotron Labs Diffusion; no AR decode timing is reported."
+
+[[cases]]
+id = "block-generation-128"
+kind = "diffusion"
+requires = ["diffusion"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 128
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "block-generation-256"
+kind = "diffusion"
+requires = ["diffusion"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0

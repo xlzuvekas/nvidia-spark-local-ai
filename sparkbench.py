@@ -11,6 +11,10 @@ import json
 from pathlib import Path
 import sys
 
+from bench.annotations import append_measurement_annotation
+from bench.acquire import fetch_model_snapshot
+from bench.audit import audit_matrix
+from bench.diffusion_direct import run_direct_diffusion
 from bench.inventory import (
     assess_model_availability,
     collect_inventory,
@@ -21,11 +25,16 @@ from bench.manifest import ManifestError, load_models, load_suite
 from bench.journal import utc_now, write_json
 from bench.report import summarize_run
 from bench.runner import create_plan, execute_plan
+from bench.trtllm_direct import run_direct_trtllm
 
 
 WORKSPACE = Path(__file__).resolve().parent
 DEFAULT_MODELS = WORKSPACE / "manifests" / "models.toml"
 DEFAULT_SUITE = WORKSPACE / "manifests" / "suites" / "smoke.toml"
+DEFAULT_DIFFUSION_SUITE = (
+    WORKSPACE / "manifests" / "suites" / "diffusion_direct.toml"
+)
+DEFAULT_AUDIO_SUITE = WORKSPACE / "manifests" / "suites" / "audio_asr.toml"
 
 
 def _inventory(*, sizes: bool = False):
@@ -86,6 +95,20 @@ def command_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_fetch(args: argparse.Namespace) -> int:
+    models = load_models(args.models)
+    try:
+        model = models[args.model]
+    except KeyError as error:
+        choices = ", ".join(sorted(models))
+        raise ManifestError(
+            f"unknown model {args.model!r}; choices: {choices}"
+        ) from error
+    result = fetch_model_snapshot(model, workspace=WORKSPACE)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
 def _select(args: argparse.Namespace):
     models = load_models(args.models)
     try:
@@ -99,6 +122,15 @@ def _select(args: argparse.Namespace):
 
 def command_plan(args: argparse.Namespace) -> int:
     model, suite = _select(args)
+    if model.support_status == "incompatible":
+        raise ManifestError("Incompatible model profiles cannot be planned")
+    if model.backend in {"transformers", "trtllm"}:
+        command = (
+            "diffusion-direct"
+            if model.backend == "transformers"
+            else "trtllm-direct"
+        )
+        raise ManifestError(f"Use {command} for direct profiles")
     run_dir = create_plan(
         model=model,
         suite=suite,
@@ -112,6 +144,15 @@ def command_plan(args: argparse.Namespace) -> int:
 
 def command_benchmark(args: argparse.Namespace) -> int:
     model, suite = _select(args)
+    if model.support_status == "incompatible":
+        raise ManifestError("Incompatible model profiles cannot be benchmarked")
+    if model.backend in {"transformers", "trtllm"}:
+        command = (
+            "diffusion-direct"
+            if model.backend == "transformers"
+            else "trtllm-direct"
+        )
+        raise ManifestError(f"Use {command} for direct profiles")
     run_dir = create_plan(
         model=model,
         suite=suite,
@@ -143,12 +184,43 @@ def command_run(args: argparse.Namespace) -> int:
     return 0 if summary["status"] == "complete" else 1
 
 
+def command_diffusion_direct(args: argparse.Namespace) -> int:
+    model, suite = _select(args)
+    summary = run_direct_diffusion(
+        model=model,
+        suite=suite,
+        workspace=WORKSPACE,
+        results_root=args.results,
+        timeout_s=args.timeout,
+    )
+    print(json.dumps(summary, indent=2))
+    return 0 if summary["status"] == "complete" else 1
+
+
+def command_trtllm_direct(args: argparse.Namespace) -> int:
+    model, suite = _select(args)
+    summary = run_direct_trtllm(
+        model=model,
+        suite=suite,
+        workspace=WORKSPACE,
+        results_root=args.results,
+        timeout_s=args.timeout,
+    )
+    print(json.dumps(summary, indent=2))
+    return 0 if summary["status"] == "complete" else 1
+
+
 def command_matrix(args: argparse.Namespace) -> int:
     models = load_models(args.models)
     suite = load_suite(args.suite)
     availability = assess_model_availability(models, _inventory())
     selected = []
     for model in models.values():
+        if model.support_status == "incompatible" or model.backend in {
+            "transformers",
+            "trtllm",
+        }:
+            continue
         if args.backend and model.backend not in args.backend:
             continue
         if args.task and not set(args.task).issubset(model.tasks):
@@ -226,6 +298,40 @@ def command_summarize(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_annotate(args: argparse.Namespace) -> int:
+    run_dir = args.run_dir.resolve()
+    annotation = append_measurement_annotation(
+        run_dir,
+        scope=args.scope,
+        reason=args.reason,
+        case_id=args.case_id,
+        evidence=args.evidence,
+    )
+    summary = summarize_run(run_dir)
+    print(
+        json.dumps(
+            {
+                "annotation": annotation,
+                "summary_path": str(run_dir / "summary.json"),
+                "startup_measurement_valid": summary[
+                    "startup_measurement_valid"
+                ],
+                "measurement_invalid_cases": summary[
+                    "measurement_invalid_cases"
+                ],
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def command_audit_matrix(args: argparse.Namespace) -> int:
+    report = audit_matrix(args.matrix_dir)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["ok"] else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -239,6 +345,13 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--models", type=Path, default=DEFAULT_MODELS)
     list_parser.add_argument("--verbose", action="store_true")
     list_parser.set_defaults(function=command_list)
+
+    fetch = subparsers.add_parser(
+        "fetch", help="download and verify one pinned Hugging Face model snapshot"
+    )
+    fetch.add_argument("model", help="model configuration ID")
+    fetch.add_argument("--models", type=Path, default=DEFAULT_MODELS)
+    fetch.set_defaults(function=command_fetch)
 
     def add_selection(command: argparse.ArgumentParser) -> None:
         command.add_argument("model", help="model configuration ID")
@@ -264,11 +377,41 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--fail-fast", action="store_true")
     run.set_defaults(function=command_run)
 
+    diffusion = subparsers.add_parser(
+        "diffusion-direct",
+        help="run the certified offline Transformers block-generation adapter",
+    )
+    add_selection(diffusion)
+    diffusion.set_defaults(suite=DEFAULT_DIFFUSION_SUITE)
+    diffusion.add_argument(
+        "--timeout",
+        type=float,
+        help="hard worker deadline in seconds (defaults to the model profile)",
+    )
+    diffusion.set_defaults(function=command_diffusion_direct)
+
+    trtllm = subparsers.add_parser(
+        "trtllm-direct",
+        help="run the pinned offline TensorRT-LLM Phi audio adapter",
+    )
+    add_selection(trtllm)
+    trtllm.set_defaults(suite=DEFAULT_AUDIO_SUITE)
+    trtllm.add_argument(
+        "--timeout",
+        type=float,
+        help="hard container deadline in seconds (defaults to the model profile)",
+    )
+    trtllm.set_defaults(function=command_trtllm_direct)
+
     matrix = subparsers.add_parser("matrix", help="plan or run a filtered model matrix sequentially")
     matrix.add_argument("--models", type=Path, default=DEFAULT_MODELS)
     matrix.add_argument("--suite", type=Path, default=DEFAULT_SUITE)
     matrix.add_argument("--results", type=Path, default=WORKSPACE / "results")
-    matrix.add_argument("--backend", action="append", choices=["vllm", "ollama", "external"])
+    matrix.add_argument(
+        "--backend",
+        action="append",
+        choices=["vllm", "llamacpp", "ollama", "sglang", "trtllm", "external"],
+    )
     matrix.add_argument("--task", action="append", help="require a declared task (repeatable)")
     matrix.add_argument("--match", default="*", help="model-ID glob")
     matrix.add_argument("--limit", type=int)
@@ -280,6 +423,29 @@ def build_parser() -> argparse.ArgumentParser:
     summarize = subparsers.add_parser("summarize", help="regenerate JSON and CSV summaries")
     summarize.add_argument("run_dir", type=Path)
     summarize.set_defaults(function=command_summarize)
+
+    annotate = subparsers.add_parser(
+        "annotate", help="append a measurement-validity annotation to a frozen run"
+    )
+    annotate.add_argument("run_dir", type=Path)
+    annotate.add_argument(
+        "--scope", required=True, choices=("startup", "case")
+    )
+    annotate.add_argument("--reason", required=True)
+    annotate.add_argument("--case-id")
+    annotate.add_argument(
+        "--evidence",
+        action="append",
+        default=[],
+        help="supporting fact or local artifact reference (repeatable)",
+    )
+    annotate.set_defaults(function=command_annotate)
+
+    audit = subparsers.add_parser(
+        "audit-matrix", help="read-only verification of a completed matrix"
+    )
+    audit.add_argument("matrix_dir", type=Path)
+    audit.set_defaults(function=command_audit_matrix)
     return parser
 
 

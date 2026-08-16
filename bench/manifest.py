@@ -13,20 +13,141 @@ from urllib.parse import urlsplit
 
 SCHEMA_VERSION = 1
 KNOWN_TASKS = frozenset(
-    {"chat", "embeddings", "json", "rerank", "thinking", "tools", "vision"}
+    {
+        "audio",
+        "chat",
+        "diffusion",
+        "embeddings",
+        "json",
+        "ocr",
+        "rerank",
+        "thinking",
+        "tools",
+        "vision",
+    }
 )
-KNOWN_BACKENDS = frozenset({"external", "ollama", "vllm"})
+KNOWN_BACKENDS = frozenset(
+    {"external", "llamacpp", "ollama", "sglang", "transformers", "trtllm", "vllm"}
+)
 KNOWN_SUPPORT_STATUSES = frozenset(
     {
         "exploratory",
+        "incompatible",
         "spark_other_backend",
+        "spark_transformers_direct",
+        "spark_trtllm_direct",
         "spark_vllm_matrix",
         "spark_vllm_recipe",
     }
 )
-KNOWN_CASE_KINDS = frozenset({"capability", "concurrency", "decode", "prefill"})
+KNOWN_CASE_KINDS = frozenset(
+    {"capability", "concurrency", "decode", "diffusion", "prefill", "quality"}
+)
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+_LLAMACPP_RESERVED_ARGS = frozenset(
+    {
+        "-m",
+        "--model",
+        "-mu",
+        "--model-url",
+        "-dr",
+        "--docker-repo",
+        "-hf",
+        "-hfr",
+        "--hf-repo",
+        "-hff",
+        "--hf-file",
+        "-hft",
+        "--hf-token",
+        "--host",
+        "--port",
+        "-a",
+        "--alias",
+        "-c",
+        "--ctx-size",
+        "-np",
+        "--parallel",
+        "-mm",
+        "--mmproj",
+        "-mmu",
+        "--mmproj-url",
+        "--mmproj-auto",
+        "--no-mmproj",
+        "--no-mmproj-auto",
+        "--mmproj-offload",
+        "--no-mmproj-offload",
+        "--metrics",
+        "--offline",
+        "--ui",
+        "--webui",
+        "--no-ui",
+        "--no-webui",
+        "-hfd",
+        "-hfrd",
+        "--spec-draft-hf",
+        "--hf-repo-draft",
+        "-md",
+        "--spec-draft-model",
+        "--model-draft",
+        "--cors-origins",
+        "--cors-methods",
+        "--cors-headers",
+        "--cors-credentials",
+        "--no-cors-credentials",
+        "--api-key",
+        "--api-key-file",
+    }
+)
+_LLAMACPP_FORBIDDEN_ARGS = frozenset(
+    {
+        "--rpc",
+        "--reuse-port",
+        "--api-prefix",
+        "--ui-config",
+        "--webui-config",
+        "--ui-config-file",
+        "--webui-config-file",
+        "--ui-mcp-proxy",
+        "--webui-mcp-proxy",
+        "--no-ui-mcp-proxy",
+        "--no-webui-mcp-proxy",
+        "--tools",
+        "--tools-runtime",
+        "--mcp-servers-config",
+        "--mcp-servers-json",
+        "-ag",
+        "--agent",
+        "-no-ag",
+        "--no-agent",
+        "--props",
+        "--models-dir",
+        "--models-preset",
+        "--models-max",
+        "--models-autoload",
+        "--no-models-autoload",
+        "--log-disable",
+        "--log-file",
+        "--log-prompts-dir",
+        "--log-colors",
+        "-v",
+        "--verbose",
+        "--log-verbose",
+        "-lv",
+        "--verbosity",
+        "--log-verbosity",
+        "--log-prefix",
+        "--no-log-prefix",
+        "--log-timestamps",
+        "--no-log-timestamps",
+        "--slot-save-path",
+        "--media-path",
+        "--path",
+        "--ssl-key-file",
+        "--ssl-cert-file",
+    }
+)
 _MODEL_KEYS = frozenset(
     {
         "id",
@@ -48,7 +169,21 @@ _MODEL_KEYS = frozenset(
         "endpoint",
         "args",
         "cache_dir",
+        "fetch_allow_patterns",
+        "fetch_ignore_patterns",
         "request_body_json",
+        "runtime_python",
+        "runtime_binary",
+        "runtime_digest",
+        "runtime_parallel",
+        "runtime_source_dir",
+        "runtime_revision",
+        "model_file",
+        "model_digest",
+        "model_size_bytes",
+        "mmproj_file",
+        "mmproj_digest",
+        "mmproj_size_bytes",
         "support_status",
     }
 )
@@ -94,7 +229,21 @@ class ModelSpec:
     lifecycle: str = "docker"
     description: str = ""
     cache_dir: str = "project"
+    fetch_allow_patterns: tuple[str, ...] = ()
+    fetch_ignore_patterns: tuple[str, ...] = ()
     request_body_json: str | None = None
+    runtime_python: str | None = None
+    runtime_binary: str | None = None
+    runtime_digest: str | None = None
+    runtime_parallel: int | None = None
+    runtime_source_dir: str | None = None
+    runtime_revision: str | None = None
+    model_file: str | None = None
+    model_digest: str | None = None
+    model_size_bytes: int | None = None
+    mmproj_file: str | None = None
+    mmproj_digest: str | None = None
+    mmproj_size_bytes: int | None = None
     support_status: str = "exploratory"
 
 
@@ -169,8 +318,34 @@ def load_models(path: str | Path) -> dict[str, ModelSpec]:
             lifecycle=_optional_string(row, "lifecycle", context) or "docker",
             description=_optional_string(row, "description", context) or "",
             cache_dir=_optional_string(row, "cache_dir", context) or "project",
+            fetch_allow_patterns=_string_tuple(
+                row, "fetch_allow_patterns", context
+            ),
+            fetch_ignore_patterns=_string_tuple(
+                row, "fetch_ignore_patterns", context
+            ),
             request_body_json=_optional_string(
                 row, "request_body_json", context
+            ),
+            runtime_python=_optional_string(row, "runtime_python", context),
+            runtime_binary=_optional_string(row, "runtime_binary", context),
+            runtime_digest=_optional_string(row, "runtime_digest", context),
+            runtime_parallel=_optional_int(
+                row, "runtime_parallel", context, default=None
+            ),
+            runtime_source_dir=_optional_string(
+                row, "runtime_source_dir", context
+            ),
+            runtime_revision=_optional_string(row, "runtime_revision", context),
+            model_file=_optional_string(row, "model_file", context),
+            model_digest=_optional_string(row, "model_digest", context),
+            model_size_bytes=_optional_int(
+                row, "model_size_bytes", context, default=None
+            ),
+            mmproj_file=_optional_string(row, "mmproj_file", context),
+            mmproj_digest=_optional_string(row, "mmproj_digest", context),
+            mmproj_size_bytes=_optional_int(
+                row, "mmproj_size_bytes", context, default=None
             ),
             support_status=(
                 _optional_string(row, "support_status", context) or "exploratory"
@@ -264,19 +439,204 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
         raise ManifestError(f"{context}.startup_timeout_s must be positive")
     if model.estimated_ram_gib is not None and model.estimated_ram_gib <= 0:
         raise ManifestError(f"{context}.estimated_ram_gib must be positive")
-    if model.lifecycle not in {"docker", "existing"}:
-        raise ManifestError(f"{context}.lifecycle must be 'docker' or 'existing'")
+    if model.lifecycle not in {"docker", "existing", "subprocess"}:
+        raise ManifestError(
+            f"{context}.lifecycle must be 'docker', 'existing', or 'subprocess'"
+        )
     if model.cache_dir not in {"project", "user"}:
         raise ManifestError(f"{context}.cache_dir must be 'project' or 'user'")
+    _validate_fetch_patterns(
+        model.fetch_allow_patterns, f"{context}.fetch_allow_patterns"
+    )
+    _validate_fetch_patterns(
+        model.fetch_ignore_patterns, f"{context}.fetch_ignore_patterns"
+    )
     if model.support_status not in KNOWN_SUPPORT_STATUSES:
         raise ManifestError(
             f"{context}.support_status must be one of {sorted(KNOWN_SUPPORT_STATUSES)}"
         )
     if model.lifecycle == "docker" and not model.image:
         raise ManifestError(f"{context}.image is required for Docker lifecycle")
+    if model.backend == "transformers":
+        if model.lifecycle != "subprocess":
+            raise ManifestError(
+                f"{context}.lifecycle must be 'subprocess' for transformers"
+            )
+        if not model.runtime_python or not Path(model.runtime_python).is_absolute():
+            raise ManifestError(
+                f"{context}.runtime_python must be an absolute path for transformers"
+            )
+        if model.endpoint != "offline://transformers":
+            raise ManifestError(
+                f"{context}.endpoint must be 'offline://transformers'"
+            )
+    if model.backend == "trtllm":
+        if model.lifecycle != "docker":
+            raise ManifestError(
+                f"{context}.lifecycle must be 'docker' for trtllm"
+            )
+        if model.endpoint != "offline://trtllm":
+            raise ManifestError(
+                f"{context}.endpoint must be 'offline://trtllm'"
+            )
+        if not model.image_digest:
+            raise ManifestError(
+                f"{context}.image_digest is required for trtllm"
+            )
+    mmproj_fields = (
+        model.mmproj_file,
+        model.mmproj_digest,
+        model.mmproj_size_bytes,
+    )
+    if any(value is not None for value in mmproj_fields) and not all(
+        value is not None for value in mmproj_fields
+    ):
+        raise ManifestError(
+            f"{context}.mmproj_file, mmproj_digest, and mmproj_size_bytes "
+            "must be set together"
+        )
+    if model.backend != "llamacpp" and any(
+        value is not None for value in mmproj_fields
+    ):
+        raise ManifestError(
+            f"{context}.mmproj_* fields are supported only for llamacpp"
+        )
+    if model.backend == "llamacpp":
+        if model.lifecycle != "subprocess":
+            raise ManifestError(
+                f"{context}.lifecycle must be 'subprocess' for llamacpp"
+            )
+        if model.image is not None:
+            raise ManifestError(f"{context}.image must be omitted for llamacpp")
+        for name, value in (
+            ("runtime_binary", model.runtime_binary),
+            ("runtime_source_dir", model.runtime_source_dir),
+        ):
+            if not value or not Path(value).is_absolute():
+                raise ManifestError(
+                    f"{context}.{name} must be an absolute path for llamacpp"
+                )
+        if not model.runtime_revision or not _COMMIT_PATTERN.fullmatch(
+            model.runtime_revision
+        ):
+            raise ManifestError(
+                f"{context}.runtime_revision must be a full lowercase commit SHA"
+            )
+        if not model.revision or not _COMMIT_PATTERN.fullmatch(model.revision):
+            raise ManifestError(
+                f"{context}.revision must be a full lowercase commit SHA for llamacpp"
+            )
+        if (
+            not model.model_file
+            or Path(model.model_file).name != model.model_file
+            or not model.model_file.lower().endswith(".gguf")
+        ):
+            raise ManifestError(
+                f"{context}.model_file must be one safe GGUF filename"
+            )
+        if model.model_size_bytes is None or model.model_size_bytes <= 0:
+            raise ManifestError(
+                f"{context}.model_size_bytes must be positive for llamacpp"
+            )
+        has_mmproj = model.mmproj_file is not None
+        if has_mmproj:
+            if (
+                Path(str(model.mmproj_file)).name != model.mmproj_file
+                or not model.mmproj_file.lower().endswith(".gguf")
+            ):
+                raise ManifestError(
+                    f"{context}.mmproj_file must be one safe GGUF filename"
+                )
+            if model.mmproj_file == model.model_file:
+                raise ManifestError(
+                    f"{context}.mmproj_file must differ from model_file"
+                )
+            if model.mmproj_size_bytes is None or model.mmproj_size_bytes <= 0:
+                raise ManifestError(
+                    f"{context}.mmproj_size_bytes must be positive for llamacpp"
+                )
+        if "vision" in model.tasks and not has_mmproj:
+            raise ManifestError(
+                f"{context}.vision task requires the complete mmproj artifact"
+            )
+        if has_mmproj and "vision" not in model.tasks:
+            raise ManifestError(
+                f"{context}.mmproj artifact requires the vision task"
+            )
+        exact_files = (
+            (model.model_file, model.mmproj_file)
+            if has_mmproj
+            else (model.model_file,)
+        )
+        if model.fetch_allow_patterns != exact_files:
+            raise ManifestError(
+                f"{context}.fetch_allow_patterns must contain only the exact "
+                "model_file and configured mmproj_file for llamacpp"
+            )
+        if model.native_context is None:
+            raise ManifestError(
+                f"{context}.native_context is required for llamacpp"
+            )
+        if model.runtime_parallel is None or model.runtime_parallel <= 0:
+            raise ManifestError(
+                f"{context}.runtime_parallel must be positive for llamacpp"
+            )
+        if model.native_context != model.max_context * model.runtime_parallel:
+            raise ManifestError(
+                f"{context}.native_context must equal max_context * "
+                "runtime_parallel for llamacpp"
+            )
+        parsed_endpoint = urlsplit(model.endpoint)
+        if (
+            parsed_endpoint.scheme != "http"
+            or parsed_endpoint.hostname != "127.0.0.1"
+            or parsed_endpoint.port is None
+            or parsed_endpoint.path.rstrip("/") != "/v1"
+            or parsed_endpoint.username is not None
+            or parsed_endpoint.password is not None
+            or parsed_endpoint.query
+            or parsed_endpoint.fragment
+        ):
+            raise ManifestError(
+                f"{context}.endpoint must be canonical http://127.0.0.1:<port>/v1 for llamacpp"
+            )
+        reserved = sorted(
+            argument.split("=", 1)[0]
+            for argument in model.args
+            if argument.split("=", 1)[0] in _LLAMACPP_RESERVED_ARGS
+        )
+        if reserved:
+            raise ManifestError(
+                f"{context}.args contains runtime-owned llamacpp option(s): "
+                + ", ".join(reserved)
+            )
+        forbidden = sorted(
+            argument.split("=", 1)[0]
+            for argument in model.args
+            if argument.split("=", 1)[0] in _LLAMACPP_FORBIDDEN_ARGS
+        )
+        if forbidden:
+            raise ManifestError(
+                f"{context}.args contains unsafe llamacpp option(s): "
+                + ", ".join(forbidden)
+            )
     if model.image_digest and not _DIGEST_PATTERN.fullmatch(model.image_digest):
         raise ManifestError(f"{context}.image_digest must be a sha256 digest")
-    _validate_endpoint(model.endpoint, f"{context}.endpoint")
+    for name, digest in (
+        ("runtime_digest", model.runtime_digest),
+        ("model_digest", model.model_digest),
+        ("mmproj_digest", model.mmproj_digest),
+    ):
+        if digest is not None and not _DIGEST_PATTERN.fullmatch(digest):
+            raise ManifestError(f"{context}.{name} must be a sha256 digest")
+    if model.backend == "llamacpp" and (
+        model.runtime_digest is None or model.model_digest is None
+    ):
+        raise ManifestError(
+            f"{context}.runtime_digest and model_digest are required for llamacpp"
+        )
+    if model.backend not in {"transformers", "trtllm"}:
+        _validate_endpoint(model.endpoint, f"{context}.endpoint")
     if any(not isinstance(argument, str) or not argument for argument in model.args):
         raise ManifestError(f"{context}.args must contain non-empty strings")
     if model.request_body_json is not None:
@@ -321,6 +681,30 @@ def validate_case(case: CaseSpec, *, context: str = "case") -> None:
         raise ManifestError(
             f"{context}.prompt_repetitions must be positive for prefill cases"
         )
+    if case.kind == "quality":
+        if case.requires != ("chat",):
+            raise ManifestError(
+                f"{context}.requires must be ['chat'] for quality cases"
+            )
+        if case.prompt_repetitions != 0:
+            raise ManifestError(
+                f"{context}.prompt_repetitions must be 0 for quality cases"
+            )
+        if case.temperature != 0:
+            raise ManifestError(f"{context}.temperature must be 0 for quality cases")
+    if case.kind == "diffusion":
+        if case.requires != ("diffusion",):
+            raise ManifestError(
+                f"{context}.requires must be ['diffusion'] for diffusion cases"
+            )
+        if case.temperature != 0:
+            raise ManifestError(f"{context}.temperature must be 0 for diffusion cases")
+        if case.concurrency != 1:
+            raise ManifestError(f"{context}.concurrency must be 1 for diffusion cases")
+        if case.max_output_tokens % 32:
+            raise ManifestError(
+                f"{context}.max_output_tokens must be divisible by block size 32"
+            )
 
 
 def validate_suite(suite: SuiteSpec, *, context: str = "suite") -> None:
@@ -485,7 +869,29 @@ def _validate_endpoint(endpoint: str, context: str) -> None:
         raise ManifestError(f"{context} must use a loopback host")
 
 
+def _validate_fetch_patterns(values: tuple[str, ...], context: str) -> None:
+    if len(values) != len(set(values)):
+        raise ManifestError(f"{context} must not contain duplicates")
+    for pattern in values:
+        unsafe_component = any(
+            component in {"", ".", ".."} for component in pattern.split("/")
+        )
+        unsafe_character = any(ord(character) < 32 for character in pattern)
+        if (
+            pattern.startswith(("-", "/", "\\", "~"))
+            or "\\" in pattern
+            or ":" in pattern
+            or unsafe_component
+            or unsafe_character
+        ):
+            raise ManifestError(f"{context} contains unsafe pattern {pattern!r}")
+
+
 def _default_endpoint(backend: str) -> str:
     if backend == "ollama":
         return "http://127.0.0.1:11434/v1"
+    if backend == "transformers":
+        return "offline://transformers"
+    if backend == "trtllm":
+        return "offline://trtllm"
     return "http://127.0.0.1:8000/v1"

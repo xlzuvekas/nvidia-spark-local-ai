@@ -278,19 +278,33 @@ class RuntimeSafetyTests(unittest.TestCase):
 
 
 class PlanSafetyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        network_guard = patch(
+            "urllib.request.urlopen",
+            side_effect=AssertionError(
+                "plan safety tests must explicitly mock every HTTP request"
+            ),
+        )
+        network_guard.start()
+        self.addCleanup(network_guard.stop)
+
     def _write_runnable_plan(
         self,
         root: Path,
         *,
         backend: str = "ollama",
         case_ids: tuple[str, ...] = ("decode",),
+        tasks: tuple[str, ...] = ("chat",),
+        kind: str = "decode",
+        requires: tuple[str, ...] = ("chat",),
+        prompt_repetitions: int = 0,
     ) -> Path:
         model = {
             "id": f"{backend}-target",
             "backend": backend,
             "source": "target:latest" if backend == "ollama" else "example/model",
             "served_name": "target:latest" if backend == "ollama" else "example/model",
-            "tasks": ["chat"],
+            "tasks": list(tasks),
             "max_context": 8192,
             "endpoint": (
                 "http://127.0.0.1:11434/v1"
@@ -308,14 +322,14 @@ class PlanSafetyTests(unittest.TestCase):
                 }
             )
         case_template = {
-            "kind": "decode",
-            "requires": ["chat"],
+            "kind": kind,
+            "requires": list(requires),
             "warmups": 0,
             "repetitions": 1,
             "max_output_tokens": 8,
             "temperature": 0.0,
             "concurrency": 1,
-            "prompt_repetitions": 0,
+            "prompt_repetitions": prompt_repetitions,
         }
         cases = [{"id": case_id, **case_template} for case_id in case_ids]
         suite = {
@@ -359,6 +373,74 @@ class PlanSafetyTests(unittest.TestCase):
             results_lock_path(workspace),
             workspace / "results" / ".sparkbench.lock",
         )
+
+    def test_ollama_rerank_remains_explicitly_adapter_unimplemented(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = self._write_runnable_plan(
+                root,
+                backend="ollama",
+                case_ids=("rerank",),
+                tasks=("rerank",),
+                kind="capability",
+                requires=("rerank",),
+                prompt_repetitions=4,
+            )
+            with (
+                patch("bench.runner._preflight") as preflight,
+                patch("bench.runner.start_server") as start_server,
+            ):
+                summary = execute_plan(run_dir, workspace=root)
+
+            self.assertEqual(summary["status"], "no_work")
+            self.assertEqual(len(summary["unimplemented_cases"]), 1)
+            preflight.assert_not_called()
+            start_server.assert_not_called()
+            events = [
+                json.loads(line)
+                for line in (run_dir / "events.jsonl").read_text().splitlines()
+            ]
+            skipped = [
+                event
+                for event in events
+                if event.get("event") == "case_skipped_adapter_unimplemented"
+            ]
+            self.assertEqual(skipped[0]["backend"], "ollama")
+            self.assertIn("vLLM /score", skipped[0]["reason"])
+
+    def test_ollama_multimodal_embeddings_skip_the_vllm_chat_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = self._write_runnable_plan(
+                root,
+                backend="ollama",
+                case_ids=("multimodal-embedding",),
+                tasks=("embeddings", "vision"),
+                kind="capability",
+                requires=("embeddings", "vision"),
+                prompt_repetitions=64,
+            )
+            with (
+                patch("bench.runner._preflight") as preflight,
+                patch("bench.runner.start_server") as start_server,
+            ):
+                summary = execute_plan(run_dir, workspace=root)
+
+            self.assertEqual(summary["status"], "no_work")
+            self.assertEqual(len(summary["unimplemented_cases"]), 1)
+            preflight.assert_not_called()
+            start_server.assert_not_called()
+            events = [
+                json.loads(line)
+                for line in (run_dir / "events.jsonl").read_text().splitlines()
+            ]
+            skipped = next(
+                event
+                for event in events
+                if event.get("event") == "case_skipped_adapter_unimplemented"
+            )
+            self.assertEqual(skipped["capabilities"], ["embeddings", "vision"])
+            self.assertIn("Chat Embeddings", skipped["reason"])
 
     def test_tampered_plan_is_rejected_before_preflight_or_server_start(self) -> None:
         model = {
@@ -448,10 +530,112 @@ class PlanSafetyTests(unittest.TestCase):
             aborted = [event for event in events if event.get("event") == "run_aborted"]
             self.assertEqual(len(aborted), 1)
             self.assertEqual(aborted[0]["error_type"], "BenchmarkRequestError")
+            self.assertEqual(aborted[0]["stage"], "first_request")
             self.assertIn("disconnected", aborted[0]["error"])
             summary = summarize_run(run_dir)
-            self.assertIn(summary["status"], {"aborted", "incomplete"})
+            self.assertEqual(summary["status"], "aborted")
+            self.assertEqual(summary["run_error"]["stage"], "first_request")
             self.assertEqual(summary["completed_cases"], 0)
+
+    def test_preflight_failure_persists_abort_and_truthful_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = self._write_runnable_plan(root)
+            telemetry = Mock()
+            error = PreflightError("fixture GPU process is active")
+            with (
+                patch("bench.runner._preflight", side_effect=error),
+                patch("bench.runner.TelemetrySampler", return_value=telemetry),
+                patch("bench.runner.start_server") as start_server,
+            ):
+                with self.assertRaisesRegex(PreflightError, "GPU process"):
+                    execute_plan(run_dir, workspace=root)
+
+            events = [
+                json.loads(line)
+                for line in (run_dir / "events.jsonl").read_text().splitlines()
+            ]
+            aborted = [
+                event for event in events if event.get("event") == "run_aborted"
+            ]
+            summary = json.loads((run_dir / "summary.json").read_text())
+
+        self.assertEqual(len(aborted), 1)
+        self.assertEqual(aborted[0]["stage"], "preflight")
+        self.assertEqual(aborted[0]["error_type"], "PreflightError")
+        self.assertNotIn("run_complete", {event["event"] for event in events})
+        self.assertEqual(summary["status"], "aborted")
+        self.assertEqual(summary["run_error"]["stage"], "preflight")
+        self.assertEqual(summary["completed_cases"], 0)
+        start_server.assert_not_called()
+        telemetry.start.assert_not_called()
+
+    def test_vllm_startup_failure_persists_abort_and_truthful_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = self._write_runnable_plan(root, backend="vllm")
+            telemetry = Mock()
+            startup_error = RuntimeErrorWithContext(
+                "Server exited during startup: unsupported architecture"
+            )
+            with (
+                patch("bench.runner._preflight"),
+                patch("bench.runner.TelemetrySampler", return_value=telemetry),
+                patch("bench.runner.start_server", side_effect=startup_error),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeErrorWithContext, "unsupported architecture"
+                ):
+                    execute_plan(run_dir, workspace=root)
+
+            events = [
+                json.loads(line)
+                for line in (run_dir / "events.jsonl").read_text().splitlines()
+            ]
+            aborted = [
+                event for event in events if event.get("event") == "run_aborted"
+            ]
+            summary = json.loads((run_dir / "summary.json").read_text())
+
+        self.assertEqual(len(aborted), 1)
+        self.assertEqual(aborted[0]["stage"], "server_start")
+        self.assertEqual(aborted[0]["error_type"], "RuntimeErrorWithContext")
+        self.assertIn("unsupported architecture", aborted[0]["error"])
+        self.assertNotIn("run_complete", {event["event"] for event in events})
+        self.assertEqual(summary["status"], "aborted")
+        self.assertEqual(summary["run_error"]["stage"], "server_start")
+        self.assertEqual(summary["completed_cases"], 0)
+        telemetry.start.assert_called_once()
+        telemetry.stop.assert_called_once()
+
+    def test_telemetry_start_failure_is_a_durable_startup_abort(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = self._write_runnable_plan(root)
+            telemetry = Mock()
+            telemetry.start.side_effect = RuntimeError("telemetry thread failed")
+            with (
+                patch("bench.runner._preflight"),
+                patch("bench.runner.TelemetrySampler", return_value=telemetry),
+                patch("bench.runner.start_server") as start_server,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "telemetry thread"):
+                    execute_plan(run_dir, workspace=root)
+
+            events = [
+                json.loads(line)
+                for line in (run_dir / "events.jsonl").read_text().splitlines()
+            ]
+            aborted = [
+                event for event in events if event.get("event") == "run_aborted"
+            ]
+            summary = json.loads((run_dir / "summary.json").read_text())
+
+        self.assertEqual(len(aborted), 1)
+        self.assertEqual(aborted[0]["stage"], "telemetry_start")
+        self.assertEqual(summary["status"], "aborted")
+        start_server.assert_not_called()
+        telemetry.stop.assert_not_called()
 
     def test_completed_plan_resume_is_idempotent_and_starts_no_server(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -588,6 +772,7 @@ class PlanSafetyTests(unittest.TestCase):
                 patch("bench.runner.TelemetrySampler", return_value=telemetry),
                 patch("bench.runner._prime_model", return_value=first_request),
                 patch("bench.runner._execute_case", side_effect=complete_case),
+                patch("bench.runner.snapshot_vllm_spec_decode_metrics") as scrape,
             ):
                 summary = execute_plan(run_dir, workspace=root)
 
@@ -595,6 +780,7 @@ class PlanSafetyTests(unittest.TestCase):
             self.assertLess(order.index("preflight"), order.index("new_server_started"))
             self.assertEqual(summary["status"], "complete")
             fresh_server.stop.assert_called_once_with(keep_server=False)
+            scrape.assert_not_called()
 
     def test_resume_stops_exact_owned_vllm_before_marking_run_complete(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -719,6 +905,13 @@ class PlanSafetyTests(unittest.TestCase):
                 any(event.get("event") == "run_complete" for event in events),
                 "failed cleanup must leave the run resumable rather than certified complete",
             )
+            aborted = [
+                event for event in events if event.get("event") == "run_aborted"
+            ]
+            summary = json.loads((run_dir / "summary.json").read_text())
+            self.assertEqual(len(aborted), 1)
+            self.assertEqual(aborted[0]["stage"], "lifecycle_recovery")
+            self.assertEqual(summary["status"], "aborted")
 
     def test_resume_does_not_silently_complete_ollama_with_unknown_ownership(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

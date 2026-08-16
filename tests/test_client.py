@@ -12,6 +12,8 @@ from bench.client import (
     BenchmarkRequestError,
     concurrent_chat_requests,
     embedding_request,
+    multimodal_embedding_request,
+    score_request,
     stream_chat_request,
     stream_ollama_chat_request,
 )
@@ -31,7 +33,12 @@ class _SSEHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length)
         self.server.received.append((self.path, json.loads(body)))  # type: ignore[attr-defined]
         status = self.server.status  # type: ignore[attr-defined]
-        response_body = self.server.response_body  # type: ignore[attr-defined]
+        response_bodies = self.server.response_bodies  # type: ignore[attr-defined]
+        response_body = (
+            response_bodies.pop(0)
+            if response_bodies
+            else self.server.response_body  # type: ignore[attr-defined]
+        )
         self.send_response(status)
         self.send_header(
             "Content-Type",
@@ -51,6 +58,7 @@ class StreamingClientTests(unittest.TestCase):
         self.server.received = []  # type: ignore[attr-defined]
         self.server.status = 200  # type: ignore[attr-defined]
         self.server.response_body = b""  # type: ignore[attr-defined]
+        self.server.response_bodies = []  # type: ignore[attr-defined]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         host, port = self.server.server_address
@@ -229,6 +237,248 @@ class StreamingClientTests(unittest.TestCase):
         message = str(raised.exception)
         self.assertIn("embedding-reset-9", message)
         self.assertIn("embedding", message.lower())
+
+    def test_text_embedding_request_keeps_the_openai_input_shape(self) -> None:
+        self.server.response_body = json.dumps(  # type: ignore[attr-defined]
+            {
+                "model": "text-embedding",
+                "data": [
+                    {"index": 0, "embedding": [1.0, 0.0]},
+                    {"index": 1, "embedding": [0.0, 1.0]},
+                ],
+                "usage": {"prompt_tokens": 4},
+            }
+        ).encode()
+
+        result = embedding_request(
+            base_url=self.base_url,
+            model="text-embedding",
+            inputs=["one", "two"],
+            request_id="text-embedding-1",
+        )
+
+        path, payload = self.server.received[0]  # type: ignore[attr-defined]
+        self.assertEqual(path, "/v1/embeddings")
+        self.assertEqual(
+            payload,
+            {"model": "text-embedding", "input": ["one", "two"]},
+        )
+        self.assertEqual(result.batch_size, 2)
+        self.assertEqual(result.dimension, 2)
+
+    def test_score_request_posts_vllm_batch_and_builds_deterministic_ranking(self) -> None:
+        self.server.response_body = json.dumps(  # type: ignore[attr-defined]
+            {
+                "model": "served-reranker",
+                "data": [
+                    {"index": 2, "object": "score", "score": 0.25},
+                    {"index": 0, "object": "score", "score": 0.10},
+                    {"index": 1, "object": "score", "score": 0.95},
+                ],
+                "usage": {"total_tokens": 17},
+            }
+        ).encode()
+
+        result = score_request(
+            base_url=self.base_url,
+            model="reranker",
+            query="query",
+            candidates=["candidate zero", "candidate one", "candidate two"],
+            request_id="rerank-1",
+        )
+
+        path, request = self.server.received[0]  # type: ignore[attr-defined]
+        self.assertEqual(path, "/v1/score")
+        self.assertEqual(
+            request,
+            {
+                "model": "reranker",
+                "queries": "query",
+                "documents": [
+                    "candidate zero",
+                    "candidate one",
+                    "candidate two",
+                ],
+            },
+        )
+        self.assertEqual(result.response_model, "served-reranker")
+        self.assertEqual(result.prompt_tokens, 17)
+        self.assertEqual(result.candidate_count, 3)
+        self.assertEqual(result.scores, [0.10, 0.95, 0.25])
+        self.assertEqual(result.ranking, [1, 2, 0])
+        self.assertEqual(result.top_index, 1)
+        self.assertTrue(result.finite)
+        self.assertGreater(result.pairs_per_s, 0)
+        self.assertEqual(result.to_dict()["tool_calls"], [])
+
+    def test_score_request_rejects_incomplete_or_duplicate_indexes(self) -> None:
+        invalid_data_sets = (
+            [{"index": 0, "score": 0.1}],
+            [{"index": 0, "score": 0.1}, {"index": 0, "score": 0.2}],
+        )
+        for index, data in enumerate(invalid_data_sets):
+            with self.subTest(index=index):
+                self.server.response_body = json.dumps(  # type: ignore[attr-defined]
+                    {"model": "reranker", "data": data}
+                ).encode()
+                with self.assertRaisesRegex(BenchmarkRequestError, "Score response"):
+                    score_request(
+                        base_url=self.base_url,
+                        model="reranker",
+                        query="query",
+                        candidates=["one", "two"],
+                        request_id=f"rerank-invalid-{index}",
+                    )
+
+    def test_score_request_accepts_multimodal_documents_without_returning_payloads(
+        self,
+    ) -> None:
+        self.server.response_body = json.dumps(  # type: ignore[attr-defined]
+            {
+                "model": "served-qwen3-vl-reranker",
+                "data": [
+                    {"index": 1, "object": "score", "score": 0.9},
+                    {"index": 0, "object": "score", "score": 0.1},
+                ],
+                "usage": {"prompt_tokens": 42, "total_tokens": 42},
+            }
+        ).encode()
+        documents = [
+            {
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,local-blue-image"
+                        },
+                    }
+                ]
+            },
+            {
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,local-red-image"
+                        },
+                    }
+                ]
+            },
+        ]
+
+        result = score_request(
+            base_url=self.base_url,
+            model="qwen3-vl-reranker",
+            query="A solid red square.",
+            candidates=documents,
+            instruction="Retrieve images relevant to the user's query.",
+            request_id="multimodal-rerank-1",
+        )
+
+        path, payload = self.server.received[0]  # type: ignore[attr-defined]
+        self.assertEqual(path, "/v1/score")
+        self.assertEqual(payload["documents"], documents)
+        self.assertEqual(
+            payload["instruction"],
+            "Retrieve images relevant to the user's query.",
+        )
+        self.assertEqual(result.prompt_tokens, 42)
+        self.assertEqual(result.scores, [0.1, 0.9])
+        self.assertEqual(result.ranking, [1, 0])
+        self.assertEqual(result.top_index, 1)
+        serialized = json.dumps(result.to_dict())
+        self.assertNotIn("local-blue-image", serialized)
+        self.assertNotIn("local-red-image", serialized)
+
+    def test_multimodal_score_http_error_does_not_expose_image_payload(self) -> None:
+        self.server.status = 422  # type: ignore[attr-defined]
+        self.server.response_body = (  # type: ignore[attr-defined]
+            b'{"detail":"data:image/png;base64,sensitive-image-payload"}'
+        )
+
+        with self.assertRaises(BenchmarkRequestError) as raised:
+            score_request(
+                base_url=self.base_url,
+                model="qwen3-vl-reranker",
+                query="red",
+                candidates=[
+                    {
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,sensitive-image-payload"
+                                },
+                            }
+                        ]
+                    }
+                ],
+                request_id="multimodal-rerank-error",
+            )
+
+        self.assertNotIn("sensitive-image-payload", str(raised.exception))
+        self.assertIn("omitted", str(raised.exception))
+
+    def test_multimodal_embedding_request_uses_chat_extension_and_compares_vectors(
+        self,
+    ) -> None:
+        def response(vector: list[float], prompt_tokens: int) -> bytes:
+            return json.dumps(
+                {
+                    "model": "served-qwen3-vl-embedding",
+                    "data": [{"index": 0, "embedding": vector}],
+                    "usage": {"prompt_tokens": prompt_tokens},
+                }
+            ).encode()
+
+        self.server.response_bodies = [  # type: ignore[attr-defined]
+            response([1.0, 0.0, 0.0], 5),
+            response([0.8, 0.2, 0.0], 7),
+            response([0.0, 1.0, 0.0], 9),
+        ]
+        image_data_url = "data:image/png;base64,local-red-image"
+
+        result = multimodal_embedding_request(
+            base_url=self.base_url,
+            model="qwen3-vl-embedding",
+            image_data_url=image_data_url,
+            relevant_text="A solid red square.",
+            unrelated_text="Snowy mountains below a blue sky.",
+            request_id="multimodal-1",
+        )
+
+        self.assertEqual(result.response_model, "served-qwen3-vl-embedding")
+        self.assertEqual(result.prompt_tokens, 21)
+        self.assertEqual(result.dimension, 3)
+        self.assertEqual(result.batch_size, 3)
+        self.assertTrue(result.finite)
+        self.assertGreater(
+            result.relevant_similarity or 0, result.unrelated_similarity or 0
+        )
+        self.assertGreater(result.similarity_margin or 0, 0)
+        self.assertGreaterEqual(result.image_latency_s, 0)
+        self.assertGreaterEqual(result.relevant_text_latency_s, 0)
+        self.assertGreaterEqual(result.unrelated_text_latency_s, 0)
+
+        received = self.server.received  # type: ignore[attr-defined]
+        self.assertEqual([path for path, _ in received], ["/v1/embeddings"] * 3)
+        for _, payload in received:
+            self.assertEqual(payload["encoding_format"], "float")
+            self.assertTrue(payload["continue_final_message"])
+            self.assertTrue(payload["add_special_tokens"])
+            self.assertNotIn("input", payload)
+            self.assertEqual(payload["messages"][0]["role"], "system")
+            self.assertEqual(payload["messages"][-1]["role"], "assistant")
+        image_content = received[0][1]["messages"][1]["content"]
+        self.assertEqual(image_content[0]["image_url"]["url"], image_data_url)
+        self.assertEqual(image_content[1], {"type": "text", "text": ""})
+        self.assertEqual(
+            received[1][1]["messages"][1]["content"],
+            [{"type": "text", "text": "A solid red square."}],
+        )
+        serialized_result = json.dumps(result.to_dict())
+        self.assertNotIn("embedding", result.to_dict())
+        self.assertNotIn("local-red-image", serialized_result)
 
     def test_native_ollama_request_enforces_context_and_uses_server_timing(self) -> None:
         self.server.response_body = b"\n".join(  # type: ignore[attr-defined]

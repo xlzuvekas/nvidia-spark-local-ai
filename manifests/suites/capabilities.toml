@@ -1,0 +1,40 @@
+schema_version = 1
+
+[suite]
+id = "capabilities"
+description = "Deterministic chat checks; reasoning/coding are excluded pending a trustworthy oracle."
+
+# JSON, tool calls, and exact needle retrieval have deterministic validators.
+# `thinking` is only a model-support gate today, not a reasoning-quality check.
+[[cases]]
+id = "json-correctness"
+kind = "capability"
+requires = ["chat", "json"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "tool-call-correctness"
+kind = "capability"
+requires = ["chat", "tools"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "long-context-needle-4096"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 4096

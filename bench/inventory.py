@@ -273,6 +273,10 @@ def assess_model_availability(
         (_snapshot_cache_dir(snapshot), snapshot.source)
         for snapshot in inventory.huggingface_snapshots
     }
+    hf_snapshots = {
+        (_snapshot_cache_dir(snapshot), snapshot.source, snapshot.revision): snapshot.path
+        for snapshot in inventory.huggingface_snapshots
+    }
     ollama = {model.name: model for model in inventory.ollama_models}
     image_references = {image.reference for image in inventory.docker_images}
     image_digests = {
@@ -296,13 +300,43 @@ def assess_model_availability(
                 details.append("Ollama model revision differs from the manifest")
             if not runtime_available:
                 details.append("Ollama endpoint is unavailable")
+        elif model.backend == "llamacpp":
+            snapshot = hf_snapshots.get(
+                (model.cache_dir, model.source, str(model.revision))
+            )
+            model_file = snapshot / str(model.model_file) if snapshot else None
+            model_file_available = bool(model_file and model_file.is_file())
+            mmproj_file = (
+                snapshot / str(model.mmproj_file)
+                if snapshot and model.mmproj_file
+                else None
+            )
+            mmproj_available = model.mmproj_file is None or bool(
+                mmproj_file and mmproj_file.is_file()
+            )
+            source_available = model_file_available and mmproj_available
+            runtime_available = bool(
+                model.runtime_binary and Path(model.runtime_binary).is_file()
+            )
+            if not model_file_available:
+                details.append("exact GGUF file is not cached")
+            if not mmproj_available:
+                details.append("exact multimodal projector is not cached")
+            if not runtime_available:
+                details.append("pinned llama-server binary is unavailable")
         else:
             source_available = (
                 (model.cache_dir, model.source, model.revision) in hf_keys
                 if model.revision
                 else (model.cache_dir, model.source) in hf_sources
             )
-            if model.image and model.image_digest:
+            if model.backend == "transformers":
+                runtime_available = bool(
+                    model.runtime_python and Path(model.runtime_python).is_file()
+                )
+                if not runtime_available:
+                    details.append("certified Transformers runtime is unavailable")
+            elif model.image and model.image_digest:
                 runtime_available = (
                     model.image,
                     model.image_digest,
@@ -313,7 +347,7 @@ def assess_model_availability(
                 )
             if not source_available:
                 details.append("checkpoint revision is not cached")
-            if not runtime_available:
+            if not runtime_available and model.backend != "transformers":
                 details.append("container image or digest is not cached")
         availability[model.id] = ModelAvailability(
             model_id=model.id,

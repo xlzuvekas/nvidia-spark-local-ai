@@ -1,0 +1,16 @@
+schema_version = 1
+
+[suite]
+id = "chat-quality"
+description = "Four embedded deterministic exact-answer smoke checks across arithmetic, logic, instruction following, and static code reasoning; model output is never executed, and the score is not a broad quality claim."
+
+[[cases]]
+id = "synthetic-exact-answer"
+kind = "quality"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+concurrency = 1
+prompt_repetitions = 0
+max_output_tokens = 64
+temperature = 0.0

@@ -15,7 +15,7 @@ def _request(
     *,
     ttft_s: float,
     elapsed_s: float,
-    decode_tps: float,
+    decode_tps: float | None,
     prompt_tokens: int = 10,
     completion_tokens: int = 20,
     kind: str = "decode",
@@ -217,6 +217,201 @@ class ReportTests(unittest.TestCase):
 
         self.assertIn("validation_passed", row)
         self.assertFalse(row["validation_passed"])
+
+    def test_capability_with_unavailable_native_decode_timing_stays_null(self) -> None:
+        request = _request(
+            "ocr",
+            "attempt",
+            ttft_s=0.1,
+            elapsed_s=0.2,
+            decode_tps=None,
+            completion_tokens=6,
+            kind="capability",
+        )
+        request["result"].update(  # type: ignore[union-attr]
+            {"decode_s": None, "decode_metric_source": None}
+        )
+        self._write_events(
+            [
+                request,
+                {
+                    "event": "case_complete",
+                    "case_id": "ocr",
+                    "attempt_id": "attempt",
+                    "kind": "capability",
+                    "elapsed_s": 0.2,
+                    "validation_passed": True,
+                },
+            ]
+        )
+
+        row = summarize_run(self.run_dir)["cases"][0]
+
+        self.assertIsNone(row["median_decode_tps"])
+        self.assertIsNone(row["median_estimated_decode_tps"])
+        self.assertIsNone(row["decode_metric_source"])
+        self.assertTrue(row["validation_passed"])
+
+    def test_rerank_summary_reports_pair_throughput_and_validation(self) -> None:
+        requests = []
+        for index, pairs_per_s in enumerate((40.0, 20.0)):
+            request = _request(
+                "rerank",
+                "attempt",
+                ttft_s=0.1,
+                elapsed_s=0.2,
+                decode_tps=0.0,
+                prompt_tokens=12,
+                completion_tokens=0,
+                kind="capability",
+            )
+            request["result"].update(  # type: ignore[union-attr]
+                {
+                    "candidate_count": 4,
+                    "pairs_per_s": pairs_per_s,
+                    "finite": True,
+                    "top_index": 1,
+                    "ranking": [1, 2, 0, 3],
+                    "scores": [0.1, 0.9, 0.2, 0.05],
+                }
+            )
+            request["repetition"] = index
+            requests.append(request)
+        self._write_events(
+            [
+                *requests,
+                {
+                    "event": "case_complete",
+                    "case_id": "rerank",
+                    "attempt_id": "attempt",
+                    "kind": "capability",
+                    "elapsed_s": 0.5,
+                    "validation_passed": True,
+                },
+            ]
+        )
+
+        row = summarize_run(self.run_dir)["cases"][0]
+
+        self.assertEqual(row["rerank_candidates_per_request"], 4)
+        self.assertEqual(row["rerank_pairs"], 8)
+        self.assertAlmostEqual(row["median_rerank_pairs_s"], 30.0)
+        self.assertAlmostEqual(row["aggregate_rerank_pairs_s"], 16.0)
+        self.assertTrue(row["rerank_scores_finite"])
+        self.assertEqual(row["rerank_top_index"], 1)
+        self.assertTrue(row["rerank_ranking_stable"])
+        self.assertTrue(row["rerank_validation_passed"])
+        self.assertIsNone(row["aggregate_output_tps"])
+        self.assertIsNone(row["median_ttft_s"])
+
+    def test_multimodal_embedding_summary_reports_latency_similarity_and_validation(
+        self,
+    ) -> None:
+        requests = []
+        measurements = ((0.01, 0.9, 0.1), (0.03, 0.8, 0.2))
+        for latency, relevant, unrelated in measurements:
+            request = _request(
+                "multimodal",
+                "attempt",
+                ttft_s=latency,
+                elapsed_s=latency * 3,
+                decode_tps=0.0,
+                prompt_tokens=30,
+                completion_tokens=0,
+                kind="capability",
+            )
+            request["result"].update(  # type: ignore[union-attr]
+                {
+                    "dimension": 3,
+                    "batch_size": 3,
+                    "items_per_s": 100.0,
+                    "finite": True,
+                    "image_latency_s": latency,
+                    "relevant_text_latency_s": latency + 0.01,
+                    "unrelated_text_latency_s": latency + 0.02,
+                    "relevant_similarity": relevant,
+                    "unrelated_similarity": unrelated,
+                    "similarity_margin": relevant - unrelated,
+                }
+            )
+            requests.append(request)
+        self._write_events(
+            [
+                *requests,
+                {
+                    "event": "case_complete",
+                    "case_id": "multimodal",
+                    "attempt_id": "attempt",
+                    "kind": "capability",
+                    "elapsed_s": 0.1,
+                    "validation_passed": True,
+                },
+            ]
+        )
+
+        row = summarize_run(self.run_dir)["cases"][0]
+
+        self.assertEqual(row["embedding_dimension"], 3)
+        self.assertTrue(row["embeddings_finite"])
+        self.assertAlmostEqual(row["median_image_embedding_latency_s"], 0.02)
+        self.assertAlmostEqual(row["median_relevant_similarity"], 0.85)
+        self.assertAlmostEqual(row["median_unrelated_similarity"], 0.15)
+        self.assertAlmostEqual(row["median_similarity_margin"], 0.7)
+        self.assertTrue(row["multimodal_embeddings_finite"])
+        self.assertTrue(row["multimodal_embedding_validation_passed"])
+
+    def test_quality_summary_reports_accuracy_latency_and_token_totals(self) -> None:
+        categories = (
+            ("arithmetic", True),
+            ("logic", True),
+            ("instruction_following", False),
+            ("code_reasoning", True),
+        )
+        requests = []
+        for index, (category, passed) in enumerate(categories):
+            request = _request(
+                "quality",
+                "attempt",
+                ttft_s=0.01 * (index + 1),
+                elapsed_s=0.1 * (index + 1),
+                decode_tps=10.0,
+                prompt_tokens=25,
+                completion_tokens=2,
+                kind="quality",
+            )
+            request["validation"] = {
+                "passed": passed,
+                "quality_item_id": f"item-{index}",
+                "quality_category": category,
+            }
+            requests.append(request)
+        self._write_events(
+            [
+                *requests,
+                {
+                    "event": "case_complete",
+                    "case_id": "quality",
+                    "attempt_id": "attempt",
+                    "kind": "quality",
+                    "elapsed_s": 1.0,
+                    "validation_passed": False,
+                },
+            ]
+        )
+
+        row = summarize_run(self.run_dir)["cases"][0]
+
+        self.assertEqual(row["quality_items"], 4)
+        self.assertEqual(row["quality_scored_items"], 4)
+        self.assertEqual(row["quality_correct"], 3)
+        self.assertEqual(row["quality_accuracy"], 0.75)
+        self.assertEqual(row["quality_total_prompt_tokens"], 100)
+        self.assertEqual(row["quality_total_completion_tokens"], 8)
+        self.assertAlmostEqual(row["quality_total_request_latency_s"], 1.0)
+        self.assertEqual(row["quality_accuracy_by_category"]["logic"], 1.0)
+        self.assertEqual(
+            row["quality_accuracy_by_category"]["instruction_following"], 0.0
+        )
 
     def test_status_distinguishes_not_started_and_no_applicable_work(self) -> None:
         self.assertEqual(summarize_run(self.run_dir)["status"], "not_started")

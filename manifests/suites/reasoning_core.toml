@@ -1,9 +1,11 @@
 schema_version = 1
 
 [suite]
-id = "core"
-description = "Comparable steady-state performance, capability, and exact-answer smoke matrix."
+id = "reasoning-core"
+description = "Core matrix for low-effort reasoning profiles; prefill and needle cases reserve completion budget for reasoning before the visible answer."
 
+# Decode and concurrency budgets intentionally match core.toml so their request
+# shapes remain comparable. Reasoning tokens count toward those same budgets.
 [[cases]]
 id = "decode-256"
 kind = "decode"
@@ -26,13 +28,15 @@ temperature = 0.0
 concurrency = 1
 prompt_repetitions = 0
 
+# Prefill throughput remains prompt tokens divided by TTFT to the first visible
+# content or reasoning delta; the remaining budget only lets the request finish.
 [[cases]]
 id = "prefill-repeat-128"
 kind = "prefill"
 requires = ["chat"]
 warmups = 1
 repetitions = 5
-max_output_tokens = 1
+max_output_tokens = 64
 temperature = 0.0
 concurrency = 1
 prompt_repetitions = 128
@@ -43,7 +47,7 @@ kind = "prefill"
 requires = ["chat"]
 warmups = 1
 repetitions = 5
-max_output_tokens = 1
+max_output_tokens = 64
 temperature = 0.0
 concurrency = 1
 prompt_repetitions = 1024
@@ -54,7 +58,7 @@ kind = "prefill"
 requires = ["chat"]
 warmups = 1
 repetitions = 5
-max_output_tokens = 1
+max_output_tokens = 64
 temperature = 0.0
 concurrency = 1
 prompt_repetitions = 4096
@@ -65,7 +69,7 @@ kind = "prefill"
 requires = ["chat"]
 warmups = 1
 repetitions = 5
-max_output_tokens = 1
+max_output_tokens = 64
 temperature = 0.0
 concurrency = 1
 prompt_repetitions = 16384
@@ -76,7 +80,7 @@ kind = "prefill"
 requires = ["chat"]
 warmups = 1
 repetitions = 5
-max_output_tokens = 1
+max_output_tokens = 64
 temperature = 0.0
 concurrency = 1
 prompt_repetitions = 32768
@@ -125,13 +129,15 @@ temperature = 0.0
 concurrency = 8
 prompt_repetitions = 0
 
+# Validation deliberately checks final content only. A key present only in the
+# reasoning channel was not delivered to the caller and must remain a failure.
 [[cases]]
 id = "long-context-needle-16384"
 kind = "capability"
 requires = ["chat"]
 warmups = 0
 repetitions = 3
-max_output_tokens = 32
+max_output_tokens = 128
 temperature = 0.0
 concurrency = 1
 prompt_repetitions = 16384
@@ -169,6 +175,7 @@ temperature = 0.0
 concurrency = 1
 prompt_repetitions = 0
 
+# Non-generative adapters are carried over unchanged for full core coverage.
 [[cases]]
 id = "embeddings-throughput"
 kind = "capability"
@@ -191,6 +198,7 @@ temperature = 0.0
 concurrency = 1
 prompt_repetitions = 32
 
+# Exact-answer scoring, like needle retrieval, reads final content only.
 [[cases]]
 id = "synthetic-exact-answer"
 kind = "quality"

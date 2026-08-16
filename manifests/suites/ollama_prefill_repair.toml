@@ -1,0 +1,40 @@
+schema_version = 1
+
+[suite]
+id = "ollama-prefill-repair"
+description = "Targeted rerun of quick-suite prefill probes with two output tokens so Ollama reports a native eval duration."
+
+# Ollama omits eval_duration when num_predict is one. Two tokens preserve the
+# quick-suite prompt shapes while supplying one measurable decode interval.
+[[cases]]
+id = "prefill-repeat-256"
+kind = "prefill"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 2
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 256
+
+[[cases]]
+id = "prefill-repeat-2048"
+kind = "prefill"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 2
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 2048
+
+[[cases]]
+id = "prefill-repeat-8192"
+kind = "prefill"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 2
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 8192

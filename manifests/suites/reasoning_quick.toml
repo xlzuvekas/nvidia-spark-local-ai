@@ -1,0 +1,86 @@
+schema_version = 1
+
+[suite]
+id = "reasoning-quick"
+description = "Quick screen for low-effort reasoning profiles; prefill and needle cases reserve completion budget for reasoning before the visible answer."
+
+# Reasoning and answer tokens share one completion budget. Prefill throughput is
+# still derived from TTFT to the first visible content or reasoning delta.
+[[cases]]
+id = "decode-128"
+kind = "decode"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 128
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "prefill-repeat-256"
+kind = "prefill"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 256
+
+[[cases]]
+id = "prefill-repeat-2048"
+kind = "prefill"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 2048
+
+[[cases]]
+id = "prefill-repeat-8192"
+kind = "prefill"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 8192
+
+[[cases]]
+id = "concurrency-2"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 1
+repetitions = 2
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 2
+prompt_repetitions = 0
+
+[[cases]]
+id = "concurrency-4"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 1
+repetitions = 2
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 4
+prompt_repetitions = 0
+
+# The key must reach final content; finding it only in hidden reasoning is not a
+# user-visible success and is intentionally rejected by the validator.
+[[cases]]
+id = "long-context-needle-8192"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 128
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 8192

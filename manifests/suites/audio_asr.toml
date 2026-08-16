@@ -1,0 +1,16 @@
+schema_version = 1
+
+[suite]
+id = "audio-asr"
+description = "Exact transcription of the pinned 9.953313-second Spark-TTS Chinese WAV fixture; raw audio and base64 payloads are never journaled."
+
+[[cases]]
+id = "spark-tts-chinese-exact"
+kind = "capability"
+requires = ["chat", "audio"]
+warmups = 1
+repetitions = 3
+concurrency = 1
+prompt_repetitions = 0
+max_output_tokens = 128
+temperature = 0.0

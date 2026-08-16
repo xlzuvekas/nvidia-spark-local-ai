@@ -76,6 +76,80 @@ args = [
 ]
 
 [[models]]
+id = "qwen38-27b-bf16-throughput"
+description = "BF16 baseline with eight-sequence scheduling for matched throughput tests."
+support_status = "exploratory"
+backend = "vllm"
+source = "Qwen/Qwen3.8-27B"
+revision = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+served_name = "Qwen/Qwen3.8-27B"
+tasks = ["chat", "json", "tools"]
+architecture = "dense"
+quantization = "bf16"
+lifecycle = "docker"
+image = "vllm/vllm-openai:qwen38"
+image_digest = "sha256:4a2f33a884222f7049b983263ad9976f89452bb81affecf5b67d89ad35c1bc31"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 100.0
+endpoint = "http://127.0.0.1:8000/v1"
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+args = [
+  "--served-model-name", "Qwen/Qwen3.8-27B",
+  "--host", "0.0.0.0",
+  "--port", "8000",
+  "--tensor-parallel-size", "1",
+  "--max-model-len", "32768",
+  "--gpu-memory-utilization", "0.80",
+  "--kv-cache-dtype", "fp8",
+  "--max-num-seqs", "8",
+  "--max-num-batched-tokens", "8192",
+  "--enable-chunked-prefill",
+  "--enable-prefix-caching",
+  "--reasoning-parser", "qwen3",
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "qwen3_coder",
+]
+
+[[models]]
+id = "qwen38-27b-nvfp4-throughput"
+description = "NVFP4 weights without MTP and with eight-sequence scheduling for matched throughput tests."
+support_status = "exploratory"
+backend = "vllm"
+source = "Inferact/Qwen3.8-27B-NVFP4"
+revision = "6128240ebaf4eaa7bad2b3d1c72c37d677c5f462"
+served_name = "Qwen/Qwen3.8-27B"
+tasks = ["chat", "json", "tools"]
+architecture = "dense"
+quantization = "nvfp4"
+lifecycle = "docker"
+image = "vllm/vllm-openai:qwen38"
+image_digest = "sha256:4a2f33a884222f7049b983263ad9976f89452bb81affecf5b67d89ad35c1bc31"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 100.0
+endpoint = "http://127.0.0.1:8000/v1"
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+args = [
+  "--served-model-name", "Qwen/Qwen3.8-27B",
+  "--host", "0.0.0.0",
+  "--port", "8000",
+  "--tensor-parallel-size", "1",
+  "--max-model-len", "32768",
+  "--gpu-memory-utilization", "0.80",
+  "--kv-cache-dtype", "fp8",
+  "--max-num-seqs", "8",
+  "--max-num-batched-tokens", "8192",
+  "--enable-chunked-prefill",
+  "--enable-prefix-caching",
+  "--reasoning-parser", "qwen3",
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "qwen3_coder",
+]
+
+[[models]]
 id = "qwen38-27b-nvfp4-mtp3"
 description = "Validated NVFP4 configuration with the best tested MTP depth."
 support_status = "exploratory"
@@ -149,6 +223,763 @@ args = [
   "--enable-auto-tool-choice",
   "--tool-call-parser", "qwen3_coder",
   "--speculative-config", '{"method":"mtp","num_speculative_tokens":3}',
+]
+
+# Native llama.cpp b10453 profiles. Runtime-owned arguments (model, alias,
+# loopback bind, context, offline mode, UI, and metrics) are injected only
+# after the exact binary/source/GGUF pins below have been verified.
+[[models]]
+id = "qwen38-27b-ud-q4-k-xl-llamacpp"
+description = "Unsloth Dynamic Q4_K_XL GGUF on pinned native llama.cpp without speculation."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.8-27B-GGUF"
+revision = "f1bfb127c64f7072bdd2cad55f258b9c8b2910fe"
+served_name = "unsloth/Qwen3.8-27B-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "dense"
+quantization = "ud-q4_k_xl"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.8-27B-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372"
+model_size_bytes = 17923394624
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 8
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 64.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+]
+
+[[models]]
+id = "qwen38-27b-ud-q4-k-xl-llamacpp-vision"
+description = "Unsloth Dynamic Q4_K_XL GGUF with its exact F16 vision projector on pinned native llama.cpp."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.8-27B-GGUF"
+revision = "f1bfb127c64f7072bdd2cad55f258b9c8b2910fe"
+served_name = "unsloth/Qwen3.8-27B-GGUF"
+tasks = ["chat", "json", "vision", "tools"]
+architecture = "dense-vlm"
+quantization = "ud-q4_k_xl+mmproj-f16"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = [
+  "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+  "mmproj-F16.gguf",
+]
+model_file = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372"
+model_size_bytes = 17923394624
+mmproj_file = "mmproj-F16.gguf"
+mmproj_digest = "sha256:cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e"
+mmproj_size_bytes = 927607488
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 8
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 68.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+]
+
+[[models]]
+id = "qwen38-27b-ud-q4-k-xl-llamacpp-mtp3"
+description = "Same Unsloth Q4 GGUF with embedded NextN MTP and maximum draft length three."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.8-27B-GGUF"
+revision = "f1bfb127c64f7072bdd2cad55f258b9c8b2910fe"
+served_name = "unsloth/Qwen3.8-27B-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "dense+mtp3"
+quantization = "ud-q4_k_xl+mtp3"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.8-27B-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372"
+model_size_bytes = 17923394624
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 8
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 68.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+  "--spec-type", "draft-mtp",
+  "--spec-draft-n-max", "3",
+  "--spec-draft-type-k", "q8_0",
+  "--spec-draft-type-v", "q8_0",
+  "--spec-draft-backend-sampling",
+]
+
+# Keep the depth sweep in fixed non-monotonic order (3, 6, 1, 5, 2, 4)
+# so a sequential matrix does not confound increasing depth with thermal drift.
+[[models]]
+id = "qwen38-27b-ud-q4-k-xl-llamacpp-mtp6"
+description = "Same Unsloth Q4 GGUF with embedded NextN MTP and maximum draft length six."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.8-27B-GGUF"
+revision = "f1bfb127c64f7072bdd2cad55f258b9c8b2910fe"
+served_name = "unsloth/Qwen3.8-27B-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "dense+mtp6"
+quantization = "ud-q4_k_xl+mtp6"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.8-27B-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372"
+model_size_bytes = 17923394624
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 8
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 68.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+  "--spec-type", "draft-mtp",
+  "--spec-draft-n-max", "6",
+  "--spec-draft-type-k", "q8_0",
+  "--spec-draft-type-v", "q8_0",
+  "--spec-draft-backend-sampling",
+]
+
+[[models]]
+id = "qwen38-27b-ud-q4-k-xl-llamacpp-mtp1"
+description = "Same Unsloth Q4 GGUF with embedded NextN MTP and maximum draft length one."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.8-27B-GGUF"
+revision = "f1bfb127c64f7072bdd2cad55f258b9c8b2910fe"
+served_name = "unsloth/Qwen3.8-27B-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "dense+mtp1"
+quantization = "ud-q4_k_xl+mtp1"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.8-27B-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372"
+model_size_bytes = 17923394624
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 8
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 68.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+  "--spec-type", "draft-mtp",
+  "--spec-draft-n-max", "1",
+  "--spec-draft-type-k", "q8_0",
+  "--spec-draft-type-v", "q8_0",
+  "--spec-draft-backend-sampling",
+]
+
+[[models]]
+id = "qwen38-27b-ud-q4-k-xl-llamacpp-mtp5"
+description = "Same Unsloth Q4 GGUF with embedded NextN MTP and maximum draft length five."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.8-27B-GGUF"
+revision = "f1bfb127c64f7072bdd2cad55f258b9c8b2910fe"
+served_name = "unsloth/Qwen3.8-27B-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "dense+mtp5"
+quantization = "ud-q4_k_xl+mtp5"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.8-27B-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372"
+model_size_bytes = 17923394624
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 8
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 68.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+  "--spec-type", "draft-mtp",
+  "--spec-draft-n-max", "5",
+  "--spec-draft-type-k", "q8_0",
+  "--spec-draft-type-v", "q8_0",
+  "--spec-draft-backend-sampling",
+]
+
+[[models]]
+id = "qwen38-27b-ud-q4-k-xl-llamacpp-mtp2"
+description = "Same Unsloth Q4 GGUF with embedded NextN MTP and maximum draft length two."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.8-27B-GGUF"
+revision = "f1bfb127c64f7072bdd2cad55f258b9c8b2910fe"
+served_name = "unsloth/Qwen3.8-27B-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "dense+mtp2"
+quantization = "ud-q4_k_xl+mtp2"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.8-27B-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372"
+model_size_bytes = 17923394624
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 8
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 68.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+  "--spec-type", "draft-mtp",
+  "--spec-draft-n-max", "2",
+  "--spec-draft-type-k", "q8_0",
+  "--spec-draft-type-v", "q8_0",
+  "--spec-draft-backend-sampling",
+]
+
+[[models]]
+id = "qwen38-27b-ud-q4-k-xl-llamacpp-mtp4"
+description = "Same Unsloth Q4 GGUF with embedded NextN MTP and maximum draft length four."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.8-27B-GGUF"
+revision = "f1bfb127c64f7072bdd2cad55f258b9c8b2910fe"
+served_name = "unsloth/Qwen3.8-27B-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "dense+mtp4"
+quantization = "ud-q4_k_xl+mtp4"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.8-27B-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372"
+model_size_bytes = 17923394624
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 8
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 68.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+  "--spec-type", "draft-mtp",
+  "--spec-draft-n-max", "4",
+  "--spec-draft-type-k", "q8_0",
+  "--spec-draft-type-v", "q8_0",
+  "--spec-draft-backend-sampling",
+]
+
+[[models]]
+id = "qwen38-27b-q8-0-llamacpp"
+description = "Cached-only Q8_0 GGUF quality anchor on the same native llama.cpp runtime."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.8-27B-GGUF"
+revision = "f1bfb127c64f7072bdd2cad55f258b9c8b2910fe"
+served_name = "unsloth/Qwen3.8-27B-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "dense"
+quantization = "q8_0"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.8-27B-Q8_0.gguf"]
+model_file = "Qwen3.8-27B-Q8_0.gguf"
+model_digest = "sha256:a680f44a06920e5d689774823782006aa3acc8db95750323373b24139b67e348"
+model_size_bytes = 29047086048
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 8
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 80.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all", "--flash-attn", "on", "--fit", "off",
+  "--batch-size", "8192", "--ubatch-size", "512",
+  "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
+  "--jinja", "--reasoning", "off",
+]
+
+[[models]]
+id = "qwen38-27b-ud-iq2-xxs-llamacpp"
+description = "Cached-only Unsloth Dynamic IQ2_XXS capacity and quality-floor anchor."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.8-27B-GGUF"
+revision = "f1bfb127c64f7072bdd2cad55f258b9c8b2910fe"
+served_name = "unsloth/Qwen3.8-27B-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "dense"
+quantization = "ud-iq2_xxs"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.8-27B-UD-IQ2_XXS.gguf"]
+model_file = "Qwen3.8-27B-UD-IQ2_XXS.gguf"
+model_digest = "sha256:8d1b37297d6cf98303cd396896f35e01089ddcc904053a9c6997f7a1c35b8524"
+model_size_bytes = 9010048064
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 8
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 52.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all", "--flash-attn", "on", "--fit", "off",
+  "--batch-size", "8192", "--ubatch-size", "512",
+  "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
+  "--jinja", "--reasoning", "off",
+]
+
+# Pinned official/current downloads. These conservative profiles reuse the
+# cached NVIDIA vLLM 26.07 image and remain unavailable until the exact revision
+# is present in the user Hugging Face cache.
+[[models]]
+id = "qwen36-35b-a3b-nvfp4-mtp3"
+description = "Spark-recipe Qwen3.6 multimodal MoE adapted to a conservative 32K MTP3 profile."
+support_status = "spark_vllm_recipe"
+backend = "vllm"
+source = "nvidia/Qwen3.6-35B-A3B-NVFP4"
+revision = "491c2f1ea524c639598bf8fa787a93fed5a6fbce"
+served_name = "nvidia/Qwen3.6-35B-A3B-NVFP4"
+tasks = ["chat", "json", "vision", "tools", "thinking"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "moe-vlm+mtp3"
+quantization = "nvfp4+mtp3"
+lifecycle = "docker"
+image = "nvcr.io/nvidia/vllm:26.07-py3"
+image_digest = "sha256:95c498a475142c20c989c65e5d223348c09fed83ba17ddf44f117610c0bd3268"
+cache_dir = "user"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 64.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--served-model-name", "nvidia/Qwen3.6-35B-A3B-NVFP4",
+  "--host", "0.0.0.0",
+  "--port", "8000",
+  "--tensor-parallel-size", "1",
+  "--trust-remote-code",
+  "--kv-cache-dtype", "fp8",
+  "--moe-backend", "marlin",
+  "--max-model-len", "32768",
+  "--gpu-memory-utilization", "0.50",
+  "--max-num-seqs", "8",
+  "--max-num-batched-tokens", "8192",
+  "--enable-chunked-prefill",
+  "--async-scheduling",
+  "--enable-prefix-caching",
+  "--load-format", "fastsafetensors",
+  "--speculative-config", '{"method":"mtp","num_speculative_tokens":3,"moe_backend":"triton"}',
+  "--reasoning-parser", "qwen3",
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "qwen3_coder",
+]
+
+[[models]]
+id = "phi-4-multimodal-instruct-nvfp4"
+description = "Pinned Phi-4 multimodal NVFP4 image/text trial on the DGX Spark SGLang runtime."
+support_status = "spark_other_backend"
+backend = "sglang"
+source = "nvidia/Phi-4-multimodal-instruct-NVFP4"
+revision = "617cfabb9ad6c2c6e318fd21c1961536b84f65a1"
+served_name = "nvidia/Phi-4-multimodal-instruct-NVFP4"
+tasks = ["chat", "vision"]
+architecture = "dense-vlm"
+quantization = "nvfp4"
+lifecycle = "docker"
+image = "scitrera/dgx-spark-sglang:0.5.10rc0"
+image_digest = "sha256:3f51e3b127bd0fe8f261a84c6ad54ce42bdb65eb2e57e228a9f6359e89bd08ec"
+cache_dir = "user"
+max_context = 32768
+native_context = 131072
+startup_timeout_s = 1200
+estimated_ram_gib = 40.0
+endpoint = "http://127.0.0.1:30000/v1"
+args = [
+  "--served-model-name", "nvidia/Phi-4-multimodal-instruct-NVFP4",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+  "--tensor-parallel-size", "1",
+  "--trust-remote-code",
+  # The cached SGLang image ships Transformers 4.57, while its Phi4MM
+  # implementation reads the equivalent Transformers 5.x field name.
+  "--json-model-override-args", '{"rope_parameters":{"long_factor":[1,1.118320672,1.250641126,1.398617824,1.564103225,1.74916897,1.956131817,2.187582649,2.446418898,2.735880826,3.059592084,3.421605075,3.826451687,4.279200023,4.785517845,5.351743533,5.984965424,6.693110555,7.485043894,8.370679318,9.36110372,10.4687158,11.70738129,13.09260651,14.64173252,16.37415215,18.31155283,20.47818807,22.90118105,25.61086418,28.64115884,32.03,32.1,32.13,32.23,32.6,32.61,32.64,32.66,32.7,32.71,32.93,32.97,33.28,33.49,33.5,44.16,47.77],"short_factor":[1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0],"type":"longrope","rope_theta":10000.0}}',
+  "--enable-multimodal",
+  "--quantization", "modelopt_fp4",
+  "--attention-backend", "flashinfer",
+  "--context-length", "32768",
+  "--mem-fraction-static", "0.50",
+  "--max-running-requests", "8",
+  "--chunked-prefill-size", "8192",
+]
+
+[[models]]
+id = "phi-4-multimodal-instruct-fp8"
+description = "Pinned Phi-4 multimodal FP8 image/text trial on the DGX Spark SGLang runtime."
+support_status = "spark_other_backend"
+backend = "sglang"
+source = "nvidia/Phi-4-multimodal-instruct-FP8"
+revision = "d822efce23f65f86c165aeed435cc27092e21d60"
+served_name = "nvidia/Phi-4-multimodal-instruct-FP8"
+tasks = ["chat", "vision"]
+architecture = "dense-vlm"
+quantization = "fp8"
+lifecycle = "docker"
+image = "scitrera/dgx-spark-sglang:0.5.10rc0"
+image_digest = "sha256:3f51e3b127bd0fe8f261a84c6ad54ce42bdb65eb2e57e228a9f6359e89bd08ec"
+cache_dir = "user"
+max_context = 32768
+native_context = 131072
+startup_timeout_s = 1200
+estimated_ram_gib = 48.0
+endpoint = "http://127.0.0.1:30000/v1"
+args = [
+  "--served-model-name", "nvidia/Phi-4-multimodal-instruct-FP8",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+  "--tensor-parallel-size", "1",
+  "--trust-remote-code",
+  # Transformers 4.57 compatibility: mirror the exact LongRoPE parameters
+  # used by the validated NVFP4 profile under the Phi4MM field name.
+  "--json-model-override-args", '{"rope_parameters":{"long_factor":[1,1.118320672,1.250641126,1.398617824,1.564103225,1.74916897,1.956131817,2.187582649,2.446418898,2.735880826,3.059592084,3.421605075,3.826451687,4.279200023,4.785517845,5.351743533,5.984965424,6.693110555,7.485043894,8.370679318,9.36110372,10.4687158,11.70738129,13.09260651,14.64173252,16.37415215,18.31155283,20.47818807,22.90118105,25.61086418,28.64115884,32.03,32.1,32.13,32.23,32.6,32.61,32.64,32.66,32.7,32.71,32.93,32.97,33.28,33.49,33.5,44.16,47.77],"short_factor":[1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0],"type":"longrope","rope_theta":10000.0}}',
+  "--enable-multimodal",
+  "--attention-backend", "flashinfer",
+  "--context-length", "32768",
+  "--mem-fraction-static", "0.50",
+  "--max-running-requests", "8",
+  "--chunked-prefill-size", "8192",
+]
+
+[[models]]
+id = "phi-4-multimodal-instruct-fp8-audio"
+description = "Retained failed SGLang speech-LoRA trial; rc0 rejects adapters that add vocabulary tokens."
+support_status = "incompatible"
+backend = "sglang"
+source = "nvidia/Phi-4-multimodal-instruct-FP8"
+revision = "d822efce23f65f86c165aeed435cc27092e21d60"
+served_name = "nvidia/Phi-4-multimodal-instruct-FP8"
+tasks = ["chat"]
+architecture = "dense-vlm"
+quantization = "fp8"
+lifecycle = "docker"
+image = "scitrera/dgx-spark-sglang:0.5.10rc0"
+image_digest = "sha256:3f51e3b127bd0fe8f261a84c6ad54ce42bdb65eb2e57e228a9f6359e89bd08ec"
+cache_dir = "user"
+max_context = 32768
+native_context = 131072
+startup_timeout_s = 1200
+estimated_ram_gib = 50.0
+endpoint = "http://127.0.0.1:30000/v1"
+args = [
+  "--served-model-name", "nvidia/Phi-4-multimodal-instruct-FP8",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+  "--tensor-parallel-size", "1",
+  "--trust-remote-code",
+  # Transformers 4.57 compatibility: mirror the exact LongRoPE parameters
+  # used by the validated FP8 image/text profile under the Phi4MM field name.
+  "--json-model-override-args", '{"rope_parameters":{"long_factor":[1,1.118320672,1.250641126,1.398617824,1.564103225,1.74916897,1.956131817,2.187582649,2.446418898,2.735880826,3.059592084,3.421605075,3.826451687,4.279200023,4.785517845,5.351743533,5.984965424,6.693110555,7.485043894,8.370679318,9.36110372,10.4687158,11.70738129,13.09260651,14.64173252,16.37415215,18.31155283,20.47818807,22.90118105,25.61086418,28.64115884,32.03,32.1,32.13,32.23,32.6,32.61,32.64,32.66,32.7,32.71,32.93,32.97,33.28,33.49,33.5,44.16,47.77],"short_factor":[1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0],"type":"longrope","rope_theta":10000.0}}',
+  "--enable-multimodal",
+  "--lora-paths", "speech=/root/.cache/huggingface/hub/models--nvidia--Phi-4-multimodal-instruct-FP8/snapshots/d822efce23f65f86c165aeed435cc27092e21d60/speech-lora",
+  "--max-loras-per-batch", "2",
+  "--attention-backend", "flashinfer",
+  "--context-length", "32768",
+  "--mem-fraction-static", "0.50",
+  "--max-running-requests", "8",
+  "--chunked-prefill-size", "8192",
+]
+
+[[models]]
+id = "phi-4-multimodal-instruct-fp8-trtllm-audio"
+description = "Pinned offline TensorRT-LLM direct Phi-4 speech transcription profile; use trtllm-direct."
+support_status = "spark_trtllm_direct"
+backend = "trtllm"
+source = "nvidia/Phi-4-multimodal-instruct-FP8"
+revision = "d822efce23f65f86c165aeed435cc27092e21d60"
+served_name = "nvidia/Phi-4-multimodal-instruct-FP8"
+tasks = ["chat", "audio"]
+architecture = "dense-audio"
+quantization = "fp8"
+lifecycle = "docker"
+image = "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc13"
+image_digest = "sha256:4f30c464ead64fb9727a24064b25057dacc07bef848022421108e544c91f0965"
+cache_dir = "user"
+max_context = 32768
+native_context = 131072
+startup_timeout_s = 7200
+estimated_ram_gib = 64.0
+endpoint = "offline://trtllm"
+args = [
+  "--backend", "pytorch",
+  "--max-seq-len", "32768",
+  "--max-batch-size", "1",
+  "--max-num-tokens", "8192",
+  "--disable-block-reuse",
+  "--seed", "3407",
+]
+
+[[models]]
+id = "phi-4-reasoning-plus-fp8"
+description = "Official Phi-4 dense reasoning specialist in FP8 with a conservative 32K serving profile."
+support_status = "spark_vllm_matrix"
+backend = "vllm"
+source = "nvidia/Phi-4-reasoning-plus-FP8"
+revision = "18abf8a59bd8ff0b79ec712863a153becc6cdaeb"
+served_name = "nvidia/Phi-4-reasoning-plus-FP8"
+tasks = ["chat", "thinking"]
+architecture = "dense-reasoning"
+quantization = "fp8"
+lifecycle = "docker"
+image = "nvcr.io/nvidia/vllm:26.07-py3"
+image_digest = "sha256:95c498a475142c20c989c65e5d223348c09fed83ba17ddf44f117610c0bd3268"
+cache_dir = "user"
+max_context = 32768
+native_context = 32768
+startup_timeout_s = 1200
+estimated_ram_gib = 48.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--served-model-name", "nvidia/Phi-4-reasoning-plus-FP8",
+  "--host", "0.0.0.0",
+  "--port", "8000",
+  "--tensor-parallel-size", "1",
+  "--max-model-len", "32768",
+  "--gpu-memory-utilization", "0.50",
+  "--max-num-seqs", "8",
+  "--max-num-batched-tokens", "8192",
+  "--enable-chunked-prefill",
+  "--enable-prefix-caching",
+]
+
+[[models]]
+id = "gpt-oss-20b-mxfp4"
+description = "Official small GPT-OSS MoE control using the validated Harmony-format 32K profile."
+support_status = "spark_vllm_matrix"
+backend = "vllm"
+source = "openai/gpt-oss-20b"
+revision = "6cee5e81ee83917806bbde320786a8fb61efebee"
+served_name = "openai/gpt-oss-20b"
+tasks = ["chat", "json", "tools", "thinking"]
+request_body_json = '{"reasoning_effort":"low"}'
+architecture = "moe"
+quantization = "mxfp4"
+lifecycle = "docker"
+image = "nvcr.io/nvidia/vllm:26.07-py3"
+image_digest = "sha256:95c498a475142c20c989c65e5d223348c09fed83ba17ddf44f117610c0bd3268"
+cache_dir = "user"
+fetch_ignore_patterns = ["metal/**", "original/**"]
+max_context = 32768
+native_context = 131072
+startup_timeout_s = 1200
+estimated_ram_gib = 32.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--served-model-name", "openai/gpt-oss-20b",
+  "--host", "0.0.0.0",
+  "--port", "8000",
+  "--tensor-parallel-size", "1",
+  "--max-model-len", "32768",
+  "--gpu-memory-utilization", "0.85",
+  "--max-num-seqs", "8",
+  "--max-num-batched-tokens", "8192",
+  "--enable-chunked-prefill",
+  "--enable-prefix-caching",
+  "--reasoning-parser", "openai_gptoss",
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "openai",
+]
+
+[[models]]
+id = "qwen3-8b-nvfp4"
+description = "Official dense Qwen3 NVFP4 precision anchor with a conservative 32K profile."
+support_status = "spark_vllm_matrix"
+backend = "vllm"
+source = "nvidia/Qwen3-8B-NVFP4"
+revision = "ccd10a893cbca613259517c3efe08e151ddf2b8e"
+served_name = "nvidia/Qwen3-8B-NVFP4"
+tasks = ["chat", "json", "tools", "thinking"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "dense"
+quantization = "nvfp4"
+lifecycle = "docker"
+image = "nvcr.io/nvidia/vllm:26.07-py3"
+image_digest = "sha256:95c498a475142c20c989c65e5d223348c09fed83ba17ddf44f117610c0bd3268"
+cache_dir = "user"
+max_context = 32768
+native_context = 131072
+startup_timeout_s = 1200
+estimated_ram_gib = 24.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--served-model-name", "nvidia/Qwen3-8B-NVFP4",
+  "--host", "0.0.0.0",
+  "--port", "8000",
+  "--tensor-parallel-size", "1",
+  "--kv-cache-dtype", "fp8",
+  "--max-model-len", "32768",
+  "--gpu-memory-utilization", "0.50",
+  "--max-num-seqs", "8",
+  "--max-num-batched-tokens", "8192",
+  "--enable-chunked-prefill",
+  "--enable-prefix-caching",
+  "--reasoning-parser", "qwen3",
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "hermes",
+]
+
+[[models]]
+id = "qwen3-8b-fp8"
+description = "Official dense Qwen3 FP8 precision anchor matched to the NVFP4 32K profile."
+support_status = "spark_vllm_matrix"
+backend = "vllm"
+source = "nvidia/Qwen3-8B-FP8"
+revision = "2cebc4c89e25abc17668c81b01dceaf3d8b914d5"
+served_name = "nvidia/Qwen3-8B-FP8"
+tasks = ["chat", "json", "tools", "thinking"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "dense"
+quantization = "fp8"
+lifecycle = "docker"
+image = "nvcr.io/nvidia/vllm:26.07-py3"
+image_digest = "sha256:95c498a475142c20c989c65e5d223348c09fed83ba17ddf44f117610c0bd3268"
+cache_dir = "user"
+max_context = 32768
+native_context = 131072
+startup_timeout_s = 1200
+estimated_ram_gib = 32.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--served-model-name", "nvidia/Qwen3-8B-FP8",
+  "--host", "0.0.0.0",
+  "--port", "8000",
+  "--tensor-parallel-size", "1",
+  "--kv-cache-dtype", "fp8",
+  "--max-model-len", "32768",
+  "--gpu-memory-utilization", "0.50",
+  "--max-num-seqs", "8",
+  "--max-num-batched-tokens", "8192",
+  "--enable-chunked-prefill",
+  "--enable-prefix-caching",
+  "--reasoning-parser", "qwen3",
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "hermes",
 ]
 
 # Cached user-level Hugging Face checkpoints. These use the local NVIDIA vLLM
@@ -227,6 +1058,81 @@ args = [
 ]
 
 [[models]]
+id = "qwen3-coder-30b-a3b-bf16-ar-control"
+description = "Matched 32K autoregressive control for the cached Qwen3 Coder DFlash experiment."
+support_status = "exploratory"
+backend = "vllm"
+source = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+revision = "b2cff646eb4bb1d68355c01b18ae02e7cf42d120"
+served_name = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+tasks = ["chat", "json", "tools"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "moe"
+quantization = "bf16"
+lifecycle = "docker"
+image = "nvcr.io/nvidia/vllm:26.07-py3"
+image_digest = "sha256:95c498a475142c20c989c65e5d223348c09fed83ba17ddf44f117610c0bd3268"
+cache_dir = "user"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 90.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--served-model-name", "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+  "--host", "0.0.0.0",
+  "--port", "8000",
+  "--tensor-parallel-size", "1",
+  "--max-model-len", "32768",
+  "--gpu-memory-utilization", "0.80",
+  "--max-num-seqs", "8",
+  "--max-num-batched-tokens", "32768",
+  "--enable-chunked-prefill",
+  "--enable-prefix-caching",
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "qwen3_coder",
+  "--attention-backend", "flash_attn",
+]
+
+[[models]]
+id = "qwen3-coder-30b-a3b-bf16-dflash15"
+description = "Cached Qwen3 Coder target with the exact local 0.5B DFlash draft and 15-token speculation."
+support_status = "exploratory"
+backend = "vllm"
+source = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+revision = "b2cff646eb4bb1d68355c01b18ae02e7cf42d120"
+served_name = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+tasks = ["chat", "json", "tools"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "moe+dflash-draft"
+quantization = "bf16"
+lifecycle = "docker"
+image = "nvcr.io/nvidia/vllm:26.07-py3"
+image_digest = "sha256:95c498a475142c20c989c65e5d223348c09fed83ba17ddf44f117610c0bd3268"
+cache_dir = "user"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 92.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--served-model-name", "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+  "--host", "0.0.0.0",
+  "--port", "8000",
+  "--tensor-parallel-size", "1",
+  "--max-model-len", "32768",
+  "--gpu-memory-utilization", "0.80",
+  "--max-num-seqs", "8",
+  "--max-num-batched-tokens", "32768",
+  "--enable-chunked-prefill",
+  "--enable-prefix-caching",
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "qwen3_coder",
+  "--attention-backend", "flash_attn",
+  "--speculative-config", '{"method":"dflash","model":"z-lab/Qwen3-Coder-30B-A3B-DFlash","revision":"98f6509fba09968962ba1c9a167b82eaf356a7fb","num_speculative_tokens":15}',
+]
+
+[[models]]
 id = "gemma-3-4b-it-bf16"
 description = "Cached small multimodal BF16 baseline."
 support_status = "exploratory"
@@ -295,13 +1201,13 @@ args = [
 
 [[models]]
 id = "nemotron-labs-diffusion-8b-bf16"
-description = "Cached exploratory diffusion-language model."
-support_status = "exploratory"
+description = "Incompatible vLLM profile: the cached revision lacks its remote modeling module and vLLM rejects the custom architecture."
+support_status = "incompatible"
 backend = "vllm"
 source = "nvidia/Nemotron-Labs-Diffusion-8B"
 revision = "36e52f35cb928078f947e488b4f88f3c56c13192"
 served_name = "nvidia/Nemotron-Labs-Diffusion-8B"
-tasks = ["chat"]
+tasks = ["diffusion"]
 architecture = "diffusion-lm"
 quantization = "bf16"
 lifecycle = "docker"
@@ -327,13 +1233,13 @@ args = [
 
 [[models]]
 id = "nemotron-labs-diffusion-14b-bf16"
-description = "Cached larger exploratory diffusion-language model."
-support_status = "exploratory"
+description = "Incompatible vLLM profile: vLLM resolves the custom architecture as pooling/embed rather than diffusion generation."
+support_status = "incompatible"
 backend = "vllm"
 source = "nvidia/Nemotron-Labs-Diffusion-14B"
 revision = "b69aaebbcfa95a7e5f1de36d6134e4c858ddbc97"
 served_name = "nvidia/Nemotron-Labs-Diffusion-14B"
-tasks = ["chat"]
+tasks = ["diffusion"]
 architecture = "diffusion-lm"
 quantization = "bf16"
 lifecycle = "docker"
@@ -355,6 +1261,101 @@ args = [
   "--max-num-seqs", "8",
   "--max-num-batched-tokens", "8192",
   "--trust-remote-code",
+]
+
+[[models]]
+id = "nemotron-labs-diffusion-14b-transformers-direct"
+description = "Verified offline Transformers path for native 32-token-block diffusion generation; use the dedicated diffusion-direct command."
+support_status = "spark_transformers_direct"
+backend = "transformers"
+source = "nvidia/Nemotron-Labs-Diffusion-14B"
+revision = "b69aaebbcfa95a7e5f1de36d6134e4c858ddbc97"
+served_name = "nvidia/Nemotron-Labs-Diffusion-14B"
+tasks = ["diffusion"]
+architecture = "diffusion-lm"
+quantization = "bf16"
+lifecycle = "subprocess"
+cache_dir = "user"
+runtime_python = "/home/xlz/AGENTIC-RESEARCH/diffusion-stuff/.venv/bin/python"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 7200
+estimated_ram_gib = 52.0
+endpoint = "offline://transformers"
+args = [
+  "--block-length", "32",
+  "--threshold", "0.9",
+  "--seed", "3407",
+]
+
+[[models]]
+id = "qwen3-vl-embedding-2b-bf16"
+description = "Pinned Qwen3-VL multimodal embedding model with a conservative 8K pooling profile."
+support_status = "spark_vllm_matrix"
+backend = "vllm"
+source = "Qwen/Qwen3-VL-Embedding-2B"
+revision = "9f2f7e710d6d81056aa5c0a4f04764fec6bb7bda"
+served_name = "Qwen/Qwen3-VL-Embedding-2B"
+tasks = ["embeddings", "vision"]
+architecture = "qwen3-vl-embedding"
+quantization = "bf16"
+lifecycle = "docker"
+image = "nvcr.io/nvidia/vllm:26.07-py3"
+image_digest = "sha256:95c498a475142c20c989c65e5d223348c09fed83ba17ddf44f117610c0bd3268"
+cache_dir = "user"
+max_context = 8192
+native_context = 32768
+startup_timeout_s = 1200
+estimated_ram_gib = 24.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--served-model-name", "Qwen/Qwen3-VL-Embedding-2B",
+  "--host", "0.0.0.0",
+  "--port", "8000",
+  "--runner", "pooling",
+  "--dtype", "bfloat16",
+  "--max-model-len", "8192",
+  "--gpu-memory-utilization", "0.30",
+  "--max-num-seqs", "4",
+  "--max-num-batched-tokens", "8192",
+  "--limit-mm-per-prompt", '{"image":1}',
+  "--trust-remote-code",
+]
+
+[[models]]
+id = "qwen3-vl-reranker-2b-bf16"
+description = "Pinned Qwen3-VL cross-encoder reranker with the official score template and overrides."
+support_status = "spark_vllm_matrix"
+backend = "vllm"
+source = "Qwen/Qwen3-VL-Reranker-2B"
+revision = "4bd860ac4f15ad1897a214615cccc700f8f71818"
+served_name = "Qwen/Qwen3-VL-Reranker-2B"
+tasks = ["rerank", "vision"]
+architecture = "qwen3-vl-reranker"
+quantization = "bf16"
+lifecycle = "docker"
+image = "nvcr.io/nvidia/vllm:26.07-py3"
+image_digest = "sha256:95c498a475142c20c989c65e5d223348c09fed83ba17ddf44f117610c0bd3268"
+cache_dir = "user"
+max_context = 8192
+native_context = 32768
+startup_timeout_s = 1200
+estimated_ram_gib = 24.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--served-model-name", "Qwen/Qwen3-VL-Reranker-2B",
+  "--host", "0.0.0.0",
+  "--port", "8000",
+  "--runner", "pooling",
+  "--dtype", "bfloat16",
+  "--max-model-len", "8192",
+  "--gpu-memory-utilization", "0.30",
+  "--max-num-seqs", "4",
+  "--max-num-batched-tokens", "8192",
+  "--limit-mm-per-prompt", '{"image":1}',
+  "--trust-remote-code",
+  "--hf-overrides", '{"architectures":["Qwen3VLForSequenceClassification"],"classifier_from_token":["no","yes"],"is_original_qwen3_reranker":true}',
+  "--chat-template", "/opt/vllm/vllm-src/examples/pooling/score/template/qwen3_vl_reranker.jinja",
 ]
 
 [[models]]
@@ -563,7 +1564,7 @@ backend = "ollama"
 source = "deepseek-ocr:latest"
 revision = "0e7b018b8a22"
 served_name = "deepseek-ocr:latest"
-tasks = ["chat", "json", "vision"]
+tasks = ["chat", "json", "vision", "ocr"]
 architecture = "deepseekocr"
 quantization = "f16"
 lifecycle = "existing"

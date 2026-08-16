@@ -1,0 +1,16 @@
+schema_version = 1
+
+[suite]
+id = "multimodal-rerank"
+description = "Qwen3-VL cross-modal rerank validation using deterministic local red and blue image documents; image payloads are never journaled."
+
+[[cases]]
+id = "red-over-blue-image"
+kind = "capability"
+requires = ["rerank", "vision"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 64
