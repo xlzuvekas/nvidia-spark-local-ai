@@ -290,6 +290,94 @@ class ManifestLoaderTests(unittest.TestCase):
         for unverified_capability in ("audio", "json", "thinking", "tools"):
             self.assertNotIn(unverified_capability, model.tasks)
 
+    def test_qwen38_dspark_profile_freezes_both_artifacts_and_recipe(self) -> None:
+        model = load_models(ROOT / "manifests" / "models.toml")[
+            "qwen38-27b-nvfp4-dspark-sglang"
+        ]
+
+        self.assertEqual(model.backend, "sglang")
+        self.assertEqual(model.source, "RadixArk/Qwen3.8-27B-NVFP4")
+        self.assertEqual(
+            model.revision, "52d1adc5f38aa5ebf099c29ed7025ba34cfbb854"
+        )
+        self.assertEqual(model.weight_file_count, 3)
+        self.assertEqual(model.weight_size_bytes, 21_921_697_280)
+        self.assertEqual(model.draft_source, "RadixArk/Qwen3.8-27B-DSpark")
+        self.assertEqual(
+            model.draft_revision,
+            "923ed3a8572615643f0137e424e4ce4edd7f1cda",
+        )
+        self.assertEqual(model.draft_weight_size_bytes, 2_718_576_122)
+        self.assertEqual(
+            model.image,
+            "lmsysorg/sglang@sha256:"
+            "febfb971c7352570fc445c466ebd6ffc9d896024958e544a60f2137fd85856b1",
+        )
+        self.assertEqual(
+            model.image_digest,
+            "sha256:febfb971c7352570fc445c466ebd6ffc9d896024958e544a60f2137fd85856b1",
+        )
+        self.assertEqual(model.recipe_source, "hasso5703/dgx-spark-qwen38")
+        self.assertEqual(
+            model.recipe_revision,
+            "3590fb29296b1babd85405daad1eef1c4a3ebe0f",
+        )
+        self.assertIn(
+            "SparkBench cases and results remain independent", model.description
+        )
+        self.assertTrue(model.sglang_allow_hf_metadata_probe)
+        self.assertEqual(model.endpoint, "http://127.0.0.1:30000/v1")
+        self.assertEqual(model.max_context, 262144)
+        self.assertEqual(model.native_context, 262144)
+        self.assertEqual(
+            model.args,
+            (
+                "--trust-remote-code",
+                "--tp-size", "1",
+                "--served-model-name", "qwen3.8-27b",
+                "--mem-fraction-static", "0.50",
+                "--attention-backend", "flashinfer",
+                "--chunked-prefill-size", "8192",
+                "--disable-prefill-cuda-graph",
+                "--cuda-graph-max-bs", "4",
+                "--speculative-algorithm", "DSPARK",
+                "--speculative-dspark-block-size", "7",
+                "--speculative-draft-model-quantization", "unquant",
+                "--mamba-radix-cache-strategy", "extra_buffer_lazy",
+                "--mamba-ssm-dtype", "bfloat16",
+                "--max-mamba-cache-size", "96",
+                "--max-running-requests", "8",
+                "--enable-torch-compile",
+                "--torch-compile-max-bs", "4",
+                "--num-continuous-decode-steps", "2",
+                "--reasoning-parser", "qwen3",
+                "--tool-call-parser", "qwen3_coder",
+                "--host", "0.0.0.0",
+                "--port", "30000",
+            ),
+        )
+        self.assertNotIn("--model-path", model.args)
+        self.assertNotIn("--speculative-draft-model-path", model.args)
+        self.assertNotIn("--api-key", model.args)
+
+        invalid = (
+            replace(model, draft_revision=None),
+            replace(model, draft_revision="main"),
+            replace(model, draft_source="../unsafe"),
+            replace(model, backend="vllm"),
+            replace(model, draft_source=None, draft_revision=None),
+            replace(model, recipe_revision=None),
+            replace(model, recipe_source=None, recipe_revision=None),
+            replace(model, args=("--api-key", "secret")),
+            replace(
+                model,
+                args=("--speculative-draft-model-path", "remote/model"),
+            ),
+        )
+        for candidate in invalid:
+            with self.subTest(candidate=candidate), self.assertRaises(ManifestError):
+                validate_model(candidate)
+
     def test_phi4_reasoning_fp8_profile_is_pinned_and_conservative(self) -> None:
         model = load_models(ROOT / "manifests" / "models.toml")[
             "phi-4-reasoning-plus-fp8"

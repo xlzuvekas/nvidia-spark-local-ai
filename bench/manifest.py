@@ -46,6 +46,9 @@ KNOWN_CASE_KINDS = frozenset(
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+_HF_REPOSITORY_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"
+)
 _LLAMACPP_RESERVED_ARGS = frozenset(
     {
         "-m",
@@ -146,6 +149,16 @@ _LLAMACPP_FORBIDDEN_ARGS = frozenset(
         "--path",
         "--ssl-key-file",
         "--ssl-cert-file",
+        "--mtp",
+        "--dflash",
+        "--eagle3",
+    }
+)
+_SGLANG_RESERVED_ARGS = frozenset(
+    {
+        "--api-key",
+        "--model-path",
+        "--speculative-draft-model-path",
     }
 )
 _MODEL_KEYS = frozenset(
@@ -171,6 +184,17 @@ _MODEL_KEYS = frozenset(
         "cache_dir",
         "fetch_allow_patterns",
         "fetch_ignore_patterns",
+        "weight_size_bytes",
+        "weight_file_count",
+        "draft_source",
+        "draft_revision",
+        "draft_weight_size_bytes",
+        "draft_model_file",
+        "draft_model_digest",
+        "draft_model_size_bytes",
+        "sglang_allow_hf_metadata_probe",
+        "recipe_source",
+        "recipe_revision",
         "request_body_json",
         "runtime_python",
         "runtime_binary",
@@ -231,6 +255,17 @@ class ModelSpec:
     cache_dir: str = "project"
     fetch_allow_patterns: tuple[str, ...] = ()
     fetch_ignore_patterns: tuple[str, ...] = ()
+    weight_size_bytes: int | None = None
+    weight_file_count: int | None = None
+    draft_source: str | None = None
+    draft_revision: str | None = None
+    draft_weight_size_bytes: int | None = None
+    draft_model_file: str | None = None
+    draft_model_digest: str | None = None
+    draft_model_size_bytes: int | None = None
+    sglang_allow_hf_metadata_probe: bool = False
+    recipe_source: str | None = None
+    recipe_revision: str | None = None
     request_body_json: str | None = None
     runtime_python: str | None = None
     runtime_binary: str | None = None
@@ -324,6 +359,29 @@ def load_models(path: str | Path) -> dict[str, ModelSpec]:
             fetch_ignore_patterns=_string_tuple(
                 row, "fetch_ignore_patterns", context
             ),
+            weight_size_bytes=_optional_int(
+                row, "weight_size_bytes", context, default=None
+            ),
+            weight_file_count=_optional_int(
+                row, "weight_file_count", context, default=None
+            ),
+            draft_source=_optional_string(row, "draft_source", context),
+            draft_revision=_optional_string(row, "draft_revision", context),
+            draft_weight_size_bytes=_optional_int(
+                row, "draft_weight_size_bytes", context, default=None
+            ),
+            draft_model_file=_optional_string(row, "draft_model_file", context),
+            draft_model_digest=_optional_string(
+                row, "draft_model_digest", context
+            ),
+            draft_model_size_bytes=_optional_int(
+                row, "draft_model_size_bytes", context, default=None
+            ),
+            sglang_allow_hf_metadata_probe=_optional_bool(
+                row, "sglang_allow_hf_metadata_probe", context, default=False
+            ),
+            recipe_source=_optional_string(row, "recipe_source", context),
+            recipe_revision=_optional_string(row, "recipe_revision", context),
             request_body_json=_optional_string(
                 row, "request_body_json", context
             ),
@@ -451,6 +509,113 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
     _validate_fetch_patterns(
         model.fetch_ignore_patterns, f"{context}.fetch_ignore_patterns"
     )
+    for name, value in (
+        ("weight_size_bytes", model.weight_size_bytes),
+        ("weight_file_count", model.weight_file_count),
+        ("draft_weight_size_bytes", model.draft_weight_size_bytes),
+        ("draft_model_size_bytes", model.draft_model_size_bytes),
+    ):
+        if value is not None and value <= 0:
+            raise ManifestError(f"{context}.{name} must be positive")
+    draft_fields = (model.draft_source, model.draft_revision)
+    if any(value is not None for value in draft_fields) and not all(
+        value is not None for value in draft_fields
+    ):
+        raise ManifestError(
+            f"{context}.draft_source and draft_revision must be set together"
+        )
+    if model.draft_source is not None:
+        if model.backend not in {"llamacpp", "sglang"}:
+            raise ManifestError(
+                f"{context}.draft_source is supported only for llamacpp or sglang"
+            )
+        if not _HF_REPOSITORY_PATTERN.fullmatch(model.draft_source):
+            raise ManifestError(
+                f"{context}.draft_source must be a Hugging Face repository ID"
+            )
+        if not model.draft_revision or not _COMMIT_PATTERN.fullmatch(
+            model.draft_revision
+        ):
+            raise ManifestError(
+                f"{context}.draft_revision must be a full lowercase commit SHA"
+            )
+        if not model.revision or not _COMMIT_PATTERN.fullmatch(model.revision):
+            raise ManifestError(
+                f"{context}.revision must be a full lowercase commit SHA "
+                "when a draft snapshot is configured"
+            )
+        if not _HF_REPOSITORY_PATTERN.fullmatch(model.source):
+            raise ManifestError(
+                f"{context}.source must be a Hugging Face repository ID "
+                "when a draft snapshot is configured"
+            )
+        if (model.source, model.revision) == (
+            model.draft_source,
+            model.draft_revision,
+        ):
+            raise ManifestError(
+                f"{context}.draft snapshot must differ from the target snapshot"
+            )
+    elif any(
+        value is not None
+        for value in (
+            model.draft_weight_size_bytes,
+            model.draft_model_file,
+            model.draft_model_digest,
+            model.draft_model_size_bytes,
+        )
+    ):
+        raise ManifestError(
+            f"{context}.draft artifact fields require a draft snapshot"
+        )
+    draft_model_fields = (
+        model.draft_model_file,
+        model.draft_model_digest,
+        model.draft_model_size_bytes,
+    )
+    if any(value is not None for value in draft_model_fields) and not all(
+        value is not None for value in draft_model_fields
+    ):
+        raise ManifestError(
+            f"{context}.draft_model_file, draft_model_digest, and "
+            "draft_model_size_bytes must be set together"
+        )
+    if model.backend != "llamacpp" and any(
+        value is not None for value in draft_model_fields
+    ):
+        raise ManifestError(
+            f"{context}.draft_model_* fields are supported only for llamacpp"
+        )
+    if model.sglang_allow_hf_metadata_probe and (
+        model.backend != "sglang" or model.draft_source is None
+    ):
+        raise ManifestError(
+            f"{context}.sglang_allow_hf_metadata_probe requires an sglang "
+            "draft snapshot"
+        )
+    recipe_fields = (model.recipe_source, model.recipe_revision)
+    if any(value is not None for value in recipe_fields) and not all(
+        value is not None for value in recipe_fields
+    ):
+        raise ManifestError(
+            f"{context}.recipe_source and recipe_revision must be set together"
+        )
+    if model.recipe_source is not None:
+        if not _HF_REPOSITORY_PATTERN.fullmatch(model.recipe_source):
+            raise ManifestError(
+                f"{context}.recipe_source must be an owner/repository name"
+            )
+        if not model.recipe_revision or not _COMMIT_PATTERN.fullmatch(
+            model.recipe_revision
+        ):
+            raise ManifestError(
+                f"{context}.recipe_revision must be a full lowercase commit SHA"
+            )
+    if model.sglang_allow_hf_metadata_probe and model.recipe_source is None:
+        raise ManifestError(
+            f"{context}.sglang_allow_hf_metadata_probe requires pinned recipe "
+            "provenance"
+        )
     if model.support_status not in KNOWN_SUPPORT_STATUSES:
         raise ManifestError(
             f"{context}.support_status must be one of {sorted(KNOWN_SUPPORT_STATUSES)}"
@@ -538,6 +703,35 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
             raise ManifestError(
                 f"{context}.model_size_bytes must be positive for llamacpp"
             )
+        has_draft_model = model.draft_model_file is not None
+        if has_draft_model:
+            if (
+                Path(str(model.draft_model_file)).name != model.draft_model_file
+                or not model.draft_model_file.lower().endswith(".gguf")
+            ):
+                raise ManifestError(
+                    f"{context}.draft_model_file must be one safe GGUF filename"
+                )
+            if model.draft_source is None or model.draft_revision is None:
+                raise ManifestError(
+                    f"{context}.draft_model_file requires a pinned draft snapshot"
+                )
+            spec_types = _llamacpp_spec_types(model.args)
+            if spec_types != ("draft-dflash",):
+                raise ManifestError(
+                    f"{context}.llamacpp draft sidecar requires exactly "
+                    "--spec-type draft-dflash"
+                )
+            if _llamacpp_positive_option(model.args, "--spec-draft-n-max") is None:
+                raise ManifestError(
+                    f"{context}.llamacpp draft sidecar requires one positive "
+                    "--spec-draft-n-max"
+                )
+        elif model.draft_source is not None:
+            raise ManifestError(
+                f"{context}.llamacpp draft snapshot requires draft_model_file, "
+                "draft_model_digest, and draft_model_size_bytes"
+            )
         has_mmproj = model.mmproj_file is not None
         if has_mmproj:
             if (
@@ -620,12 +814,24 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
                 f"{context}.args contains unsafe llamacpp option(s): "
                 + ", ".join(forbidden)
             )
+    if model.backend == "sglang":
+        reserved = sorted(
+            argument.split("=", 1)[0]
+            for argument in model.args
+            if argument.split("=", 1)[0] in _SGLANG_RESERVED_ARGS
+        )
+        if reserved:
+            raise ManifestError(
+                f"{context}.args contains runtime-owned sglang option(s): "
+                + ", ".join(reserved)
+            )
     if model.image_digest and not _DIGEST_PATTERN.fullmatch(model.image_digest):
         raise ManifestError(f"{context}.image_digest must be a sha256 digest")
     for name, digest in (
         ("runtime_digest", model.runtime_digest),
         ("model_digest", model.model_digest),
         ("mmproj_digest", model.mmproj_digest),
+        ("draft_model_digest", model.draft_model_digest),
     ):
         if digest is not None and not _DIGEST_PATTERN.fullmatch(digest):
             raise ManifestError(f"{context}.{name} must be a sha256 digest")
@@ -806,6 +1012,17 @@ def _optional_int(
     return _required_int(table, key, context)
 
 
+def _optional_bool(
+    table: Mapping[str, Any], key: str, context: str, *, default: bool
+) -> bool:
+    if key not in table:
+        return default
+    value = table[key]
+    if not isinstance(value, bool):
+        raise ManifestError(f"{context}.{key} must be a boolean")
+    return value
+
+
 def _optional_number(
     table: Mapping[str, Any],
     key: str,
@@ -885,6 +1102,40 @@ def _validate_fetch_patterns(values: tuple[str, ...], context: str) -> None:
             or unsafe_character
         ):
             raise ManifestError(f"{context} contains unsafe pattern {pattern!r}")
+
+
+def _llamacpp_spec_types(arguments: Iterable[Any]) -> tuple[str, ...]:
+    values = tuple(str(argument) for argument in arguments)
+    configured: list[str] = []
+    for index, argument in enumerate(values):
+        if argument.startswith("--spec-type="):
+            configured.append(argument.split("=", 1)[1])
+        elif argument == "--spec-type" and index + 1 < len(values):
+            configured.append(values[index + 1])
+    if len(configured) != 1:
+        return ()
+    return tuple(
+        item.strip() for item in configured[0].split(",") if item.strip()
+    )
+
+
+def _llamacpp_positive_option(
+    arguments: Iterable[Any], option: str
+) -> int | None:
+    values = tuple(str(argument) for argument in arguments)
+    configured: list[str] = []
+    for index, argument in enumerate(values):
+        if argument.startswith(option + "="):
+            configured.append(argument.split("=", 1)[1])
+        elif argument == option and index + 1 < len(values):
+            configured.append(values[index + 1])
+    if len(configured) != 1:
+        return None
+    try:
+        parsed = int(configured[0])
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _default_endpoint(backend: str) -> str:

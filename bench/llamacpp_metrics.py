@@ -163,11 +163,13 @@ def snapshot_llamacpp_spec_decode_metrics(
     return parse_llamacpp_spec_decode_metrics(exposition)
 
 
-def require_mtp_activity(metrics: dict[str, Any] | None) -> None:
-    """Reject an MTP run that did not draft and accept at least one token."""
+def require_speculative_activity(
+    metrics: dict[str, Any] | None, *, method: str
+) -> None:
+    """Reject a requested draft method without positive draft/acceptance proof."""
 
     if metrics is None:
-        raise RuntimeError("llama.cpp MTP metrics were unavailable")
+        raise RuntimeError(f"llama.cpp {method} metrics were unavailable")
     drafted = metrics.get("num_draft_tokens")
     accepted = metrics.get("num_accepted_tokens")
     steps = metrics.get("num_drafts")
@@ -179,15 +181,22 @@ def require_mtp_activity(metrics: dict[str, Any] | None) -> None:
         for value in (drafted, accepted, steps)
     ):
         raise RuntimeError(
-            "llama.cpp MTP was requested but drafted/accepted counters were not all positive"
+            f"llama.cpp {method} was requested but drafted/accepted counters "
+            "were not all positive"
         )
     if float(accepted) > float(drafted):
         raise RuntimeError("llama.cpp accepted-token counter exceeds drafted tokens")
 
 
-def llamacpp_mtp_requested(arguments: Iterable[Any]) -> bool:
-    """Return whether frozen llama.cpp arguments request embedded MTP drafting."""
+def require_mtp_activity(metrics: dict[str, Any] | None) -> None:
+    """Reject an MTP run that did not draft and accept at least one token."""
 
+    require_speculative_activity(metrics, method="MTP")
+
+
+def _llamacpp_spec_type_requested(
+    arguments: Iterable[Any], requested_type: str
+) -> bool:
     values = [str(argument) for argument in arguments]
     for index, argument in enumerate(values):
         if argument.startswith("--spec-type="):
@@ -196,11 +205,23 @@ def llamacpp_mtp_requested(arguments: Iterable[Any]) -> bool:
             configured = values[index + 1]
         else:
             continue
-        if "draft-mtp" in {
+        if requested_type in {
             item.strip() for item in configured.split(",") if item.strip()
         }:
             return True
     return False
+
+
+def llamacpp_mtp_requested(arguments: Iterable[Any]) -> bool:
+    """Return whether frozen llama.cpp arguments request embedded MTP drafting."""
+
+    return _llamacpp_spec_type_requested(arguments, "draft-mtp")
+
+
+def llamacpp_dflash_requested(arguments: Iterable[Any]) -> bool:
+    """Return whether frozen llama.cpp arguments request DFlash drafting."""
+
+    return _llamacpp_spec_type_requested(arguments, "draft-dflash")
 
 
 def llamacpp_mtp_depth(arguments: Iterable[Any]) -> int | None:
@@ -305,8 +326,9 @@ def assess_llamacpp_mtp_evidence(
     *,
     requested: bool,
     configured_depth: int | None = None,
+    method: str = "MTP",
 ) -> dict[str, Any]:
-    """Check that every reported case lifetime has a later valid MTP snapshot."""
+    """Check every reported draft lifetime has a later valid metrics snapshot."""
 
     records = list(events)
     evidence: dict[str, Any] = {
@@ -367,14 +389,14 @@ def assess_llamacpp_mtp_evidence(
                 {
                     "passed": False,
                     "reason": (
-                        "completed llama.cpp MTP lifetime has no later "
+                        f"completed llama.cpp {method} lifetime has no later "
                         "speculative-decoding metrics snapshot"
                     ),
                 }
             )
             return evidence
         try:
-            require_mtp_activity(snapshots[-1])
+            require_speculative_activity(snapshots[-1], method=method)
         except RuntimeError as error:
             evidence.update({"passed": False, "reason": str(error)})
             return evidence
@@ -407,4 +429,23 @@ def require_llamacpp_mtp_evidence(
     )
     if evidence["requested"] and not evidence["passed"]:
         raise RuntimeError(f"llama.cpp MTP evidence is incomplete: {evidence['reason']}")
+    return evidence
+
+
+def require_llamacpp_dflash_evidence(
+    arguments: Iterable[Any], events: Iterable[dict[str, Any]]
+) -> dict[str, Any]:
+    """Fail closed when completed DFlash work lacks per-lifetime activity proof."""
+
+    evidence = assess_llamacpp_mtp_evidence(
+        events,
+        requested=llamacpp_dflash_requested(arguments),
+        configured_depth=None,
+        method="DFlash",
+    )
+    if evidence["requested"] and not evidence["passed"]:
+        raise RuntimeError(
+            "llama.cpp DFlash evidence is incomplete: "
+            f"{evidence['reason']}"
+        )
     return evidence

@@ -4,9 +4,39 @@ Reproducible local inference experiments on NVIDIA DGX Spark / GB10. This
 repository records the configurations that worked, the ones that did not, and
 the measurements behind each conclusion.
 
-**Start with the [full 2026-08-16 capability campaign](docs/benchmark-results-2026-08-16.md).**
-It reports successful, partial, incompatible, and repaired paths with exact
-model revisions, image digests, telemetry, and retained local evidence IDs.
+**Start with the [latest overnight report](docs/benchmark-results-2026-08-17.md).**
+It records the completed Unsloth Qwen3.6 and Qwen3.8 GGUF, SGLang/DSpark, and
+Muse-Glimmer/DFlash experiments with their semantic gates and exact evidence
+IDs. The preceding
+[full 2026-08-16 capability campaign](docs/benchmark-results-2026-08-16.md)
+reports successful, partial, incompatible, and repaired paths with exact model
+revisions, image digests, telemetry, and retained local evidence IDs.
+
+## Overnight findings
+
+- **Qwen3.6 Q4 + MTP2:** embedded MTP2 was active and raised matched
+  fixed-budget aggregate decode by 24–29% in the short screens and roughly
+  50–56% in the core screen. Both profiles passed chat, JSON, tools, and
+  exact-key retrieval through 245K-token prompts; MTP2 was 4.2–7.0% slower to
+  first token in the prompt-dominated long-context sweep.
+- **Qwen3.8 NVFP4 + DSpark:** the pinned community SGLang recipe served at
+  26.369 tok/s for D256 and scaled to 127.185 aggregate tok/s at C8. JSON and
+  tools passed, but core output was reasoning-only: retrieval was 0/3 and the
+  small exact-answer screen was 0/4. Fresh prompt throughput ranged from
+  14.499 to 42.739 tok/s, so the headline 34–38 tok/s is workload-dependent.
+- **Qwen3.8 Q5, perplexity, and 262K context:** Q5 reached 9.229 tok/s at D256
+  and 45.301 aggregate tok/s at C8 while passing the bounded capability cells.
+  Matched WikiText-2 did not resolve Q4/Q5/Q8 (their reported intervals
+  overlap); IQ2 was 12.77% worse than Q4. Separate Q4 baseline/MTP5 profiles
+  both passed all 10 retrieval probes through 245K-token prompts, although
+  MTP5 TTFT was 3.2–5.1% slower.
+- **Muse-Glimmer Q4 + DFlash15:** llama.cpp admitted the pinned sidecar; the
+  quick lifetime recorded 155 drafts, 1,992 proposals, and 1,271 acceptances.
+  DFlash raised matched D128 aggregate emission from 11.707 to 59.259 tok/s,
+  but all 30 fixed-token quick responses still had empty visible content and
+  reasoning-side prompt echo; both 8K needles failed. These are accelerated
+  invalid emissions, not usable-answer throughput, so core was deliberately
+  stopped at the semantic gate.
 
 ## Campaign coverage
 
@@ -17,12 +47,14 @@ time:
   profiles;
 - Ollama for quantized chat, native prefill timing, vision, OCR, and embedding
   or reranking endpoints;
-- SGLang for Phi-4 FP8 text and vision, while retaining incompatible attempts;
-- an offline TensorRT-LLM direct adapter for Phi-4 audio transcription; and
+- SGLang for Phi-4 FP8 text and vision, plus a managed Qwen3.8 NVFP4/DSpark
+  target-and-draft profile with measured throughput and retained semantic
+  failures;
+- an offline TensorRT-LLM direct adapter for Phi-4 audio transcription;
 - an offline Transformers direct adapter for Nemotron block-diffusion text;
   and
-- a pinned native llama.cpp build for Unsloth Qwen3.8 GGUF, including its
-  embedded NextN/MTP head.
+- a pinned native llama.cpp build for Unsloth Qwen3.6 and Qwen3.8 GGUF,
+  including their embedded MTP/NextN heads.
 
 Suites cover decode, prefill, concurrency, long-context retrieval, JSON, tool
 calling, small exact-answer quality checks, embeddings, reranking, vision, OCR,
@@ -172,6 +204,14 @@ python3 sparkbench.py benchmark qwen38-27b-ud-q4-k-xl-llamacpp \
   --suite manifests/suites/quick.toml
 python3 sparkbench.py benchmark qwen38-27b-ud-q4-k-xl-llamacpp-mtp3 \
   --suite manifests/suites/core.toml
+python3 sparkbench.py benchmark qwen36-35b-a3b-ud-q4-k-xl-llamacpp-mtp2 \
+  --suite manifests/suites/llamacpp_long_context.toml
+python3 sparkbench.py benchmark qwen38-27b-nvfp4-dspark-sglang \
+  --suite manifests/suites/core.toml
+python3 sparkbench.py benchmark qwen38-27b-ud-q5-k-xl-llamacpp \
+  --suite manifests/suites/core.toml
+python3 sparkbench.py benchmark muse-glimmer-30b-ud-q4-k-xl-llamacpp-dflash15 \
+  --suite manifests/suites/smoke.toml
 ```
 
 The default `smoke.toml` suite performs quick endpoint and capability checks;
@@ -183,7 +223,31 @@ completion budget to reach visible answers. Focused suites include
 `multimodal_embeddings.toml`, `multimodal_rerank.toml`, `vision.toml`,
 `ocr.toml`, `audio_asr.toml`, and `diffusion_direct.toml`. The last two are
 executed through their dedicated direct commands above.
-`llamacpp_mtp_depth.toml` isolates the native GGUF draft-depth sweep.
+`llamacpp_mtp_depth.toml` isolates the native GGUF draft-depth sweep, while
+`llamacpp_long_context.toml` probes exact-key retrieval from 32K through 245K.
+
+The direct perplexity command records pinned model, runtime, and dataset
+hashes. Compare only the same base model with identical dataset and runtime
+settings:
+
+```bash
+python3 sparkbench.py perplexity qwen38-27b-ud-q5-k-xl-llamacpp \
+  --dataset /absolute/path/to/wiki.test.raw --chunks 64 --ctx-size 512 \
+  --timeout 3600
+```
+
+`content_battery.py` measures an already-running OpenAI-compatible server and
+is lifecycle-neutral: it neither launches nor stops the server. Pass its
+Bearer credential by file; the saved JSON contains scalar timing and usage
+evidence, not prompts, completions, request tags, or the key.
+
+```bash
+RUN_DIR=/absolute/path/to/kept-sglang-run
+python3 content_battery.py \
+  --base-url http://127.0.0.1:30000/v1 --model qwen3.8-27b \
+  --api-key-file "$RUN_DIR/server/api-key" \
+  --output results/content-battery-dspark.json --timeout-seconds 900
+```
 
 Reasoning prefill throughput uses TTFT to the first visible content or reasoning
 delta. Needle correctness checks final content only: a key found solely in hidden
@@ -225,6 +289,7 @@ cache coverage. The dated [campaign plan](docs/benchmark-campaign-2026-08-15.md)
 [cached training guide](docs/cached-training-capability-2026-08-15.md), and
 [Nemotron direct-run guide](docs/nemotron-diffusion-direct.md) preserve the
 specialized protocols. The consolidated evidence is in the
+[2026-08-17 overnight results](docs/benchmark-results-2026-08-17.md) and
 [2026-08-16 campaign results](docs/benchmark-results-2026-08-16.md); the earlier
 [2026-08-14 smoke results](docs/benchmark-results-2026-08-14.md) remain as a
 historical snapshot.
@@ -237,12 +302,21 @@ python3 -m unittest discover -s tests -v
 
 ## Native GGUF highlights
 
+The managed Unsloth track now covers Qwen3.6 35B-A3B UD-Q4_K_XL as well as
+Qwen3.8. On Qwen3.6, embedded MTP2 improved matched D256 aggregate decode by
+29.0% in the five-request screen and 53.7% in core. It passed chat, JSON,
+tools, and exact-key retrieval through 245K tokens, but did not improve
+prefill: long-context TTFT was 4.2–7.0% slower.
+See the [overnight report](docs/benchmark-results-2026-08-17.md) for sample-size,
+queueing, telemetry, and comparison limits.
+
 The pinned Unsloth Qwen3.8 GGUF track now covers Q8, UD-Q4_K_XL, and
 UD-IQ2_XXS on the same llama.cpp build and eight-slot 32K-per-slot layout.
 The Q8 checkpoint was roughly one-third slower than Q4 without improving the
 small exact-answer screen. IQ2 was much faster and about half the Q4 size, but
 failed the JSON validator in both smoke and core, so it is a capacity floor—not
-a quality-equivalent replacement.
+a quality-equivalent replacement. Matched WikiText-2 perplexity likewise left
+Q4, Q5, and Q8 unresolved while separating IQ2 as 12.77% worse than Q4.
 
 For Q4's embedded NextN head, bracket controls drifted only 0.33%. A six-depth
 sweep followed by 20-request confirmation measured **23.80 tok/s at maximum
@@ -250,6 +324,15 @@ draft depth 5** versus **23.27 tok/s at depth 4**; depth 5 is the tested leader,
 but the 2.28% margin is modest. The F16 vision projector also passed all nine
 solid-color transport/recognition probes across 64, 512, and 1024 pixels. These
 targeted checks do not establish broad language or vision quality.
+
+The Q5 middle quantization passed smoke and bounded core capability checks,
+with true eight-slot aggregate throughput reaching 45.301 tok/s at C8. A
+separate one-slot Q4 baseline/MTP5 comparison passed 20/20 combined retrieval
+requests through 245K-token prompts; MTP5 was active but slower on every
+prompt-dominated tier. Muse-Glimmer's DFlash15 sidecar was also active through
+the fifteenth draft position, but both Muse smoke profiles emitted
+reasoning-only prompt echo rather than visible answers and failed
+structured-output contracts.
 
 ## Original Qwen3.8 conclusions
 
@@ -275,10 +358,21 @@ failed or partial cases remain part of the result.
 
 The managed llama.cpp path validates pinned binaries, GGUF/projector hashes,
 offline loopback isolation, native speculative-decoding counters, and cleanup
-by process identity. Matched Qwen3.8 runs now cover the quantization ladder,
-vision, MTP depth, smoke, quick, and core suites; see the campaign report for
-the measurements and validity limits. Broader calibrated quality, native
-32K/128K/262K correctness, and agent workloads remain future work.
+by process identity. Matched Qwen3.6 and Qwen3.8 evidence now covers MTP,
+long-context, quantization, vision, smoke, quick, and core probes; see the dated
+reports for the exact coverage and validity limits. Broader calibrated quality,
+Muse prompt/template repair, and agent workloads remain future work.
+
+The `qwen38-27b-nvfp4-dspark-sglang` profile encodes the pinned target and
+draft snapshots, container digest, recipe flags, isolated compile cache,
+loopback API, ephemeral per-run authentication, and redacted provenance needed
+to evaluate the community
+[DGX Spark Qwen3.8 recipe](https://github.com/hasso5703/dgx-spark-qwen38).
+The managed run completed after a compile-cache permission repair. It measured
+26.369 tok/s at D256 and 127.185 aggregate tok/s at C8, while fresh content
+prompts ranged from 14.499 to 42.739 tok/s. Those rates are execution evidence,
+not a correctness result: output remained reasoning-only, and the frozen core
+budgets failed every retrieval and exact-answer check.
 
 ## License
 

@@ -35,9 +35,12 @@ from .client import (
 )
 from .journal import Journal, content_hash, utc_now, write_json
 from .llamacpp_metrics import (
+    llamacpp_dflash_requested,
     llamacpp_mtp_requested,
+    require_llamacpp_dflash_evidence,
     require_llamacpp_mtp_evidence,
     require_mtp_activity,
+    require_speculative_activity,
     snapshot_llamacpp_spec_decode_metrics,
 )
 from .report import summarize_run
@@ -819,6 +822,8 @@ def _request_arguments(
         arguments["require_native_decode_timing"] = not (
             str(case.kind) == "capability" and "vision" in case.requires
         )
+    elif getattr(server, "authorization", None):
+        arguments["authorization"] = str(server.authorization)
     return arguments
 
 
@@ -850,6 +855,11 @@ def _chat_request_function(server: Any, case: SimpleNamespace | None = None):
     return stream_ollama_chat_request if server.backend == "ollama" else stream_chat_request
 
 
+def _authorization_argument(server: Any) -> dict[str, str]:
+    authorization = getattr(server, "authorization", None)
+    return {"authorization": str(authorization)} if authorization else {}
+
+
 def _rerank_request_arguments(
     *, server: Any, model: SimpleNamespace, case: SimpleNamespace, request_id: str
 ) -> dict[str, Any]:
@@ -868,6 +878,8 @@ def _rerank_request_arguments(
         "candidates": candidates,
         "request_id": request_id,
     }
+    if getattr(server, "authorization", None):
+        arguments["authorization"] = str(server.authorization)
     if instruction is not None:
         arguments["instruction"] = instruction
     return arguments
@@ -881,7 +893,7 @@ def _multimodal_embedding_request_arguments(
             "Multimodal embeddings require the vLLM Chat Embeddings endpoint"
         )
     image_size = int(case.prompt_repetitions) or 64
-    return {
+    arguments = {
         "base_url": server.base_url,
         "model": str(model.served_name),
         "image_data_url": _solid_red_png_data_url(image_size),
@@ -889,6 +901,9 @@ def _multimodal_embedding_request_arguments(
         "unrelated_text": _MULTIMODAL_UNRELATED_TEXT,
         "request_id": request_id,
     }
+    if getattr(server, "authorization", None):
+        arguments["authorization"] = str(server.authorization)
+    return arguments
 
 
 def _validate_capability(
@@ -1102,6 +1117,7 @@ def _run_warmups(server: Any, model: SimpleNamespace, case: SimpleNamespace) -> 
                 model=str(model.served_name),
                 inputs=[f"{text} batch item {item}" for item in range(int(case.concurrency))],
                 request_id=request_id,
+                **_authorization_argument(server),
             )
         else:
             _chat_request_function(server, case)(
@@ -1137,6 +1153,7 @@ def _prime_model(server: Any, model: SimpleNamespace) -> Any:
             model=str(model.served_name),
             inputs=["Spark benchmark model-load probe."],
             request_id=request_id,
+            **_authorization_argument(server),
         )
     prime_case = SimpleNamespace(
         id="first-request-after-start",
@@ -1269,6 +1286,7 @@ def _execute_case(
                             for item in range(int(case.concurrency))
                         ],
                         request_id=request_id,
+                        **_authorization_argument(server),
                     )
                 ]
                 burst_s = time.perf_counter() - burst_started
@@ -1383,10 +1401,13 @@ def _recover_pending_lifecycle(
             )
             return True
         if backend in {"sglang", "vllm"} and not run_finished:
-            recover = (
-                recover_owned_sglang if backend == "sglang" else recover_owned_vllm
-            )
-            action = recover(str(model.run_identity))
+            if backend == "sglang":
+                action = recover_owned_sglang(
+                    str(model.run_identity),
+                    api_key_path=run_dir / "server" / "api-key",
+                )
+            else:
+                action = recover_owned_vllm(str(model.run_identity))
             journal.append(
                 {
                     "event": "server_stopped",
@@ -1423,10 +1444,13 @@ def _recover_pending_lifecycle(
         )
         return True
     if backend in {"sglang", "vllm"}:
-        recover = (
-            recover_owned_sglang if backend == "sglang" else recover_owned_vllm
-        )
-        action = recover(str(model.run_identity))
+        if backend == "sglang":
+            action = recover_owned_sglang(
+                str(model.run_identity),
+                api_key_path=run_dir / "server" / "api-key",
+            )
+        else:
+            action = recover_owned_vllm(str(model.run_identity))
         journal.append(
             {
                 "event": "server_stopped",
@@ -1627,8 +1651,17 @@ def execute_plan(
                 require_llamacpp_mtp_evidence(
                     getattr(model, "args", ()), journal.events()
                 )
+                if llamacpp_dflash_requested(getattr(model, "args", ())):
+                    require_llamacpp_dflash_evidence(
+                        getattr(model, "args", ()), journal.events()
+                    )
             except BaseException as error:
-                _record_run_aborted(journal, error, stage="mtp_evidence")
+                stage = (
+                    "dflash_evidence"
+                    if llamacpp_dflash_requested(getattr(model, "args", ()))
+                    else "mtp_evidence"
+                )
+                _record_run_aborted(journal, error, stage=stage)
                 try:
                     summarize_run(run_dir)
                 except Exception as summary_error:
@@ -1751,6 +1784,10 @@ def execute_plan(
                         artifact_event["mmproj_sha256"] = (
                             validated_llamacpp_artifacts["mmproj_sha256"]
                         )
+                    if "draft_model_sha256" in validated_llamacpp_artifacts:
+                        artifact_event["draft_model_sha256"] = (
+                            validated_llamacpp_artifacts["draft_model_sha256"]
+                        )
                     journal.append(artifact_event)
                 telemetry.set_phase("server_startup")
                 failure_stage = "server_start"
@@ -1863,6 +1900,12 @@ def execute_plan(
                                     getattr(model, "args", ())
                                 ):
                                     require_mtp_activity(spec_decode_metrics)
+                                if llamacpp_dflash_requested(
+                                    getattr(model, "args", ())
+                                ):
+                                    require_speculative_activity(
+                                        spec_decode_metrics, method="DFlash"
+                                    )
                             save_server_logs(
                                 server, run_dir / "server" / "server.log"
                             )
@@ -1893,6 +1936,11 @@ def execute_plan(
                 require_llamacpp_mtp_evidence(
                     getattr(model, "args", ()), journal.events()
                 )
+                if llamacpp_dflash_requested(getattr(model, "args", ())):
+                    failure_stage = "dflash_evidence"
+                    require_llamacpp_dflash_evidence(
+                        getattr(model, "args", ()), journal.events()
+                    )
             journal.append(
                 {
                     "event": "run_complete",

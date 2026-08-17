@@ -21,6 +21,7 @@ from bench.inventory import (
     discover_huggingface_snapshots,
     inventory_to_dict,
 )
+from bench.llamacpp_perplexity import run_llamacpp_perplexity
 from bench.manifest import ManifestError, load_models, load_suite
 from bench.journal import utc_now, write_json
 from bench.report import summarize_run
@@ -204,6 +205,28 @@ def command_trtllm_direct(args: argparse.Namespace) -> int:
         suite=suite,
         workspace=WORKSPACE,
         results_root=args.results,
+        timeout_s=args.timeout,
+    )
+    print(json.dumps(summary, indent=2))
+    return 0 if summary["status"] == "complete" else 1
+
+
+def command_perplexity(args: argparse.Namespace) -> int:
+    models = load_models(args.models)
+    try:
+        model = models[args.model]
+    except KeyError as error:
+        choices = ", ".join(sorted(models))
+        raise ManifestError(
+            f"unknown model {args.model!r}; choices: {choices}"
+        ) from error
+    summary = run_llamacpp_perplexity(
+        model=model,
+        workspace=WORKSPACE,
+        results_root=args.results,
+        dataset=args.dataset,
+        chunks=args.chunks,
+        ctx_size=args.ctx_size,
         timeout_s=args.timeout,
     )
     print(json.dumps(summary, indent=2))
@@ -402,6 +425,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="hard container deadline in seconds (defaults to the model profile)",
     )
     trtllm.set_defaults(function=command_trtllm_direct)
+
+    perplexity = subparsers.add_parser(
+        "perplexity",
+        help="run pinned offline llama.cpp perplexity",
+    )
+    perplexity.add_argument("model", help="llama.cpp model configuration ID")
+    perplexity.add_argument("--models", type=Path, default=DEFAULT_MODELS)
+    perplexity.add_argument("--results", type=Path, default=WORKSPACE / "results")
+    perplexity.add_argument("--dataset", type=Path, required=True)
+    perplexity.add_argument("--chunks", type=int, required=True)
+    perplexity.add_argument("--ctx-size", type=int, default=512)
+    perplexity.add_argument("--timeout", type=float, required=True)
+    perplexity.set_defaults(function=command_perplexity)
 
     matrix = subparsers.add_parser("matrix", help="plan or run a filtered model matrix sequentially")
     matrix.add_argument("--models", type=Path, default=DEFAULT_MODELS)

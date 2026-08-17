@@ -32,13 +32,22 @@ class _SSEHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
         self.server.received.append((self.path, json.loads(body)))  # type: ignore[attr-defined]
-        status = self.server.status  # type: ignore[attr-defined]
+        authorization = self.headers.get("Authorization")
+        self.server.received_authorizations.append(authorization)  # type: ignore[attr-defined]
+        expected_authorization = self.server.expected_authorization  # type: ignore[attr-defined]
+        authorized = (
+            expected_authorization is None
+            or authorization == expected_authorization
+        )
+        status = self.server.status if authorized else 401  # type: ignore[attr-defined]
         response_bodies = self.server.response_bodies  # type: ignore[attr-defined]
         response_body = (
             response_bodies.pop(0)
             if response_bodies
             else self.server.response_body  # type: ignore[attr-defined]
         )
+        if not authorized:
+            response_body = b'{"error":"unauthorized"}'
         self.send_response(status)
         self.send_header(
             "Content-Type",
@@ -59,6 +68,8 @@ class StreamingClientTests(unittest.TestCase):
         self.server.status = 200  # type: ignore[attr-defined]
         self.server.response_body = b""  # type: ignore[attr-defined]
         self.server.response_bodies = []  # type: ignore[attr-defined]
+        self.server.expected_authorization = None  # type: ignore[attr-defined]
+        self.server.received_authorizations = []  # type: ignore[attr-defined]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         host, port = self.server.server_address
@@ -153,6 +164,9 @@ class StreamingClientTests(unittest.TestCase):
         self.assertTrue(request["stream"])
         self.assertEqual(request["stream_options"], {"include_usage": True})
         self.assertEqual(request["seed"], 7)
+        self.assertEqual(
+            self.server.received_authorizations, [None]  # type: ignore[attr-defined]
+        )
 
     def test_concurrent_requests_complete_against_threaded_server(self) -> None:
         self.server.response_body = b"".join(  # type: ignore[attr-defined]
@@ -179,6 +193,40 @@ class StreamingClientTests(unittest.TestCase):
         self.assertEqual({result.request_id for result in results}, {"request-0", "request-1"})
         self.assertEqual(len(self.server.received), 2)  # type: ignore[attr-defined]
         self.assertGreater(wall_s, 0)
+
+    def test_ephemeral_bearer_rejects_browser_and_wrong_key_requests(self) -> None:
+        correct = "Bearer ephemeral-correct-key"
+        wrong = "Bearer secret-wrong-key"
+        self.server.expected_authorization = correct  # type: ignore[attr-defined]
+        self.server.response_body = b"".join(  # type: ignore[attr-defined]
+            [
+                _event({"choices": [{"delta": {"content": "ok"}}]}),
+                _event(
+                    {
+                        "usage": {
+                            "prompt_tokens": 2,
+                            "completion_tokens": 1,
+                        },
+                        "choices": [],
+                    }
+                ),
+                b"data: [DONE]\n\n",
+            ]
+        )
+
+        with self.assertRaisesRegex(BenchmarkRequestError, "HTTP 401"):
+            self._request()
+        with self.assertRaisesRegex(BenchmarkRequestError, "HTTP 401") as raised:
+            self._request(authorization=wrong)
+        self.assertNotIn("secret-wrong-key", str(raised.exception))
+
+        result = self._request(authorization=correct)
+
+        self.assertEqual(result.content, "ok")
+        self.assertEqual(
+            self.server.received_authorizations,  # type: ignore[attr-defined]
+            [None, wrong, correct],
+        )
 
     def test_invalid_json_and_http_errors_have_context(self) -> None:
         self.server.response_body = b"data: {not-json}\n\n"  # type: ignore[attr-defined]

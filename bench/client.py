@@ -147,18 +147,35 @@ class _ChatEmbeddingVector:
     response_model: str | None
 
 
+def _openai_headers(authorization: str | None) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if authorization is None:
+        return headers
+    if (
+        not isinstance(authorization, str)
+        or not authorization.startswith("Bearer ")
+        or len(authorization) <= len("Bearer ")
+        or "\r" in authorization
+        or "\n" in authorization
+    ):
+        raise BenchmarkRequestError("OpenAI authorization header is malformed")
+    headers["Authorization"] = authorization
+    return headers
+
+
 def embedding_request(
     *,
     base_url: str,
     model: str,
     inputs: list[str],
     request_id: str,
+    authorization: str | None = None,
     timeout_s: float = 900,
 ) -> EmbeddingResult:
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/embeddings",
         data=json.dumps({"model": model, "input": inputs}).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=_openai_headers(authorization),
     )
     started_wall_ns = time.time_ns()
     started = time.perf_counter()
@@ -242,6 +259,7 @@ def _chat_embedding_vector_request(
     messages: list[dict[str, Any]],
     request_id: str,
     timeout_s: float,
+    authorization: str | None,
 ) -> _ChatEmbeddingVector:
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/embeddings",
@@ -254,7 +272,7 @@ def _chat_embedding_vector_request(
                 "add_special_tokens": True,
             }
         ).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=_openai_headers(authorization),
     )
     started = time.perf_counter()
     try:
@@ -318,6 +336,7 @@ def multimodal_embedding_request(
     relevant_text: str,
     unrelated_text: str,
     request_id: str,
+    authorization: str | None = None,
     timeout_s: float = 900,
     start_barrier: threading.Barrier | None = None,
 ) -> MultimodalEmbeddingResult:
@@ -331,6 +350,7 @@ def multimodal_embedding_request(
         messages=_chat_embedding_messages(image_data_url=image_data_url),
         request_id=f"{request_id}:image",
         timeout_s=timeout_s,
+        authorization=authorization,
     )
     relevant = _chat_embedding_vector_request(
         base_url=base_url,
@@ -338,6 +358,7 @@ def multimodal_embedding_request(
         messages=_chat_embedding_messages(text=relevant_text),
         request_id=f"{request_id}:relevant-text",
         timeout_s=timeout_s,
+        authorization=authorization,
     )
     unrelated = _chat_embedding_vector_request(
         base_url=base_url,
@@ -345,6 +366,7 @@ def multimodal_embedding_request(
         messages=_chat_embedding_messages(text=unrelated_text),
         request_id=f"{request_id}:unrelated-text",
         timeout_s=timeout_s,
+        authorization=authorization,
     )
     elapsed_s = time.perf_counter() - started
     vectors = [image.embedding, relevant.embedding, unrelated.embedding]
@@ -417,6 +439,7 @@ def score_request(
     candidates: list[str | dict[str, Any]],
     request_id: str,
     instruction: str | None = None,
+    authorization: str | None = None,
     timeout_s: float = 900,
     start_barrier: threading.Barrier | None = None,
 ) -> RerankResult:
@@ -435,7 +458,7 @@ def score_request(
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/score",
         data=json.dumps(request_payload).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=_openai_headers(authorization),
     )
     if start_barrier:
         start_barrier.wait(timeout=30)
@@ -531,6 +554,7 @@ def stream_chat_request(
     temperature: float,
     request_id: str,
     extra_body: dict[str, Any] | None = None,
+    authorization: str | None = None,
     timeout_s: float = 900,
     start_barrier: threading.Barrier | None = None,
 ) -> RequestResult:
@@ -556,7 +580,7 @@ def stream_chat_request(
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/chat/completions",
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=_openai_headers(authorization),
     )
     started_wall_ns = time.time_ns()
     started = time.perf_counter()
@@ -660,6 +684,7 @@ def stream_audio_chat_request(
     expected_audio_sha256: str,
     lora_path: str,
     extra_body: dict[str, Any] | None = None,
+    authorization: str | None = None,
     timeout_s: float = 900,
     start_barrier: threading.Barrier | None = None,
 ) -> RequestResult:
@@ -721,6 +746,7 @@ def stream_audio_chat_request(
             temperature=temperature,
             request_id=request_id,
             extra_body=additions,
+            authorization=authorization,
             timeout_s=timeout_s,
             start_barrier=start_barrier,
         )

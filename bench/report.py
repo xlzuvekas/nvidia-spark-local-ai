@@ -16,6 +16,7 @@ from .llamacpp_metrics import (
     aggregate_llamacpp_spec_decode_metrics,
     assess_llamacpp_mtp_evidence,
     assess_llamacpp_mtp_proposal_depth,
+    llamacpp_dflash_requested,
     llamacpp_mtp_depth,
     llamacpp_mtp_requested,
 )
@@ -140,6 +141,15 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         if mtp_requested
         else None
     )
+    dflash_requested = bool(
+        planned_model.get("backend") == "llamacpp"
+        and llamacpp_dflash_requested(planned_model.get("args") or ())
+    )
+    speculative_depth = (
+        llamacpp_mtp_depth(planned_model.get("args") or ())
+        if mtp_requested or dflash_requested
+        else None
+    )
     annotations = measurement_annotations(events)
     startup_annotations = [
         annotation
@@ -168,8 +178,13 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         )
         llamacpp_speculative_decoding = {
             **llamacpp_speculative_decoding,
-            "requested": mtp_requested,
-            "configured_max_draft_tokens": mtp_depth,
+            "requested": mtp_requested or dflash_requested,
+            "method": (
+                "draft-dflash"
+                if dflash_requested
+                else ("draft-mtp" if mtp_requested else None)
+            ),
+            "configured_max_draft_tokens": speculative_depth,
             "proposal_depth": proposal_depth,
         }
     speculative_decoding = llamacpp_speculative_decoding or (
@@ -184,6 +199,12 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         events,
         requested=mtp_requested,
         configured_depth=mtp_depth,
+    )
+    llamacpp_dflash_evidence = assess_llamacpp_mtp_evidence(
+        events,
+        requested=dflash_requested,
+        configured_depth=None,
+        method="DFlash",
     )
     diffusion_generation = _is_diffusion_architecture(
         planned_model.get("architecture")
@@ -671,6 +692,8 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         status = "partial"
     elif mtp_requested and not llamacpp_mtp_evidence["passed"]:
         status = "partial"
+    elif dflash_requested and not llamacpp_dflash_evidence["passed"]:
+        status = "partial"
     run_error = None
     if status == "aborted" and last_abort >= 0:
         aborted_event = events[last_abort]
@@ -732,6 +755,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
                         "runtime_binary_sha256",
                         "model_sha256",
                         "mmproj_sha256",
+                        "draft_model_sha256",
                     )
                 }
                 for event in reversed(events)
@@ -743,6 +767,9 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         "speculative_decoding": speculative_decoding,
         "llamacpp_mtp_evidence": (
             llamacpp_mtp_evidence if mtp_requested else None
+        ),
+        "llamacpp_dflash_evidence": (
+            llamacpp_dflash_evidence if dflash_requested else None
         ),
         "cases": rows,
     }

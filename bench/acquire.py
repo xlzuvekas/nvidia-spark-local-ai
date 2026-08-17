@@ -41,6 +41,7 @@ class SnapshotVerification:
 
     snapshot_path: str
     snapshot_bytes: int
+    weight_bytes: int
     file_count: int
     weight_file_count: int
     weight_index_count: int
@@ -99,25 +100,35 @@ def fetch_model_snapshot(
             f"Hugging Face CLI {executable!r} is not installed or executable"
         )
 
-    command = _download_command(executable_path, model, hub_root)
     environment = os.environ.copy()
     environment["HF_HUB_DISABLE_TELEMETRY"] = "1"
-    completed = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-        cwd=Path(workspace).resolve(),
-        env=environment,
-    )
-    if completed.returncode != 0:
-        raise AcquisitionError(
-            f"hf download failed for {model.source}@{model.revision} "
-            f"with exit code {completed.returncode}; client output was suppressed"
+    verifications: dict[str, SnapshotVerification] = {}
+    roles = ("target", "draft") if model.draft_source is not None else ("target",)
+    for role in roles:
+        is_draft = role == "draft"
+        source, revision = _snapshot_identity(model, draft=is_draft)
+        command = _download_command(
+            executable_path, model, hub_root, draft=is_draft
+        )
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=Path(workspace).resolve(),
+            env=environment,
+        )
+        if completed.returncode != 0:
+            raise AcquisitionError(
+                f"hf download failed for {role} {source}@{revision} "
+                f"with exit code {completed.returncode}; client output was suppressed"
+            )
+        verifications[role] = verify_exact_snapshot(
+            model, hub_root=hub_root, draft=is_draft
         )
 
-    verification = verify_exact_snapshot(model, hub_root=hub_root)
-    return {
+    verification = verifications["target"]
+    result: dict[str, Any] = {
         "schema_version": 1,
         "status": "verified",
         "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -130,17 +141,25 @@ def fetch_model_snapshot(
         "fetch_ignore_patterns": list(model.fetch_ignore_patterns),
         **asdict(verification),
     }
+    if "draft" in verifications:
+        result["draft"] = {
+            "source": model.draft_source,
+            "revision": model.draft_revision,
+            **asdict(verifications["draft"]),
+        }
+    return result
 
 
 def verify_exact_snapshot(
-    model: ModelSpec, *, hub_root: str | Path
+    model: ModelSpec, *, hub_root: str | Path, draft: bool = False
 ) -> SnapshotVerification:
     """Verify the exact snapshot and every shard named by a weight index."""
 
     _validate_fetch_profile(model)
+    source, revision = _snapshot_identity(model, draft=draft)
     root = Path(hub_root).expanduser().resolve()
-    repository_root = root / ("models--" + model.source.replace("/", "--"))
-    snapshot = repository_root / "snapshots" / str(model.revision)
+    repository_root = root / ("models--" + source.replace("/", "--"))
+    snapshot = repository_root / "snapshots" / revision
     if not snapshot.is_dir():
         raise AcquisitionError(f"Exact downloaded snapshot is missing: {snapshot}")
 
@@ -212,37 +231,70 @@ def verify_exact_snapshot(
             f"Exact snapshot contains no recognized model weight files: {snapshot}"
         )
     _verify_sharded_layouts(weight_files, referenced_shards, weight_index_count)
+    weight_bytes = _unique_file_bytes(weight_files, repository_resolved)
+    expected_weight_bytes = (
+        model.draft_weight_size_bytes if draft else model.weight_size_bytes
+    )
+    if expected_weight_bytes is not None and weight_bytes != expected_weight_bytes:
+        raise AcquisitionError(
+            f"Manifest-pinned {'draft ' if draft else ''}weight size mismatch: "
+            f"expected {expected_weight_bytes}, got {weight_bytes}"
+        )
+    if (
+        not draft
+        and model.weight_file_count is not None
+        and len(weight_files) != model.weight_file_count
+    ):
+        raise AcquisitionError(
+            "Manifest-pinned weight file count mismatch: "
+            f"expected {model.weight_file_count}, got {len(weight_files)}"
+        )
     exact_model_file: str | None = None
     exact_model_size_bytes: int | None = None
     exact_model_sha256: str | None = None
-    if model.model_file is not None:
-        exact_path = snapshot / model.model_file
+    exact_filename = (
+        model.draft_model_file if draft else model.model_file
+    )
+    exact_size = (
+        model.draft_model_size_bytes if draft else model.model_size_bytes
+    )
+    exact_digest = (
+        model.draft_model_digest if draft else model.model_digest
+    )
+    if exact_filename is not None:
+        exact_path = snapshot / exact_filename
         exact_target = _verified_cache_file(
-            exact_path, repository_resolved, label="manifest-pinned model file"
+            exact_path,
+            repository_resolved,
+            label=(
+                "manifest-pinned draft model file"
+                if draft
+                else "manifest-pinned model file"
+            ),
         )
-        exact_model_file = model.model_file
+        exact_model_file = exact_filename
         exact_model_size_bytes = exact_target.stat().st_size
         if (
-            model.model_size_bytes is not None
-            and exact_model_size_bytes != model.model_size_bytes
+            exact_size is not None
+            and exact_model_size_bytes != exact_size
         ):
             raise AcquisitionError(
-                "Manifest-pinned model size mismatch: "
-                f"expected {model.model_size_bytes}, got {exact_model_size_bytes}"
+                f"Manifest-pinned {'draft ' if draft else ''}model size mismatch: "
+                f"expected {exact_size}, got {exact_model_size_bytes}"
             )
         exact_model_sha256 = _sha256_file(exact_target)
         if (
-            model.model_digest is not None
-            and exact_model_sha256 != model.model_digest
+            exact_digest is not None
+            and exact_model_sha256 != exact_digest
         ):
             raise AcquisitionError(
-                "Manifest-pinned model SHA-256 mismatch: "
-                f"expected {model.model_digest}, got {exact_model_sha256}"
+                f"Manifest-pinned {'draft ' if draft else ''}model SHA-256 mismatch: "
+                f"expected {exact_digest}, got {exact_model_sha256}"
             )
     exact_mmproj_file: str | None = None
     exact_mmproj_size_bytes: int | None = None
     exact_mmproj_sha256: str | None = None
-    if model.mmproj_file is not None:
+    if not draft and model.mmproj_file is not None:
         mmproj_path = snapshot / model.mmproj_file
         mmproj_target = _verified_cache_file(
             mmproj_path,
@@ -271,6 +323,7 @@ def verify_exact_snapshot(
     return SnapshotVerification(
         snapshot_path=str(snapshot),
         snapshot_bytes=total_bytes,
+        weight_bytes=weight_bytes,
         file_count=len(files),
         weight_file_count=len(weight_files),
         weight_index_count=weight_index_count,
@@ -308,28 +361,68 @@ def _validate_fetch_profile(model: ModelSpec) -> None:
         raise AcquisitionError(
             f"Profile {model.id!r} must pin a full 40-character lowercase commit SHA"
         )
+    if model.draft_source is not None:
+        if not _HF_REPOSITORY_PATTERN.fullmatch(model.draft_source):
+            raise AcquisitionError(
+                f"Profile {model.id!r} draft does not use a Hugging Face repository ID"
+            )
+        if not isinstance(model.draft_revision, str) or not _COMMIT_PATTERN.fullmatch(
+            model.draft_revision
+        ):
+            raise AcquisitionError(
+                f"Profile {model.id!r} draft must pin a full 40-character "
+                "lowercase commit SHA"
+            )
 
 
 def _download_command(
-    executable: str, model: ModelSpec, hub_root: Path
+    executable: str, model: ModelSpec, hub_root: Path, *, draft: bool = False
 ) -> list[str]:
+    source, revision = _snapshot_identity(model, draft=draft)
     command = [
         executable,
         "download",
-        model.source,
+        source,
         "--repo-type",
         "model",
         "--revision",
-        str(model.revision),
+        revision,
         "--cache-dir",
         str(hub_root),
         "--quiet",
     ]
-    if model.fetch_allow_patterns:
+    if draft and model.draft_model_file:
+        command.extend(("--include", model.draft_model_file))
+    elif not draft and model.fetch_allow_patterns:
         command.extend(("--include", *model.fetch_allow_patterns))
-    if model.fetch_ignore_patterns:
+    if not draft and model.fetch_ignore_patterns:
         command.extend(("--exclude", *model.fetch_ignore_patterns))
     return command
+
+
+def _snapshot_identity(model: ModelSpec, *, draft: bool) -> tuple[str, str]:
+    if draft:
+        if model.draft_source is None or model.draft_revision is None:
+            raise AcquisitionError(
+                f"Profile {model.id!r} has no pinned draft snapshot"
+            )
+        return model.draft_source, model.draft_revision
+    if model.revision is None:
+        raise AcquisitionError(f"Profile {model.id!r} has no pinned target revision")
+    return model.source, model.revision
+
+
+def _unique_file_bytes(files: set[Path], repository_root: Path) -> int:
+    total = 0
+    seen: set[tuple[int, int]] = set()
+    for path in files:
+        target = _verified_cache_file(path, repository_root, label="model weight")
+        stat = target.stat()
+        identity = (stat.st_dev, stat.st_ino)
+        if identity not in seen:
+            seen.add(identity)
+            total += stat.st_size
+    return total
 
 
 def _snapshot_files(snapshot: Path) -> tuple[Path, ...]:

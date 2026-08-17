@@ -209,6 +209,68 @@ class AcquisitionTests(unittest.TestCase):
             self.assertEqual(result["status"], "verified")
             self.assertEqual(result["revision"], REVISION)
 
+    def test_sglang_fetch_acquires_and_verifies_exact_target_and_draft(self) -> None:
+        draft_revision = "a" * 40
+        model = _model(
+            backend="sglang",
+            weight_size_bytes=11,
+            weight_file_count=2,
+            draft_source="example/draft",
+            draft_revision=draft_revision,
+            draft_weight_size_bytes=5,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            hub_root = workspace / "data" / "huggingface" / "hub"
+
+            def run(
+                command: list[str], **_: object
+            ) -> subprocess.CompletedProcess[str]:
+                source = command[2]
+                if source == model.source:
+                    self.assertEqual(
+                        command[command.index("--revision") + 1], model.revision
+                    )
+                    self.assertIn("--include", command)
+                    self.assertIn("--exclude", command)
+                    _write_complete_snapshot(hub_root, model)
+                else:
+                    self.assertEqual(source, model.draft_source)
+                    self.assertEqual(
+                        command[command.index("--revision") + 1], draft_revision
+                    )
+                    self.assertNotIn("--include", command)
+                    self.assertNotIn("--exclude", command)
+                    draft = (
+                        hub_root
+                        / "models--example--draft"
+                        / "snapshots"
+                        / draft_revision
+                    )
+                    draft.mkdir(parents=True)
+                    (draft / "model.safetensors").write_bytes(b"draft")
+                self.assertNotIn("--token", command)
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            with (
+                patch("bench.acquire.shutil.which", return_value="/mock/hf"),
+                patch("bench.acquire.subprocess.run", side_effect=run) as run_mock,
+            ):
+                result = fetch_model_snapshot(model, workspace=workspace)
+
+            self.assertEqual(run_mock.call_count, 2)
+            self.assertEqual(result["weight_bytes"], 11)
+            self.assertEqual(result["weight_file_count"], 2)
+            self.assertEqual(result["draft"]["source"], "example/draft")
+            self.assertEqual(result["draft"]["revision"], draft_revision)
+            self.assertEqual(result["draft"]["weight_bytes"], 5)
+            with self.assertRaisesRegex(AcquisitionError, "draft weight size"):
+                verify_exact_snapshot(
+                    replace(model, draft_weight_size_bytes=6),
+                    hub_root=hub_root,
+                    draft=True,
+                )
+
     def test_fetch_refuses_unpinned_incompatible_and_non_hf_profiles(self) -> None:
         cases = (
             (_model(revision="main"), "full 40-character"),
@@ -294,6 +356,156 @@ class AcquisitionTests(unittest.TestCase):
             gguf.write_bytes(b"X" * len(payload))
             with self.assertRaisesRegex(AcquisitionError, "SHA-256 mismatch"):
                 verify_exact_snapshot(model, hub_root=hub_root)
+
+    def test_q5_repository_profile_fetches_only_its_pinned_gguf(self) -> None:
+        repository_model = load_models(ROOT / "manifests" / "models.toml")[
+            "qwen38-27b-ud-q5-k-xl-llamacpp"
+        ]
+        payload = b"Q5 acquisition fixture"
+        model = replace(
+            repository_model,
+            model_size_bytes=len(payload),
+            model_digest="sha256:" + hashlib.sha256(payload).hexdigest(),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = root / "workspace"
+            home = root / "home"
+            workspace.mkdir()
+            snapshot = (
+                home
+                / ".cache"
+                / "huggingface"
+                / "hub"
+                / "models--unsloth--Qwen3.8-27B-GGUF"
+                / "snapshots"
+                / str(model.revision)
+            )
+
+            def run(
+                command: list[str], **_: object
+            ) -> subprocess.CompletedProcess[str]:
+                self.assertEqual(command[:3], ["/mock/hf", "download", model.source])
+                revision = command.index("--revision")
+                self.assertEqual(command[revision + 1], model.revision)
+                cache_dir = command.index("--cache-dir")
+                self.assertEqual(
+                    command[cache_dir + 1],
+                    str(home / ".cache" / "huggingface" / "hub"),
+                )
+                include = command.index("--include")
+                self.assertEqual(
+                    command[include + 1 :], ["Qwen3.8-27B-UD-Q5_K_XL.gguf"]
+                )
+                snapshot.mkdir(parents=True)
+                (snapshot / str(model.model_file)).write_bytes(payload)
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            with (
+                patch("bench.acquire.shutil.which", return_value="/mock/hf"),
+                patch("bench.acquire.subprocess.run", side_effect=run),
+            ):
+                result = fetch_model_snapshot(
+                    model, workspace=workspace, home=home
+                )
+
+            self.assertEqual(
+                result["exact_model_file"], "Qwen3.8-27B-UD-Q5_K_XL.gguf"
+            )
+            self.assertEqual(result["exact_model_size_bytes"], len(payload))
+            self.assertEqual(result["exact_model_sha256"], model.model_digest)
+
+    def test_llamacpp_dflash_fetches_and_verifies_exact_target_and_sidecar(self) -> None:
+        repository_model = load_models(ROOT / "manifests" / "models.toml")[
+            "muse-glimmer-30b-ud-q4-k-xl-llamacpp-dflash15"
+        ]
+        target_payload = b"Muse target acquisition fixture"
+        draft_payload = b"Muse DFlash acquisition fixture"
+        model = replace(
+            repository_model,
+            model_size_bytes=len(target_payload),
+            model_digest=(
+                "sha256:" + hashlib.sha256(target_payload).hexdigest()
+            ),
+            draft_model_size_bytes=len(draft_payload),
+            draft_model_digest=(
+                "sha256:" + hashlib.sha256(draft_payload).hexdigest()
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = root / "workspace"
+            home = root / "home"
+            workspace.mkdir()
+            hub = home / ".cache" / "huggingface" / "hub"
+            target_snapshot = (
+                hub
+                / "models--unsloth--Muse-Glimmer-30B-GGUF"
+                / "snapshots"
+                / str(model.revision)
+            )
+            draft_snapshot = (
+                hub
+                / "models--meta-models--Muse-Glimmer-30B-GGUF"
+                / "snapshots"
+                / str(model.draft_revision)
+            )
+
+            def run(
+                command: list[str], **_: object
+            ) -> subprocess.CompletedProcess[str]:
+                source = command[2]
+                include = command.index("--include")
+                self.assertEqual(len(command[include + 1 :]), 1)
+                if source == model.source:
+                    self.assertEqual(
+                        command[include + 1], model.model_file
+                    )
+                    target_snapshot.mkdir(parents=True)
+                    (target_snapshot / str(model.model_file)).write_bytes(
+                        target_payload
+                    )
+                else:
+                    self.assertEqual(source, model.draft_source)
+                    self.assertEqual(
+                        command[include + 1], model.draft_model_file
+                    )
+                    draft_snapshot.mkdir(parents=True)
+                    (draft_snapshot / str(model.draft_model_file)).write_bytes(
+                        draft_payload
+                    )
+                return subprocess.CompletedProcess(
+                    command, 0, stdout="", stderr=""
+                )
+
+            with (
+                patch("bench.acquire.shutil.which", return_value="/mock/hf"),
+                patch("bench.acquire.subprocess.run", side_effect=run),
+            ):
+                result = fetch_model_snapshot(
+                    model, workspace=workspace, home=home
+                )
+
+            self.assertEqual(result["exact_model_file"], model.model_file)
+            self.assertEqual(
+                result["exact_model_sha256"], model.model_digest
+            )
+            self.assertEqual(
+                result["draft"]["exact_model_file"],
+                model.draft_model_file,
+            )
+            self.assertEqual(
+                result["draft"]["exact_model_sha256"],
+                model.draft_model_digest,
+            )
+
+            (draft_snapshot / str(model.draft_model_file)).write_bytes(
+                b"X" * len(draft_payload)
+            )
+            with self.assertRaisesRegex(
+                AcquisitionError, "draft model SHA-256 mismatch"
+            ):
+                verify_exact_snapshot(model, hub_root=hub, draft=True)
 
     def test_llamacpp_fetch_includes_and_verifies_exact_projector(self) -> None:
         payload = b"manifest-pinned GGUF fixture"

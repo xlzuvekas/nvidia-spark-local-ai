@@ -279,12 +279,6 @@ def assess_model_availability(
     }
     ollama = {model.name: model for model in inventory.ollama_models}
     image_references = {image.reference for image in inventory.docker_images}
-    image_digests = {
-        (image.reference, image.digest)
-        for image in inventory.docker_images
-        if image.digest
-    }
-
     availability: dict[str, ModelAvailability] = {}
     for model in models.values():
         details: list[str] = []
@@ -314,7 +308,30 @@ def assess_model_availability(
             mmproj_available = model.mmproj_file is None or bool(
                 mmproj_file and mmproj_file.is_file()
             )
-            source_available = model_file_available and mmproj_available
+            draft_snapshot = (
+                hf_snapshots.get(
+                    (
+                        model.cache_dir,
+                        str(model.draft_source),
+                        str(model.draft_revision),
+                    )
+                )
+                if model.draft_source is not None
+                else None
+            )
+            draft_model_file = (
+                draft_snapshot / str(model.draft_model_file)
+                if draft_snapshot and model.draft_model_file
+                else None
+            )
+            draft_model_available = model.draft_model_file is None or bool(
+                draft_model_file and draft_model_file.is_file()
+            )
+            source_available = (
+                model_file_available
+                and mmproj_available
+                and draft_model_available
+            )
             runtime_available = bool(
                 model.runtime_binary and Path(model.runtime_binary).is_file()
             )
@@ -322,14 +339,22 @@ def assess_model_availability(
                 details.append("exact GGUF file is not cached")
             if not mmproj_available:
                 details.append("exact multimodal projector is not cached")
+            if not draft_model_available:
+                details.append("exact draft GGUF file is not cached")
             if not runtime_available:
                 details.append("pinned llama-server binary is unavailable")
         else:
-            source_available = (
+            target_available = (
                 (model.cache_dir, model.source, model.revision) in hf_keys
                 if model.revision
                 else (model.cache_dir, model.source) in hf_sources
             )
+            draft_available = model.draft_source is None or (
+                model.cache_dir,
+                model.draft_source,
+                model.draft_revision,
+            ) in hf_keys
+            source_available = target_available and draft_available
             if model.backend == "transformers":
                 runtime_available = bool(
                     model.runtime_python and Path(model.runtime_python).is_file()
@@ -337,16 +362,20 @@ def assess_model_availability(
                 if not runtime_available:
                     details.append("certified Transformers runtime is unavailable")
             elif model.image and model.image_digest:
-                runtime_available = (
-                    model.image,
-                    model.image_digest,
-                ) in image_digests
+                image_name = model.image.split("@sha256:", 1)[0]
+                runtime_available = any(
+                    image.digest == model.image_digest
+                    and image_name in {image.repository, image.reference}
+                    for image in inventory.docker_images
+                )
             else:
                 runtime_available = bool(
                     model.image and model.image in image_references
                 )
-            if not source_available:
+            if not target_available:
                 details.append("checkpoint revision is not cached")
+            if not draft_available:
+                details.append("draft checkpoint revision is not cached")
             if not runtime_available and model.backend != "transformers":
                 details.append("container image or digest is not cached")
         availability[model.id] = ModelAvailability(

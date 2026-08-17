@@ -16,9 +16,11 @@ from bench.llamacpp_metrics import (
     aggregate_llamacpp_spec_decode_metrics,
     assess_llamacpp_mtp_evidence,
     assess_llamacpp_mtp_proposal_depth,
+    llamacpp_dflash_requested,
     llamacpp_mtp_depth,
     llamacpp_mtp_requested,
     parse_llamacpp_spec_decode_metrics,
+    require_llamacpp_dflash_evidence,
     require_llamacpp_mtp_evidence,
     require_mtp_activity,
 )
@@ -30,13 +32,15 @@ from bench.inventory import (
 )
 from bench.manifest import ManifestError, load_models, load_suite, validate_model
 from bench.report import summarize_run
-from bench.runner import _request_arguments, execute_plan
+from bench.runner import _estimated_context_tokens, _request_arguments, execute_plan
 from bench.runtime import (
     ManagedServer,
     RuntimeErrorWithContext,
     _llamacpp_alias_ready,
+    _native_command,
     recover_owned_llamacpp,
     start_llamacpp,
+    validate_llamacpp_artifacts,
 )
 
 
@@ -65,6 +69,267 @@ def _completed(
 
 
 class LlamaCppManifestTests(unittest.TestCase):
+    def test_muse_glimmer_profiles_are_exact_matched_dflash_pair(self) -> None:
+        models = load_models(ROOT / "manifests" / "models.toml")
+        baseline = models["muse-glimmer-30b-ud-q4-k-xl-llamacpp"]
+        dflash = models[
+            "muse-glimmer-30b-ud-q4-k-xl-llamacpp-dflash15"
+        ]
+
+        for model in (baseline, dflash):
+            with self.subTest(model=model.id):
+                self.assertEqual(model.backend, "llamacpp")
+                self.assertEqual(model.lifecycle, "subprocess")
+                self.assertEqual(
+                    model.source, "unsloth/Muse-Glimmer-30B-GGUF"
+                )
+                self.assertEqual(
+                    model.revision,
+                    "faa5b025c584459c13febfa5c59883516710ae39",
+                )
+                self.assertEqual(
+                    model.model_file,
+                    "Muse-Glimmer-30B-UD-Q4_K_XL.gguf",
+                )
+                self.assertEqual(model.model_size_bytes, 15_878_222_368)
+                self.assertIsNone(model.weight_size_bytes)
+                self.assertEqual(
+                    model.model_digest,
+                    "sha256:82bece304887a313ece08400bc030f6066c7bff5b906b0cd40308ec8a409fd38",
+                )
+                self.assertEqual(model.runtime_parallel, 4)
+                self.assertEqual(model.max_context, 32_768)
+                self.assertEqual(model.native_context, 131_072)
+                self.assertEqual(model.tasks, ("chat", "json", "tools"))
+                self.assertNotIn("vision", model.tasks)
+                self.assertNotIn("--spec-draft-model", model.args)
+
+        self.assertFalse(llamacpp_dflash_requested(baseline.args))
+        self.assertTrue(llamacpp_dflash_requested(dflash.args))
+        self.assertEqual(
+            dflash.draft_source, "meta-models/Muse-Glimmer-30B-GGUF"
+        )
+        self.assertEqual(
+            dflash.draft_revision,
+            "43c7eadd41352a299ea8e0a36b3157978dd63596",
+        )
+        self.assertEqual(
+            dflash.draft_model_file,
+            "dflash-Muse-Glimmer-30B-Q4_K_M.gguf",
+        )
+        self.assertEqual(dflash.draft_model_size_bytes, 1_631_208_128)
+        self.assertIsNone(dflash.draft_weight_size_bytes)
+        self.assertEqual(
+            dflash.draft_model_digest,
+            "sha256:b2e808bf656086fe86bd0d0bd990f01d33e377537a07c02d45371517c8b264ef",
+        )
+        self.assertEqual(
+            dflash.args[len(baseline.args) :],
+            (
+                "--spec-type",
+                "draft-dflash",
+                "--spec-draft-n-max",
+                "15",
+            ),
+        )
+        self.assertEqual(
+            replace(
+                dflash,
+                id=baseline.id,
+                description=baseline.description,
+                architecture=baseline.architecture,
+                quantization=baseline.quantization,
+                estimated_ram_gib=baseline.estimated_ram_gib,
+                args=baseline.args,
+                draft_source=None,
+                draft_revision=None,
+                draft_weight_size_bytes=None,
+                draft_model_file=None,
+                draft_model_digest=None,
+                draft_model_size_bytes=None,
+            ),
+            baseline,
+        )
+
+    def test_llamacpp_dflash_contract_is_complete_and_runtime_owned(self) -> None:
+        models = load_models(ROOT / "manifests" / "models.toml")
+        baseline = models["muse-glimmer-30b-ud-q4-k-xl-llamacpp"]
+        dflash = models[
+            "muse-glimmer-30b-ud-q4-k-xl-llamacpp-dflash15"
+        ]
+        invalid = (
+            replace(dflash, draft_model_digest=None),
+            replace(dflash, draft_model_file="../draft.gguf"),
+            replace(dflash, draft_model_size_bytes=None),
+            replace(dflash, args=baseline.args),
+            replace(
+                dflash,
+                args=(*baseline.args, "--spec-type", "draft-dflash"),
+            ),
+        )
+        for profile in invalid:
+            with self.subTest(profile=profile):
+                with self.assertRaises(ManifestError):
+                    validate_model(profile)
+        with self.assertRaisesRegex(ManifestError, "runtime-owned"):
+            validate_model(
+                replace(
+                    dflash,
+                    args=(*dflash.args, "--spec-draft-model", "/tmp/draft.gguf"),
+                )
+            )
+
+    def test_dflash_native_command_injects_only_the_verified_sidecar(self) -> None:
+        model = load_models(ROOT / "manifests" / "models.toml")[
+            "muse-glimmer-30b-ud-q4-k-xl-llamacpp-dflash15"
+        ]
+        command = _native_command(
+            model,
+            {
+                "runtime_binary": "/runtime/llama-server",
+                "model_path": "/verified/target.gguf",
+                "draft_model_path": "/verified/draft.gguf",
+            },
+            port=8000,
+        )
+        self.assertEqual(command.count("--spec-draft-model"), 1)
+        self.assertEqual(
+            command[command.index("--spec-draft-model") + 1],
+            "/verified/draft.gguf",
+        )
+        self.assertLess(
+            command.index("--spec-draft-model"), command.index("--alias")
+        )
+        self.assertNotIn(str(model.draft_source), command)
+
+    def test_dflash_inventory_requires_both_exact_snapshots(self) -> None:
+        profile = load_models(ROOT / "manifests" / "models.toml")[
+            "muse-glimmer-30b-ud-q4-k-xl-llamacpp-dflash15"
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            draft = root / "draft"
+            target.mkdir()
+            draft.mkdir()
+            (target / str(profile.model_file)).write_bytes(b"target")
+            runtime = root / "llama-server"
+            runtime.write_bytes(b"runtime")
+            profile = replace(
+                profile, cache_dir="project", runtime_binary=str(runtime)
+            )
+
+            def inventory(*snapshots: HuggingFaceSnapshot) -> Inventory:
+                return Inventory(
+                    collected_at="now",
+                    python_version="3",
+                    platform="test",
+                    machine="aarch64",
+                    huggingface_snapshots=snapshots,
+                    docker_images=(),
+                    ollama_models=(),
+                )
+
+            target_snapshot = HuggingFaceSnapshot(
+                source=profile.source,
+                revision=str(profile.revision),
+                path=target,
+            )
+            draft_snapshot = HuggingFaceSnapshot(
+                source=str(profile.draft_source),
+                revision=str(profile.draft_revision),
+                path=draft,
+            )
+            availability = assess_model_availability(
+                {profile.id: profile}, inventory(target_snapshot)
+            )[profile.id]
+            self.assertFalse(availability.source_available)
+            self.assertIn(
+                "exact draft GGUF file is not cached", availability.details
+            )
+
+            (draft / str(profile.draft_model_file)).write_bytes(b"draft")
+            availability = assess_model_availability(
+                {profile.id: profile},
+                inventory(target_snapshot, draft_snapshot),
+            )[profile.id]
+            self.assertTrue(availability.available)
+
+    def test_qwen36_profiles_are_exact_single_slot_mtp_pair(self) -> None:
+        models = load_models(ROOT / "manifests" / "models.toml")
+        baseline = models["qwen36-35b-a3b-ud-q4-k-xl-llamacpp"]
+        mtp2 = models["qwen36-35b-a3b-ud-q4-k-xl-llamacpp-mtp2"]
+
+        for model in (baseline, mtp2):
+            with self.subTest(model=model.id):
+                self.assertEqual(model.backend, "llamacpp")
+                self.assertEqual(model.lifecycle, "subprocess")
+                self.assertEqual(
+                    model.source, "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+                )
+                self.assertEqual(
+                    model.revision,
+                    "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",
+                )
+                self.assertEqual(
+                    model.model_file,
+                    "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+                )
+                self.assertEqual(
+                    model.fetch_allow_patterns, (model.model_file,)
+                )
+                self.assertEqual(
+                    model.model_digest,
+                    "sha256:55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1",
+                )
+                self.assertEqual(model.model_size_bytes, 22_853_663_008)
+                self.assertEqual(
+                    model.runtime_digest,
+                    "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40",
+                )
+                self.assertEqual(
+                    model.runtime_revision,
+                    "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70",
+                )
+                self.assertEqual(model.tasks, ("chat", "json", "tools"))
+                self.assertEqual(model.architecture, "qwen35moe")
+                self.assertEqual(model.quantization, "ud-q4_k_xl")
+                self.assertEqual(model.runtime_parallel, 1)
+                self.assertEqual(model.max_context, 262_144)
+                self.assertEqual(model.native_context, 262_144)
+                self.assertEqual(model.estimated_ram_gib, 100.0)
+                self.assertIsNone(model.mmproj_file)
+                self.assertNotIn("--parallel", model.args)
+
+        self.assertFalse(llamacpp_mtp_requested(baseline.args))
+        self.assertTrue(llamacpp_mtp_requested(mtp2.args))
+        self.assertEqual(llamacpp_mtp_depth(mtp2.args), 2)
+        self.assertEqual(mtp2.args[: len(baseline.args)], baseline.args)
+        self.assertEqual(
+            mtp2.args[len(baseline.args) :],
+            (
+                "--spec-type",
+                "draft-mtp",
+                "--spec-draft-n-max",
+                "2",
+                "--spec-draft-type-k",
+                "q8_0",
+                "--spec-draft-type-v",
+                "q8_0",
+                "--spec-draft-backend-sampling",
+            ),
+        )
+        self.assertEqual(
+            replace(
+                mtp2,
+                id=baseline.id,
+                description=baseline.description,
+                args=baseline.args,
+            ),
+            baseline,
+            "Qwen3.6 matched profiles drifted outside identity text and MTP args",
+        )
+
     def test_repository_profiles_pin_runtime_and_each_gguf(self) -> None:
         models = load_models(ROOT / "manifests" / "models.toml")
         expected = {
@@ -79,6 +344,12 @@ class LlamaCppManifestTests(unittest.TestCase):
                 "sha256:bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372",
                 17_923_394_624,
                 True,
+            ),
+            "qwen38-27b-ud-q5-k-xl-llamacpp": (
+                "Qwen3.8-27B-UD-Q5_K_XL.gguf",
+                "sha256:176a6a3f034e9cdc447c10cd00329fc9b31002e6589b9295f2ad4f1eefe0f6ab",
+                20_218_178_624,
+                False,
             ),
             "qwen38-27b-q8-0-llamacpp": (
                 "Qwen3.8-27B-Q8_0.gguf",
@@ -112,6 +383,36 @@ class LlamaCppManifestTests(unittest.TestCase):
                 self.assertNotIn("--parallel", model.args)
                 self.assertIn("--reasoning", model.args)
                 self.assertEqual("draft-mtp" in model.args, mtp)
+
+    def test_q5_profile_is_a_matched_non_mtp_anchor_between_q4_and_q8(self) -> None:
+        models = load_models(ROOT / "manifests" / "models.toml")
+        q4 = models["qwen38-27b-ud-q4-k-xl-llamacpp"]
+        q5 = models["qwen38-27b-ud-q5-k-xl-llamacpp"]
+        q8 = models["qwen38-27b-q8-0-llamacpp"]
+
+        self.assertEqual(q5.tasks, ("chat", "json", "tools"))
+        self.assertEqual(q5.quantization, "ud-q5_k_xl")
+        self.assertFalse(llamacpp_mtp_requested(q5.args))
+        self.assertIsNone(q5.mmproj_file)
+        self.assertEqual(q5.estimated_ram_gib, 72.0)
+        self.assertLess(q4.estimated_ram_gib, q5.estimated_ram_gib)
+        self.assertLess(q5.estimated_ram_gib, q8.estimated_ram_gib)
+        self.assertEqual(
+            replace(
+                q5,
+                id=q4.id,
+                description=q4.description,
+                quantization=q4.quantization,
+                fetch_allow_patterns=q4.fetch_allow_patterns,
+                model_file=q4.model_file,
+                model_digest=q4.model_digest,
+                model_size_bytes=q4.model_size_bytes,
+                estimated_ram_gib=q4.estimated_ram_gib,
+            ),
+            q4,
+            "Q5 profile drifted outside its identity, artifact, quantization, "
+            "and RAM estimate",
+        )
 
     def test_mtp_depth_sweep_profiles_are_matched_and_nonmonotonic(self) -> None:
         models = load_models(ROOT / "manifests" / "models.toml")
@@ -160,6 +461,166 @@ class LlamaCppManifestTests(unittest.TestCase):
         core_decode = next(case for case in core.cases if case.id == "decode-256")
         self.assertEqual(sweep.id, "llamacpp-mtp-depth")
         self.assertEqual(sweep.cases, (core_decode,))
+
+    def test_long_context_profiles_change_only_geometry_and_mtp_fields(self) -> None:
+        models = load_models(ROOT / "manifests" / "models.toml")
+        profile_pairs = (
+            (
+                models["qwen38-27b-ud-q4-k-xl-llamacpp"],
+                models["qwen38-27b-ud-q4-k-xl-llamacpp-long-context"],
+                96.0,
+            ),
+            (
+                models["qwen38-27b-ud-q4-k-xl-llamacpp-mtp5"],
+                models[
+                    "qwen38-27b-ud-q4-k-xl-llamacpp-mtp5-long-context"
+                ],
+                100.0,
+            ),
+        )
+        for current, long_context, estimated_ram_gib in profile_pairs:
+            with self.subTest(model=long_context.id):
+                self.assertEqual(long_context.runtime_parallel, 1)
+                self.assertEqual(long_context.max_context, 262_144)
+                self.assertEqual(long_context.native_context, 262_144)
+                self.assertEqual(
+                    long_context.max_context * long_context.runtime_parallel,
+                    long_context.native_context,
+                )
+                self.assertEqual(
+                    long_context.estimated_ram_gib, estimated_ram_gib
+                )
+                self.assertEqual(
+                    replace(
+                        long_context,
+                        id=current.id,
+                        description=current.description,
+                        runtime_parallel=current.runtime_parallel,
+                        max_context=current.max_context,
+                        estimated_ram_gib=current.estimated_ram_gib,
+                    ),
+                    current,
+                    "long-context profile drifted outside identity, slot geometry, "
+                    "and conservative RAM estimate",
+                )
+
+        baseline = profile_pairs[0][1]
+        mtp5 = profile_pairs[1][1]
+        self.assertEqual(mtp5.args[: len(baseline.args)], baseline.args)
+        self.assertEqual(
+            mtp5.args[len(baseline.args) :],
+            (
+                "--spec-type",
+                "draft-mtp",
+                "--spec-draft-n-max",
+                "5",
+                "--spec-draft-type-k",
+                "q8_0",
+                "--spec-draft-type-v",
+                "q8_0",
+                "--spec-draft-backend-sampling",
+            ),
+        )
+        self.assertEqual(
+            replace(
+                mtp5,
+                id=baseline.id,
+                description=baseline.description,
+                architecture=baseline.architecture,
+                quantization=baseline.quantization,
+                estimated_ram_gib=baseline.estimated_ram_gib,
+                args=baseline.args,
+            ),
+            baseline,
+            "matched long-context profiles drifted outside MTP labels/arguments",
+        )
+
+    def test_long_context_suite_is_exact_key_single_slot_and_fits(self) -> None:
+        suite = load_suite(
+            ROOT / "manifests" / "suites" / "llamacpp_long_context.toml"
+        )
+        self.assertEqual(suite.id, "llamacpp-long-context")
+        expected = (
+            (32_768, 3),
+            (65_536, 3),
+            (131_072, 3),
+            (245_760, 1),
+        )
+        self.assertEqual(
+            tuple(
+                (case.prompt_repetitions, case.repetitions)
+                for case in suite.cases
+            ),
+            expected,
+        )
+
+        models = load_models(ROOT / "manifests" / "models.toml")
+        long_context_profiles = (
+            models["qwen38-27b-ud-q4-k-xl-llamacpp-long-context"],
+            models["qwen38-27b-ud-q4-k-xl-llamacpp-mtp5-long-context"],
+        )
+        for case in suite.cases:
+            with self.subTest(case=case.id):
+                self.assertEqual(
+                    case.id,
+                    f"long-context-needle-{case.prompt_repetitions}",
+                )
+                self.assertEqual(case.kind, "capability")
+                self.assertEqual(case.requires, ("chat",))
+                self.assertEqual(case.warmups, 0)
+                self.assertEqual(case.max_output_tokens, 32)
+                self.assertEqual(case.temperature, 0.0)
+                self.assertEqual(case.concurrency, 1)
+                estimated_tokens, basis = _estimated_context_tokens(case)
+                self.assertEqual(basis, "prompt_words_plus_request_margin")
+                self.assertGreater(estimated_tokens, case.prompt_repetitions)
+                for profile in long_context_profiles:
+                    self.assertLessEqual(estimated_tokens, profile.max_context)
+
+    def test_long_context_runtime_command_changes_only_parallel_slots(self) -> None:
+        models = load_models(ROOT / "manifests" / "models.toml")
+        artifacts = {
+            "runtime_binary": "/runtime/llama-server",
+            "model_path": "/models/qwen38-q4.gguf",
+        }
+        profile_pairs = (
+            (
+                models["qwen38-27b-ud-q4-k-xl-llamacpp"],
+                models["qwen38-27b-ud-q4-k-xl-llamacpp-long-context"],
+            ),
+            (
+                models["qwen38-27b-ud-q4-k-xl-llamacpp-mtp5"],
+                models[
+                    "qwen38-27b-ud-q4-k-xl-llamacpp-mtp5-long-context"
+                ],
+            ),
+        )
+        for current, long_context in profile_pairs:
+            with self.subTest(model=long_context.id):
+                current_command = _native_command(
+                    current, artifacts, port=8000
+                )
+                long_command = _native_command(
+                    long_context, artifacts, port=8000
+                )
+                current_parallel = current_command.index("--parallel") + 1
+                long_parallel = long_command.index("--parallel") + 1
+                current_context = current_command.index("--ctx-size") + 1
+                long_context_size = long_command.index("--ctx-size") + 1
+                self.assertEqual(current_command[current_context], "262144")
+                self.assertEqual(long_command[long_context_size], "262144")
+                self.assertEqual(current_command[current_parallel], "8")
+                self.assertEqual(long_command[long_parallel], "1")
+
+                normalized_current = list(current_command)
+                normalized_long = list(long_command)
+                normalized_current[current_parallel] = "<parallel>"
+                normalized_long[long_parallel] = "<parallel>"
+                self.assertEqual(
+                    normalized_long,
+                    normalized_current,
+                    "native launch command drifted outside the parallel-slot count",
+                )
 
     def test_vision_profile_pins_exact_projector_and_capability(self) -> None:
         model = load_models(ROOT / "manifests" / "models.toml")[
@@ -245,6 +706,9 @@ class LlamaCppManifestTests(unittest.TestCase):
             "--log-prompts-dir=/tmp/prompts",
             "--verbosity",
             "--media-path",
+            "--mtp",
+            "--dflash",
+            "--eagle3",
         ):
             with self.subTest(argument=argument):
                 with self.assertRaisesRegex(ManifestError, "unsafe llamacpp"):
@@ -558,6 +1022,80 @@ class LlamaCppMetricsTests(unittest.TestCase):
         self.assertEqual(evidence["validated_lifetimes"], 2)
         self.assertEqual(evidence["proposal_depth_validated_lifetimes"], 2)
 
+    def test_dflash_evidence_requires_positive_per_lifetime_activity(self) -> None:
+        parsed = parse_llamacpp_spec_decode_metrics(EXPOSITION)
+        assert parsed is not None
+        arguments = [
+            "--spec-type",
+            "draft-dflash",
+            "--spec-draft-n-max",
+            "15",
+        ]
+        self.assertTrue(llamacpp_dflash_requested(arguments))
+        self.assertFalse(llamacpp_mtp_requested(arguments))
+        missing = [
+            {"event": "run_start"},
+            {"event": "case_complete", "case_id": "one"},
+        ]
+        with self.assertRaisesRegex(RuntimeError, "DFlash evidence"):
+            require_llamacpp_dflash_evidence(arguments, missing)
+        evidence = require_llamacpp_dflash_evidence(
+            arguments,
+            [
+                *missing,
+                {
+                    "event": "llamacpp_spec_decode_metrics_snapshot",
+                    "metrics": parsed,
+                },
+            ],
+        )
+        self.assertTrue(evidence["passed"])
+        self.assertEqual(evidence["validated_lifetimes"], 1)
+        self.assertEqual(evidence["proposal_depth_validated_lifetimes"], 0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            (run_dir / "plan.json").write_text(
+                json.dumps(
+                    {
+                        "model": {"backend": "llamacpp", "args": arguments},
+                        "suite": {"id": "fixture"},
+                    }
+                )
+            )
+            (run_dir / "events.jsonl").write_text(
+                "\n".join(
+                    json.dumps(event)
+                    for event in (
+                        {"event": "run_start"},
+                        {
+                            "event": "case_complete",
+                            "case_id": "one",
+                            "attempt_id": "attempt",
+                            "kind": "decode",
+                            "elapsed_s": 1.0,
+                        },
+                        {
+                            "event": "llamacpp_spec_decode_metrics_snapshot",
+                            "metrics": parsed,
+                        },
+                        {"event": "run_complete", "status": "completed"},
+                    )
+                )
+                + "\n"
+            )
+            summary = summarize_run(run_dir)
+        self.assertEqual(summary["status"], "complete")
+        self.assertEqual(
+            summary["speculative_decoding"]["method"], "draft-dflash"
+        )
+        self.assertEqual(
+            summary["speculative_decoding"]["configured_max_draft_tokens"],
+            15,
+        )
+        self.assertTrue(summary["llamacpp_dflash_evidence"]["passed"])
+        self.assertIsNone(summary["llamacpp_mtp_evidence"])
+
     def test_report_records_and_enforces_configured_mtp_depth(self) -> None:
         parsed = parse_llamacpp_spec_decode_metrics(EXPOSITION)
         assert parsed is not None
@@ -650,7 +1188,16 @@ class LlamaCppMetricsTests(unittest.TestCase):
 
 
 class LlamaCppRuntimeTests(unittest.TestCase):
-    def _write_plan(self, root: Path, *, mtp: bool) -> tuple[Path, str]:
+    def _write_plan(
+        self, root: Path, *, mtp: bool, dflash: bool = False
+    ) -> tuple[Path, str]:
+        if mtp and dflash:
+            raise ValueError("fixture cannot request MTP and DFlash together")
+        arguments = (
+            ["--spec-type", "draft-dflash", "--spec-draft-n-max", "15"]
+            if dflash
+            else (["--spec-type", "draft-mtp"] if mtp else [])
+        )
         model = {
             "id": "llamacpp-fixture",
             "backend": "llamacpp",
@@ -659,7 +1206,7 @@ class LlamaCppRuntimeTests(unittest.TestCase):
             "tasks": ["chat"],
             "max_context": 1024,
             "endpoint": "http://127.0.0.1:8000/v1",
-            "args": ["--spec-type", "draft-mtp"] if mtp else [],
+            "args": arguments,
         }
         case = {
             "id": "decode",
@@ -691,7 +1238,7 @@ class LlamaCppRuntimeTests(unittest.TestCase):
         return run_dir, case_id
 
     def _fixture(
-        self, root: Path, *, vision: bool = False
+        self, root: Path, *, vision: bool = False, dflash: bool = False
     ) -> tuple[Path, SimpleNamespace]:
         source_dir = root / "llama.cpp"
         binary = source_dir / "build" / "bin" / "llama-server"
@@ -715,6 +1262,20 @@ class LlamaCppRuntimeTests(unittest.TestCase):
         mmproj = gguf.with_name("mmproj.gguf")
         if vision:
             mmproj.write_bytes(b"tiny projector fixture")
+        draft_revision = "c" * 40
+        draft = (
+            root
+            / "data"
+            / "huggingface"
+            / "hub"
+            / "models--example--draft"
+            / "snapshots"
+            / draft_revision
+            / "dflash.gguf"
+        )
+        if dflash:
+            draft.parent.mkdir(parents=True)
+            draft.write_bytes(b"tiny dflash fixture")
         model = SimpleNamespace(
             backend="llamacpp",
             source="example/gguf",
@@ -728,6 +1289,12 @@ class LlamaCppRuntimeTests(unittest.TestCase):
             mmproj_file=mmproj.name if vision else None,
             mmproj_digest=_digest(mmproj) if vision else None,
             mmproj_size_bytes=mmproj.stat().st_size if vision else None,
+            draft_source="example/draft" if dflash else None,
+            draft_revision=draft_revision if dflash else None,
+            draft_weight_size_bytes=None,
+            draft_model_file=draft.name if dflash else None,
+            draft_model_digest=_digest(draft) if dflash else None,
+            draft_model_size_bytes=draft.stat().st_size if dflash else None,
             runtime_binary=str(binary),
             runtime_digest=_digest(binary),
             runtime_source_dir=str(source_dir),
@@ -738,7 +1305,18 @@ class LlamaCppRuntimeTests(unittest.TestCase):
             endpoint="http://127.0.0.1:8000/v1",
             startup_timeout_s=5,
             run_identity="frozen-run-1",
-            args=["--reasoning", "off"],
+            args=(
+                [
+                    "--reasoning",
+                    "off",
+                    "--spec-type",
+                    "draft-dflash",
+                    "--spec-draft-n-max",
+                    "15",
+                ]
+                if dflash
+                else ["--reasoning", "off"]
+            ),
         )
         return gguf, model
 
@@ -928,6 +1506,85 @@ class LlamaCppRuntimeTests(unittest.TestCase):
                     )
             popen.assert_not_called()
 
+    def test_dflash_launch_validates_and_owns_exact_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            _, model = self._fixture(workspace, dflash=True)
+            process = Mock(pid=4244)
+            process.poll.return_value = None
+            with (
+                patch(
+                    "bench.runtime._run",
+                    side_effect=[
+                        _completed(stdout=model.runtime_revision + "\n"),
+                        _completed(),
+                    ],
+                ),
+                patch("bench.runtime._port_is_free", return_value=True),
+                patch(
+                    "bench.runtime.subprocess.Popen", return_value=process
+                ) as popen,
+                patch("bench.runtime._proc_start_ticks", return_value=123458),
+                patch("bench.runtime.os.getpgid", return_value=4244),
+                patch("bench.runtime.wait_for_llamacpp", return_value=5.0),
+            ):
+                server = start_llamacpp(
+                    model,
+                    workspace=workspace,
+                    server_log_path=workspace / "run" / "server.log",
+                    process_state_path=workspace / "run" / "process.json",
+                )
+
+            command = popen.call_args.args[0]
+            expected_draft = str(
+                workspace
+                / "data"
+                / "huggingface"
+                / "hub"
+                / "models--example--draft"
+                / "snapshots"
+                / str(model.draft_revision)
+                / str(model.draft_model_file)
+            )
+            self.assertEqual(
+                command[command.index("--spec-draft-model") + 1],
+                expected_draft,
+            )
+            state = json.loads((workspace / "run" / "process.json").read_text())
+            self.assertEqual(state["draft_model_path"], expected_draft)
+            self.assertEqual(
+                state["draft_model_digest"], model.draft_model_digest
+            )
+            assert server.native_provenance is not None
+            self.assertEqual(
+                server.native_provenance["draft_model_sha256"],
+                model.draft_model_digest,
+            )
+            assert server.process_log is not None
+            server.process_log.close()
+
+    def test_dflash_hash_mismatch_fails_before_process_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            _, model = self._fixture(workspace, dflash=True)
+            model.draft_model_digest = "sha256:" + "0" * 64
+            with (
+                patch(
+                    "bench.runtime._run",
+                    side_effect=[
+                        _completed(stdout=model.runtime_revision + "\n"),
+                        _completed(),
+                    ],
+                ),
+                patch("bench.runtime._port_is_free", return_value=True),
+                patch("bench.runtime.subprocess.Popen") as popen,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeErrorWithContext, "draft GGUF SHA-256"
+                ):
+                    validate_llamacpp_artifacts(model, workspace=workspace)
+            popen.assert_not_called()
+
     def test_terminal_mtp_resume_refuses_missing_lifetime_proof(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -968,6 +1625,46 @@ class LlamaCppRuntimeTests(unittest.TestCase):
             summary = json.loads((run_dir / "summary.json").read_text())
             self.assertEqual(summary["status"], "aborted")
             self.assertFalse(summary["llamacpp_mtp_evidence"]["passed"])
+
+    def test_terminal_dflash_resume_refuses_missing_lifetime_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            run_dir, case_id = self._write_plan(
+                workspace, mtp=False, dflash=True
+            )
+            journal = Journal(run_dir / "events.jsonl")
+            journal.append({"event": "run_start"})
+            journal.append(
+                {
+                    "event": "case_complete",
+                    "case_id": case_id,
+                    "attempt_id": "attempt",
+                    "kind": "decode",
+                    "elapsed_s": 1.0,
+                }
+            )
+
+            with (
+                patch(
+                    "bench.runner._recover_pending_lifecycle",
+                    return_value=False,
+                ),
+                patch("bench.runner._preflight") as preflight,
+                patch("bench.runner.start_server") as start_server,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "DFlash evidence"):
+                    execute_plan(run_dir, workspace=workspace)
+
+            preflight.assert_not_called()
+            start_server.assert_not_called()
+            events = Journal(run_dir / "events.jsonl").events()
+            aborted = [
+                event for event in events if event.get("event") == "run_aborted"
+            ]
+            self.assertEqual(aborted[-1]["stage"], "dflash_evidence")
+            summary = json.loads((run_dir / "summary.json").read_text())
+            self.assertEqual(summary["status"], "aborted")
+            self.assertFalse(summary["llamacpp_dflash_evidence"]["passed"])
 
     def test_runner_separates_artifact_validation_from_server_startup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

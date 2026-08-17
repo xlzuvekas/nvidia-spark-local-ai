@@ -229,6 +229,177 @@ args = [
 # loopback bind, context, offline mode, UI, and metrics) are injected only
 # after the exact binary/source/GGUF pins below have been verified.
 [[models]]
+id = "muse-glimmer-30b-ud-q4-k-xl-llamacpp"
+description = "Pinned Unsloth Muse-Glimmer Q4_K_XL GGUF text-serving baseline without speculative decoding."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Muse-Glimmer-30B-GGUF"
+revision = "faa5b025c584459c13febfa5c59883516710ae39"
+served_name = "unsloth/Muse-Glimmer-30B-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "muse-glimmer"
+quantization = "ud-q4_k_xl"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Muse-Glimmer-30B-UD-Q4_K_XL.gguf"]
+model_file = "Muse-Glimmer-30B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:82bece304887a313ece08400bc030f6066c7bff5b906b0cd40308ec8a409fd38"
+model_size_bytes = 15878222368
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 4
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 131072
+startup_timeout_s = 600
+estimated_ram_gib = 64.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+]
+
+[[models]]
+id = "muse-glimmer-30b-ud-q4-k-xl-llamacpp-dflash15"
+# llama.cpp b10453 documents this local-sidecar contract in
+# docs/speculative.md and registers the same options in common/arg.cpp. This
+# first admission leaves draft KV at its documented F16 default.
+description = "Matched Muse-Glimmer Q4_K_XL profile with the exact Q4_K_M DFlash sidecar and maximum draft length fifteen."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Muse-Glimmer-30B-GGUF"
+revision = "faa5b025c584459c13febfa5c59883516710ae39"
+served_name = "unsloth/Muse-Glimmer-30B-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "muse-glimmer+dflash15"
+quantization = "ud-q4_k_xl+dflash-q4_k_m"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Muse-Glimmer-30B-UD-Q4_K_XL.gguf"]
+model_file = "Muse-Glimmer-30B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:82bece304887a313ece08400bc030f6066c7bff5b906b0cd40308ec8a409fd38"
+model_size_bytes = 15878222368
+draft_source = "meta-models/Muse-Glimmer-30B-GGUF"
+draft_revision = "43c7eadd41352a299ea8e0a36b3157978dd63596"
+draft_model_file = "dflash-Muse-Glimmer-30B-Q4_K_M.gguf"
+draft_model_digest = "sha256:b2e808bf656086fe86bd0d0bd990f01d33e377537a07c02d45371517c8b264ef"
+draft_model_size_bytes = 1631208128
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 4
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 131072
+startup_timeout_s = 600
+estimated_ram_gib = 68.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+  "--spec-type", "draft-dflash",
+  "--spec-draft-n-max", "15",
+]
+
+[[models]]
+id = "qwen36-35b-a3b-ud-q4-k-xl-llamacpp"
+description = "Single-slot 262K-context Unsloth Qwen3.6 MoE Q4_K_XL GGUF without speculation."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+revision = "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d"
+served_name = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "qwen35moe"
+quantization = "ud-q4_k_xl"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1"
+model_size_bytes = 22853663008
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 1
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 262144
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 100.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+]
+
+[[models]]
+id = "qwen36-35b-a3b-ud-q4-k-xl-llamacpp-mtp2"
+description = "Matched single-slot Qwen3.6 Q4_K_XL profile with embedded MTP and maximum draft length two."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+revision = "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d"
+served_name = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "qwen35moe"
+quantization = "ud-q4_k_xl"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1"
+model_size_bytes = 22853663008
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 1
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 262144
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 100.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+  "--spec-type", "draft-mtp",
+  "--spec-draft-n-max", "2",
+  "--spec-draft-type-k", "q8_0",
+  "--spec-draft-type-v", "q8_0",
+  "--spec-draft-backend-sampling",
+]
+
+[[models]]
 id = "qwen38-27b-ud-q4-k-xl-llamacpp"
 description = "Unsloth Dynamic Q4_K_XL GGUF on pinned native llama.cpp without speculation."
 support_status = "spark_other_backend"
@@ -254,6 +425,45 @@ max_context = 32768
 native_context = 262144
 startup_timeout_s = 600
 estimated_ram_gib = 64.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+]
+
+[[models]]
+id = "qwen38-27b-ud-q4-k-xl-llamacpp-long-context"
+description = "Single-slot 262K-context Unsloth Dynamic Q4_K_XL GGUF on pinned native llama.cpp without speculation."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.8-27B-GGUF"
+revision = "f1bfb127c64f7072bdd2cad55f258b9c8b2910fe"
+served_name = "unsloth/Qwen3.8-27B-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "dense"
+quantization = "ud-q4_k_xl"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.8-27B-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372"
+model_size_bytes = 17923394624
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 1
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 262144
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 96.0
 endpoint = "http://127.0.0.1:8000/v1"
 args = [
   "--n-gpu-layers", "all",
@@ -491,6 +701,50 @@ args = [
 ]
 
 [[models]]
+id = "qwen38-27b-ud-q4-k-xl-llamacpp-mtp5-long-context"
+description = "Matched single-slot 262K-context Unsloth Q4 GGUF with embedded NextN MTP and maximum draft length five."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.8-27B-GGUF"
+revision = "f1bfb127c64f7072bdd2cad55f258b9c8b2910fe"
+served_name = "unsloth/Qwen3.8-27B-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "dense+mtp5"
+quantization = "ud-q4_k_xl+mtp5"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.8-27B-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372"
+model_size_bytes = 17923394624
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 1
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 262144
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 100.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+  "--spec-type", "draft-mtp",
+  "--spec-draft-n-max", "5",
+  "--spec-draft-type-k", "q8_0",
+  "--spec-draft-type-v", "q8_0",
+  "--spec-draft-backend-sampling",
+]
+
+[[models]]
 id = "qwen38-27b-ud-q4-k-xl-llamacpp-mtp2"
 description = "Same Unsloth Q4 GGUF with embedded NextN MTP and maximum draft length two."
 support_status = "spark_other_backend"
@@ -576,6 +830,45 @@ args = [
   "--spec-draft-type-k", "q8_0",
   "--spec-draft-type-v", "q8_0",
   "--spec-draft-backend-sampling",
+]
+
+[[models]]
+id = "qwen38-27b-ud-q5-k-xl-llamacpp"
+description = "Pinned Unsloth Dynamic Q5_K_XL GGUF quality/performance anchor on the same native llama.cpp runtime."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.8-27B-GGUF"
+revision = "f1bfb127c64f7072bdd2cad55f258b9c8b2910fe"
+served_name = "unsloth/Qwen3.8-27B-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "dense"
+quantization = "ud-q5_k_xl"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.8-27B-UD-Q5_K_XL.gguf"]
+model_file = "Qwen3.8-27B-UD-Q5_K_XL.gguf"
+model_digest = "sha256:176a6a3f034e9cdc447c10cd00329fc9b31002e6589b9295f2ad4f1eefe0f6ab"
+model_size_bytes = 20218178624
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 8
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 72.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
 ]
 
 [[models]]
@@ -690,6 +983,62 @@ args = [
   "--reasoning-parser", "qwen3",
   "--enable-auto-tool-choice",
   "--tool-call-parser", "qwen3_coder",
+]
+
+[[models]]
+id = "qwen38-27b-nvfp4-dspark-sglang"
+description = "Managed serving-config reproduction of the pinned upstream recipe; SparkBench cases and results remain independent. Apache-2.0 target with the card-license=other DSpark draft."
+support_status = "spark_other_backend"
+backend = "sglang"
+recipe_source = "hasso5703/dgx-spark-qwen38"
+recipe_revision = "3590fb29296b1babd85405daad1eef1c4a3ebe0f"
+source = "RadixArk/Qwen3.8-27B-NVFP4"
+revision = "52d1adc5f38aa5ebf099c29ed7025ba34cfbb854"
+weight_file_count = 3
+weight_size_bytes = 21921697280
+draft_source = "RadixArk/Qwen3.8-27B-DSpark"
+draft_revision = "923ed3a8572615643f0137e424e4ce4edd7f1cda"
+draft_weight_size_bytes = 2718576122
+served_name = "qwen3.8-27b"
+tasks = ["chat", "json", "thinking", "tools"]
+architecture = "dense+dspark-draft"
+quantization = "nvfp4+unquant-dspark"
+lifecycle = "docker"
+image = "lmsysorg/sglang@sha256:febfb971c7352570fc445c466ebd6ffc9d896024958e544a60f2137fd85856b1"
+image_digest = "sha256:febfb971c7352570fc445c466ebd6ffc9d896024958e544a60f2137fd85856b1"
+cache_dir = "user"
+max_context = 262144
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 92.0
+endpoint = "http://127.0.0.1:30000/v1"
+# The pinned image's LongCat existence check turns a harmless metadata miss
+# into a hard startup error under HF_HUB_OFFLINE. Both weight snapshots remain
+# exact, local, and read-only; this opt-in exposes the exception in provenance.
+sglang_allow_hf_metadata_probe = true
+args = [
+  "--trust-remote-code",
+  "--tp-size", "1",
+  "--served-model-name", "qwen3.8-27b",
+  "--mem-fraction-static", "0.50",
+  "--attention-backend", "flashinfer",
+  "--chunked-prefill-size", "8192",
+  "--disable-prefill-cuda-graph",
+  "--cuda-graph-max-bs", "4",
+  "--speculative-algorithm", "DSPARK",
+  "--speculative-dspark-block-size", "7",
+  "--speculative-draft-model-quantization", "unquant",
+  "--mamba-radix-cache-strategy", "extra_buffer_lazy",
+  "--mamba-ssm-dtype", "bfloat16",
+  "--max-mamba-cache-size", "96",
+  "--max-running-requests", "8",
+  "--enable-torch-compile",
+  "--torch-compile-max-bs", "4",
+  "--num-continuous-decode-steps", "2",
+  "--reasoning-parser", "qwen3",
+  "--tool-call-parser", "qwen3_coder",
+  "--host", "0.0.0.0",
+  "--port", "30000",
 ]
 
 [[models]]

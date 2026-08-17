@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import secrets
 import signal
 import socket
 import subprocess
@@ -71,11 +72,48 @@ def _run(command: list[str], *, check: bool = True, timeout: float | None = None
     )
 
 
-def endpoint_ready(base_url: str, timeout_s: float = 2) -> bool:
+def _redact_text(text: str, sensitive_values: tuple[str, ...]) -> str:
+    redacted = text
+    for value in sensitive_values:
+        if value:
+            redacted = redacted.replace(value, "<redacted>")
+    return redacted
+
+
+def _redact_exception(
+    error: BaseException, sensitive_values: tuple[str, ...]
+) -> None:
+    error.args = tuple(
+        _redact_text(argument, sensitive_values)
+        if isinstance(argument, str)
+        else argument
+        for argument in error.args
+    )
+    notes = getattr(error, "__notes__", None)
+    if notes:
+        error.__notes__ = [
+            _redact_text(note, sensitive_values) for note in notes
+        ]
+
+
+def _authorization_headers(authorization: str | None) -> dict[str, str]:
+    return {"Authorization": authorization} if authorization else {}
+
+
+def endpoint_ready(
+    base_url: str,
+    timeout_s: float = 2,
+    *,
+    authorization: str | None = None,
+) -> bool:
     root = base_url.removesuffix("/v1").rstrip("/")
     for path in ("/health", "/v1/models"):
         try:
-            with urllib.request.urlopen(root + path, timeout=timeout_s) as response:
+            request = urllib.request.Request(
+                root + path,
+                headers=_authorization_headers(authorization),
+            )
+            with urllib.request.urlopen(request, timeout=timeout_s) as response:
                 if response.status < 400:
                     return True
         except (OSError, urllib.error.URLError, TimeoutError):
@@ -83,10 +121,17 @@ def endpoint_ready(base_url: str, timeout_s: float = 2) -> bool:
     return False
 
 
-def wait_for_endpoint(base_url: str, timeout_s: float, container_id: str | None = None) -> float:
+def wait_for_endpoint(
+    base_url: str,
+    timeout_s: float,
+    container_id: str | None = None,
+    *,
+    authorization: str | None = None,
+    sensitive_values: tuple[str, ...] = (),
+) -> float:
     started = time.monotonic()
     while time.monotonic() - started < timeout_s:
-        if endpoint_ready(base_url):
+        if endpoint_ready(base_url, authorization=authorization):
             return time.monotonic() - started
         if container_id:
             state = _run(
@@ -96,7 +141,11 @@ def wait_for_endpoint(base_url: str, timeout_s: float, container_id: str | None 
             if state.returncode or state.stdout.startswith("exited"):
                 logs = _run(["docker", "logs", "--tail", "100", container_id], check=False)
                 raise RuntimeErrorWithContext(
-                    f"Server exited during startup: {state.stdout.strip()}\n{logs.stdout}{logs.stderr}"
+                    _redact_text(
+                        f"Server exited during startup: {state.stdout.strip()}\n"
+                        f"{logs.stdout}{logs.stderr}",
+                        sensitive_values,
+                    )
                 )
         time.sleep(2)
     raise RuntimeErrorWithContext(f"Server did not become ready within {timeout_s:.0f}s")
@@ -260,6 +309,44 @@ def validate_llamacpp_artifacts(model: Any, *, workspace: Path) -> dict[str, Any
                 "multimodal": True,
             }
         )
+    draft_model_file = getattr(model, "draft_model_file", None)
+    if draft_model_file is not None:
+        draft_source = str(model.draft_source)
+        draft_revision = str(model.draft_revision)
+        draft_repository = (
+            _huggingface_root(model, workspace)
+            / "hub"
+            / ("models--" + draft_source.replace("/", "--"))
+        )
+        draft_snapshot = draft_repository / "snapshots" / draft_revision
+        try:
+            draft_repository_resolved = draft_repository.resolve(strict=True)
+            draft_snapshot.resolve(strict=True).relative_to(
+                draft_repository_resolved
+            )
+        except (OSError, ValueError) as error:
+            raise RuntimeErrorWithContext(
+                "Exact cached draft GGUF snapshot is missing or escapes its "
+                f"repository: {draft_snapshot}"
+            ) from error
+        draft_artifact = _validate_llamacpp_snapshot_artifact(
+            repository_resolved=draft_repository_resolved,
+            snapshot=draft_snapshot,
+            filename=str(draft_model_file),
+            expected_size=int(model.draft_model_size_bytes),
+            expected_digest=str(model.draft_model_digest),
+            label="draft GGUF",
+        )
+        result.update(
+            {
+                "draft_model_path": draft_artifact["path"],
+                "draft_model_target": draft_artifact["target"],
+                "draft_model_sha256": draft_artifact["sha256"],
+                "draft_model_size_bytes": draft_artifact["size_bytes"],
+                "draft_model_source": draft_source,
+                "draft_model_revision": draft_revision,
+            }
+        )
     return result
 
 
@@ -297,6 +384,10 @@ def _native_command(
     ]
     if artifacts.get("mmproj_path"):
         command.extend(("--mmproj", str(artifacts["mmproj_path"])))
+    if artifacts.get("draft_model_path"):
+        command.extend(
+            ("--spec-draft-model", str(artifacts["draft_model_path"]))
+        )
     command.extend(
         [
             "--alias",
@@ -376,6 +467,46 @@ def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
         if descriptor is not None:
             os.close(descriptor)
         temporary.unlink(missing_ok=True)
+
+
+def _write_private_secret(path: Path, value: str) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        raise RuntimeErrorWithContext(
+            f"Refusing to overwrite existing API-key path: {path}"
+        )
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = None
+            stream.write(value + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _unlink_private_secret(path: Path | None) -> None:
+    if path is None:
+        return
+    path.unlink(missing_ok=True)
+    if path.parent.is_dir():
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
 
 def _unlink_state(path: Path) -> None:
@@ -556,6 +687,9 @@ class ManagedServer:
     process_state_path: Path | None = None
     process_log: TextIO | None = None
     native_provenance: dict[str, Any] | None = None
+    authorization: str | None = None
+    api_key: str | None = None
+    api_key_path: Path | None = None
 
     def stop(self, *, keep_server: bool = False) -> None:
         if self.backend == LLAMACPP_BACKEND:
@@ -607,6 +741,11 @@ class ManagedServer:
             _run(["docker", "stop", "--time", "30", self.container_id], check=True, timeout=45)
             _run(["docker", "rm", self.container_id], check=True, timeout=15)
             self.container_id = None
+            if self.backend == "sglang":
+                _unlink_private_secret(self.api_key_path)
+                self.api_key_path = None
+                self.api_key = None
+                self.authorization = None
         elif (
             self.backend == "ollama"
             and self.ollama_model
@@ -654,11 +793,14 @@ def recover_owned_vllm(run_identity: str) -> str:
     return "stopped_owned_container"
 
 
-def recover_owned_sglang(run_identity: str) -> str:
+def recover_owned_sglang(
+    run_identity: str, *, api_key_path: Path | None = None
+) -> str:
     """Stop only the exact SGLang container labeled for a crashed run."""
 
     existing = _existing_container(SGLANG_CONTAINER_NAME)
     if existing is None:
+        _unlink_private_secret(api_key_path)
         return "already_absent"
     container_id, managed, existing_run = existing
     if not managed or existing_run != run_identity:
@@ -668,8 +810,42 @@ def recover_owned_sglang(run_identity: str) -> str:
         base_url="http://127.0.0.1:30000/v1",
         container_id=container_id,
         run_identity=run_identity,
+        api_key_path=api_key_path,
     ).stop()
     return "stopped_owned_container"
+
+
+def _exact_sglang_snapshot(
+    hf_cache: Path, *, source: str, revision: str, role: str
+) -> tuple[Path, str]:
+    if (
+        len(revision) != 40
+        or any(character not in "0123456789abcdef" for character in revision)
+    ):
+        raise RuntimeErrorWithContext(
+            f"SGLang {role} revision must be a full lowercase commit SHA"
+        )
+    repository_name = "models--" + source.replace("/", "--")
+    hub_root = hf_cache / "hub"
+    repository = hub_root / repository_name
+    snapshot = repository / "snapshots" / revision
+    if not snapshot.is_dir():
+        raise RuntimeErrorWithContext(
+            f"Exact SGLang {role} snapshot is not cached: {source}@{revision}"
+        )
+    try:
+        hub_resolved = hub_root.resolve(strict=True)
+        repository_resolved = repository.resolve(strict=True)
+        repository_resolved.relative_to(hub_resolved)
+        snapshot.resolve(strict=True).relative_to(repository_resolved)
+    except (OSError, ValueError) as error:
+        raise RuntimeErrorWithContext(
+            f"Exact SGLang {role} snapshot escapes its cache repository"
+        ) from error
+    container_snapshot = (
+        f"/root/.cache/huggingface/hub/{repository_name}/snapshots/{revision}"
+    )
+    return repository_resolved, container_snapshot
 
 
 def start_vllm(
@@ -781,9 +957,11 @@ def start_sglang(
     allow_download: bool = False,
     server_log_path: Path | None = None,
 ) -> ManagedServer:
-    """Start an offline, digest-pinned SGLang server for an exact snapshot."""
+    """Start a digest-pinned SGLang server from exact cached snapshots."""
 
-    del allow_download  # SGLang profiles intentionally remain offline-only.
+    # Runtime acquisition is always forbidden. A typed profile may permit only
+    # the pinned image's documented metadata probe after both snapshots exist.
+    del allow_download
     existing = _existing_container(SGLANG_CONTAINER_NAME)
     if existing:
         container_id, managed, existing_run = existing
@@ -807,75 +985,235 @@ def start_sglang(
 
     source = str(model.source)
     revision = str(getattr(model, "revision", "") or "")
-    if not revision:
+    target_repository, container_snapshot = _exact_sglang_snapshot(
+        hf_cache, source=source, revision=revision, role="target"
+    )
+    draft_source = getattr(model, "draft_source", None)
+    draft_revision = getattr(model, "draft_revision", None)
+    if (draft_source is None) != (draft_revision is None):
         raise RuntimeErrorWithContext(
-            "SGLang Docker profiles require an exact cached revision"
+            "SGLang draft source and revision must be configured together"
         )
-    repository_name = "models--" + source.replace("/", "--")
-    snapshot = hf_cache / "hub" / repository_name / "snapshots" / revision
-    if not snapshot.is_dir():
-        raise RuntimeErrorWithContext(
-            f"Exact SGLang snapshot is not cached: {source}@{revision}"
+    container_draft_snapshot: str | None = None
+    draft_repository: Path | None = None
+    if draft_source is not None and draft_revision is not None:
+        draft_repository, container_draft_snapshot = _exact_sglang_snapshot(
+            hf_cache,
+            source=str(draft_source),
+            revision=str(draft_revision),
+            role="draft",
         )
 
     image_reference = str(getattr(model, "resolved_image", None) or model.image)
-    if "@sha256:" not in image_reference:
-        digest = str(getattr(model, "image_digest", "") or "")
-        if digest.startswith("sha256:"):
-            image_reference = f"{model.image}@{digest}"
-    if "@sha256:" not in image_reference:
+    expected_image_digest = str(getattr(model, "image_digest", "") or "")
+    if (
+        len(expected_image_digest) != 71
+        or not expected_image_digest.startswith("sha256:")
+        or any(
+            character not in "0123456789abcdef"
+            for character in expected_image_digest.removeprefix("sha256:")
+        )
+    ):
         raise RuntimeErrorWithContext(
-            "SGLang image must resolve to an immutable sha256 digest"
+            "SGLang image digest must be explicitly pinned"
+        )
+    if "@sha256:" not in image_reference:
+        image_reference = f"{model.image}@{expected_image_digest}"
+    if not image_reference.endswith("@" + expected_image_digest):
+        raise RuntimeErrorWithContext(
+            "Resolved SGLang image does not match the manifest sha256 digest"
         )
 
     run_identity = str(getattr(model, "run_identity", "unknown"))
-    container_snapshot = (
-        f"/root/.cache/huggingface/hub/{repository_name}/snapshots/{revision}"
+    metadata_probe = bool(
+        getattr(model, "sglang_allow_hf_metadata_probe", False)
     )
+    if metadata_probe and container_draft_snapshot is None:
+        raise RuntimeErrorWithContext(
+            "SGLang Hugging Face metadata probe requires a pinned draft snapshot"
+        )
+    if metadata_probe and (
+        getattr(model, "recipe_source", None) is None
+        or getattr(model, "recipe_revision", None) is None
+    ):
+        raise RuntimeErrorWithContext(
+            "SGLang Hugging Face metadata probe requires pinned recipe provenance"
+        )
+    compile_cache: Path | None = None
+    if container_draft_snapshot is not None:
+        model_id = str(getattr(model, "id", ""))
+        runtime_cache_root = (
+            Path.home() / ".cache" / "sparkbench" / "sglang"
+        ).resolve()
+        compile_cache = (runtime_cache_root / model_id / "compile").resolve()
+        try:
+            compile_cache.relative_to(runtime_cache_root)
+        except ValueError as error:
+            raise RuntimeErrorWithContext(
+                "SGLang compile cache escapes the private runtime cache"
+            ) from error
+        compile_cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    api_key = secrets.token_urlsafe(32)
+    authorization = f"Bearer {api_key}"
+    sensitive_values = (api_key, authorization)
+    api_key_path = (
+        server_log_path.parent / "api-key"
+        if server_log_path is not None
+        else None
+    )
+    if api_key_path is not None:
+        _write_private_secret(api_key_path, api_key)
+
     command = [
         "docker", "run", "--detach", "--pull=never",
         "--name", SGLANG_CONTAINER_NAME,
         "--label", MANAGED_LABEL,
         "--label", f"ai.sparkbench.run={run_identity}",
         "--label", "ai.sparkbench.backend=sglang",
-        "--entrypoint", "sglang",
-        "--gpus", "all", "--ipc", "host",
-        "--ulimit", "memlock=-1", "--ulimit", "stack=67108864",
-        "--publish", f"127.0.0.1:{port}:30000",
-        "--volume", f"{hf_cache}:/root/.cache/huggingface:ro",
-        "--env", "HF_HOME=/root/.cache/huggingface",
-        "--env", "HF_MODULES_CACHE=/tmp/huggingface/modules",
-        "--env", "HF_HUB_OFFLINE=1",
-        "--env", "TRANSFORMERS_OFFLINE=1",
-        image_reference,
-        "serve", "--model-path", container_snapshot,
+        "--gpus", "all",
     ]
+    if container_draft_snapshot is not None:
+        command.extend(
+            [
+                "--memory", "100g",
+                "--memory-swap", "100g",
+                "--shm-size", "16g",
+                "--entrypoint", "python3",
+            ]
+        )
+    else:
+        command.extend(["--ipc", "host", "--entrypoint", "sglang"])
+    command.extend(
+        [
+            "--ulimit", "memlock=-1", "--ulimit", "stack=67108864",
+            "--publish", f"127.0.0.1:{port}:30000",
+            "--volume",
+            f"{target_repository}:/root/.cache/huggingface/hub/"
+            f"{target_repository.name}:ro",
+            "--env", "HF_HOME=/tmp/sparkbench-hf",
+            "--env", "HF_HUB_CACHE=/tmp/sparkbench-hf/hub",
+            "--env", "HF_MODULES_CACHE=/tmp/sparkbench-hf/modules",
+            "--env", "HF_TOKEN_PATH=/tmp/sparkbench-hf/token-disabled",
+            "--env", "HF_HUB_DISABLE_IMPLICIT_TOKEN=1",
+            "--env", "HF_HUB_DISABLE_TELEMETRY=1",
+        ]
+    )
+    if draft_repository is not None:
+        command.extend(
+            [
+                "--volume",
+                f"{draft_repository}:/root/.cache/huggingface/hub/"
+                f"{draft_repository.name}:ro",
+            ]
+        )
+    if compile_cache is not None:
+        command.extend(
+            [
+                "--volume", f"{compile_cache}:/cache",
+                "--env", "TORCHINDUCTOR_CACHE_DIR=/cache/inductor",
+            ]
+        )
+    if not metadata_probe:
+        command.extend(
+            [
+                "--env", "HF_HUB_OFFLINE=1",
+                "--env", "TRANSFORMERS_OFFLINE=1",
+            ]
+        )
+    command.append(image_reference)
+    if container_draft_snapshot is not None:
+        command.extend(
+            ["-m", "sglang.launch_server", "--model-path", container_snapshot]
+        )
+        command.extend(
+            ["--speculative-draft-model-path", container_draft_snapshot]
+        )
+    else:
+        command.extend(["serve", "--model-path", container_snapshot])
+    command.extend(["--api-key", api_key])
     command.extend(str(argument) for argument in model.args)
-    result = _run(command, check=False, timeout=60)
+    try:
+        result = _run(command, check=False, timeout=60)
+    except BaseException as launch_error:
+        _unlink_private_secret(api_key_path)
+        raise RuntimeErrorWithContext(
+            "docker run failed: "
+            + _redact_text(str(launch_error), sensitive_values)
+        ) from None
     if result.returncode:
-        raise RuntimeErrorWithContext(f"docker run failed: {result.stderr.strip()}")
+        _unlink_private_secret(api_key_path)
+        raise RuntimeErrorWithContext(
+            "docker run failed: "
+            + _redact_text(result.stderr.strip(), sensitive_values)
+        )
     container_id = result.stdout.strip()
+    if not container_id:
+        _unlink_private_secret(api_key_path)
+        raise RuntimeErrorWithContext(
+            "docker run returned no authenticated SGLang container ID"
+        )
     server = ManagedServer(
         "sglang",
         f"http://127.0.0.1:{port}/v1",
         container_id=container_id,
         run_identity=run_identity,
+        authorization=authorization,
+        api_key=api_key,
+        api_key_path=api_key_path,
     )
+    server.native_provenance = {
+        "target_source": source,
+        "target_revision": revision,
+        "target_container_snapshot": container_snapshot,
+        "draft_source": draft_source,
+        "draft_revision": draft_revision,
+        "draft_container_snapshot": container_draft_snapshot,
+        "compile_cache_dir": str(compile_cache) if compile_cache else None,
+        "sglang_allow_hf_metadata_probe": metadata_probe,
+        "hf_network_policy": (
+            "documented_longcat_metadata_probe"
+            if metadata_probe
+            else "offline"
+        ),
+        "docker_memory": "100g" if container_draft_snapshot else None,
+        "docker_memory_swap": "100g" if container_draft_snapshot else None,
+        "docker_shm_size": "16g" if container_draft_snapshot else None,
+        "recipe_source": getattr(model, "recipe_source", None),
+        "recipe_revision": getattr(model, "recipe_revision", None),
+        "benchmark_scope": "sparkbench_suite_not_upstream_battery",
+        "model_acquisition": "disabled_exact_read_only_snapshots",
+        "api_authentication": "ephemeral_bearer",
+        "api_key_file_mode": "0600" if api_key_path is not None else None,
+    }
     try:
         server.startup_s = wait_for_endpoint(
-            server.base_url, float(model.startup_timeout_s), container_id
+            server.base_url,
+            float(model.startup_timeout_s),
+            container_id,
+            authorization=authorization,
+            sensitive_values=sensitive_values,
         )
     except BaseException as startup_error:
         if server_log_path is not None:
             try:
                 save_server_logs(server, server_log_path)
             except Exception as log_error:
+                _redact_exception(log_error, sensitive_values)
                 startup_error.add_note(
                     "Could not persist full startup container logs: "
                     f"{type(log_error).__name__}: {log_error}"
                 )
-        server.stop()
-        raise
+        try:
+            server.stop()
+        except BaseException as cleanup_error:
+            _redact_exception(cleanup_error, sensitive_values)
+            startup_error.add_note(
+                "Could not clean up authenticated SGLang server: "
+                f"{type(cleanup_error).__name__}: {cleanup_error}"
+            )
+        _redact_exception(startup_error, sensitive_values)
+        raise startup_error
     return server
 
 
@@ -1069,6 +1407,13 @@ def start_llamacpp(
                     "mmproj_digest": artifacts["mmproj_sha256"],
                 }
             )
+        if artifacts.get("draft_model_path"):
+            state.update(
+                {
+                    "draft_model_path": artifacts["draft_model_path"],
+                    "draft_model_digest": artifacts["draft_model_sha256"],
+                }
+            )
         _write_private_json(process_state_path, state)
     except BaseException:
         process.terminate()
@@ -1175,6 +1520,13 @@ def _scan_owned_llamacpp(
                     {
                         "mmproj_path": artifacts["mmproj_path"],
                         "mmproj_digest": artifacts["mmproj_sha256"],
+                    }
+                )
+            if artifacts.get("draft_model_path"):
+                state.update(
+                    {
+                        "draft_model_path": artifacts["draft_model_path"],
+                        "draft_model_digest": artifacts["draft_model_sha256"],
                     }
                 )
             if _native_process_is_owned(state):
@@ -1305,11 +1657,22 @@ def capture_server_provenance(server: ManagedServer) -> dict[str, Any]:
         result = _run(["docker", "inspect", server.container_id], check=False)
         if result.returncode == 0:
             inspect = json.loads(result.stdout)[0]
+            argv = inspect["Config"].get("Entrypoint", []) + inspect[
+                "Config"
+            ].get("Cmd", [])
+            sensitive_values = tuple(
+                value
+                for value in (server.api_key, server.authorization)
+                if value
+            )
             provenance.update(
                 {
                     "container_id": inspect["Id"],
                     "image_id": inspect["Image"],
-                    "argv": inspect["Config"].get("Entrypoint", []) + inspect["Config"].get("Cmd", []),
+                    "argv": [
+                        _redact_text(str(argument), sensitive_values)
+                        for argument in argv
+                    ],
                 }
             )
     native_provenance = getattr(server, "native_provenance", None)
@@ -1334,6 +1697,10 @@ def save_server_logs(server: ManagedServer, path: Path) -> None:
         if payload and not payload.endswith("\n"):
             payload += "\n"
         payload += result.stderr
+    sensitive_values = tuple(
+        value for value in (server.api_key, server.authorization) if value
+    )
+    payload = _redact_text(payload, sensitive_values)
     path.parent.mkdir(parents=True, exist_ok=True)
     has_existing = path.is_file() and path.stat().st_size > 0
     needs_newline = False
