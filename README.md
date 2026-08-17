@@ -31,10 +31,13 @@ revisions, image digests, telemetry, and retained local evidence IDs.
   stayed around 22.7 aggregate tok/s; core strict JSON passed 1/5 and the
   exact-answer check passed 3/4, so this is not a broad quality claim.
 - Stock NInfer did not admit GB10's SM121/CUDA environment. A bounded
-  experimental SM121a eager port raised MTP3 TG256 from 67.821 to 123.231
-  tok/s and TG1024 from 67.692 to 140.190 tok/s. That result used no CUDA
-  graphs and establishes neither upstream support nor reference-quality
-  correctness.
+  [experimental SM121a patch](patches/ninfer/README.md) enabled eager-only
+  measurements without claiming upstream support. On Qwen3.6 35B-A3B, MTP3
+  raised TG1024 from 67.692 to 140.190 tok/s. On dense Qwen3.8 27B NVFP4, it
+  raised TG1024 from 11.681 to 21.222 tok/s while reducing pure-prefill rates by
+  1.3–1.6%; one greedy probe had byte- and token-identical MTP0/MTP3 output.
+  These raw-engine results used no CUDA graphs and are not reference-quality
+  or semantic-quality certification.
 - The public G9v3 39B-A5B preview remains admission-only: its custom
   architecture lacks a validated path in the pinned optimized runtimes, so no
   throughput headline is reported.

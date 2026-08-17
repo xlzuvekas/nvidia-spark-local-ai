@@ -1,0 +1,78 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index df17a9b..4d05a71 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,14 +1,14 @@
+ cmake_minimum_required(VERSION 3.28)
+ 
+-# The current implementation is compiled only for sm_120a. Set and validate the
++# Experimental DGX Spark port: compile only for sm_121a. Set and validate the
+ # architecture before CUDA compiler detection so CMake never injects a generic
+ # host-toolchain default or accepts an unsupported target.
+ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+-  set(CMAKE_CUDA_ARCHITECTURES 120a CACHE STRING "CUDA architectures to build")
++  set(CMAKE_CUDA_ARCHITECTURES 121a CACHE STRING "CUDA architectures to build")
+ endif()
+-if(NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
++if(NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "121a")
+   message(FATAL_ERROR
+-    "NInfer supports only CMAKE_CUDA_ARCHITECTURES=120a; got "
++    "Experimental DGX Spark port supports only CMAKE_CUDA_ARCHITECTURES=121a; got "
+     "'${CMAKE_CUDA_ARCHITECTURES}'")
+ endif()
+ 
+diff --git a/Dockerfile b/Dockerfile
+index bc3dc5d..c1d4560 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,6 +1,6 @@
+ # syntax=docker/dockerfile:1
+ 
+-FROM nvidia/cuda:13.1.2-devel-ubuntu24.04 AS build
++FROM nvidia/cuda:13.1.2-devel-ubuntu24.04@sha256:369b61cfc40a36830d246f0a14004a716aee72f4c520ee719b73d2b47e8bd9ce AS build
+ 
+ ARG DEBIAN_FRONTEND=noninteractive
+ RUN apt-get update \
+@@ -23,9 +23,16 @@ RUN cmake -S . -B /build -G Ninja \
+         -DNINFER_BUILD_APPS=ON \
+         -DBUILD_TESTING=OFF \
+         -DNINFER_BUILD_BENCHMARKS=OFF \
+-    && cmake --build /build --parallel --target ninfer ninfer-serve
++    && cmake --build /build --parallel 4 --target ninfer ninfer-serve \
++    && cmake -S . -B /bench-build -G Ninja \
++        -DCMAKE_BUILD_TYPE=Release \
++        -DNINFER_BUILD_APPS=OFF \
++        -DBUILD_TESTING=OFF \
++        -DNINFER_BUILD_BENCHMARKS=ON \
++        -DCMAKE_CUDA_ARCHITECTURES=121a \
++    && cmake --build /bench-build --parallel 4 --target ninfer_bench
+ 
+-FROM nvidia/cuda:13.1.2-runtime-ubuntu24.04
++FROM nvidia/cuda:13.1.2-runtime-ubuntu24.04@sha256:6c8bcccb947a781668a7bfed5357a316456131cf5273a72db7fd014db0a0f81a
+ 
+ ARG DEBIAN_FRONTEND=noninteractive
+ RUN apt-get update \
+@@ -40,6 +47,7 @@ RUN apt-get update \
+ 
+ COPY --from=build /build/apps/ninfer /usr/local/bin/ninfer
+ COPY --from=build /build/apps/ninfer-serve /usr/local/bin/ninfer-serve
++COPY --from=build /bench-build/bench/ninfer_bench /usr/local/bin/ninfer_bench
+ 
+ WORKDIR /workspace
+ EXPOSE 8080
+diff --git a/src/targets/qwen3_6/impl/runtime/layouts_impl.h b/src/targets/qwen3_6/impl/runtime/layouts_impl.h
+index ca50405..7ff0747 100644
+--- a/src/targets/qwen3_6/impl/runtime/layouts_impl.h
++++ b/src/targets/qwen3_6/impl/runtime/layouts_impl.h
+@@ -596,8 +596,9 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
+         }
+         break;
+     }
+-    if (device.sm() != 120) {
+-        throw std::invalid_argument("Qwen3.6 family runtime requires compute capability 12.0");
++    if (device.sm() != 121) {
++        throw std::invalid_argument(
++            "Experimental DGX Spark port requires compute capability 12.1");
+     }
+ }
+ 

@@ -21,15 +21,16 @@ bounded results from different profile geometries, not one interchangeable
 leaderboard.
 
 A separate, explicitly experimental NInfer port also reached GB10 GPU
-execution for Qwen3.6 35B-A3B. In a matched eager Engine matrix, MTP3 raised
-mean TG1024 decode from 67.691870 to 140.190259 tok/s (+107.100585%) while
-the three pure-prefill means changed by -0.994907% to -1.619287%. This does
-not make upstream NInfer a supported Spark runtime: stock source rejects
-`sm_121a`, the first CUDA Graph attempt failed before measurement, the
-measured profile forces 128-token prefill chunks and eager decode, and no
-external numerical or semantic-quality oracle was run. The result is a
-bounded experimental port measurement, not a stock-support or
-production-readiness claim.
+execution for Qwen3.6 35B-A3B and dense Qwen3.8 27B NVFP4. In matched eager
+Engine matrices, Qwen3.6 MTP3 raised mean TG1024 decode from 67.691870 to
+140.190259 tok/s (+107.100585%); Qwen3.8 MTP3 raised it from 11.681340 to
+21.221587 tok/s (+81.670823%). Pure-prefill means fell by roughly 1–2% in
+both comparisons. This does not make upstream NInfer a supported Spark
+runtime: stock source rejects `sm_121a`, the Qwen3.6 CUDA Graph attempt
+failed before measurement, both measured profiles force 128-token prefill
+chunks and eager decode, and no external numerical or semantic-quality
+oracle was run. These are bounded experimental port measurements, not
+stock-support or production-readiness claims.
 
 The new 118B-A8B result is a successful memory and execution admission. The
 exact three-shard Unsloth UD-Q4_K_XL quant totals 73,395,172,000 bytes
@@ -579,6 +580,80 @@ The two stock configure logs remain separately under
 the CUDA Graph planner is fixed for GB10, and a reference/semantic validation
 campaign passes, the appropriate status is **experimental eager port**, not
 stock NInfer support.
+
+#### Qwen3.8 27B NVFP4 on the Same Experimental Port
+
+The same image and three-file source patch were then tested with NInfer's
+official
+[`neroued/Qwen3.8-27B-nvfp4-NInfer`](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer/tree/d6d0b3b61a38262e57217e64e7f44cf4ce98bda1)
+artifact at revision
+`d6d0b3b61a38262e57217e64e7f44cf4ce98bda1`. The single version-2 artifact
+is 21,492,695,040 bytes (20.016632 GiB) with
+`sha256:bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32`.
+NInfer's independent inspector resolved identity `qwen3.8-27b/nvfp4`, target
+`qwen3_8_27b`, and 1,124 objects: 1,118 tensors plus six resources. This is a
+mixed profile rather than universal NVFP4: the inspector reports 112 NVFP4
+tensors and 146 row-scaled FP8 tensors among its registered formats.
+
+Two one-repetition execution gates preceded measurement. MTP0 completed
+exact `pp96+tg1` and `pp128+tg1` routes; MTP3 completed exact
+`pp128+tg32`, produced positive counters at all three draft positions, and
+accounted for 32 committed decode tokens. Both loaded the expected artifact
+on NVIDIA GB10 under CUDA runtime/driver API 13.1. These cold gates establish
+the audited prefill and eager-decode routes only; their rates are not promoted
+as performance measurements.
+
+The terminal matched pair used `max_context=8192`, 128-token prefill chunks,
+INT8 group-64 KV, eager decode, five measured repetitions after one discarded
+warmup, and exact output-length checks. MTP3 changed only the draft window to
+three and selected the embedded optimized proposal head. Values are arithmetic
+means plus sample standard deviation; deltas are MTP3 relative to MTP0.
+
+| Engine metric | MTP0 mean +/- SD tok/s | MTP3 mean +/- SD tok/s | MTP3 delta | MTP3 accepted / drafted |
+| --- | ---: | ---: | ---: | ---: |
+| PP128 prefill | 1,008.948447 +/- 8.785989 | 994.713142 +/- 5.377957 | -1.410905% | n/a |
+| PP1024 prefill | 1,052.919599 +/- 3.684916 | 1,036.428662 +/- 1.921179 | -1.566210% | n/a |
+| PP4096 prefill | 1,044.019498 +/- 1.570377 | 1,030.375858 +/- 2.076544 | -1.306838% | n/a |
+| TG256 decode | 11.715064 +/- 0.062220 | **18.683347 +/- 0.073374** | **+59.481388%** | 610 / 1,995 (30.576441%) |
+| TG1024 decode | 11.681340 +/- 0.012898 | **21.221587 +/- 0.042279** | **+81.670823%** | 2,765 / 7,050 (39.219858%) |
+| PP2048 prefill | 1,036.622403 +/- 5.429863 | 1,024.551994 +/- 7.258133 | -1.164398% | n/a |
+| PP2048+TG256 decode | 11.610403 +/- 0.025611 | **36.614015 +/- 0.178323** | **+215.355257%** | 940 / 1,010 (93.069307%) |
+
+All 60 measured repetitions across the pair produced their exact requested
+output counts. Across the 15 measured MTP3 decode-bearing repetitions, the
+runtime recorded 3,355 speculative rounds, 10,055 drafted tokens, 4,315
+accepted tokens, and ten fallback steps: 42.913973% overall acceptance, with
+accepted-position totals 2,105/1,370/840. Acceptance was highly
+workload-dependent. In particular, the deterministic corpus continuation in
+the combined case accepted 93.069307% of proposals, so its 3.15x speedup is
+not a general chat-throughput estimate.
+
+The matched reports came from separate process lifetimes in fixed MTP0 then
+MTP3 order, not an alternated thermal bracket. NInfer reported 67.579258 and
+66.833233 GiB free after startup respectively; loaded GPU weights were
+18.976276 and 19.729072 GiB. The extra optimized draft head accounts for 14
+additional loaded tensors and approximately 0.753 GiB of weights.
+
+The fixed corpus supplies raw token IDs and exact lengths without a chat
+template, sampler-quality screen, or semantic validator. A separate greedy
+CLI probe therefore checked only internal speculative parity: MTP0 and MTP3
+produced the same eight token IDs and byte-identical stdout with
+`sha256:8bde74ff31522c083c52ecf8faaab10280142d15dd991b4d59b773d4a1d64d10`.
+The raw prompt and completion remain ignored and uncommitted. This one-sample
+match is not an external numerical oracle or a broad quality result.
+
+The MTP0 process lifetime had 854 telemetry samples, averaged 47.276897 W,
+peaked at 64.67 W and 83 °C; MTP3 had 480 samples, averaged 59.407958 W,
+peaked at 63.16 W and 80 °C. Sampling spans load, warmup, and measurement, so
+these are lifecycle resource bounds rather than case-scoped energy results.
+The exact ignored evidence root is
+`results/ninfer-qwen38-nvfp4-sm121a-20260817T200147Z/`; its `SHA256SUMS`
+ledger has
+`sha256:ee97458816895a5b6d625bde4201c68265251e95e95614b9d496c4ecb1003c21`
+and verifies the artifact inspection, gates, matched reports, logs, telemetry,
+and private parity artifacts. No NInfer source or branch was pushed upstream.
+The reusable exact port diff is preserved in this repository as
+[`patches/ninfer/5f45a26f-sm121a.patch`](../patches/ninfer/5f45a26f-sm121a.patch).
 
 ### Poolside Laguna XS 2.1: Official GGUF P1
 
