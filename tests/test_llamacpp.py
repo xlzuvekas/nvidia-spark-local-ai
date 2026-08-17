@@ -5,13 +5,14 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from bench.acquire import AcquisitionError, verify_exact_snapshot
 from bench.llamacpp_metrics import (
     aggregate_llamacpp_spec_decode_metrics,
     assess_llamacpp_mtp_evidence,
@@ -30,7 +31,13 @@ from bench.inventory import (
     Inventory,
     assess_model_availability,
 )
-from bench.manifest import ManifestError, load_models, load_suite, validate_model
+from bench.manifest import (
+    ManifestError,
+    ModelShard,
+    load_models,
+    load_suite,
+    validate_model,
+)
 from bench.report import summarize_run
 from bench.runner import _estimated_context_tokens, _request_arguments, execute_plan
 from bench.runtime import (
@@ -69,6 +76,414 @@ def _completed(
 
 
 class LlamaCppManifestTests(unittest.TestCase):
+    def test_laguna_xs21_profile_pins_official_q4_k_m_baseline(self) -> None:
+        model = load_models(ROOT / "manifests" / "models.toml")[
+            "laguna-xs21-33b-a3b-q4-k-m-llamacpp"
+        ]
+
+        self.assertEqual(model.backend, "llamacpp")
+        self.assertEqual(model.lifecycle, "subprocess")
+        self.assertEqual(model.source, "poolside/Laguna-XS-2.1-GGUF")
+        self.assertEqual(
+            model.revision,
+            "1a37c0a5fb8c7a18e6106decb6be6327d1b63fa6",
+        )
+        self.assertEqual(model.served_name, "poolside/Laguna-XS-2.1")
+        self.assertEqual(model.model_file, "Laguna-XS-2.1-Q4_K_M.gguf")
+        self.assertEqual(model.fetch_allow_patterns, (model.model_file,))
+        self.assertEqual(model.model_size_bytes, 20_274_300_032)
+        self.assertIsNone(model.weight_size_bytes)
+        self.assertEqual(
+            model.model_digest,
+            "sha256:1ac7079101fca5a6df8c5a7523a3c30ea7d1c0e4b1258090e7d6d4039287f6cb",
+        )
+        self.assertEqual(model.architecture, "laguna")
+        self.assertEqual(model.quantization, "q4_k_m")
+        self.assertEqual(model.runtime_parallel, 1)
+        self.assertEqual(model.max_context, 32_768)
+        self.assertEqual(model.native_context, 32_768)
+        self.assertEqual(model.tasks, ("chat", "json", "tools"))
+        self.assertEqual(
+            model.request_body_json,
+            '{"chat_template_kwargs":{"enable_thinking":false}}',
+        )
+        self.assertEqual(
+            model.args,
+            (
+                "--n-gpu-layers",
+                "all",
+                "--flash-attn",
+                "on",
+                "--fit",
+                "off",
+                "--batch-size",
+                "8192",
+                "--ubatch-size",
+                "512",
+                "--cache-type-k",
+                "q8_0",
+                "--cache-type-v",
+                "q8_0",
+                "--jinja",
+                "--reasoning",
+                "off",
+            ),
+        )
+        self.assertNotIn("--parallel", model.args)
+        self.assertFalse(llamacpp_mtp_requested(model.args))
+        self.assertFalse(llamacpp_dflash_requested(model.args))
+
+    def test_laguna_s21_profile_pins_complete_unsloth_split_q4(self) -> None:
+        model = load_models(ROOT / "manifests" / "models.toml")[
+            "laguna-s21-118b-a8b-ud-q4-k-xl-llamacpp"
+        ]
+        expected_shards = (
+            ModelShard(
+                path=(
+                    "UD-Q4_K_XL/"
+                    "Laguna-S-2.1-UD-Q4_K_XL-00001-of-00003.gguf"
+                ),
+                digest=(
+                    "sha256:0cfaf46917260d253773e5e2fab64329fa5c9c60fdf0db0"
+                    "f59f31205b5f5dd32"
+                ),
+                size_bytes=3_683_648,
+            ),
+            ModelShard(
+                path=(
+                    "UD-Q4_K_XL/"
+                    "Laguna-S-2.1-UD-Q4_K_XL-00002-of-00003.gguf"
+                ),
+                digest=(
+                    "sha256:2296102462b02edca70163121ac62bacf7a82078c0eafc916"
+                    "25c8822850769bf"
+                ),
+                size_bytes=49_971_821_312,
+            ),
+            ModelShard(
+                path=(
+                    "UD-Q4_K_XL/"
+                    "Laguna-S-2.1-UD-Q4_K_XL-00003-of-00003.gguf"
+                ),
+                digest=(
+                    "sha256:9150e2338f7690af29685b6a2ca621a8fda7ecf972467826"
+                    "6c4b04b7c6dd0ef3"
+                ),
+                size_bytes=23_419_667_040,
+            ),
+        )
+
+        self.assertEqual(model.backend, "llamacpp")
+        self.assertEqual(model.lifecycle, "subprocess")
+        self.assertEqual(model.source, "unsloth/Laguna-S-2.1-GGUF")
+        self.assertEqual(
+            model.revision,
+            "750f92f90cf54159c4d7a610cb7b3e74498e75c6",
+        )
+        self.assertEqual(model.served_name, "poolside/Laguna-S-2.1")
+        self.assertEqual(model.architecture, "laguna")
+        self.assertEqual(model.quantization, "ud-q4_k_xl")
+        self.assertEqual(model.model_shards, expected_shards)
+        self.assertEqual(
+            model.fetch_allow_patterns,
+            tuple(shard.path for shard in expected_shards),
+        )
+        self.assertIsNone(model.model_file)
+        self.assertIsNone(model.model_digest)
+        self.assertIsNone(model.model_size_bytes)
+        self.assertEqual(model.weight_file_count, 3)
+        self.assertEqual(model.weight_size_bytes, 73_395_172_000)
+        self.assertEqual(model.runtime_parallel, 1)
+        self.assertEqual(model.max_context, 32_768)
+        self.assertEqual(model.native_context, 32_768)
+        self.assertEqual(model.estimated_ram_gib, 96.0)
+        self.assertEqual(model.startup_timeout_s, 1_200)
+        self.assertEqual(model.tasks, ("chat", "json", "tools"))
+        self.assertEqual(
+            model.request_body_json,
+            '{"chat_template_kwargs":{"enable_thinking":false}}',
+        )
+        self.assertNotIn("--parallel", model.args)
+        self.assertFalse(llamacpp_mtp_requested(model.args))
+        self.assertFalse(llamacpp_dflash_requested(model.args))
+
+    def test_split_gguf_manifest_rejects_incomplete_or_unsafe_sets(self) -> None:
+        model = load_models(ROOT / "manifests" / "models.toml")[
+            "laguna-s21-118b-a8b-ud-q4-k-xl-llamacpp"
+        ]
+        shards = model.model_shards
+        invalid = (
+            replace(
+                model,
+                model_shards=shards[:1],
+                fetch_allow_patterns=(shards[0].path,),
+                weight_file_count=1,
+                weight_size_bytes=shards[0].size_bytes,
+            ),
+            replace(
+                model,
+                model_shards=(shards[0], shards[2], shards[1]),
+                fetch_allow_patterns=(
+                    shards[0].path,
+                    shards[2].path,
+                    shards[1].path,
+                ),
+            ),
+            replace(
+                model,
+                model_shards=(
+                    replace(shards[0], path="../first.gguf"),
+                    *shards[1:],
+                ),
+                fetch_allow_patterns=(
+                    "../first.gguf",
+                    *model.fetch_allow_patterns[1:],
+                ),
+            ),
+            replace(
+                model,
+                model_shards=(
+                    replace(
+                        shards[0],
+                        path=shards[0].path.replace("Laguna", "Laguna*", 1),
+                    ),
+                    *shards[1:],
+                ),
+                fetch_allow_patterns=(
+                    shards[0].path.replace("Laguna", "Laguna*", 1),
+                    *model.fetch_allow_patterns[1:],
+                ),
+            ),
+            replace(
+                model,
+                model_shards=(
+                    shards[0],
+                    replace(shards[1], digest="sha256:" + "0" * 63),
+                    shards[2],
+                ),
+            ),
+            replace(model, weight_size_bytes=model.weight_size_bytes - 1),
+            replace(model, fetch_allow_patterns=model.fetch_allow_patterns[:-1]),
+            replace(
+                model,
+                model_file="duplicate.gguf",
+                model_digest="sha256:" + "0" * 64,
+                model_size_bytes=1,
+            ),
+        )
+        for profile in invalid:
+            with self.subTest(profile=profile):
+                with self.assertRaises(ManifestError):
+                    validate_model(profile)
+
+        duplicate_basename = replace(
+            model,
+            model_shards=(
+                shards[0],
+                replace(
+                    shards[1],
+                    path="alternate/" + PurePosixPath(shards[0].path).name,
+                ),
+                shards[2],
+            ),
+        )
+        with self.assertRaisesRegex(ManifestError, "duplicate basenames"):
+            validate_model(duplicate_basename)
+
+    def test_split_gguf_snapshot_verifies_every_pin_without_index(self) -> None:
+        model = load_models(ROOT / "manifests" / "models.toml")[
+            "laguna-s21-118b-a8b-ud-q4-k-xl-llamacpp"
+        ]
+        payloads = (b"split header", b"middle weights", b"final weights")
+        fixture_shards = tuple(
+            replace(
+                shard,
+                digest="sha256:" + hashlib.sha256(payload).hexdigest(),
+                size_bytes=len(payload),
+            )
+            for shard, payload in zip(model.model_shards, payloads, strict=True)
+        )
+        revision = "d" * 40
+        model = replace(
+            model,
+            source="example/laguna",
+            revision=revision,
+            model_shards=fixture_shards,
+            fetch_allow_patterns=tuple(shard.path for shard in fixture_shards),
+            weight_file_count=len(fixture_shards),
+            weight_size_bytes=sum(shard.size_bytes for shard in fixture_shards),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            hub_root = Path(directory) / "hub"
+            snapshot = (
+                hub_root
+                / "models--example--laguna"
+                / "snapshots"
+                / revision
+            )
+            for shard, payload in zip(
+                fixture_shards, payloads, strict=True
+            ):
+                path = snapshot / shard.path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+            # Shared HF snapshots can retain a separately fetched quant. Exact
+            # shard verification and aggregates remain scoped to this profile.
+            (snapshot / "unrelated-q8.gguf").write_bytes(b"other quant")
+
+            evidence = verify_exact_snapshot(model, hub_root=hub_root)
+            self.assertEqual(evidence.weight_file_count, 3)
+            self.assertEqual(evidence.weight_index_count, 0)
+            self.assertEqual(evidence.referenced_shard_count, 3)
+            self.assertEqual(
+                evidence.exact_model_total_size_bytes,
+                sum(map(len, payloads)),
+            )
+            self.assertEqual(
+                tuple(shard.path for shard in evidence.exact_model_shards),
+                tuple(shard.path for shard in fixture_shards),
+            )
+            self.assertEqual(
+                tuple(shard.sha256 for shard in evidence.exact_model_shards),
+                tuple(shard.digest for shard in fixture_shards),
+            )
+
+            (snapshot / fixture_shards[-1].path).write_bytes(b"tampered")
+            with self.assertRaisesRegex(
+                AcquisitionError, "model shard (size|SHA-256) mismatch"
+            ):
+                verify_exact_snapshot(model, hub_root=hub_root)
+
+    def test_same_snapshot_sharded_sidecar_rejects_path_and_digest_aliases(
+        self,
+    ) -> None:
+        model = load_models(ROOT / "manifests" / "models.toml")[
+            "laguna-s21-118b-a8b-ud-q4-k-xl-llamacpp"
+        ]
+        root_shards = tuple(
+            replace(shard, path=PurePosixPath(shard.path).name)
+            for shard in model.model_shards
+        )
+        sidecar = replace(
+            model,
+            model_shards=root_shards,
+            fetch_allow_patterns=tuple(shard.path for shard in root_shards),
+            draft_source=model.source,
+            draft_revision=model.revision,
+            draft_model_file="dflash-Laguna-S-2.1.gguf",
+            draft_model_digest="sha256:" + "f" * 64,
+            draft_model_size_bytes=1,
+            args=(
+                *model.args,
+                "--spec-type",
+                "draft-dflash",
+                "--spec-draft-n-max",
+                "1",
+            ),
+        )
+        validate_model(sidecar)
+
+        with self.assertRaisesRegex(
+            ManifestError, "draft_model_file must differ from every target"
+        ):
+            validate_model(
+                replace(sidecar, draft_model_file=root_shards[1].path)
+            )
+        with self.assertRaisesRegex(
+            ManifestError, "draft_model_digest must differ from every target"
+        ):
+            validate_model(
+                replace(sidecar, draft_model_digest=root_shards[1].digest)
+            )
+
+    def test_nemotron35_profiles_are_an_exact_official_q4_mtp_pair(self) -> None:
+        models = load_models(ROOT / "manifests" / "models.toml")
+        baseline = models[
+            "nemotron35-lightning-30b-a3b-q4-0-llamacpp"
+        ]
+        mtp3 = models[
+            "nemotron35-lightning-30b-a3b-q4-0-llamacpp-mtp3"
+        ]
+
+        for model in (baseline, mtp3):
+            with self.subTest(model=model.id):
+                self.assertEqual(model.backend, "llamacpp")
+                self.assertEqual(model.lifecycle, "subprocess")
+                self.assertEqual(
+                    model.source,
+                    "ggml-org/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF",
+                )
+                self.assertEqual(
+                    model.revision,
+                    "9d425fe18d84ab04da6aabb757d2e2807083d054",
+                )
+                self.assertEqual(
+                    model.model_file,
+                    "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf",
+                )
+                self.assertEqual(model.model_size_bytes, 18_898_091_584)
+                self.assertEqual(
+                    model.model_digest,
+                    "sha256:61f87e75974e4b535dcdf9aad056541a9514f1dfa4538b463b081d19b7a00e3c",
+                )
+                self.assertEqual(model.runtime_parallel, 1)
+                self.assertEqual(model.max_context, 40_960)
+                self.assertEqual(model.native_context, 40_960)
+                self.assertEqual(model.tasks, ("chat", "json", "tools"))
+                self.assertEqual(
+                    model.request_body_json,
+                    '{"chat_template_kwargs":{"enable_thinking":false}}',
+                )
+                self.assertNotIn("--parallel", model.args)
+
+        self.assertFalse(llamacpp_mtp_requested(baseline.args))
+        self.assertTrue(llamacpp_mtp_requested(mtp3.args))
+        self.assertEqual(llamacpp_mtp_depth(mtp3.args), 3)
+        self.assertEqual(
+            mtp3.draft_source,
+            "ggml-org/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF",
+        )
+        self.assertEqual(mtp3.draft_revision, baseline.revision)
+        self.assertEqual(
+            mtp3.draft_model_file,
+            "mtp-NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf",
+        )
+        self.assertEqual(mtp3.draft_model_size_bytes, 1_155_907_520)
+        self.assertEqual(
+            mtp3.draft_model_digest,
+            "sha256:19f964207d5236dc88662686f00604a5494974c23fb04dd16a5ad7b2eebbd5b4",
+        )
+        self.assertEqual(
+            mtp3.args[len(baseline.args) :],
+            (
+                "--spec-type",
+                "draft-mtp",
+                "--spec-draft-n-max",
+                "3",
+                "--spec-draft-ngl",
+                "99",
+            ),
+        )
+        self.assertEqual(
+            replace(
+                mtp3,
+                id=baseline.id,
+                description=baseline.description,
+                architecture=baseline.architecture,
+                quantization=baseline.quantization,
+                estimated_ram_gib=baseline.estimated_ram_gib,
+                args=baseline.args,
+                draft_source=None,
+                draft_revision=None,
+                draft_model_file=None,
+                draft_model_digest=None,
+                draft_model_size_bytes=None,
+            ),
+            baseline,
+            "Nemotron 3.5 profiles drifted outside MTP identity and sidecar",
+        )
+
     def test_muse_glimmer_profiles_are_exact_matched_dflash_pair(self) -> None:
         models = load_models(ROOT / "manifests" / "models.toml")
         baseline = models["muse-glimmer-30b-ud-q4-k-xl-llamacpp"]
@@ -328,6 +743,28 @@ class LlamaCppManifestTests(unittest.TestCase):
             ),
             baseline,
             "Qwen3.6 matched profiles drifted outside identity text and MTP args",
+        )
+
+    def test_qwen36_p8_profile_is_exact_non_mtp_throughput_pair(self) -> None:
+        models = load_models(ROOT / "manifests" / "models.toml")
+        baseline = models["qwen36-35b-a3b-ud-q4-k-xl-llamacpp"]
+        p8 = models["qwen36-35b-a3b-ud-q4-k-xl-llamacpp-p8"]
+
+        self.assertEqual(p8.runtime_parallel, 8)
+        self.assertEqual(p8.max_context, 32_768)
+        self.assertEqual(p8.native_context, 262_144)
+        self.assertNotIn("--parallel", p8.args)
+        self.assertFalse(llamacpp_mtp_requested(p8.args))
+        self.assertEqual(
+            replace(
+                p8,
+                id=baseline.id,
+                description=baseline.description,
+                runtime_parallel=baseline.runtime_parallel,
+                max_context=baseline.max_context,
+            ),
+            baseline,
+            "Qwen3.6 p8 profile drifted outside identity text, parallelism, and context",
         )
 
     def test_repository_profiles_pin_runtime_and_each_gguf(self) -> None:
@@ -1286,6 +1723,7 @@ class LlamaCppRuntimeTests(unittest.TestCase):
             model_file=model_file,
             model_digest=_digest(gguf),
             model_size_bytes=gguf.stat().st_size,
+            model_shards=(),
             mmproj_file=mmproj.name if vision else None,
             mmproj_digest=_digest(mmproj) if vision else None,
             mmproj_size_bytes=mmproj.stat().st_size if vision else None,
@@ -1319,6 +1757,33 @@ class LlamaCppRuntimeTests(unittest.TestCase):
             ),
         )
         return gguf, model
+
+    def _sharded_fixture(
+        self, root: Path
+    ) -> tuple[tuple[Path, ...], SimpleNamespace]:
+        gguf, model = self._fixture(root)
+        payloads = (b"split header", b"middle weights", b"final weights")
+        shard_root = gguf.parent / "UD-Q4_K_XL"
+        paths = tuple(
+            shard_root
+            / f"Laguna-S-2.1-UD-Q4_K_XL-{index:05d}-of-00003.gguf"
+            for index in range(1, 4)
+        )
+        for path, payload in zip(paths, payloads, strict=True):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        model.model_file = None
+        model.model_digest = None
+        model.model_size_bytes = None
+        model.model_shards = tuple(
+            SimpleNamespace(
+                path=str(path.relative_to(gguf.parent)),
+                digest=_digest(path),
+                size_bytes=path.stat().st_size,
+            )
+            for path in paths
+        )
+        return paths, model
 
     def test_launch_is_exact_offline_loopback_and_secret_free(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1415,6 +1880,120 @@ class LlamaCppRuntimeTests(unittest.TestCase):
                 patch("bench.runtime.subprocess.Popen") as popen,
             ):
                 with self.assertRaisesRegex(RuntimeErrorWithContext, "GGUF SHA-256"):
+                    start_llamacpp(
+                        model,
+                        workspace=workspace,
+                        server_log_path=workspace / "run" / "server.log",
+                        process_state_path=workspace / "run" / "process.json",
+                    )
+            popen.assert_not_called()
+
+    def test_split_gguf_launch_verifies_all_shards_and_passes_first(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            paths, model = self._sharded_fixture(workspace)
+            process = Mock(pid=4245)
+            process.poll.return_value = None
+            with (
+                patch(
+                    "bench.runtime._run",
+                    side_effect=[
+                        _completed(stdout=model.runtime_revision + "\n"),
+                        _completed(),
+                    ],
+                ),
+                patch("bench.runtime._port_is_free", return_value=True),
+                patch(
+                    "bench.runtime.subprocess.Popen", return_value=process
+                ) as popen,
+                patch("bench.runtime._proc_start_ticks", return_value=123459),
+                patch("bench.runtime.os.getpgid", return_value=4245),
+                patch("bench.runtime.wait_for_llamacpp", return_value=5.0),
+            ):
+                server = start_llamacpp(
+                    model,
+                    workspace=workspace,
+                    server_log_path=workspace / "run" / "server.log",
+                    process_state_path=workspace / "run" / "process.json",
+                )
+
+            command = popen.call_args.args[0]
+            self.assertEqual(
+                command[command.index("--model") + 1], str(paths[0])
+            )
+            self.assertNotIn(str(paths[1]), command)
+            self.assertNotIn(str(paths[2]), command)
+            state = json.loads((workspace / "run" / "process.json").read_text())
+            self.assertEqual(len(state["model_shards"]), 3)
+            self.assertEqual(
+                tuple(shard["path"] for shard in state["model_shards"]),
+                tuple(map(str, paths)),
+            )
+            self.assertEqual(
+                state["model_total_size_bytes"],
+                sum(path.stat().st_size for path in paths),
+            )
+            assert server.native_provenance is not None
+            self.assertEqual(server.native_provenance["model_shard_count"], 3)
+            self.assertEqual(
+                tuple(
+                    shard["sha256"]
+                    for shard in server.native_provenance["model_shards"]
+                ),
+                tuple(shard.digest for shard in model.model_shards),
+            )
+            assert server.process_log is not None
+            server.process_log.close()
+
+    def test_split_gguf_late_shard_mismatch_fails_before_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            _, model = self._sharded_fixture(workspace)
+            model.model_shards[-1].digest = "sha256:" + "0" * 64
+            with (
+                patch(
+                    "bench.runtime._run",
+                    side_effect=[
+                        _completed(stdout=model.runtime_revision + "\n"),
+                        _completed(),
+                    ],
+                ),
+                patch("bench.runtime._port_is_free", return_value=True),
+                patch("bench.runtime.subprocess.Popen") as popen,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeErrorWithContext, "GGUF shard 3/3 SHA-256 mismatch"
+                ):
+                    start_llamacpp(
+                        model,
+                        workspace=workspace,
+                        server_log_path=workspace / "run" / "server.log",
+                        process_state_path=workspace / "run" / "process.json",
+                    )
+            popen.assert_not_called()
+
+    def test_split_gguf_symlink_escape_fails_before_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            paths, model = self._sharded_fixture(workspace)
+            escaped = workspace / "escaped.gguf"
+            escaped.write_bytes(paths[-1].read_bytes())
+            paths[-1].unlink()
+            paths[-1].symlink_to(escaped)
+            with (
+                patch(
+                    "bench.runtime._run",
+                    side_effect=[
+                        _completed(stdout=model.runtime_revision + "\n"),
+                        _completed(),
+                    ],
+                ),
+                patch("bench.runtime._port_is_free", return_value=True),
+                patch("bench.runtime.subprocess.Popen") as popen,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeErrorWithContext, "missing or escapes its repository"
+                ):
                     start_llamacpp(
                         model,
                         workspace=workspace,
@@ -1674,6 +2253,15 @@ class LlamaCppRuntimeTests(unittest.TestCase):
                 "runtime_binary_sha256": "sha256:" + "1" * 64,
                 "model_sha256": "sha256:" + "2" * 64,
                 "mmproj_sha256": "sha256:" + "3" * 64,
+                "model_shards": [
+                    {
+                        "sha256": "sha256:" + str(index) * 64,
+                        "size_bytes": index * 10,
+                    }
+                    for index in range(4, 7)
+                ],
+                "model_shard_count": 3,
+                "model_total_size_bytes": 150,
             }
             telemetry = Mock()
             server = SimpleNamespace(
@@ -1750,6 +2338,14 @@ class LlamaCppRuntimeTests(unittest.TestCase):
             self.assertEqual(
                 artifact_event["mmproj_sha256"], artifacts["mmproj_sha256"]
             )
+            self.assertEqual(artifact_event["model_shard_count"], 3)
+            self.assertEqual(artifact_event["model_total_size_bytes"], 150)
+            self.assertEqual(
+                artifact_event["model_shard_sha256s"],
+                [shard["sha256"] for shard in artifacts["model_shards"]],
+            )
+            self.assertNotIn("model_shards", artifact_event)
+            self.assertNotIn("model_path", artifact_event)
             self.assertEqual(summary["status"], "complete")
             self.assertEqual(
                 summary["artifact_validation"]["model_sha256"],
@@ -1759,6 +2355,20 @@ class LlamaCppRuntimeTests(unittest.TestCase):
                 summary["artifact_validation"]["mmproj_sha256"],
                 artifacts["mmproj_sha256"],
             )
+            self.assertEqual(
+                summary["artifact_validation"]["model_shard_count"], 3
+            )
+            self.assertEqual(
+                summary["artifact_validation"]["model_total_size_bytes"], 150
+            )
+            self.assertEqual(
+                summary["artifact_validation"]["model_shard_sha256s"],
+                [shard["sha256"] for shard in artifacts["model_shards"]],
+            )
+            self.assertNotIn(
+                "model_shards", summary["artifact_validation"]
+            )
+            self.assertNotIn("model_path", summary["artifact_validation"])
             server.stop.assert_called_once_with(keep_server=False)
 
     def test_recovery_uses_exact_state_and_keep_server_is_rejected(self) -> None:

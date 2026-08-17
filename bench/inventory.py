@@ -298,8 +298,22 @@ def assess_model_availability(
             snapshot = hf_snapshots.get(
                 (model.cache_dir, model.source, str(model.revision))
             )
-            model_file = snapshot / str(model.model_file) if snapshot else None
-            model_file_available = bool(model_file and model_file.is_file())
+            if model.model_shards:
+                model_shard_files = (
+                    tuple(snapshot / shard.path for shard in model.model_shards)
+                    if snapshot
+                    else ()
+                )
+                model_file_available = bool(
+                    snapshot
+                    and len(model_shard_files) == len(model.model_shards)
+                    and all(path.is_file() for path in model_shard_files)
+                )
+            else:
+                model_file = (
+                    snapshot / str(model.model_file) if snapshot else None
+                )
+                model_file_available = bool(model_file and model_file.is_file())
             mmproj_file = (
                 snapshot / str(model.mmproj_file)
                 if snapshot and model.mmproj_file
@@ -336,7 +350,11 @@ def assess_model_availability(
                 model.runtime_binary and Path(model.runtime_binary).is_file()
             )
             if not model_file_available:
-                details.append("exact GGUF file is not cached")
+                details.append(
+                    "exact GGUF shard set is not cached"
+                    if model.model_shards
+                    else "exact GGUF file is not cached"
+                )
             if not mmproj_available:
                 details.append("exact multimodal projector is not cached")
             if not draft_model_available:

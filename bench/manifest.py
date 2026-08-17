@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import tomllib
 from typing import Any, Iterable, Mapping
@@ -48,6 +48,10 @@ _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HF_REPOSITORY_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"
+)
+_LLAMACPP_SPLIT_GGUF_PATTERN = re.compile(
+    r"^(?P<prefix>.+)-(?P<ordinal>[0-9]+)-of-(?P<total>[0-9]+)\.gguf$",
+    re.IGNORECASE,
 )
 _LLAMACPP_RESERVED_ARGS = frozenset(
     {
@@ -205,12 +209,14 @@ _MODEL_KEYS = frozenset(
         "model_file",
         "model_digest",
         "model_size_bytes",
+        "model_shards",
         "mmproj_file",
         "mmproj_digest",
         "mmproj_size_bytes",
         "support_status",
     }
 )
+_MODEL_SHARD_KEYS = frozenset({"path", "digest", "size_bytes"})
 _CASE_KEYS = frozenset(
     {
         "id",
@@ -228,6 +234,15 @@ _CASE_KEYS = frozenset(
 
 class ManifestError(ValueError):
     """Raised when a manifest is malformed or internally inconsistent."""
+
+
+@dataclass(frozen=True, slots=True)
+class ModelShard:
+    """One ordered, exact GGUF shard within a pinned snapshot."""
+
+    path: str
+    digest: str
+    size_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,6 +291,7 @@ class ModelSpec:
     model_file: str | None = None
     model_digest: str | None = None
     model_size_bytes: int | None = None
+    model_shards: tuple[ModelShard, ...] = ()
     mmproj_file: str | None = None
     mmproj_digest: str | None = None
     mmproj_size_bytes: int | None = None
@@ -400,6 +416,7 @@ def load_models(path: str | Path) -> dict[str, ModelSpec]:
             model_size_bytes=_optional_int(
                 row, "model_size_bytes", context, default=None
             ),
+            model_shards=_model_shards(row, "model_shards", context),
             mmproj_file=_optional_string(row, "mmproj_file", context),
             mmproj_digest=_optional_string(row, "mmproj_digest", context),
             mmproj_size_bytes=_optional_int(
@@ -549,12 +566,49 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
                 f"{context}.source must be a Hugging Face repository ID "
                 "when a draft snapshot is configured"
             )
-        if (model.source, model.revision) == (
+        same_snapshot = (model.source, model.revision) == (
             model.draft_source,
             model.draft_revision,
+        )
+        target_model_paths = (
+            (model.model_file,)
+            if model.model_file is not None
+            else tuple(shard.path for shard in model.model_shards)
+        )
+        target_model_digests = (
+            (model.model_digest,)
+            if model.model_digest is not None
+            else tuple(shard.digest for shard in model.model_shards)
+        )
+        if (
+            same_snapshot
+            and model.backend == "llamacpp"
+            and model.draft_model_file in target_model_paths
         ):
             raise ManifestError(
-                f"{context}.draft snapshot must differ from the target snapshot"
+                f"{context}.draft_model_file must differ from every target "
+                "model artifact in a shared snapshot"
+            )
+        same_snapshot_sidecar = (
+            model.backend == "llamacpp"
+            and bool(target_model_paths)
+            and model.draft_model_file is not None
+            and model.draft_model_file not in target_model_paths
+        )
+        if same_snapshot and not same_snapshot_sidecar:
+            raise ManifestError(
+                f"{context}.draft snapshot must differ from the target snapshot "
+                "unless it pins a distinct llama.cpp sidecar file"
+            )
+        if (
+            same_snapshot
+            and same_snapshot_sidecar
+            and model.draft_model_digest is not None
+            and model.draft_model_digest in target_model_digests
+        ):
+            raise ManifestError(
+                f"{context}.draft_model_digest must differ from every target "
+                "model artifact digest in a shared snapshot"
             )
     elif any(
         value is not None
@@ -666,6 +720,29 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
         raise ManifestError(
             f"{context}.mmproj_* fields are supported only for llamacpp"
         )
+    model_file_fields = (
+        model.model_file,
+        model.model_digest,
+        model.model_size_bytes,
+    )
+    if any(value is not None for value in model_file_fields) and not all(
+        value is not None for value in model_file_fields
+    ):
+        raise ManifestError(
+            f"{context}.model_file, model_digest, and model_size_bytes "
+            "must be set together"
+        )
+    if model.model_shards and any(
+        value is not None for value in model_file_fields
+    ):
+        raise ManifestError(
+            f"{context}.model_shards cannot be combined with single-file "
+            "model_* fields"
+        )
+    if model.backend != "llamacpp" and model.model_shards:
+        raise ManifestError(
+            f"{context}.model_shards is supported only for llamacpp"
+        )
     if model.backend == "llamacpp":
         if model.lifecycle != "subprocess":
             raise ManifestError(
@@ -691,18 +768,40 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
             raise ManifestError(
                 f"{context}.revision must be a full lowercase commit SHA for llamacpp"
             )
-        if (
-            not model.model_file
-            or Path(model.model_file).name != model.model_file
-            or not model.model_file.lower().endswith(".gguf")
-        ):
+        has_model_file = model.model_file is not None
+        has_model_shards = bool(model.model_shards)
+        if has_model_file == has_model_shards:
             raise ManifestError(
-                f"{context}.model_file must be one safe GGUF filename"
+                f"{context} must configure exactly one of model_file or "
+                "model_shards for llamacpp"
             )
-        if model.model_size_bytes is None or model.model_size_bytes <= 0:
-            raise ManifestError(
-                f"{context}.model_size_bytes must be positive for llamacpp"
+        if has_model_file:
+            if (
+                Path(str(model.model_file)).name != model.model_file
+                or not model.model_file.lower().endswith(".gguf")
+            ):
+                raise ManifestError(
+                    f"{context}.model_file must be one safe GGUF filename"
+                )
+            if model.model_size_bytes is None or model.model_size_bytes <= 0:
+                raise ManifestError(
+                    f"{context}.model_size_bytes must be positive for llamacpp"
+                )
+        else:
+            _validate_model_shards(
+                model.model_shards, f"{context}.model_shards"
             )
+            shard_bytes = sum(shard.size_bytes for shard in model.model_shards)
+            if model.weight_size_bytes != shard_bytes:
+                raise ManifestError(
+                    f"{context}.weight_size_bytes must equal the exact GGUF "
+                    f"shard total {shard_bytes}"
+                )
+            if model.weight_file_count != len(model.model_shards):
+                raise ManifestError(
+                    f"{context}.weight_file_count must equal the exact GGUF "
+                    f"shard count {len(model.model_shards)}"
+                )
         has_draft_model = model.draft_model_file is not None
         if has_draft_model:
             if (
@@ -717,10 +816,10 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
                     f"{context}.draft_model_file requires a pinned draft snapshot"
                 )
             spec_types = _llamacpp_spec_types(model.args)
-            if spec_types != ("draft-dflash",):
+            if spec_types not in {("draft-dflash",), ("draft-mtp",)}:
                 raise ManifestError(
                     f"{context}.llamacpp draft sidecar requires exactly "
-                    "--spec-type draft-dflash"
+                    "--spec-type draft-dflash or draft-mtp"
                 )
             if _llamacpp_positive_option(model.args, "--spec-draft-n-max") is None:
                 raise ManifestError(
@@ -745,6 +844,12 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
                 raise ManifestError(
                     f"{context}.mmproj_file must differ from model_file"
                 )
+            if any(
+                model.mmproj_file == shard.path for shard in model.model_shards
+            ):
+                raise ManifestError(
+                    f"{context}.mmproj_file must differ from model_shards"
+                )
             if model.mmproj_size_bytes is None or model.mmproj_size_bytes <= 0:
                 raise ManifestError(
                     f"{context}.mmproj_size_bytes must be positive for llamacpp"
@@ -757,10 +862,15 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
             raise ManifestError(
                 f"{context}.mmproj artifact requires the vision task"
             )
+        target_files = (
+            tuple(shard.path for shard in model.model_shards)
+            if has_model_shards
+            else (str(model.model_file),)
+        )
         exact_files = (
-            (model.model_file, model.mmproj_file)
+            (*target_files, str(model.mmproj_file))
             if has_mmproj
-            else (model.model_file,)
+            else target_files
         )
         if model.fetch_allow_patterns != exact_files:
             raise ManifestError(
@@ -835,11 +945,9 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
     ):
         if digest is not None and not _DIGEST_PATTERN.fullmatch(digest):
             raise ManifestError(f"{context}.{name} must be a sha256 digest")
-    if model.backend == "llamacpp" and (
-        model.runtime_digest is None or model.model_digest is None
-    ):
+    if model.backend == "llamacpp" and model.runtime_digest is None:
         raise ManifestError(
-            f"{context}.runtime_digest and model_digest are required for llamacpp"
+            f"{context}.runtime_digest is required for llamacpp"
         )
     if model.backend not in {"transformers", "trtllm"}:
         _validate_endpoint(model.endpoint, f"{context}.endpoint")
@@ -1059,6 +1167,30 @@ def _string_tuple(
     return tuple(item.strip() for item in value)
 
 
+def _model_shards(
+    table: Mapping[str, Any], key: str, context: str
+) -> tuple[ModelShard, ...]:
+    if key not in table:
+        return ()
+    value = table[key]
+    if not isinstance(value, list) or not value:
+        raise ManifestError(f"{context}.{key} must be a non-empty array of tables")
+    shards: list[ModelShard] = []
+    for index, row in enumerate(value):
+        shard_context = f"{context}.{key}[{index}]"
+        if not isinstance(row, dict):
+            raise ManifestError(f"{shard_context} must be a table")
+        _reject_unknown(row, _MODEL_SHARD_KEYS, shard_context)
+        shards.append(
+            ModelShard(
+                path=_required_string(row, "path", shard_context),
+                digest=_required_string(row, "digest", shard_context),
+                size_bytes=_required_int(row, "size_bytes", shard_context),
+            )
+        )
+    return tuple(shards)
+
+
 def _validate_id(value: str, context: str) -> None:
     if not isinstance(value, str) or not _ID_PATTERN.fullmatch(value):
         raise ManifestError(
@@ -1102,6 +1234,93 @@ def _validate_fetch_patterns(values: tuple[str, ...], context: str) -> None:
             or unsafe_character
         ):
             raise ManifestError(f"{context} contains unsafe pattern {pattern!r}")
+
+
+def _validate_model_shards(
+    shards: tuple[ModelShard, ...], context: str
+) -> None:
+    if len(shards) < 2:
+        raise ManifestError(f"{context} must contain at least two split GGUF files")
+    seen_paths: set[str] = set()
+    seen_basenames: set[str] = set()
+    expected_parent: PurePosixPath | None = None
+    expected_prefix: str | None = None
+    expected_total: int | None = None
+    expected_width: int | None = None
+    for index, shard in enumerate(shards, start=1):
+        shard_context = f"{context}[{index - 1}]"
+        if not isinstance(shard, ModelShard):
+            raise ManifestError(f"{shard_context} must be a ModelShard")
+        path = shard.path
+        if not isinstance(path, str) or not path or path != path.strip():
+            raise ManifestError(f"{shard_context}.path must be a non-empty string")
+        if (
+            path.startswith(("-", "/", "\\", "~"))
+            or "\\" in path
+            or ":" in path
+            or any(character in path for character in "*?[")
+            or any(ord(character) < 32 for character in path)
+        ):
+            raise ManifestError(
+                f"{shard_context}.path must be a safe relative snapshot path"
+            )
+        relative = PurePosixPath(path)
+        if relative.is_absolute() or any(
+            part in {"", ".", ".."} for part in relative.parts
+        ):
+            raise ManifestError(
+                f"{shard_context}.path must be a safe relative snapshot path"
+            )
+        if path in seen_paths:
+            raise ManifestError(f"{context} must not contain duplicate paths")
+        if relative.name in seen_basenames:
+            raise ManifestError(f"{context} must not contain duplicate basenames")
+        seen_paths.add(path)
+        seen_basenames.add(relative.name)
+        if not _DIGEST_PATTERN.fullmatch(shard.digest):
+            raise ManifestError(f"{shard_context}.digest must be a sha256 digest")
+        if (
+            isinstance(shard.size_bytes, bool)
+            or not isinstance(shard.size_bytes, int)
+            or shard.size_bytes <= 0
+        ):
+            raise ManifestError(f"{shard_context}.size_bytes must be positive")
+        match = _LLAMACPP_SPLIT_GGUF_PATTERN.fullmatch(relative.name)
+        if match is None:
+            raise ManifestError(
+                f"{shard_context}.path must use canonical "
+                "<name>-<index>-of-<total>.gguf split naming"
+            )
+        ordinal_text = match.group("ordinal")
+        total_text = match.group("total")
+        ordinal = int(ordinal_text)
+        total = int(total_text)
+        if total < 2 or ordinal != index:
+            raise ManifestError(
+                f"{context} must be ordered without missing shard indexes"
+            )
+        if len(ordinal_text) != len(total_text):
+            raise ManifestError(
+                f"{shard_context}.path split indexes must use equal widths"
+            )
+        if expected_parent is None:
+            expected_parent = relative.parent
+            expected_prefix = match.group("prefix")
+            expected_total = total
+            expected_width = len(total_text)
+        elif (
+            relative.parent != expected_parent
+            or match.group("prefix") != expected_prefix
+            or total != expected_total
+            or len(total_text) != expected_width
+        ):
+            raise ManifestError(
+                f"{context} must describe one canonical split GGUF set"
+            )
+    if expected_total != len(shards):
+        raise ManifestError(
+            f"{context} must include every shard declared by the split total"
+        )
 
 
 def _llamacpp_spec_types(arguments: Iterable[Any]) -> tuple[str, ...]:

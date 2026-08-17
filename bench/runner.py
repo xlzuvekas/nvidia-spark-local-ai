@@ -1788,6 +1788,23 @@ def execute_plan(
                         artifact_event["draft_model_sha256"] = (
                             validated_llamacpp_artifacts["draft_model_sha256"]
                         )
+                    model_shards = validated_llamacpp_artifacts.get(
+                        "model_shards"
+                    )
+                    if model_shards:
+                        artifact_event.update(
+                            {
+                                "model_shard_count": len(model_shards),
+                                "model_total_size_bytes": sum(
+                                    int(shard["size_bytes"])
+                                    for shard in model_shards
+                                ),
+                                "model_shard_sha256s": [
+                                    str(shard["sha256"])
+                                    for shard in model_shards
+                                ],
+                            }
+                        )
                     journal.append(artifact_event)
                 telemetry.set_phase("server_startup")
                 failure_stage = "server_start"

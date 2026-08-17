@@ -36,6 +36,15 @@ class AcquisitionError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class ModelShardVerification:
+    """Verified evidence for one manifest-pinned split GGUF file."""
+
+    path: str
+    size_bytes: int
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class SnapshotVerification:
     """Evidence that one exact cached snapshot is locally usable."""
 
@@ -49,6 +58,8 @@ class SnapshotVerification:
     exact_model_file: str | None = None
     exact_model_size_bytes: int | None = None
     exact_model_sha256: str | None = None
+    exact_model_shards: tuple[ModelShardVerification, ...] = ()
+    exact_model_total_size_bytes: int | None = None
     exact_mmproj_file: str | None = None
     exact_mmproj_size_bytes: int | None = None
     exact_mmproj_sha256: str | None = None
@@ -226,12 +237,52 @@ def verify_exact_snapshot(
             referenced_shards.add(shard_path)
             weight_files.add(shard_path)
 
+    exact_model_shards: list[ModelShardVerification] = []
+    manifest_shard_paths: set[Path] = set()
+    if not draft and model.model_shards:
+        for shard in model.model_shards:
+            shard_path = snapshot.joinpath(*PurePosixPath(shard.path).parts)
+            shard_target = _verified_cache_file(
+                shard_path,
+                repository_resolved,
+                label="manifest-pinned model shard",
+            )
+            actual_size = shard_target.stat().st_size
+            if actual_size != shard.size_bytes:
+                raise AcquisitionError(
+                    "Manifest-pinned model shard size mismatch: "
+                    f"{shard.path}: expected {shard.size_bytes}, got {actual_size}"
+                )
+            actual_digest = _sha256_file(shard_target)
+            if actual_digest != shard.digest:
+                raise AcquisitionError(
+                    "Manifest-pinned model shard SHA-256 mismatch: "
+                    f"{shard.path}: expected {shard.digest}, got {actual_digest}"
+                )
+            manifest_shard_paths.add(shard_path)
+            weight_files.add(shard_path)
+            exact_model_shards.append(
+                ModelShardVerification(
+                    path=shard.path,
+                    size_bytes=actual_size,
+                    sha256=actual_digest,
+                )
+            )
+
     if not weight_files:
         raise AcquisitionError(
             f"Exact snapshot contains no recognized model weight files: {snapshot}"
         )
-    _verify_sharded_layouts(weight_files, referenced_shards, weight_index_count)
-    weight_bytes = _unique_file_bytes(weight_files, repository_resolved)
+    verified_weight_files = manifest_shard_paths or weight_files
+    _verify_sharded_layouts(
+        verified_weight_files,
+        referenced_shards,
+        weight_index_count,
+        manifest_shards=manifest_shard_paths,
+    )
+    weight_bytes = _unique_file_bytes(
+        verified_weight_files, repository_resolved
+    )
     expected_weight_bytes = (
         model.draft_weight_size_bytes if draft else model.weight_size_bytes
     )
@@ -243,11 +294,12 @@ def verify_exact_snapshot(
     if (
         not draft
         and model.weight_file_count is not None
-        and len(weight_files) != model.weight_file_count
+        and len(verified_weight_files) != model.weight_file_count
     ):
         raise AcquisitionError(
             "Manifest-pinned weight file count mismatch: "
-            f"expected {model.weight_file_count}, got {len(weight_files)}"
+            f"expected {model.weight_file_count}, "
+            f"got {len(verified_weight_files)}"
         )
     exact_model_file: str | None = None
     exact_model_size_bytes: int | None = None
@@ -325,12 +377,18 @@ def verify_exact_snapshot(
         snapshot_bytes=total_bytes,
         weight_bytes=weight_bytes,
         file_count=len(files),
-        weight_file_count=len(weight_files),
+        weight_file_count=len(verified_weight_files),
         weight_index_count=weight_index_count,
-        referenced_shard_count=len(referenced_shards),
+        referenced_shard_count=len(referenced_shards | manifest_shard_paths),
         exact_model_file=exact_model_file,
         exact_model_size_bytes=exact_model_size_bytes,
         exact_model_sha256=exact_model_sha256,
+        exact_model_shards=tuple(exact_model_shards),
+        exact_model_total_size_bytes=(
+            sum(shard.size_bytes for shard in exact_model_shards)
+            if exact_model_shards
+            else None
+        ),
         exact_mmproj_file=exact_mmproj_file,
         exact_mmproj_size_bytes=exact_mmproj_size_bytes,
         exact_mmproj_sha256=exact_mmproj_sha256,
@@ -478,6 +536,8 @@ def _verify_sharded_layouts(
     weight_files: set[Path],
     referenced_shards: set[Path],
     weight_index_count: int,
+    *,
+    manifest_shards: set[Path] | None = None,
 ) -> None:
     groups: dict[tuple[Path, str, int, str], set[int]] = {}
     sharded_files: set[Path] = set()
@@ -495,9 +555,13 @@ def _verify_sharded_layouts(
 
     if not sharded_files:
         return
-    if weight_index_count == 0:
-        raise AcquisitionError("Sharded model weights require a verified weight index")
-    unreferenced = sorted(sharded_files - referenced_shards)
+    pinned_shards = manifest_shards or set()
+    if weight_index_count == 0 and not pinned_shards:
+        raise AcquisitionError(
+            "Sharded model weights require a verified weight index or exact "
+            "manifest shard pins"
+        )
+    unreferenced = sorted(sharded_files - referenced_shards - pinned_shards)
     if unreferenced:
         raise AcquisitionError(
             f"Sharded model weight is not referenced by an index: {unreferenced[0]}"

@@ -6,7 +6,8 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
 import secrets
 import signal
 import socket
@@ -36,6 +37,11 @@ _NATIVE_ENV_ALLOWLIST = frozenset(
         "TMPDIR",
     }
 )
+_SPLIT_GGUF_PATTERN = re.compile(
+    r"^(?P<prefix>.+)-(?P<ordinal>[0-9]+)-of-(?P<total>[0-9]+)\.gguf$",
+    re.IGNORECASE,
+)
+_SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class RuntimeErrorWithContext(RuntimeError):
@@ -179,8 +185,27 @@ def _validate_llamacpp_snapshot_artifact(
     expected_digest: str,
     label: str,
 ) -> dict[str, Any]:
-    artifact_path = snapshot / filename
+    if (
+        not filename
+        or filename.startswith(("-", "/", "\\", "~"))
+        or "\\" in filename
+        or ":" in filename
+        or any(ord(character) < 32 for character in filename)
+    ):
+        raise RuntimeErrorWithContext(
+            f"Exact cached {label} uses an unsafe snapshot path: {filename!r}"
+        )
+    relative = PurePosixPath(filename)
+    if relative.is_absolute() or any(
+        part in {"", ".", ".."} for part in relative.parts
+    ):
+        raise RuntimeErrorWithContext(
+            f"Exact cached {label} uses an unsafe snapshot path: {filename!r}"
+        )
+    artifact_path = snapshot.joinpath(*relative.parts)
     try:
+        snapshot_resolved = snapshot.resolve(strict=True)
+        artifact_path.parent.resolve(strict=True).relative_to(snapshot_resolved)
         artifact_target = artifact_path.resolve(strict=True)
         artifact_target.relative_to(repository_resolved)
     except (OSError, ValueError) as error:
@@ -209,6 +234,96 @@ def _validate_llamacpp_snapshot_artifact(
         "sha256": actual_digest,
         "size_bytes": actual_size,
     }
+
+
+def _validate_runtime_model_shards(shards: tuple[Any, ...]) -> None:
+    if len(shards) < 2:
+        raise RuntimeErrorWithContext(
+            "Split GGUF provenance must contain at least two shards"
+        )
+    seen_paths: set[str] = set()
+    seen_basenames: set[str] = set()
+    expected_parent: PurePosixPath | None = None
+    expected_prefix: str | None = None
+    expected_total: int | None = None
+    expected_width: int | None = None
+    for index, shard in enumerate(shards, start=1):
+        path = getattr(shard, "path", None)
+        digest = getattr(shard, "digest", None)
+        size_bytes = getattr(shard, "size_bytes", None)
+        if not isinstance(path, str) or not path or path != path.strip():
+            raise RuntimeErrorWithContext(
+                "Split GGUF provenance contains an invalid shard path"
+            )
+        if (
+            path.startswith(("-", "/", "\\", "~"))
+            or "\\" in path
+            or ":" in path
+            or any(ord(character) < 32 for character in path)
+        ):
+            raise RuntimeErrorWithContext(
+                "Split GGUF provenance contains an unsafe shard path"
+            )
+        relative = PurePosixPath(path)
+        if relative.is_absolute() or any(
+            part in {"", ".", ".."} for part in path.split("/")
+        ):
+            raise RuntimeErrorWithContext(
+                "Split GGUF provenance contains an unsafe shard path"
+            )
+        if not isinstance(digest, str) or not _SHA256_PATTERN.fullmatch(digest):
+            raise RuntimeErrorWithContext(
+                "Split GGUF provenance must pin every shard SHA-256"
+            )
+        if (
+            isinstance(size_bytes, bool)
+            or not isinstance(size_bytes, int)
+            or size_bytes <= 0
+        ):
+            raise RuntimeErrorWithContext(
+                "Split GGUF provenance must pin every shard byte size"
+            )
+        match = _SPLIT_GGUF_PATTERN.fullmatch(relative.name)
+        if (
+            not path
+            or path in seen_paths
+            or relative.name in seen_basenames
+            or match is None
+        ):
+            raise RuntimeErrorWithContext(
+                "Split GGUF provenance contains a duplicate or invalid shard path"
+            )
+        seen_paths.add(path)
+        seen_basenames.add(relative.name)
+        ordinal_text = match.group("ordinal")
+        total_text = match.group("total")
+        total = int(total_text)
+        if (
+            int(ordinal_text) != index
+            or total < 2
+            or len(ordinal_text) != len(total_text)
+        ):
+            raise RuntimeErrorWithContext(
+                "Split GGUF provenance is unordered or has a missing shard index"
+            )
+        if expected_parent is None:
+            expected_parent = relative.parent
+            expected_prefix = match.group("prefix")
+            expected_total = total
+            expected_width = len(total_text)
+        elif (
+            relative.parent != expected_parent
+            or match.group("prefix") != expected_prefix
+            or total != expected_total
+            or len(total_text) != expected_width
+        ):
+            raise RuntimeErrorWithContext(
+                "Split GGUF provenance does not describe one canonical shard set"
+            )
+    if expected_total != len(shards):
+        raise RuntimeErrorWithContext(
+            "Split GGUF provenance omits one or more declared shards"
+        )
 
 
 def validate_llamacpp_artifacts(model: Any, *, workspace: Path) -> dict[str, Any]:
@@ -269,14 +384,35 @@ def validate_llamacpp_artifacts(model: Any, *, workspace: Path) -> dict[str, Any
         raise RuntimeErrorWithContext(
             f"Exact cached GGUF snapshot is missing or escapes its repository: {snapshot}"
         ) from error
-    model_artifact = _validate_llamacpp_snapshot_artifact(
-        repository_resolved=repository_resolved,
-        snapshot=snapshot,
-        filename=str(model.model_file),
-        expected_size=int(model.model_size_bytes),
-        expected_digest=str(model.model_digest),
-        label="GGUF",
-    )
+    configured_shards = tuple(getattr(model, "model_shards", ()))
+    model_shards: list[dict[str, Any]] = []
+    if configured_shards:
+        _validate_runtime_model_shards(configured_shards)
+        for index, shard in enumerate(configured_shards, start=1):
+            artifact = _validate_llamacpp_snapshot_artifact(
+                repository_resolved=repository_resolved,
+                snapshot=snapshot,
+                filename=str(shard.path),
+                expected_size=int(shard.size_bytes),
+                expected_digest=str(shard.digest),
+                label=f"GGUF shard {index}/{len(configured_shards)}",
+            )
+            model_shards.append(
+                {
+                    "relative_path": str(shard.path),
+                    **artifact,
+                }
+            )
+        model_artifact = model_shards[0]
+    else:
+        model_artifact = _validate_llamacpp_snapshot_artifact(
+            repository_resolved=repository_resolved,
+            snapshot=snapshot,
+            filename=str(model.model_file),
+            expected_size=int(model.model_size_bytes),
+            expected_digest=str(model.model_digest),
+            label="GGUF",
+        )
     result = {
         "runtime_binary": str(binary),
         "runtime_binary_sha256": binary_digest,
@@ -290,6 +426,16 @@ def validate_llamacpp_artifacts(model: Any, *, workspace: Path) -> dict[str, Any
         "model_source": str(model.source),
         "model_revision": str(model.revision),
     }
+    if model_shards:
+        result.update(
+            {
+                "model_shards": model_shards,
+                "model_shard_count": len(model_shards),
+                "model_total_size_bytes": sum(
+                    int(shard["size_bytes"]) for shard in model_shards
+                ),
+            }
+        )
     mmproj_file = getattr(model, "mmproj_file", None)
     if mmproj_file is not None:
         mmproj_artifact = _validate_llamacpp_snapshot_artifact(
@@ -1400,6 +1546,15 @@ def start_llamacpp(
             "base_url": str(model.endpoint),
             "argv": command,
         }
+        if artifacts.get("model_shards"):
+            state.update(
+                {
+                    "model_shards": artifacts["model_shards"],
+                    "model_total_size_bytes": artifacts[
+                        "model_total_size_bytes"
+                    ],
+                }
+            )
         if artifacts.get("mmproj_path"):
             state.update(
                 {

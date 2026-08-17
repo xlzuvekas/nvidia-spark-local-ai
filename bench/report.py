@@ -754,6 +754,9 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
                         "elapsed_s",
                         "runtime_binary_sha256",
                         "model_sha256",
+                        "model_shard_count",
+                        "model_total_size_bytes",
+                        "model_shard_sha256s",
                         "mmproj_sha256",
                         "draft_model_sha256",
                     )

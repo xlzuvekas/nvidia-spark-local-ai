@@ -317,6 +317,182 @@ args = [
 ]
 
 [[models]]
+id = "nemotron35-lightning-30b-a3b-q4-0-llamacpp"
+description = "Official Nemotron 3.5 Lightning Q4_0 GGUF baseline on pinned llama.cpp, single-slot and no speculation."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "ggml-org/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF"
+revision = "9d425fe18d84ab04da6aabb757d2e2807083d054"
+served_name = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B"
+tasks = ["chat", "json", "tools"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "nemotron-h-moe"
+quantization = "q4_0"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf"]
+model_file = "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf"
+model_digest = "sha256:61f87e75974e4b535dcdf9aad056541a9514f1dfa4538b463b081d19b7a00e3c"
+model_size_bytes = 18898091584
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 1
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 40960
+native_context = 40960
+startup_timeout_s = 600
+estimated_ram_gib = 48.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+]
+
+[[models]]
+id = "nemotron35-lightning-30b-a3b-q4-0-llamacpp-mtp3"
+description = "Matched Nemotron 3.5 Lightning Q4_0 profile with its exact Q4_0 MTP sidecar and maximum draft length three."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "ggml-org/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF"
+revision = "9d425fe18d84ab04da6aabb757d2e2807083d054"
+served_name = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B"
+tasks = ["chat", "json", "tools"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "nemotron-h-moe+mtp3"
+quantization = "q4_0+mtp-q4_0"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf"]
+model_file = "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf"
+model_digest = "sha256:61f87e75974e4b535dcdf9aad056541a9514f1dfa4538b463b081d19b7a00e3c"
+model_size_bytes = 18898091584
+draft_source = "ggml-org/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF"
+draft_revision = "9d425fe18d84ab04da6aabb757d2e2807083d054"
+draft_model_file = "mtp-NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf"
+draft_model_digest = "sha256:19f964207d5236dc88662686f00604a5494974c23fb04dd16a5ad7b2eebbd5b4"
+draft_model_size_bytes = 1155907520
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 1
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 40960
+native_context = 40960
+startup_timeout_s = 600
+estimated_ram_gib = 52.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+  "--spec-type", "draft-mtp",
+  "--spec-draft-n-max", "3",
+  "--spec-draft-ngl", "99",
+]
+
+[[models]]
+id = "laguna-xs21-33b-a3b-q4-k-m-llamacpp"
+description = "Official Poolside Laguna XS 2.1 Q4_K_M GGUF baseline on pinned llama.cpp, single-slot at 32K and without speculation."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "poolside/Laguna-XS-2.1-GGUF"
+revision = "1a37c0a5fb8c7a18e6106decb6be6327d1b63fa6"
+served_name = "poolside/Laguna-XS-2.1"
+tasks = ["chat", "json", "tools"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "laguna"
+quantization = "q4_k_m"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Laguna-XS-2.1-Q4_K_M.gguf"]
+model_file = "Laguna-XS-2.1-Q4_K_M.gguf"
+model_digest = "sha256:1ac7079101fca5a6df8c5a7523a3c30ea7d1c0e4b1258090e7d6d4039287f6cb"
+model_size_bytes = 20274300032
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 1
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 32768
+startup_timeout_s = 600
+estimated_ram_gib = 48.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+]
+
+[[models]]
+id = "laguna-s21-118b-a8b-ud-q4-k-xl-llamacpp"
+description = "Unsloth Laguna S 2.1 118B-A8B Dynamic 2.0 UD-Q4_K_XL split-GGUF baseline on pinned llama.cpp, single-slot at 32K and without speculation."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Laguna-S-2.1-GGUF"
+revision = "750f92f90cf54159c4d7a610cb7b3e74498e75c6"
+served_name = "poolside/Laguna-S-2.1"
+tasks = ["chat", "json", "tools"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "laguna"
+quantization = "ud-q4_k_xl"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = [
+  "UD-Q4_K_XL/Laguna-S-2.1-UD-Q4_K_XL-00001-of-00003.gguf",
+  "UD-Q4_K_XL/Laguna-S-2.1-UD-Q4_K_XL-00002-of-00003.gguf",
+  "UD-Q4_K_XL/Laguna-S-2.1-UD-Q4_K_XL-00003-of-00003.gguf",
+]
+model_shards = [
+  { path = "UD-Q4_K_XL/Laguna-S-2.1-UD-Q4_K_XL-00001-of-00003.gguf", digest = "sha256:0cfaf46917260d253773e5e2fab64329fa5c9c60fdf0db0f59f31205b5f5dd32", size_bytes = 3683648 },
+  { path = "UD-Q4_K_XL/Laguna-S-2.1-UD-Q4_K_XL-00002-of-00003.gguf", digest = "sha256:2296102462b02edca70163121ac62bacf7a82078c0eafc91625c8822850769bf", size_bytes = 49971821312 },
+  { path = "UD-Q4_K_XL/Laguna-S-2.1-UD-Q4_K_XL-00003-of-00003.gguf", digest = "sha256:9150e2338f7690af29685b6a2ca621a8fda7ecf9724678266c4b04b7c6dd0ef3", size_bytes = 23419667040 },
+]
+weight_file_count = 3
+weight_size_bytes = 73395172000
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 1
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 32768
+startup_timeout_s = 1200
+estimated_ram_gib = 96.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+]
+
+[[models]]
 id = "qwen36-35b-a3b-ud-q4-k-xl-llamacpp"
 description = "Single-slot 262K-context Unsloth Qwen3.6 MoE Q4_K_XL GGUF without speculation."
 support_status = "spark_other_backend"
@@ -339,6 +515,45 @@ runtime_parallel = 1
 runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
 runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
 max_context = 262144
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 100.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+]
+
+[[models]]
+id = "qwen36-35b-a3b-ud-q4-k-xl-llamacpp-p8"
+description = "Eight-slot 32K-context Unsloth Qwen3.6 MoE Q4_K_XL GGUF throughput profile without speculation."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+revision = "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d"
+served_name = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "qwen35moe"
+quantization = "ud-q4_k_xl"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1"
+model_size_bytes = 22853663008
+runtime_binary = "/home/xlz/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 8
+runtime_source_dir = "/home/xlz/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
 native_context = 262144
 startup_timeout_s = 600
 estimated_ram_gib = 100.0

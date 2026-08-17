@@ -4,13 +4,40 @@ Reproducible local inference experiments on NVIDIA DGX Spark / GB10. This
 repository records the configurations that worked, the ones that did not, and
 the measurements behind each conclusion.
 
-**Start with the [latest overnight report](docs/benchmark-results-2026-08-17.md).**
-It records the completed Unsloth Qwen3.6 and Qwen3.8 GGUF, SGLang/DSpark, and
-Muse-Glimmer/DFlash experiments with their semantic gates and exact evidence
-IDs. The preceding
+**Start with the [current MoE landscape and measurements](docs/moe-landscape-2026-08-17.md).**
+It covers the sparse-model speed hypothesis, locally measured candidates,
+runtime-readiness limits, and the 118B-A8B memory result. The broader
+[overnight report](docs/benchmark-results-2026-08-17.md) records the completed
+Unsloth Qwen3.6 and Qwen3.8 GGUF, SGLang/DSpark, and Muse-Glimmer/DFlash
+experiments with their semantic gates and exact evidence IDs. The preceding
 [full 2026-08-16 capability campaign](docs/benchmark-results-2026-08-16.md)
 reports successful, partial, incompatible, and repaired paths with exact model
 revisions, image digests, telemetry, and retained local evidence IDs.
+
+## Current MoE findings
+
+- In a same-binary, kernel-only TG1024 panel, the tested sparse 30--35B
+  artifacts reached 61.563--82.559 tok/s, versus 10.965 tok/s for dense
+  Qwen3.8 and 11.763 tok/s for dense Muse-Glimmer. Separate serving-profile
+  results below use different geometries and are not one interchangeable
+  leaderboard.
+- Nemotron 3.5 Lightning's valid MTP3 D128 result improved 63.73% over its
+  matched baseline, although MTP3 was slower on every tested prefill tier.
+  Laguna XS 2.1 reached 77.058 tok/s at valid P1 D1024. Qwen3.6's eight-slot
+  P8 profile reached 184.899 aggregate tok/s at C8 with 75/75 concurrency
+  requests valid.
+- Laguna S 2.1 118B-A8B fit as the tested three-shard Unsloth Q4 in one 32K
+  slot and reached 22.817 tok/s at valid D256. Its P1 C1--C8 cases queued and
+  stayed around 22.7 aggregate tok/s; core strict JSON passed 1/5 and the
+  exact-answer check passed 3/4, so this is not a broad quality claim.
+- Stock NInfer did not admit GB10's SM121/CUDA environment. A bounded
+  experimental SM121a eager port raised MTP3 TG256 from 67.821 to 123.231
+  tok/s and TG1024 from 67.692 to 140.190 tok/s. That result used no CUDA
+  graphs and establishes neither upstream support nor reference-quality
+  correctness.
+- The public G9v3 39B-A5B preview remains admission-only: its custom
+  architecture lacks a validated path in the pinned optimized runtimes, so no
+  throughput headline is reported.
 
 ## Overnight findings
 

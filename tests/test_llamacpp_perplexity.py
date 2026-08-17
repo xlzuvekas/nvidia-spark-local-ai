@@ -110,6 +110,40 @@ class LlamaCppPerplexityTests(unittest.TestCase):
         self.assertEqual(args.chunks, 7)
         self.assertEqual(args.timeout, 900.0)
 
+    def test_split_gguf_profile_fails_closed_before_worker_setup(self) -> None:
+        model = _model(
+            model_file=None,
+            model_digest=None,
+            model_size_bytes=None,
+            model_shards=(
+                SimpleNamespace(
+                    path="model-00001-of-00002.gguf",
+                    digest="sha256:" + "1" * 64,
+                    size_bytes=8,
+                ),
+                SimpleNamespace(
+                    path="model-00002-of-00002.gguf",
+                    digest="sha256:" + "2" * 64,
+                    size_bytes=8,
+                ),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(
+                LlamaCppPerplexityError,
+                "does not yet support split GGUF profiles",
+            ):
+                run_llamacpp_perplexity(
+                    model=model,
+                    workspace=root,
+                    results_root=root / "results",
+                    dataset=root / "dataset.txt",
+                    chunks=1,
+                    timeout_s=60,
+                )
+            self.assertFalse((root / "results").exists())
+
     def test_parser_accepts_terminal_ppl_and_rejects_malformed_output(self) -> None:
         self.assertEqual(
             parse_final_perplexity(

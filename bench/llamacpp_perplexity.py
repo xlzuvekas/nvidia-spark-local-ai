@@ -120,6 +120,11 @@ def _validate_parameters(
 
 
 def _validate_profile_shape(model: Any) -> None:
+    if getattr(model, "model_shards", ()):
+        raise LlamaCppPerplexityError(
+            "llama.cpp perplexity does not yet support split GGUF profiles; "
+            "use the server benchmark path or a single-file profile"
+        )
     source_dir = str(getattr(model, "runtime_source_dir", ""))
     revision = str(getattr(model, "runtime_revision", ""))
     if source_dir != str(PINNED_RUNTIME_SOURCE):
