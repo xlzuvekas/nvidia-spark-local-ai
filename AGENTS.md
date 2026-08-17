@@ -2,7 +2,7 @@
 
 ## Structure
 
-`sparkbench.py` is the CLI; modules live in `bench/`, profiles in `manifests/models.toml`, suites in `manifests/suites/`, and tests in `tests/`. `benchmark.py` and Compose preserve the original experiment. Keep protocols in `BENCHMARK.md`, analysis in `docs/`, and generated `data/`, `logs/`, and `results/` out of Git. `docs/benchmark-results-2026-08-17.md` covers Qwen3.6 MTP2, Qwen3.8 DSpark/Q5/262K, perplexity, and Muse DFlash admission.
+`sparkbench.py` is the CLI; modules live in `bench/`, profiles in `manifests/models.toml`, suites in `manifests/suites/`, and tests in `tests/`. `benchmark.py` and Compose preserve the original experiment. Keep protocols in `BENCHMARK.md`, analysis in `docs/`, and generated `data/`, `logs/`, and `results/` out of Git. `docs/benchmark-results-2026-08-17.md` covers Qwen3.6 MTP2, Qwen3.8 DSpark/Q5/262K, perplexity, and Muse DFlash admission. `docs/methodology-audit-2026-08-17.md` audits harness methodology and the sanitized `evidence/` corpus against the prior reports.
 
 ## Commands
 
