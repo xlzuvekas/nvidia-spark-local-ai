@@ -15,6 +15,7 @@ from bench.annotations import append_measurement_annotation
 from bench.acquire import fetch_model_snapshot
 from bench.audit import audit_matrix
 from bench.diffusion_direct import run_direct_diffusion
+from bench.evidence import export_evidence, verify_evidence, verify_staged_evidence
 from bench.inventory import (
     assess_model_availability,
     collect_inventory,
@@ -36,6 +37,8 @@ DEFAULT_DIFFUSION_SUITE = (
     WORKSPACE / "manifests" / "suites" / "diffusion_direct.toml"
 )
 DEFAULT_AUDIO_SUITE = WORKSPACE / "manifests" / "suites" / "audio_asr.toml"
+DEFAULT_EVIDENCE = WORKSPACE / "evidence"
+DEFAULT_RESULTS = WORKSPACE / "results"
 
 
 def _inventory(*, sizes: bool = False):
@@ -355,6 +358,26 @@ def command_audit_matrix(args: argparse.Namespace) -> int:
     return 0 if report["ok"] else 1
 
 
+def command_export_evidence(args: argparse.Namespace) -> int:
+    report = export_evidence(
+        results_root=args.results,
+        output_root=args.output,
+        replace=args.replace,
+    )
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
+
+
+def command_verify_evidence(args: argparse.Namespace) -> int:
+    report = (
+        verify_staged_evidence(repo_root=WORKSPACE, evidence_root=args.evidence)
+        if args.staged
+        else verify_evidence(args.evidence)
+    )
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -482,6 +505,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     audit.add_argument("matrix_dir", type=Path)
     audit.set_defaults(function=command_audit_matrix)
+
+    export = subparsers.add_parser(
+        "export-evidence",
+        help="publish deterministic scalar-only evidence from ignored raw results",
+    )
+    export.add_argument("--results", type=Path, default=DEFAULT_RESULTS)
+    export.add_argument("--output", type=Path, default=DEFAULT_EVIDENCE)
+    export.add_argument(
+        "--replace",
+        action="store_true",
+        help="atomically replace an existing evidence tree when measurements changed",
+    )
+    export.set_defaults(function=command_export_evidence)
+
+    verify = subparsers.add_parser(
+        "verify-evidence",
+        help="validate the sanitized evidence schema, checksums, and secret policy",
+    )
+    verify.add_argument("evidence", type=Path, nargs="?", default=DEFAULT_EVIDENCE)
+    verify.add_argument(
+        "--staged",
+        action="store_true",
+        help="verify the exact staged evidence tree and scan every staged text blob",
+    )
+    verify.set_defaults(function=command_verify_evidence)
     return parser
 
 

@@ -2,7 +2,7 @@
 
 ## Structure
 
-`sparkbench.py` is the CLI; modules live in `bench/`, profiles in `manifests/models.toml`, suites in `manifests/suites/`, and tests in `tests/`. `benchmark.py` and Compose preserve the original experiment. Keep protocols in `BENCHMARK.md`, analysis in `docs/`, and generated `data/`, `logs/`, and `results/` out of Git. `docs/benchmark-results-2026-08-17.md` covers Qwen3.6 MTP2, Qwen3.8 DSpark/Q5/262K, perplexity, and Muse DFlash admission.
+`sparkbench.py` is the CLI; modules live in `bench/`, profiles in `manifests/models.toml`, suites in `manifests/suites/`, and tests in `tests/`. `benchmark.py` and Compose preserve the original experiment. Keep protocols in `BENCHMARK.md` and analysis in `docs/`. Generated `data/`, `logs/`, and raw `results/` stay out of Git; deterministic sanitized scalar evidence generated from those runs belongs in tracked `evidence/`. Start from the report index in `README.md`; `docs/moe-landscape-2026-08-17.md` covers the current MoE, Laguna, G9v3, NInfer, and Muse findings.
 
 ## Commands
 
@@ -13,6 +13,7 @@
 - `python3 sparkbench.py perplexity <model> --dataset <path> --chunks 64 --ctx-size 512 --timeout 3600` records matched perplexity.
 - `python3 sparkbench.py plan`, `python3 sparkbench.py run`, `python3 sparkbench.py resume`, and `python3 sparkbench.py summarize` manage frozen runs; `python3 sparkbench.py audit-matrix results/matrices/<id>` audits them.
 - `python3 content_battery.py --base-url <loopback-url> --model <served-id> --api-key-file <path> --output <path>` measures an existing server without managing it.
+- `python3 sparkbench.py export-evidence --results results --output evidence --replace` regenerates the tracked scalar archive; `python3 sparkbench.py verify-evidence evidence` verifies its schemas, topology, and checksums; add `--staged` after `git add` to verify and secret-scan the exact index.
 - `python3 -m unittest discover -s tests -v` and `python3 -m py_compile sparkbench.py benchmark.py bench/*.py tests/*.py` validate code.
 - `docker compose -f compose.nvfp4.yaml -f compose.nvfp4-mtp.yaml up -d` plus `python3 benchmark.py` preserves the original path.
 
@@ -24,12 +25,12 @@ Use four-space indentation, standard-library Python, `snake_case`, `UPPER_CASE` 
 
 ## Testing Guidelines
 
-Run unittest discovery and compile Python. Load changed manifests, validate Compose with `docker compose ... config --quiet`, and smoke-test serving changes. Unit tests must not download, stop services, use Docker, or require a GPU. Use unique prefill prompts. Perplexity comparisons require the same base model, dataset hash, runtime, chunks, and context.
+Run unittest discovery and compile Python. Load changed manifests, validate Compose with `docker compose ... config --quiet`, and smoke-test serving changes. Unit tests must not download, stop services, use Docker, or require a GPU. Use unique prefill prompts. Perplexity comparisons require the same base model, dataset hash, runtime, chunks, and context. Evidence-export changes require an offline fixture test, a full export to a temporary directory, deterministic re-export, and `verify-evidence` before refreshing tracked `evidence/`.
 
 ## Commits
 
-Use concise, imperative commit subjects. Pull requests identify configuration, hardware, exact versions, reproduction commands, impact, and failed or partial cases. Update `BENCHMARK.md` or `docs/` when conclusions change.
+Use concise, imperative commit subjects. Pull requests identify configuration, hardware, exact versions, reproduction commands, impact, and failed or partial cases. Update `BENCHMARK.md` or `docs/` when conclusions change, and refresh sanitized evidence when the underlying measurements change.
 
 ## Security
 
-Pass Hugging Face credentials through `HF_TOKEN`; never commit tokens, weights, caches, raw media, captured prompts or completions, request tags, API keys, or secrets. Versioned benchmark fixtures allowed. Preserve loopback. Content-battery evidence must remain scalar-only and use `--api-key-file`; redact credentials from logs and provenance.
+Pass Hugging Face credentials through `HF_TOKEN`; never commit tokens, weights, caches, raw media, raw `results/`, logs, captured prompts or completions, reasoning, tool payloads, transcriptions, request tags or identifiers, local paths, commands, environment dumps, API keys, or secrets. Versioned benchmark fixtures must contain synthetic non-sensitive values only. Preserve loopback. Content-battery evidence must remain scalar-only and use `--api-key-file`; redact credentials from logs and provenance. Commit `evidence/` only through the allowlisted exporter, then verify the exact staged files and scan them for secrets before pushing.

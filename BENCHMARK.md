@@ -1,5 +1,9 @@
 # Qwen3.8-27B DGX Spark benchmark
 
+This file preserves the exact original Qwen3.8 experiment first. The
+repository-wide SparkBench measurement and publication contract follows in
+[SparkBench protocol and evidence publication](#sparkbench-protocol-and-evidence-publication).
+
 Measured on 2026-08-14 with the configuration in `compose.yaml`:
 
 - NVIDIA GB10, one GPU
@@ -130,3 +134,107 @@ autotuned artifacts were persisted, but this run did not measure a subsequent
 warm-start time. This remains an exploratory serving profile. vLLM also warned
 that FP8 KV-cache scales defaulted to 1.0 without calibration, so the run
 validates performance and its one retrieval probe—not broad model accuracy.
+
+## SparkBench Protocol and Evidence Publication
+
+SparkBench extends the focused experiment above to multiple models and runtime
+families. Every managed run freezes its model profile, suite, artifact pins,
+runtime configuration, hardware identity, and harness revision before serving
+starts. The frozen plan is immutable for the life of the run; interrupted work
+is resumed from that plan instead of being silently regenerated.
+
+### Execution rules
+
+- Run one inference configuration at a time. Refuse unrelated GPU compute and
+  container workloads rather than stopping them implicitly.
+- Resolve pinned cached artifacts before measurement. Network acquisition is a
+  separate `fetch` step or requires an explicit `--allow-download` flag.
+- Bind managed inference endpoints to loopback. Preserve per-run authentication
+  and verify cleanup using process or container identity.
+- Warm up before measured repetitions and use unique prefill prompts so prefix
+  caching cannot inflate fresh-prompt results.
+- Record prompt tokens, output tokens, TTFT, end-to-end time, aggregate output
+  throughput, runtime-native counters when available, validation state, and
+  sampled telemetry with explicit units.
+- Preserve failures, partial results, early stops, and unsupported admissions.
+  Do not turn successful transport or accelerated invalid emissions into a
+  semantic-quality claim.
+
+Aggregate output throughput is completed output tokens divided by measured case
+wall time and is the primary cross-request decode metric. Per-request client
+decode rates are secondary when a server can bundle multiple tokens into one
+stream event. Client-TTFT prefill is an approximation unless the runtime reports
+an isolated prompt-evaluation duration.
+
+Concurrency results are comparable only when the serving-slot geometry is the
+same. A one-slot profile receiving C2, C4, or C8 requests measures queued
+aggregate service, not parallel-sequence scaling. Similarly, compare
+perplexity only for the same base model, tokenizer, dataset hash, runtime,
+chunk count, and context size. Exact revisions, image digests, artifact hashes,
+hardware, date, and validation state accompany publishable conclusions.
+
+### Raw run records
+
+The complete local source of truth lives under ignored `results/` paths. A
+managed run can include `plan.json`, an append-only event journal, telemetry,
+server provenance and logs, generated summaries, and cleanup evidence. Matrix,
+perplexity, direct-adapter, llama-bench, NInfer, and content-battery campaigns
+have their own bounded source layouts.
+
+Raw records are intentionally not committed. They can contain captured prompts
+or completions, reasoning, tool calls, request identifiers, process details,
+host paths, raw media, logs, or ephemeral credentials. `data/` and `logs/` are
+also local-only because they hold weights, caches, media, and runtime output.
+Exact raw run IDs may be cited in a report for local traceability, but the path
+name is not itself public evidence.
+
+### Publishing sanitized evidence
+
+An evidence export creates a deterministic tracked archive without copying raw
+records:
+
+```bash
+python3 sparkbench.py export-evidence \
+  --results results --output evidence --replace
+python3 sparkbench.py verify-evidence evidence
+# After staging the intended commit:
+python3 sparkbench.py verify-evidence evidence --staged
+```
+
+The intended archive entry points are `evidence/README.md` for people and
+`evidence/index.json` for tools. Run bundles retain scalar request measurements,
+case aggregates, validation booleans and bounded categories, lifecycle state,
+compact numeric telemetry, and reproducibility pins such as artifact hashes,
+runtime revisions, image digests, hardware, and harness revision. Campaign and
+matrix bundles retain only their explicitly supported scalar schemas.
+
+The exporter must fail closed. Unknown fields or schema versions, malformed or
+non-finite numbers, duplicate JSON keys, unsafe file types or links, unexpected
+source files, unsafe output placement, and configured size limits are errors.
+Every bundle and the archive root carry checksums, and verification recomputes
+those checksums while cross-checking index counts and references.
+
+The archive excludes all captured input and output text, reasoning text, tool
+arguments or responses, transcriptions, request or sample tags, raw identifiers,
+local paths, commands, environment variables, logs, media, model weights,
+caches, and credentials. String fields that remain are allowlisted bounded
+labels, public model/runtime identifiers, status values, units, hashes, and
+other non-content provenance.
+
+Before committing a refresh:
+
+1. Stop writes to the selected raw run corpus and let the exporter acquire the
+   benchmark lock.
+2. Export twice and confirm the second pass is unchanged.
+3. Run `verify-evidence` against the finished archive.
+4. Inspect the Git diff and staged file list; confirm that only documentation,
+   code, tests, manifests, patches, and sanitized `evidence/` files are staged.
+5. Run `python3 sparkbench.py verify-evidence evidence --staged` to reconstruct
+   and validate the exact Git-index evidence tree and secret-scan every staged
+   text blob.
+6. Run the repository tests before committing or pushing.
+
+Never hand-copy a raw result into `evidence/`, loosen an allowlist merely to make
+an export pass, or publish a number without its status and comparison geometry.
+When a legitimate schema evolves, update the exporter, add an offline regression
+fixture, regenerate the archive, and document any conclusion that changed.

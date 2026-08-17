@@ -1,0 +1,1 @@
+{"campaign_id":"ninfer-experimental-sm121a-20260817T181134Z","evidence_kind":"ninfer","parity":{"output_bytes":22,"output_bytes_equal":true,"token_count":6,"token_ids_equal":true},"payloads_included":false,"sanitization_policy":"strict-scalar-allowlist-v1","schema_version":"sparkbench-evidence-v1","status":"complete"}

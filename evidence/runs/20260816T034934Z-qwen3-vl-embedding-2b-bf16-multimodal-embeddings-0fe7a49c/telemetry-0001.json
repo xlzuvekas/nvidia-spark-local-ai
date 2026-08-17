@@ -1,0 +1,1 @@
+{"sample_count":1,"schema_version":"sparkbench-evidence-v1","segments":[{"first_phase_sample_index":1,"first_sample_index":1,"phase":"idle","phase_segment":1,"rows":[[0.0,false,3.0,0.0,6.58,552.0,51.0,93622378496,122949066752,24054767616,15560581120,17179865088]]}]}

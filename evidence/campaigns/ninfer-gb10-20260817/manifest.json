@@ -1,0 +1,1 @@
+{"campaign_id":"ninfer-gb10-20260817","evidence_kind":"ninfer_admission","failure_codes":["unsupported_compute_architecture","cuda_toolkit_too_old"],"payloads_included":false,"sanitization_policy":"strict-scalar-allowlist-v1","schema_version":"sparkbench-evidence-v1","status":"unsupported"}
