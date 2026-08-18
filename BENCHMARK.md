@@ -345,8 +345,10 @@ Before the measured matrix, require all of the following:
    admission, including one valid tool call;
 4. the full Harbor runtime and all Node/agent prefix trees match their complete
    immutable admissions, and the relay image is native ARM64;
-5. a native ARM64 canary task image builds, yields a verifier result, and leaves
-   no campaign container running; and
+5. a native ARM64 canary task image builds, yields a terminal Harbor result,
+   and leaves no campaign container running; a finalized `AgentTimeoutError`
+   remains a failed measurement but may continue the panel when every image,
+   network, process, and cleanup proof passes; and
 6. authenticated relay/bridge access succeeds, invalid access never reaches
    the model, every forbidden network probe fails, the phase-policy and relay
    assets match their digests, and no raw-payload publication path is enabled.

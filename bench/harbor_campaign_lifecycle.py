@@ -931,6 +931,12 @@ def _remove_owned_tree(path: Path, *, owner: Path) -> bool:
         return False
 
 
+def _raw_descendant_owner_is_private(uid: int) -> bool:
+    """Accept only the host user or container root below a private run root."""
+
+    return type(uid) is int and uid in {0, os.geteuid()}
+
+
 def certify_private_raw_jobs(
     path: Path, *, owner: Path, relay_credential: str
 ) -> tuple[bool, bool]:
@@ -957,14 +963,21 @@ def certify_private_raw_jobs(
         needle = relay_credential.encode("ascii")
         private = True
         key_free = True
+
+        walk_failed = False
+
+        def record_walk_failure(_error: OSError) -> None:
+            nonlocal walk_failed
+            walk_failed = True
+
         for directory, directory_names, file_names in os.walk(
-            candidate, followlinks=False
+            candidate, followlinks=False, onerror=record_walk_failure
         ):
             directory_path = Path(directory)
             directory_metadata = os.lstat(directory_path)
             if (
                 not stat.S_ISDIR(directory_metadata.st_mode)
-                or directory_metadata.st_uid != os.geteuid()
+                or not _raw_descendant_owner_is_private(directory_metadata.st_uid)
             ):
                 private = False
             for name in directory_names:
@@ -976,7 +989,7 @@ def certify_private_raw_jobs(
                 metadata = os.lstat(child)
                 if (
                     not stat.S_ISREG(metadata.st_mode)
-                    or metadata.st_uid != os.geteuid()
+                    or not _raw_descendant_owner_is_private(metadata.st_uid)
                     or metadata.st_nlink != 1
                 ):
                     private = False
@@ -993,6 +1006,8 @@ def certify_private_raw_jobs(
                     break
             if not key_free:
                 break
+        if walk_failed:
+            return False, False
         return private, key_free
     except (OSError, UnicodeEncodeError):
         return False, False
@@ -1045,6 +1060,10 @@ def _status_network_admitted(status: HarborRunStatus) -> bool:
 def _canary_admitted(attempt: HarborAttempt, projection: Mapping[str, Any]) -> bool:
     status = attempt.status
     reward = projection.get("reward")
+    exception_class = projection.get("exception_class")
+    terminal_outcome = (
+        exception_class is None and reward is not None and float(reward) in {0.0, 1.0}
+    ) or (exception_class == "AgentTimeoutError" and reward is None)
     return (
         attempt.job_result is not None
         and status.exit_code == 0
@@ -1056,9 +1075,7 @@ def _canary_admitted(attempt: HarborAttempt, projection: Mapping[str, Any]) -> b
         and status.built_image_cleanup_succeeded
         and status.cleanup_succeeded
         and _status_network_admitted(status)
-        and reward is not None
-        and float(reward) in {0.0, 1.0}
-        and projection.get("exception_class") is None
+        and terminal_outcome
     )
 
 

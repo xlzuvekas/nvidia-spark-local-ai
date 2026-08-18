@@ -4,11 +4,13 @@ from copy import deepcopy
 from dataclasses import replace
 import hashlib
 import json
+import os
 from pathlib import Path
 import stat
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from bench.harbor_campaign_lifecycle import (
     CampaignLifecycleError,
@@ -25,6 +27,7 @@ from bench.harbor_campaign_lifecycle import (
     _is_exact_admission_payload,
     _parse_bounded_json_object,
     _record_status_then_load,
+    _raw_descendant_owner_is_private,
     _scalar_output_path,
     _trial_timeout_s,
     admit_native_platform,
@@ -345,6 +348,37 @@ class LifecycleGateTests(unittest.TestCase):
             _attempt_gate((bad_probe,), {"trials": [projection]}), "canary_gate"
         )
 
+        timed_out = HarborAttempt(
+            trial=self.trials[0],
+            status=_status(self.trials[0]),
+            job_result=object(),
+        )
+        timeout_projection = {
+            "reward": None,
+            "exception_class": "AgentTimeoutError",
+            "paired_image_match": None,
+        }
+        self.assertIsNone(
+            _attempt_gate((timed_out,), {"trials": [timeout_projection]})
+        )
+        timeout_bad_probe = HarborAttempt(
+            trial=self.trials[0],
+            status=_status(self.trials[0], dns_rejected=False),
+            job_result=object(),
+        )
+        self.assertEqual(
+            _attempt_gate(
+                (timeout_bad_probe,), {"trials": [timeout_projection]}
+            ),
+            "canary_gate",
+        )
+        nonterminal_timeout = deepcopy(timeout_projection)
+        nonterminal_timeout["exception_class"] = "ApiError"
+        self.assertEqual(
+            _attempt_gate((timed_out,), {"trials": [nonterminal_timeout]}),
+            "canary_gate",
+        )
+
     def test_auth_is_immediate_and_endpoint_gate_is_narrow_and_consecutive(self) -> None:
         first = HarborAttempt(
             trial=self.trials[0], status=_status(self.trials[0]), job_result=object()
@@ -489,6 +523,39 @@ class LifecycleFilesystemTests(unittest.TestCase):
                 ),
                 (True, False),
             )
+
+    def test_retained_raw_descendants_allow_only_host_or_container_root(self) -> None:
+        self.assertTrue(_raw_descendant_owner_is_private(0))
+        self.assertTrue(_raw_descendant_owner_is_private(os.geteuid()))
+        rejected_uid = next(
+            uid for uid in (1, 2, 65534) if uid not in {0, os.geteuid()}
+        )
+        self.assertFalse(_raw_descendant_owner_is_private(rejected_uid))
+        self.assertFalse(_raw_descendant_owner_is_private(True))
+
+    def test_retained_raw_tree_fails_closed_on_walk_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            external = Path(directory)
+            external.chmod(0o700)
+            run = external / "run"
+            run.mkdir(mode=0o700)
+
+            def failed_walk(
+                _top: Path, *, followlinks: bool, onerror: object
+            ) -> object:
+                self.assertFalse(followlinks)
+                onerror(PermissionError("unreadable descendant"))
+                return iter(())
+
+            with patch(
+                "bench.harbor_campaign_lifecycle.os.walk", side_effect=failed_walk
+            ):
+                self.assertEqual(
+                    certify_private_raw_jobs(
+                        run, owner=external, relay_credential="exact-secret"
+                    ),
+                    (False, False),
+                )
 
     def test_cli_has_no_checkout_or_bridge_host_escape_hatches(self) -> None:
         options = {option for action in build_parser()._actions for option in action.option_strings}
