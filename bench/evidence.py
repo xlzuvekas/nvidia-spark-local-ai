@@ -23,7 +23,7 @@ import stat
 import statistics
 import subprocess
 import tempfile
-from typing import Any
+from typing import Any, Sequence
 import unicodedata
 
 from .manifest import KNOWN_AGENTIC_CASE_IDS
@@ -31,6 +31,14 @@ from .manifest import KNOWN_AGENTIC_CASE_IDS
 
 SCHEMA_VERSION = "sparkbench-evidence-v1"
 SANITIZATION_POLICY = "strict-scalar-allowlist-v1"
+HARBOR_EVIDENCE_KIND = "harbor_terminal_campaign"
+HARBOR_SCHEMA_VERSION = "sparkbench-harbor-evidence-v1"
+HARBOR_CAMPAIGN_ID = "qwen3-coder-next-harbor-terminal-offline-2026-08-18"
+HARBOR_EXPECTED_GIT_REVISION = "26600d4abe48c082ce6764a61618516837069b9c"
+HARBOR_EXPECTED_DERIVATION_DIGEST = (
+    "sha256:4749be56af707f6d7615ac5cdb0fb7fa8d50fcdd49e5d4c9a9bfebb71677b4ef"
+)
+HARBOR_REPLICATE_COUNT = 2
 MAX_SOURCE_JSON_BYTES = 16 * 1024 * 1024
 MAX_SOURCE_LINE_BYTES = 1024 * 1024
 MAX_OUTPUT_FILE_BYTES = 2 * 1024 * 1024
@@ -63,6 +71,32 @@ _HEX_RE = re.compile(r"[0-9a-f]{64}\Z")
 _REVISION_RE = re.compile(r"[0-9a-f]{7,64}\Z")
 _VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}\Z")
 _RUN_ID_RE = re.compile(r"20[0-9]{6}T[0-9]{6,12}Z-[A-Za-z0-9_.-]+\Z")
+
+_HARBOR_ZERO_INFRASTRUCTURE_FIELDS = (
+    "harbor_process_failures",
+    "harbor_timeouts",
+    "cleanup_failures",
+    "native_image_admission_failures",
+    "built_image_cleanup_failures",
+    "network_admission_failures",
+    "image_pair_mismatches",
+)
+_HARBOR_TRIAL_SECURITY_FIELDS = (
+    "main_image_arm64",
+    "relay_image_arm64",
+    "built_image_cleanup_succeeded",
+    "setup_relay_rejected",
+    "agent_relay_passed",
+    "wrong_auth_rejected",
+    "other_loopback_rejected",
+    "gost_rejected",
+    "dns_rejected",
+    "gateway_rejected",
+    "public_rejected",
+    "capabilities_dropped",
+    "paired_image_match",
+    "cleanup_succeeded",
+)
 
 _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("private-key", re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")),
@@ -1002,6 +1036,377 @@ def _load_json(path: Path, root: Path) -> Any:
     if text[end:].strip():
         raise EvidenceError(f"trailing data in JSON file {path.name}")
     return value
+
+
+def _secure_owner_read(path: Path, *, maximum: int) -> bytes:
+    """Read one explicit owner-private file without following links."""
+
+    absolute = Path(os.path.abspath(path))
+    try:
+        directory_descriptor = os.open(
+            absolute.anchor,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0),
+        )
+    except OSError as error:
+        raise EvidenceError("Harbor result cannot be inspected") from error
+    try:
+        for component in absolute.parts[1:-1]:
+            component_metadata = os.stat(
+                component, dir_fd=directory_descriptor, follow_symlinks=False
+            )
+            if stat.S_ISLNK(component_metadata.st_mode):
+                raise EvidenceError("Harbor result path contains a symbolic link")
+            next_descriptor = os.open(
+                component,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_descriptor,
+            )
+            try:
+                opened_component = os.fstat(next_descriptor)
+            except BaseException:
+                os.close(next_descriptor)
+                raise
+            if (
+                not stat.S_ISDIR(opened_component.st_mode)
+                or (opened_component.st_dev, opened_component.st_ino)
+                != (component_metadata.st_dev, component_metadata.st_ino)
+            ):
+                os.close(next_descriptor)
+                raise EvidenceError("Harbor result path changed while opening")
+            os.close(directory_descriptor)
+            directory_descriptor = next_descriptor
+        name = absolute.parts[-1]
+        metadata = os.stat(
+            name, dir_fd=directory_descriptor, follow_symlinks=False
+        )
+        if stat.S_ISLNK(metadata.st_mode):
+            raise EvidenceError("Harbor result path contains a symbolic link")
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise EvidenceError(
+                "Harbor result must be an owner-mode-0600 single-link regular file"
+            )
+        if metadata.st_size > maximum:
+            raise EvidenceError("Harbor result exceeds the source size limit")
+        descriptor = os.open(
+            name,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_descriptor,
+        )
+    except OSError as error:
+        raise EvidenceError("Harbor result cannot be opened safely") from error
+    finally:
+        os.close(directory_descriptor)
+    try:
+        opened = os.fstat(descriptor)
+        identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_nlink,
+            opened.st_uid,
+            stat.S_IMODE(opened.st_mode),
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+        )
+        expected_identity = (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_nlink,
+            metadata.st_uid,
+            stat.S_IMODE(metadata.st_mode),
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+        if identity != expected_identity:
+            raise EvidenceError("Harbor result changed while opening")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= maximum:
+            chunk = os.read(descriptor, min(1024 * 1024, maximum + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        final = os.fstat(descriptor)
+        final_identity = (
+            final.st_dev,
+            final.st_ino,
+            final.st_size,
+            final.st_nlink,
+            final.st_uid,
+            stat.S_IMODE(final.st_mode),
+            final.st_mtime_ns,
+            final.st_ctime_ns,
+        )
+        if final_identity != identity:
+            raise EvidenceError("Harbor result changed while reading")
+    finally:
+        os.close(descriptor)
+    data = b"".join(chunks)
+    if len(data) != metadata.st_size or len(data) > maximum or b"\x00" in data:
+        raise EvidenceError("Harbor result has invalid source bytes")
+    return data
+
+
+def _json_strict_equal(left: Any, right: Any) -> bool:
+    """Compare JSON values without Python's bool/int or int/float coercion."""
+
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return set(left) == set(right) and all(
+            _json_strict_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _json_strict_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    return bool(left == right)
+
+
+def _expected_harbor_pin_sections(campaign: Any) -> dict[str, Any]:
+    agents: list[dict[str, Any]] = []
+    for agent in campaign.agents:
+        projection = {
+            "id": agent.id,
+            "version": agent.version,
+            "source": agent.source,
+            "revision": agent.revision,
+            "install_tree_sha256": agent.install_tree_sha256,
+            "install_tree_size_bytes": agent.install_tree_size_bytes,
+            "npm_package": agent.npm_package,
+            "npm_integrity": agent.npm_integrity,
+            "npm_shasum": agent.npm_shasum,
+        }
+        if agent.platform_package is not None:
+            projection.update(
+                {
+                    "platform_package": agent.platform_package,
+                    "platform_integrity": agent.platform_integrity,
+                    "platform_shasum": agent.platform_shasum,
+                }
+            )
+        agents.append(projection)
+    return {
+        "harbor": {
+            "source": campaign.harbor.source,
+            "revision": campaign.harbor.revision,
+            "version": campaign.harbor.version,
+            "runtime_tree_sha256": campaign.harbor.runtime_tree_sha256,
+            "runtime_tree_size_bytes": campaign.harbor.runtime_tree_size_bytes,
+            "runtime_tree_entries": campaign.harbor.runtime_tree_entries,
+            "runtime_tree_files": campaign.harbor.runtime_tree_files,
+            "runtime_tree_links": campaign.harbor.runtime_tree_links,
+            "executable_size_bytes": campaign.harbor.executable_size_bytes,
+            "executable_sha256": campaign.harbor.executable_sha256,
+            "agent_source_sha256": campaign.harbor.agent_source_sha256,
+            "python_version": campaign.harbor.python_version,
+            "python_size_bytes": campaign.harbor.python_size_bytes,
+            "python_sha256": campaign.harbor.python_sha256,
+        },
+        "dataset": {
+            "source": campaign.dataset.source,
+            "revision": campaign.dataset.revision,
+            "version": campaign.dataset.version,
+            "network_policy_patch_digest": HARBOR_EXPECTED_DERIVATION_DIGEST,
+        },
+        "model": {
+            "profile": campaign.model.profile,
+            "served_name": campaign.model.served_name,
+            "context_tokens": campaign.model.context_tokens,
+            "max_output_tokens": campaign.model.max_output_tokens,
+            "parallel": campaign.model.parallel,
+            "temperature": campaign.execution.server_default_temperature,
+            "top_p": campaign.execution.server_default_top_p,
+            "top_k": campaign.execution.server_default_top_k,
+        },
+        "relay": {
+            "protocol": "phase-isolated-loopback-uds-relay-v1",
+            "listen_host": campaign.relay.listen_host,
+            "port": campaign.relay.port,
+            "sentinel_host": campaign.relay.sentinel_host,
+            "node_image": campaign.relay.node_image,
+            "relay_script_sha256": campaign.relay.relay_script_sha256,
+            "network_policy_sha256": campaign.relay.network_policy_sha256,
+        },
+        "toolchain": {
+            "node_version": campaign.toolchain.node_version,
+            "npm_builder_version": campaign.toolchain.npm_builder_version,
+            "node_binary_sha256": campaign.toolchain.node_binary_sha256,
+            "node_tree_sha256": campaign.toolchain.node_tree_sha256,
+            "node_tree_size_bytes": campaign.toolchain.node_tree_size_bytes,
+        },
+        "agents": agents,
+    }
+
+
+def _validate_harbor_envelope(payload: Any) -> dict[str, Any]:
+    """Apply the tracked lifecycle schema plus publication-only success gates."""
+
+    if not isinstance(payload, dict):
+        raise EvidenceError("Harbor result must be a JSON object")
+    try:
+        _validate_output_value(payload, pointer="/harbor-result")
+    except EvidenceError as error:
+        raise EvidenceError("Harbor result violates scalar publication policy") from error
+    try:
+        from .harbor_campaign_lifecycle import (
+            CampaignLifecycleError,
+            DEFAULT_CAMPAIGN_PATH,
+            _EXPECTED_MODEL,
+            validate_lifecycle_envelope,
+        )
+        from .harbor_terminal import HarborCampaignError, load_campaign
+
+        campaign = load_campaign(DEFAULT_CAMPAIGN_PATH)
+        validate_lifecycle_envelope(payload, campaign=campaign)
+    except (CampaignLifecycleError, HarborCampaignError, OSError, ValueError) as error:
+        raise EvidenceError("Harbor lifecycle envelope failed exact validation") from error
+
+    if (
+        campaign.id != HARBOR_CAMPAIGN_ID
+        or payload["campaign_id"] != HARBOR_CAMPAIGN_ID
+        or payload["status"] != "completed"
+        or payload["stop_reason"] != "completed"
+        or payload["git"]
+        != {"clean": True, "revision": HARBOR_EXPECTED_GIT_REVISION}
+        or not _json_strict_equal(payload["model"], _EXPECTED_MODEL)
+        or type(payload["schema_version"]) is not int
+        or type(payload["campaign"]["schema_version"]) is not int
+    ):
+        raise EvidenceError("Harbor result is not the completed tracked campaign")
+    admission = payload["admission"]
+    model_admission = admission["model"]
+    if (
+        model_admission is None
+        or any(
+            model_admission[key] is not True
+            for key in ("chat_passed", "json_passed", "tool_call_passed")
+        )
+        or admission["agent_trees_verified"] != 2
+        or admission["npm_artifacts_verified"] != 3
+        or admission["runtime_assets_verified"] != 2
+        or admission["agent_source_files_verified"] != 1
+        or any(
+            admission[key] is not True
+            for key in (
+                "artifact_validation",
+                "harbor_runtime_verified",
+                "node_tree_verified",
+                "python_bytecode_cache_empty",
+                "host_arm64",
+                "docker_server_arm64",
+                "unix_bridge_verified",
+            )
+        )
+    ):
+        raise EvidenceError("Harbor runtime admission is incomplete")
+    if any(value is not True for value in payload["cleanup"].values()):
+        raise EvidenceError("Harbor lifecycle cleanup is incomplete")
+
+    execution = payload["execution"]
+    totals = payload["campaign"]["summary"]
+    trials = payload["campaign"]["trials"]
+    if (
+        type(execution["trials_planned"]) is not int
+        or type(execution["hard_cutoff_s"]) is not int
+        or type(execution["audit_reserve_s"]) is not int
+        or execution["trials_planned"] != 12
+        or execution["trials_started"] != 12
+        or execution["trials_completed"] != 12
+        or execution["cutoff_reached"] is not False
+        or totals["planned_attempts"] != 12
+        or totals["attempts"] != 12
+        or totals["completed_results"] != 12
+        or totals["missing_results"] != 0
+        or totals["unstarted_attempts"] != 0
+        or totals["campaign_complete"] is not True
+        or totals["campaign_cutoff_reached"] is not False
+        or any(totals[field] != 0 for field in _HARBOR_ZERO_INFRASTRUCTURE_FIELDS)
+    ):
+        raise EvidenceError("Harbor campaign execution or infrastructure gates failed")
+    for trial in trials:
+        if (
+            type(trial["trial_index"]) is not int
+            or trial["result_available"] is not True
+            or trial["reward"] is None
+            or trial["harbor_exit_code"] != 0
+            or trial["harbor_timed_out"] is not False
+            or any(trial[field] is not True for field in _HARBOR_TRIAL_SECURITY_FIELDS)
+            or any(
+                trial[f"{resource}_found"] != trial[f"{resource}_removed"]
+                for resource in ("containers", "networks", "volumes")
+            )
+        ):
+            raise EvidenceError("Harbor trial infrastructure gates failed")
+    pins = payload["campaign"]["pins"]
+    expected_pin_sections = _expected_harbor_pin_sections(campaign)
+    if any(
+        not _json_strict_equal(pins[key], expected)
+        for key, expected in expected_pin_sections.items()
+    ):
+        raise EvidenceError("Harbor campaign pins or scalar types changed")
+    return payload
+
+
+def _load_harbor_result(path: Path) -> dict[str, Any]:
+    data = _secure_owner_read(path, maximum=MAX_SOURCE_JSON_BYTES)
+    try:
+        text = data.decode("utf-8")
+        value, end = _DECODER.raw_decode(text)
+    except EvidenceError as error:
+        raise EvidenceError("Harbor result violates the strict JSON grammar") from error
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise EvidenceError("Harbor result is not valid UTF-8 JSON") from error
+    if text[end:].strip():
+        raise EvidenceError("Harbor result contains trailing JSON data")
+    if _canonical(value) != data:
+        raise EvidenceError("Harbor result is not canonical JSON")
+    return _validate_harbor_envelope(value)
+
+
+def _order_harbor_replicates(
+    replicates: Sequence[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if len(replicates) != HARBOR_REPLICATE_COUNT:
+        raise EvidenceError("Harbor evidence requires exactly two result files")
+    encoded = [_canonical(replicate) for replicate in replicates]
+    if encoded[0] == encoded[1]:
+        raise EvidenceError("Harbor result inputs are duplicates")
+    started = [
+        _parse_timestamp(replicate["started_at"], name="Harbor replicate started_at")
+        for replicate in replicates
+    ]
+    if started[0] == started[1]:
+        raise EvidenceError("Harbor result inputs have duplicate start timestamps")
+    ordered_pairs = sorted(zip(started, replicates), key=lambda item: item[0])
+    ordered = (ordered_pairs[0][1], ordered_pairs[1][1])
+    first, second = ordered
+    if (
+        not _json_strict_equal(first["git"], second["git"])
+        or not _json_strict_equal(first["model"], second["model"])
+        or not _json_strict_equal(
+            first["campaign"]["pins"], second["campaign"]["pins"]
+        )
+        or first["campaign_id"] != second["campaign_id"]
+    ):
+        raise EvidenceError("Harbor result inputs do not share exact campaign pins")
+    return ordered
 
 
 def _load_json_lines(path: Path, root: Path) -> list[dict[str, Any]]:
@@ -3839,6 +4244,57 @@ def _export_campaign(
     }
 
 
+def _harbor_manifest(replicates: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    first = replicates[0]
+    return {
+        "campaign_id": HARBOR_CAMPAIGN_ID,
+        "derivation_digest": HARBOR_EXPECTED_DERIVATION_DIGEST,
+        "evidence_kind": HARBOR_EVIDENCE_KIND,
+        "git_revision": HARBOR_EXPECTED_GIT_REVISION,
+        "model_profile": first["model"]["profile"],
+        "payloads_included": False,
+        "replicate_count": HARBOR_REPLICATE_COUNT,
+        "replicate_order": "started_at_utc",
+        "sanitization_policy": SANITIZATION_POLICY,
+        "schema_version": HARBOR_SCHEMA_VERSION,
+        "status": "complete",
+    }
+
+
+def _export_harbor_campaign(
+    paths: Sequence[Path], output_root: Path
+) -> dict[str, Any]:
+    if len(paths) != HARBOR_REPLICATE_COUNT:
+        raise EvidenceError("Harbor evidence requires exactly two result files")
+    absolute_paths = tuple(Path(os.path.abspath(path)) for path in paths)
+    if len(set(absolute_paths)) != HARBOR_REPLICATE_COUNT:
+        raise EvidenceError("Harbor result inputs are duplicates")
+    replicates = _order_harbor_replicates(
+        tuple(_load_harbor_result(path) for path in absolute_paths)
+    )
+    relative = Path("campaigns") / HARBOR_CAMPAIGN_ID
+    manifest = _harbor_manifest(replicates)
+    bundle_hash, _ = _write_bundle(
+        output_root,
+        relative,
+        {
+            "manifest.json": manifest,
+            "replicates.json": {
+                "replicate_count": HARBOR_REPLICATE_COUNT,
+                "replicates": list(replicates),
+                "schema_version": HARBOR_SCHEMA_VERSION,
+            },
+        },
+    )
+    return {
+        "bundle_sha256": bundle_hash,
+        "campaign_id": HARBOR_CAMPAIGN_ID,
+        "evidence_kind": HARBOR_EVIDENCE_KIND,
+        "file": str(relative / "manifest.json"),
+        "status": "complete",
+    }
+
+
 def _project_metric_mapping(
     value: Any,
     *,
@@ -4371,6 +4827,48 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
         raise EvidenceError(f"telemetry total mismatch: {run_id}")
 
 
+def _verify_harbor_bundle(
+    root: Path,
+    directory: Path,
+    entry: dict[str, Any],
+    manifest: dict[str, Any],
+) -> None:
+    if {path.name for path in directory.iterdir()} != {
+        "checksums.json",
+        "manifest.json",
+        "replicates.json",
+    }:
+        raise EvidenceError("Harbor evidence bundle file set changed")
+    replicates_document = _load_json(directory / "replicates.json", root)
+    replicates_document = _expect_object_keys(
+        replicates_document,
+        {"replicate_count", "replicates", "schema_version"},
+        name="Harbor replicates",
+    )
+    replicates = replicates_document["replicates"]
+    if (
+        replicates_document["schema_version"] != HARBOR_SCHEMA_VERSION
+        or type(replicates_document["replicate_count"]) is not int
+        or replicates_document["replicate_count"] != HARBOR_REPLICATE_COUNT
+        or not isinstance(replicates, list)
+        or len(replicates) != HARBOR_REPLICATE_COUNT
+    ):
+        raise EvidenceError("Harbor replicate document changed")
+    validated = tuple(_validate_harbor_envelope(value) for value in replicates)
+    ordered = _order_harbor_replicates(validated)
+    if not _json_strict_equal(list(ordered), replicates):
+        raise EvidenceError("Harbor replicates are not ordered by started_at")
+    expected_manifest = _harbor_manifest(ordered)
+    if not _json_strict_equal(manifest, expected_manifest):
+        raise EvidenceError("Harbor evidence manifest changed")
+    if (
+        entry["campaign_id"] != HARBOR_CAMPAIGN_ID
+        or entry["evidence_kind"] != HARBOR_EVIDENCE_KIND
+        or entry["status"] != "complete"
+    ):
+        raise EvidenceError("Harbor campaign index entry changed")
+
+
 def _verify_simple_bundle(
     root: Path,
     entry: dict[str, Any],
@@ -4396,10 +4894,23 @@ def _verify_simple_bundle(
     if relative.parts[:2] != (category, identity) or len(relative.parts) != 3:
         raise EvidenceError(f"unsafe {category} manifest pointer")
     primary = _load_json(root / relative, root)
-    if not isinstance(primary, dict) or primary.get("schema_version") != SCHEMA_VERSION:
+    if not isinstance(primary, dict):
         raise EvidenceError(f"{category} schema mismatch: {identity}")
     if primary.get("evidence_kind") != entry["evidence_kind"]:
         raise EvidenceError(f"{category} kind mismatch: {identity}")
+    if category == "campaigns" and (
+        identity == HARBOR_CAMPAIGN_ID
+        or entry["evidence_kind"] == HARBOR_EVIDENCE_KIND
+    ):
+        if (
+            identity != HARBOR_CAMPAIGN_ID
+            or entry["evidence_kind"] != HARBOR_EVIDENCE_KIND
+        ):
+            raise EvidenceError("Harbor campaign identity or evidence kind changed")
+        _verify_harbor_bundle(root, directory, entry, primary)
+        return
+    if primary.get("schema_version") != SCHEMA_VERSION:
+        raise EvidenceError(f"{category} schema mismatch: {identity}")
     measurements_path = directory / "measurements.json"
     if measurements_path.is_file():
         measurements = _load_json(measurements_path, root)
@@ -4778,8 +5289,11 @@ def _export_evidence_locked(
     *,
     results_root: Path,
     output_root: Path,
+    harbor_results: Sequence[Path] = (),
     replace: bool = False,
 ) -> dict[str, Any]:
+    if len(harbor_results) not in {0, HARBOR_REPLICATE_COUNT}:
+        raise EvidenceError("Harbor evidence requires zero or exactly two result files")
     results_root = results_root.resolve(strict=True)
     source_file_count, source_size_bytes = _assert_source_tree(results_root)
     if output_root.name in {"", ".", ".."} or not re.fullmatch(
@@ -4849,6 +5363,9 @@ def _export_evidence_locked(
             _export_campaign(results_root / name, results_root, temporary)
             for name in campaign_names
         ]
+        if harbor_results:
+            campaigns.append(_export_harbor_campaign(harbor_results, temporary))
+        campaigns.sort(key=lambda campaign: campaign["campaign_id"])
         standalone = [
             _export_content_battery(
                 results_root / "content-battery-dspark-sglang-20260817.json",
@@ -4936,8 +5453,11 @@ def export_evidence(
     *,
     results_root: Path,
     output_root: Path,
+    harbor_results: Sequence[Path] = (),
     replace: bool = False,
 ) -> dict[str, Any]:
+    if len(harbor_results) not in {0, HARBOR_REPLICATE_COUNT}:
+        raise EvidenceError("Harbor evidence requires zero or exactly two result files")
     results_root = results_root.resolve(strict=True)
     lock_path = results_root / ".sparkbench.lock"
     descriptor = os.open(lock_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
@@ -4954,6 +5474,7 @@ def export_evidence(
         return _export_evidence_locked(
             results_root=results_root,
             output_root=output_root,
+            harbor_results=tuple(Path(path) for path in harbor_results),
             replace=replace,
         )
     finally:

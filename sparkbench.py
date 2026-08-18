@@ -362,6 +362,7 @@ def command_export_evidence(args: argparse.Namespace) -> int:
     report = export_evidence(
         results_root=args.results,
         output_root=args.output,
+        harbor_results=args.harbor_result,
         replace=args.replace,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
@@ -512,6 +513,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export.add_argument("--results", type=Path, default=DEFAULT_RESULTS)
     export.add_argument("--output", type=Path, default=DEFAULT_EVIDENCE)
+    export.add_argument(
+        "--harbor-result",
+        action="append",
+        default=[],
+        type=Path,
+        help=(
+            "explicit owner-private canonical Harbor lifecycle result; "
+            "provide exactly two when publishing Harbor evidence"
+        ),
+    )
     export.add_argument(
         "--replace",
         action="store_true",

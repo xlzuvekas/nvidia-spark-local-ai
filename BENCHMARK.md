@@ -208,11 +208,13 @@ and its comparison limits are recorded in
 
 ### Harbor terminal coding-agent campaign
 
-The Qwen3-Coder-Next Harbor campaign is a pre-run, paired comparison of two
+The Qwen3-Coder-Next Harbor campaign defines a paired comparison of two
 coding-agent clients against one locally served model. Its normative definition
 is
 [`manifests/campaigns/harbor_terminal_coder_next.toml`](manifests/campaigns/harbor_terminal_coder_next.toml).
-Do not infer a result from the presence of the manifest or this protocol.
+The completed two-replicate outcome is reported separately in
+[Qwen3-Coder-Next Harbor terminal results](docs/harbor-terminal-results-2026-08-18.md);
+do not infer or replace that result from the presence of the manifest alone.
 The corrected campaign ID is
 `qwen3-coder-next-harbor-terminal-offline-2026-08-18`. Earlier trials under the
 2026-08-17 ID are diagnostic only: their verifier upload was not traversable
@@ -260,10 +262,11 @@ ephemeral `xdg-data` and `xdg-state` trees. The retained `opencode.txt` remains
 the OpenCode trajectory and metric source. The complete Harbor runtime is
 admitted the same way, and commands execute only its verified entry point.
 
-Each task-agent pair runs once, with one active trial, no retry, and a 900-second
-agent timeout. The containing Harbor invocation has a separate 3,600-second
-wall ceiling covering native image build, agent setup, agent execution, and
-verification. The twelve trials use the manifest's fixed counterbalanced order:
+Within each replicate, every task-agent pair runs once, with one active trial,
+no retry, and a 900-second agent timeout. The containing Harbor invocation has a
+separate 3,600-second wall ceiling covering native image build, agent setup,
+agent execution, and verification. The twelve trials use the manifest's fixed
+counterbalanced order:
 the starting client alternates across tasks so simple warmup or time-order drift
 does not consistently favor one client. Harbor must build each task image for
 the native ARM64 host instead of pulling an AMD64-only prebuilt image. The
@@ -275,6 +278,39 @@ pair is not a valid comparison unless those fingerprints match. A failure or
 timeout remains a measured failed attempt; it is not silently retried or
 replaced. This small, selected task panel is an exploratory admission screen,
 not a broad coding-quality claim.
+
+#### Measured result
+
+Two corrected-ID replicates completed on 2026-08-18. The fixed six-task by
+two-client panel produced **1/24 strict passes (4.1667%)**: Qwen Code passed
+**1/12 (8.3333%)**, while OpenCode passed **0/12**. Qwen Code earned the sole
+reward `1` on `fix-git` in the first replicate; that result did not repeat.
+The other five tasks were 0/4 across two clients and two replicates.
+
+All 24 trials finalized. Both campaign envelopes completed their 12 planned
+attempts, and the network-admission, native-image, paired-image, and cleanup
+failure counters remained zero. The summaries also record zero containing
+Harbor wrapper timeouts. One Qwen Code trial separately reached its 900-second
+agent timeout and remains a reward-zero `AgentTimeoutError`; do not conflate
+that agent outcome with the 3,600-second wrapper counter.
+
+Token telemetry is complete for 12/12 Qwen Code trials but only 5/12 OpenCode
+trials because seven OpenCode early exits have no token counts. Token or wall
+totals therefore do not support a fair efficiency ranking. The
+[full report](docs/harbor-terminal-results-2026-08-18.md) preserves the
+per-task, replicate, exception-label, and interpretation detail. Its
+[tracked scalar bundle](evidence/campaigns/qwen3-coder-next-harbor-terminal-offline-2026-08-18/manifest.json)
+uses schema `sparkbench-harbor-evidence-v1`, pins clean harness commit
+`26600d4abe48c082ce6764a61618516837069b9c` and derived-policy digest
+`sha256:4749be56af707f6d7615ac5cdb0fb7fa8d50fcdd49e5d4c9a9bfebb71677b4ef`,
+and declares that payloads are excluded.
+
+This remains a derived harness-stack result, not an official Terminal-Bench
+2.1 score. The six-task selection, one UD-Q4_K_XL model on one machine,
+temperature 1.0 defaults, two replicates, client-controlled requests,
+transformed offline verifier, and shared-verifier trust boundary all remain
+attached to the result. The scalar exception classes are outcomes, not causal
+diagnoses; raw payload evidence is neither published nor used to infer one.
 
 #### Execution lifecycle
 

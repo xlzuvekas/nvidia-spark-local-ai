@@ -11,6 +11,10 @@ from unittest.mock import patch
 
 from bench.evidence import (
     EvidenceError,
+    HARBOR_CAMPAIGN_ID,
+    HARBOR_EXPECTED_DERIVATION_DIGEST,
+    HARBOR_EXPECTED_GIT_REVISION,
+    HARBOR_SCHEMA_VERSION,
     _NINFER_TOP_FIELDS,
     SCHEMA_VERSION,
     _assert_source_tree,
@@ -28,6 +32,24 @@ from bench.evidence import (
     verify_evidence,
     verify_staged_evidence,
 )
+from bench.harbor_campaign_lifecycle import (
+    CleanupStatus,
+    ModelAdmission,
+    RuntimeAdmission,
+    _EXPECTED_MODEL,
+    build_lifecycle_envelope,
+)
+from bench.harbor_terminal import (
+    HarborAttempt,
+    HarborRawResult,
+    HarborRunStatus,
+    NpmArtifactAdmission,
+    NpmArtifactRecord,
+    iter_trials,
+    load_campaign,
+    summarize_campaign_results,
+)
+from sparkbench import build_parser
 
 
 RAW_COMPLETION = "RAW_COMPLETION_SENTINEL"
@@ -35,6 +57,235 @@ RAW_REASONING = "RAW_REASONING_SENTINEL"
 RAW_REQUEST_ID = "RAW_REQUEST_ID_SENTINEL"
 RAW_HOST_PATH = "/home/private-user/benchmark-cache/model.gguf"
 RAW_SECRET = "hf" + "_" + "0123456789abcdefghijklmnop"
+
+REPOSITORY = Path(__file__).resolve().parents[1]
+HARBOR_CAMPAIGN_PATH = (
+    REPOSITORY / "manifests" / "campaigns" / "harbor_terminal_coder_next.toml"
+)
+
+
+def _harbor_npm_admission(
+    campaign: object, *, size_offset: int = 0
+) -> NpmArtifactAdmission:
+    declared: list[tuple[str, str, str, str]] = []
+    for agent in campaign.agents:
+        declared.append(
+            (agent.npm_package, agent.version, agent.npm_shasum, agent.npm_integrity)
+        )
+        if agent.platform_package is not None:
+            declared.append(
+                (
+                    agent.platform_package,
+                    agent.version,
+                    agent.platform_shasum,
+                    agent.platform_integrity,
+                )
+            )
+    records = tuple(
+        NpmArtifactRecord(
+            package=package,
+            version=version,
+            size_bytes=index + size_offset,
+            shasum=shasum,
+            integrity=integrity,
+        )
+        for index, (package, version, shasum, integrity) in enumerate(
+            sorted(declared), start=1
+        )
+    )
+    projection = [
+        {
+            "package": record.package,
+            "version": record.version,
+            "size_bytes": record.size_bytes,
+            "shasum": record.shasum,
+            "integrity": record.integrity,
+        }
+        for record in records
+    ]
+    digest = "sha256:" + hashlib.sha256(
+        json.dumps(projection, sort_keys=True, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+    return NpmArtifactAdmission(digest=digest, artifacts=records)
+
+
+def _harbor_status(trial: object) -> HarborRunStatus:
+    return HarborRunStatus(
+        trial=trial,
+        exit_code=0,
+        timed_out=False,
+        wall_s=1.0,
+        main_image_id="sha256:" + "1" * 64,
+        main_image_fingerprint="sha256:" + "2" * 64,
+        main_image_arm64=True,
+        relay_image_arm64=True,
+        built_image_cleanup_succeeded=True,
+        setup_relay_rejected=True,
+        agent_relay_passed=True,
+        wrong_auth_rejected=True,
+        other_loopback_rejected=True,
+        gost_rejected=True,
+        dns_rejected=True,
+        gateway_rejected=True,
+        public_rejected=True,
+        capabilities_dropped=True,
+        cleanup_succeeded=True,
+        containers_found=1,
+        containers_removed=1,
+        networks_found=1,
+        networks_removed=1,
+        volumes_found=1,
+        volumes_removed=1,
+    )
+
+
+def _harbor_job_result(campaign: object, trial: object, *, reward: int) -> HarborRawResult:
+    agent = campaign.agent(trial.agent_id)
+
+    def timing(start: str, finish: str) -> dict[str, str]:
+        return {"started_at": start, "finished_at": finish}
+
+    return HarborRawResult(
+        job={
+            "id": "synthetic-private-job-id",
+            "n_total_trials": 1,
+            "stats": {"n_retries": 0, "n_completed_trials": 1},
+            "synthetic_private_value": "must-not-survive",
+        },
+        trial={
+            "id": "synthetic-private-trial-id",
+            "trial_name": "synthetic-private-trial-name",
+            "trial_uri": "synthetic-private-uri",
+            "task_name": f"terminal-bench/{trial.task_id}",
+            "agent_info": {
+                "name": trial.agent_id,
+                "version": agent.version,
+                "model_info": {
+                    "provider": "openai",
+                    "name": campaign.model.served_name,
+                },
+            },
+            "agent_result": {
+                "n_input_tokens": 100 + trial.index,
+                "n_cache_tokens": 10,
+                "n_output_tokens": 20 + trial.index,
+                "metadata": {"synthetic_private_value": "must-not-survive"},
+            },
+            "verifier_result": {"rewards": {"reward": reward}},
+            "started_at": "2026-08-18T01:00:00+00:00",
+            "finished_at": "2026-08-18T01:00:20+00:00",
+            "environment_setup": timing(
+                "2026-08-18T01:00:00+00:00", "2026-08-18T01:00:02+00:00"
+            ),
+            "agent_setup": timing(
+                "2026-08-18T01:00:02+00:00", "2026-08-18T01:00:05+00:00"
+            ),
+            "agent_execution": timing(
+                "2026-08-18T01:00:05+00:00", "2026-08-18T01:00:17+00:00"
+            ),
+            "verifier": timing(
+                "2026-08-18T01:00:17+00:00", "2026-08-18T01:00:20+00:00"
+            ),
+            "exception_info": None,
+            "config": {"synthetic_private_value": "must-not-survive"},
+        },
+    )
+
+
+def _harbor_envelope(
+    *,
+    started_at: str,
+    finished_at: str,
+    size_offset: int = 0,
+) -> dict[str, object]:
+    campaign = load_campaign(HARBOR_CAMPAIGN_PATH)
+    attempts = tuple(
+        HarborAttempt(
+            trial=trial,
+            status=_harbor_status(trial),
+            job_result=_harbor_job_result(
+                campaign, trial, reward=1 if trial.index % 3 else 0
+            ),
+        )
+        for trial in iter_trials(campaign)
+    )
+    summary = summarize_campaign_results(
+        campaign,
+        attempts,
+        network_policy_patch_digest=HARBOR_EXPECTED_DERIVATION_DIGEST,
+        npm_artifact_admission=_harbor_npm_admission(
+            campaign, size_offset=size_offset
+        ),
+    )
+    admission = RuntimeAdmission(
+        artifact_validation=True,
+        harbor_runtime_verified=True,
+        node_tree_verified=True,
+        agent_trees_verified=2,
+        npm_artifacts_verified=3,
+        runtime_assets_verified=2,
+        agent_source_files_verified=1,
+        python_bytecode_cache_empty=True,
+        host_arm64=True,
+        docker_server_arm64=True,
+        model=ModelAdmission(
+            chat_passed=True,
+            json_passed=True,
+            tool_call_passed=True,
+            prompt_tokens=30,
+            completion_tokens=15,
+            wall_s=2.0,
+        ),
+        unix_bridge_verified=True,
+    )
+    cleanup = CleanupStatus(
+        harbor_resources_removed=True,
+        bridge_stopped=True,
+        bridge_socket_removed=True,
+        server_stopped=True,
+        telemetry_stopped=True,
+        key_removed=True,
+        raw_jobs_private_retained=True,
+        raw_jobs_key_free=True,
+        derived_dataset_removed=True,
+        runtime_overlays_removed=True,
+        staged_assets_removed=True,
+        socket_directory_removed=True,
+        npm_scratch_removed=True,
+        agent_source_removed=True,
+        python_pycache_removed=True,
+    )
+    return build_lifecycle_envelope(
+        campaign=campaign,
+        campaign_summary=summary,
+        model_provenance=dict(_EXPECTED_MODEL),
+        git_revision=HARBOR_EXPECTED_GIT_REVISION,
+        git_clean=True,
+        admission=admission,
+        cleanup=cleanup,
+        status="completed",
+        stop_reason="completed",
+        started_at=started_at,
+        finished_at=finished_at,
+        elapsed_s=300.0,
+        trials_started=12,
+        trials_completed=12,
+        cutoff_reached=False,
+    )
+
+
+def _write_private_json(path: Path, value: object, *, canonical: bool = True) -> None:
+    if canonical:
+        text = json.dumps(
+            value,
+            sort_keys=True,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ) + "\n"
+    else:
+        text = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    path.write_text(text, encoding="ascii")
+    path.chmod(0o600)
 
 
 def _agentic_suite() -> dict[str, object]:
@@ -494,7 +745,13 @@ class EvidenceExportTests(unittest.TestCase):
             "status": "complete",
         }
 
-    def export(self, *, replace: bool = False) -> dict[str, object]:
+    def export(
+        self,
+        *,
+        harbor_results: tuple[Path, ...] = (),
+        output: Path | None = None,
+        replace: bool = False,
+    ) -> dict[str, object]:
         # Production campaigns have deliberately exact file-set contracts. Patch
         # that independent adapter so this fixture can remain a small run corpus.
         with patch(
@@ -503,9 +760,70 @@ class EvidenceExportTests(unittest.TestCase):
         ):
             return export_evidence(
                 results_root=self.fixture.results,
-                output_root=self.fixture.output,
+                output_root=output or self.fixture.output,
+                harbor_results=harbor_results,
                 replace=replace,
             )
+
+    def harbor_results(
+        self, *, second_size_offset: int = 0
+    ) -> tuple[Path, Path]:
+        first = Path(self.temporary.name) / "harbor-first.json"
+        second = Path(self.temporary.name) / "harbor-second.json"
+        _write_private_json(
+            first,
+            _harbor_envelope(
+                started_at="2026-08-18T02:00:00+00:00",
+                finished_at="2026-08-18T02:00:20+00:00",
+            ),
+        )
+        _write_private_json(
+            second,
+            _harbor_envelope(
+                started_at="2026-08-18T03:00:00+00:00",
+                finished_at="2026-08-18T03:00:20+00:00",
+                size_offset=second_size_offset,
+            ),
+        )
+        return first, second
+
+    def refresh_campaign_checksums(
+        self, campaign_id: str, *, evidence_root: Path | None = None
+    ) -> None:
+        root = evidence_root or self.fixture.output
+        bundle = root / "campaigns" / campaign_id
+        bundle_checksums = {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(bundle.iterdir())
+            if path.name != "checksums.json"
+        }
+        EvidenceFixture.write_json(
+            bundle / "checksums.json",
+            {"files": bundle_checksums, "schema_version": SCHEMA_VERSION},
+        )
+        index_path = root / "index.json"
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        campaign_entry = next(
+            entry
+            for entry in index["campaigns"]
+            if entry["campaign_id"] == campaign_id
+        )
+        campaign_entry["bundle_sha256"] = hashlib.sha256(
+            (bundle / "checksums.json").read_bytes()
+        ).hexdigest()
+        EvidenceFixture.write_json(index_path, index)
+        root_checksums_path = root / "checksums.json"
+        root_checksums = {
+            str(path.relative_to(root)): hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+            for path in sorted(root.rglob("*"))
+            if path.is_file() and path != root_checksums_path
+        }
+        EvidenceFixture.write_json(
+            root_checksums_path,
+            {"files": root_checksums, "schema_version": SCHEMA_VERSION},
+        )
 
     def test_export_is_deterministic_and_excludes_raw_values(self) -> None:
         first = self.export()
@@ -590,6 +908,237 @@ class EvidenceExportTests(unittest.TestCase):
         self.assertEqual([False, True], [row[error_index] for row in first_rows])
         self.assertEqual([10 * 1024, 9 * 1024], [row[memfree_index] for row in first_rows])
         self.assertEqual(0.0, chunk["segments"][1]["rows"][0][elapsed_index])
+
+    def test_harbor_reversed_inputs_are_deterministic_and_staged_safe(self) -> None:
+        self.add_matrix_source()
+        first, second = self.harbor_results()
+        initial = self.export(harbor_results=(second, first))
+        self.assertTrue(initial["changed"])
+        original = self.exported_bytes()
+
+        repeated = self.export(harbor_results=(first, second))
+
+        self.assertFalse(repeated["changed"])
+        self.assertEqual(original, self.exported_bytes())
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+        bundle = self.fixture.output / "campaigns" / HARBOR_CAMPAIGN_ID
+        self.assertEqual(
+            {"checksums.json", "manifest.json", "replicates.json"},
+            {path.name for path in bundle.iterdir()},
+        )
+        document = json.loads((bundle / "replicates.json").read_text())
+        manifest = json.loads((bundle / "manifest.json").read_text())
+        self.assertEqual(HARBOR_SCHEMA_VERSION, manifest["schema_version"])
+        self.assertNotEqual(SCHEMA_VERSION, manifest["schema_version"])
+        self.assertEqual(2, document["replicate_count"])
+        self.assertEqual(
+            [
+                "2026-08-18T02:00:00+00:00",
+                "2026-08-18T03:00:00+00:00",
+            ],
+            [replicate["started_at"] for replicate in document["replicates"]],
+        )
+        serialized = (bundle / "replicates.json").read_text(encoding="utf-8")
+        self.assertNotIn(str(first.parent), serialized)
+        self.assertNotIn("synthetic-private", serialized)
+
+        repository = Path(self.temporary.name)
+        self.git("init", "--quiet")
+        self.git("add", "--", self.fixture.output.name)
+        staged = verify_staged_evidence(
+            repo_root=repository,
+            evidence_root=Path(self.fixture.output.name),
+        )
+        self.assertEqual("staged_verified", staged["status"])
+
+    def test_harbor_input_count_duplicates_and_pin_mismatch_fail_closed(self) -> None:
+        first, second = self.harbor_results()
+        with self.assertRaisesRegex(EvidenceError, "zero or exactly two"):
+            self.export(harbor_results=(first,))
+        with self.assertRaisesRegex(EvidenceError, "zero or exactly two"):
+            self.export(harbor_results=(first, second, first))
+        with self.assertRaisesRegex(EvidenceError, "duplicates"):
+            self.export(harbor_results=(first, first))
+
+        mismatched_first, mismatched_second = self.harbor_results(
+            second_size_offset=10
+        )
+        with self.assertRaisesRegex(EvidenceError, "exact campaign pins"):
+            self.export(harbor_results=(mismatched_first, mismatched_second))
+
+        parsed = build_parser().parse_args(
+            [
+                "export-evidence",
+                "--harbor-result",
+                str(first),
+                "--harbor-result",
+                str(second),
+            ]
+        )
+        self.assertEqual([first, second], parsed.harbor_result)
+
+    def test_harbor_unsafe_malformed_partial_and_sensitive_inputs_fail(self) -> None:
+        first, second = self.harbor_results()
+        first.chmod(0o644)
+        with self.assertRaisesRegex(EvidenceError, "owner-mode-0600"):
+            self.export(harbor_results=(first, second))
+
+        first.unlink()
+        _write_private_json(
+            first,
+            _harbor_envelope(
+                started_at="2026-08-18T02:00:00+00:00",
+                finished_at="2026-08-18T02:00:20+00:00",
+            ),
+        )
+        hardlink = Path(self.temporary.name) / "harbor-hardlink.json"
+        os.link(first, hardlink)
+        with self.assertRaisesRegex(EvidenceError, "single-link"):
+            self.export(harbor_results=(hardlink, second))
+        hardlink.unlink()
+        symlink = Path(self.temporary.name) / "harbor-symlink.json"
+        symlink.symlink_to(first)
+        with self.assertRaisesRegex(EvidenceError, "symbolic link"):
+            self.export(harbor_results=(symlink, second))
+
+        first.unlink()
+        _write_private_json(
+            first,
+            _harbor_envelope(
+                started_at="2026-08-18T02:00:00+00:00",
+                finished_at="2026-08-18T02:00:20+00:00",
+            ),
+            canonical=False,
+        )
+        with self.assertRaisesRegex(EvidenceError, "not canonical"):
+            self.export(harbor_results=(first, second))
+
+        partial = _harbor_envelope(
+            started_at="2026-08-18T02:00:00+00:00",
+            finished_at="2026-08-18T02:00:20+00:00",
+        )
+        partial["status"] = "partial"
+        _write_private_json(first, partial)
+        with self.assertRaisesRegex(EvidenceError, "exact validation"):
+            self.export(harbor_results=(first, second))
+
+        sensitive = _harbor_envelope(
+            started_at="2026-08-18T02:00:00+00:00",
+            finished_at="2026-08-18T02:00:20+00:00",
+        )
+        sensitive["campaign"]["trials"][0]["prompt"] = RAW_SECRET
+        _write_private_json(first, sensitive)
+        with self.assertRaises(EvidenceError):
+            self.export(harbor_results=(first, second))
+
+        path_value = _harbor_envelope(
+            started_at="2026-08-18T02:00:00+00:00",
+            finished_at="2026-08-18T02:00:20+00:00",
+        )
+        path_value["campaign"]["trials"][0]["safe_metric"] = RAW_HOST_PATH
+        _write_private_json(first, path_value)
+        with self.assertRaisesRegex(EvidenceError, "scalar publication policy"):
+            self.export(harbor_results=(first, second))
+
+        infrastructure_failure = _harbor_envelope(
+            started_at="2026-08-18T02:00:00+00:00",
+            finished_at="2026-08-18T02:00:20+00:00",
+        )
+        infrastructure_failure["campaign"]["trials"][2]["public_rejected"] = False
+        infrastructure_failure["campaign"]["summary"][
+            "network_admission_failures"
+        ] = 1
+        _write_private_json(first, infrastructure_failure)
+        with self.assertRaisesRegex(EvidenceError, "infrastructure gates"):
+            self.export(harbor_results=(first, second))
+
+        missing_reward = _harbor_envelope(
+            started_at="2026-08-18T02:00:00+00:00",
+            finished_at="2026-08-18T02:00:20+00:00",
+        )
+        missing_reward["campaign"]["trials"][2]["reward"] = None
+        _write_private_json(first, missing_reward)
+        with self.assertRaisesRegex(EvidenceError, "trial infrastructure gates"):
+            self.export(harbor_results=(first, second))
+
+        first.write_text('{"value":1,"value":2}\n', encoding="ascii")
+        first.chmod(0o600)
+        with self.assertRaisesRegex(EvidenceError, "strict JSON grammar"):
+            self.export(harbor_results=(first, second))
+
+        for location in ("model", "pins"):
+            type_drift = _harbor_envelope(
+                started_at="2026-08-18T02:00:00+00:00",
+                finished_at="2026-08-18T02:00:20+00:00",
+            )
+            if location == "model":
+                type_drift["model"]["runtime_parallel"] = True
+            else:
+                type_drift["campaign"]["pins"]["model"]["parallel"] = True
+            _write_private_json(first, type_drift)
+            with self.subTest(type_drift=location), self.assertRaises(EvidenceError):
+                self.export(harbor_results=(first, second))
+
+    def test_harbor_verifier_rechecks_order_after_checksum_rewrite(self) -> None:
+        first, second = self.harbor_results()
+        self.export(harbor_results=(first, second))
+        bundle = self.fixture.output / "campaigns" / HARBOR_CAMPAIGN_ID
+        replicates_path = bundle / "replicates.json"
+        document = json.loads(replicates_path.read_text(encoding="utf-8"))
+        document["replicates"].reverse()
+        EvidenceFixture.write_json(replicates_path, document)
+        self.refresh_campaign_checksums(HARBOR_CAMPAIGN_ID)
+
+        with self.assertRaisesRegex(EvidenceError, "not ordered"):
+            verify_evidence(self.fixture.output)
+
+    def test_harbor_verifier_cannot_be_bypassed_by_changing_kind(self) -> None:
+        first, second = self.harbor_results()
+        self.export(harbor_results=(first, second))
+        bundle = self.fixture.output / "campaigns" / HARBOR_CAMPAIGN_ID
+        manifest_path = bundle / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["evidence_kind"] = "synthetic_campaign"
+        EvidenceFixture.write_json(manifest_path, manifest)
+        index_path = self.fixture.output / "index.json"
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        harbor_entry = next(
+            entry
+            for entry in index["campaigns"]
+            if entry["campaign_id"] == HARBOR_CAMPAIGN_ID
+        )
+        harbor_entry["evidence_kind"] = "synthetic_campaign"
+        EvidenceFixture.write_json(index_path, index)
+        self.refresh_campaign_checksums(HARBOR_CAMPAIGN_ID)
+
+        with self.assertRaisesRegex(EvidenceError, "identity or evidence kind"):
+            verify_evidence(self.fixture.output)
+
+    def test_harbor_verifier_rejects_boolean_numeric_coercions(self) -> None:
+        first, second = self.harbor_results()
+        mutations = (
+            ("manifest", "payloads_included", 0),
+            ("replicates", "replicate_count", 2.0),
+        )
+        for document_name, key, value in mutations:
+            with self.subTest(document=document_name, key=key):
+                output = Path(self.temporary.name) / f"evidence-{document_name}"
+                self.export(harbor_results=(first, second), output=output)
+                document_path = (
+                    output
+                    / "campaigns"
+                    / HARBOR_CAMPAIGN_ID
+                    / f"{document_name}.json"
+                )
+                document = json.loads(document_path.read_text(encoding="utf-8"))
+                document[key] = value
+                EvidenceFixture.write_json(document_path, document)
+                self.refresh_campaign_checksums(
+                    HARBOR_CAMPAIGN_ID, evidence_root=output
+                )
+
+                with self.assertRaises(EvidenceError):
+                    verify_evidence(output)
 
     def test_changed_export_requires_replace(self) -> None:
         self.export()

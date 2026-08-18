@@ -10,8 +10,9 @@ quality checks, and the provenance needed to interpret each number.
 | --- | --- |
 | Which MoE models are useful on Spark now? | [MoE landscape, including Laguna XS/S, G9v3, NInfer, and the dense Muse control](docs/moe-landscape-2026-08-17.md) |
 | Which models complete deterministic multi-turn tool tasks? | [Agentic tool-use results: strict success, trace correctness, MTP, and Laguna](docs/agentic-tools-results-2026-08-17.md) |
-| How will coding-agent harnesses be compared overnight? | [Offline-derived Qwen3-Coder-Next Harbor/Terminal-Bench protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign) |
-| What ran in the latest overnight campaign? | [2026-08-17 results: Unsloth Qwen3.6/Qwen3.8, DSpark, perplexity, long context, and Muse DFlash](docs/benchmark-results-2026-08-17.md) |
+| How did Qwen3-Coder-Next fare on terminal coding tasks? | [Harbor/Terminal-Bench-derived results: Qwen Code versus OpenCode](docs/harbor-terminal-results-2026-08-18.md) |
+| How are offline coding-agent harnesses compared? | [Qwen3-Coder-Next Harbor campaign protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign) |
+| What ran in the 2026-08-17 overnight campaign? | [Unsloth Qwen3.6/Qwen3.8, DSpark, perplexity, long context, and Muse DFlash](docs/benchmark-results-2026-08-17.md) |
 | What is the broad cross-runtime baseline? | [2026-08-16 campaign: vLLM, Ollama, SGLang, llama.cpp, TensorRT-LLM, and Transformers](docs/benchmark-results-2026-08-16.md) |
 | How was the original Qwen3.8 result produced? | [Focused Qwen3.8 study](docs/qwen38-27b.md) and [exact benchmark record](BENCHMARK.md) |
 | How should results be compared or published? | [Benchmark protocol and evidence policy](BENCHMARK.md#sparkbench-protocol-and-evidence-publication) |
@@ -27,6 +28,14 @@ explains how to create and verify both files.
 
 ## What the results say
 
+- In the two-replicate Harbor/Terminal-Bench-derived coding-agent panel,
+  Qwen3-Coder-Next produced **1/24 strict passes overall**: Qwen Code passed
+  1/12 and OpenCode passed 0/12. The one `fix-git` pass did not repeat. All 24
+  trials finalized and the network, native-image, image-pair, and cleanup gates
+  passed, separating task failure from harness infrastructure. This fixed
+  six-task subset is not an official Terminal-Bench score; see the
+  [Harbor result report](docs/harbor-terminal-results-2026-08-18.md) for the
+  shared-verifier, quantization, telemetry, and replication limits.
 - In the clean-revision agentic campaign, Laguna XS 2.1 was the fastest
   configuration to pass all 12 deterministic multi-turn tool episodes; Laguna
   S 2.1 and both Qwen3.8 configurations also passed 12/12. All eight
@@ -68,6 +77,10 @@ geometries, slot counts, or validation states.
 
 ### Measured results
 
+- [Qwen3-Coder-Next Harbor terminal results — 2026-08-18](docs/harbor-terminal-results-2026-08-18.md):
+  two complete replicates of a fixed six-task Terminal-Bench 2.1 subset through
+  Qwen Code and OpenCode, with strict rewards, failure labels, infrastructure
+  gates, and scalar-only evidence kept distinct.
 - [Agentic tool-use results — 2026-08-17](docs/agentic-tools-results-2026-08-17.md):
   four deterministic multi-turn scenarios across Laguna, Qwen3.6, Qwen3.8,
   Nemotron, and matched MTP controls, with strict and trace outcomes separated.
