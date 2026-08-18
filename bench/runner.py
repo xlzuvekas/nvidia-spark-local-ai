@@ -64,6 +64,16 @@ class PreflightError(RuntimeError):
     pass
 
 
+_MULTI_HOP_FAILURE_MESSAGE = "multi-hop case failed; error details omitted"
+
+
+class MultiHopNeedleError(RuntimeError):
+    """A public-safe failure for a generated multi-hop needle case."""
+
+    def __init__(self) -> None:
+        super().__init__(_MULTI_HOP_FAILURE_MESSAGE)
+
+
 def _command_output(command: list[str]) -> str | None:
     result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=15)
     return result.stdout.strip() if result.returncode == 0 else None
@@ -225,6 +235,88 @@ def _preflight(model: SimpleNamespace) -> None:
 
 def _needle(nonce: str) -> str:
     return "SPARK-" + hashlib.sha256(nonce.encode()).hexdigest()[:10].upper()
+
+
+def _multi_hop_path(nonce: str, path_id: str) -> tuple[str, str, str]:
+    """Return one nonce-derived source-to-relay-to-final relation path."""
+
+    source = "SPARK-SOURCE-" + hashlib.sha256(
+        f"{nonce}:{path_id}:source".encode()
+    ).hexdigest()[:10].upper()
+    relay = "SPARK-RELAY-" + hashlib.sha256(
+        f"{source}:{path_id}:relay".encode()
+    ).hexdigest()[:10].upper()
+    final = "SPARK-FINAL-" + hashlib.sha256(
+        f"{relay}:{path_id}:final".encode()
+    ).hexdigest()[:10].upper()
+    return source, relay, final
+
+
+def _multi_hop_values(nonce: str) -> tuple[str, str, str]:
+    """Return the nonce-derived target path for one two-hop task."""
+
+    return _multi_hop_path(nonce, "target")
+
+
+def _multi_hop_needle(nonce: str) -> str:
+    """Return only the final answer expected from a two-hop needle task."""
+
+    return _multi_hop_values(nonce)[2]
+
+
+def _is_multi_hop_needle(case: Any) -> bool:
+    return str(getattr(case, "id", "")).startswith(
+        "long-context-multi-hop-needle-"
+    )
+
+
+def _multi_hop_needle_prompt(
+    *, prompt_repetitions: int, nonce: str, prefix: str
+) -> str:
+    """Build a two-hop retrieval prompt with separated target and decoy paths."""
+
+    source, relay, final = _multi_hop_values(nonce)
+    decoy_one = _multi_hop_path(nonce, "decoy-one")
+    decoy_two = _multi_hop_path(nonce, "decoy-two")
+    records = (
+        f"Source record: source {source} routes through relay {relay}. ",
+        (
+            f"Source record: source {decoy_one[0]} routes through relay "
+            f"{decoy_one[1]}. "
+        ),
+        (
+            f"Relay record: relay {decoy_two[1]} has final archive key "
+            f"{decoy_two[2]}. "
+        ),
+        f"Relay record: relay {relay} has final archive key {final}. ",
+        (
+            f"Relay record: relay {decoy_one[1]} has final archive key "
+            f"{decoy_one[2]}. "
+        ),
+        (
+            f"Source record: source {decoy_two[0]} routes through relay "
+            f"{decoy_two[1]}. "
+        ),
+    )
+    filler_count = max(prompt_repetitions, 1)
+    block_count = len(records) + 1
+    base_filler_count, extra_filler_count = divmod(filler_count, block_count)
+    filler_counts = tuple(
+        base_filler_count + (1 if index < extra_filler_count else 0)
+        for index in range(block_count)
+    )
+    parts = [prefix]
+    for index, record in enumerate(records):
+        parts.append("archive " * filler_counts[index])
+        parts.append(record)
+    parts.extend(
+        (
+            "archive " * filler_counts[-1],
+            f"Start at source {source}. Follow its relay, then use that relay to find "
+            "the final archive key. Reply with only the final archive key.",
+        )
+    )
+    return "".join(parts)
 
 
 def _solid_color_png_data_url(
@@ -503,6 +595,46 @@ def _request_result_payload(model: Any, result: Any) -> dict[str, Any]:
     return payload
 
 
+_MULTI_HOP_RESULT_SCALAR_FIELDS = (
+    "prompt_tokens",
+    "completion_tokens",
+    "reasoning_tokens",
+    "ttft_s",
+    "elapsed_s",
+    "decode_s",
+    "decode_tps",
+    "output_tps",
+    "emission_events",
+    "finish_reason",
+    "response_model",
+    "decode_metric_source",
+    "load_s",
+    "server_prompt_s",
+)
+
+
+def _multi_hop_result_payload(model: Any, result: Any) -> dict[str, Any]:
+    """Return the fixed scalar result schema used by multi-hop needle cases.
+
+    The generated prompt, nonce-derived request identifiers and start times,
+    relation values, visible completion, hidden reasoning, and tool payloads
+    are intentionally excluded from raw results.
+    """
+
+    payload = _request_result_payload(model, result)
+    scalar_payload: dict[str, Any] = {}
+    for field in _MULTI_HOP_RESULT_SCALAR_FIELDS:
+        if field not in payload:
+            continue
+        value = payload[field]
+        if value is not None and not isinstance(value, (bool, int, float, str)):
+            raise RuntimeError(
+                f"Multi-hop result field {field!r} must be a scalar or null"
+            )
+        scalar_payload[field] = value
+    return scalar_payload
+
+
 def _rerank_inputs(case: SimpleNamespace) -> tuple[str, list[str], int]:
     requested = int(case.prompt_repetitions)
     candidate_count = max(requested, 2) if requested else len(_RERANK_BASE_CANDIDATES)
@@ -655,6 +787,12 @@ def _prompt(case: SimpleNamespace, nonce: str) -> str:
         return prefix + 'Return only a JSON object with keys "benchmark" set to "spark" and "value" set to 42.'
     if kind == "capability" and "tools" in case.requires:
         return prefix + "Use the multiply tool to multiply 6 by 7. Do not answer without calling the tool."
+    if kind == "capability" and _is_multi_hop_needle(case):
+        return _multi_hop_needle_prompt(
+            prompt_repetitions=prompt_repetitions,
+            nonce=nonce,
+            prefix=prefix,
+        )
     if kind == "capability" and str(case.id).startswith("long-context-needle"):
         filler = "archive " * max(prompt_repetitions, 1)
         midpoint = len(filler) // 2
@@ -1077,6 +1215,14 @@ def _validate_capability(
     if "embeddings" in case.requires:
         passed = bool(result.finite and result.dimension > 0 and result.batch_size > 0)
         return {"passed": passed, "reason": None if passed else "embedding vector validation failed"}
+    if _is_multi_hop_needle(case):
+        passed = str(result.content).strip() == _multi_hop_needle(result.request_id)
+        return {
+            "passed": passed,
+            "reason": (
+                None if passed else "final multi-hop needle key was not returned exactly"
+            ),
+        }
     if str(case.id).startswith("long-context-needle"):
         passed = _needle(result.request_id) in result.content
         return {"passed": passed, "reason": None if passed else "needle was not returned"}
@@ -1364,12 +1510,29 @@ def _execute_case(
                         "kind": case.kind,
                         "repetition": repetition,
                         "burst_elapsed_s": result_burst_s,
-                        "result": _request_result_payload(model, result),
+                        "result": (
+                            _multi_hop_result_payload(model, result)
+                            if _is_multi_hop_needle(case)
+                            else _request_result_payload(model, result)
+                        ),
                         "validation": validation,
                     }
                 )
         elapsed_s = time.perf_counter() - measured_started
     except Exception as error:
+        if _is_multi_hop_needle(case):
+            safe_error = MultiHopNeedleError()
+            journal.append(
+                {
+                    "event": "case_failed",
+                    "case_id": case.case_id,
+                    "attempt_id": attempt_id,
+                    "error_type": type(safe_error).__name__,
+                    "error": str(safe_error),
+                    "elapsed_s": time.perf_counter() - started,
+                }
+            )
+            raise safe_error from error
         journal.append(
             {
                 "event": "case_failed",

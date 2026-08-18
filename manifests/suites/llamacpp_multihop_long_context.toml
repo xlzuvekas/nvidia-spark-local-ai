@@ -1,0 +1,49 @@
+schema_version = 1
+
+[suite]
+id = "llamacpp-multihop-long-context"
+description = "Single-slot native llama.cpp two-hop nonce-derived relation retrieval at 32K through 240K context targets; only the final visible key is validated."
+
+[[cases]]
+id = "long-context-multi-hop-needle-32768"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 32768
+
+[[cases]]
+id = "long-context-multi-hop-needle-65536"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 65536
+
+[[cases]]
+id = "long-context-multi-hop-needle-131072"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 131072
+
+[[cases]]
+id = "long-context-multi-hop-needle-245760"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 245760

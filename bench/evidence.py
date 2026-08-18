@@ -71,6 +71,10 @@ _HEX_RE = re.compile(r"[0-9a-f]{64}\Z")
 _REVISION_RE = re.compile(r"[0-9a-f]{7,64}\Z")
 _VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}\Z")
 _RUN_ID_RE = re.compile(r"20[0-9]{6}T[0-9]{6,12}Z-[A-Za-z0-9_.-]+\Z")
+_GROUPED_RUN_ROOT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"qwen36-core-(20[0-9]{6}T[0-9]{6})\Z"), "%Y%m%dT%H%M%S"),
+    (re.compile(r"reasoning-(20[0-9]{6})\Z"), "%Y%m%d"),
+)
 
 _HARBOR_ZERO_INFRASTRUCTURE_FIELDS = (
     "harbor_process_failures",
@@ -1524,6 +1528,21 @@ def _date_from_run_id(run_id: str) -> str:
         return datetime.strptime(run_id[:8], "%Y%m%d").date().isoformat()
     except ValueError as error:
         raise EvidenceError(f"invalid date in run ID {run_id!r}") from error
+
+
+def _is_grouped_run_root(name: str) -> bool:
+    """Recognize the two audited timestamped group layouts under ``results``."""
+
+    for pattern, timestamp_format in _GROUPED_RUN_ROOT_PATTERNS:
+        match = pattern.fullmatch(name)
+        if match is None:
+            continue
+        try:
+            datetime.strptime(match.group(1), timestamp_format)
+        except ValueError as error:
+            raise EvidenceError(f"invalid date in grouped results root {name!r}") from error
+        return True
+    return False
 
 
 def _canonical(value: Any) -> bytes:
@@ -5296,6 +5315,37 @@ def _assert_source_tree(root: Path) -> tuple[int, int]:
     return count, size
 
 
+def _grouped_run_dirs(results_root: Path) -> dict[str, set[Path]]:
+    """Validate and enumerate the narrowly allowlisted grouped-run layouts."""
+
+    grouped: dict[str, set[Path]] = {}
+    for root in sorted(results_root.iterdir()):
+        if not _is_grouped_run_root(root.name):
+            continue
+        metadata = root.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise EvidenceError("grouped results root must be a real directory")
+        children = sorted(root.iterdir())
+        if not children:
+            raise EvidenceError("grouped results root must contain at least one run")
+        runs: set[Path] = set()
+        for child in children:
+            child_metadata = child.lstat()
+            if not stat.S_ISDIR(child_metadata.st_mode) or stat.S_ISLNK(
+                child_metadata.st_mode
+            ):
+                raise EvidenceError(
+                    "grouped results root must contain only direct run directories"
+                )
+            _date_from_run_id(child.name)
+            plan_path = child / "plan.json"
+            if not plan_path.is_file():
+                raise EvidenceError("grouped run directory is missing plan.json")
+            runs.add(child)
+        grouped[root.name] = runs
+    return grouped
+
+
 def _export_evidence_locked(
     *,
     results_root: Path,
@@ -5330,6 +5380,7 @@ def _export_evidence_locked(
             (temporary / category).mkdir()
         runs: list[dict[str, Any]] = []
         run_dirs = sorted({path.parent for path in results_root.rglob("plan.json")})
+        grouped_runs = _grouped_run_dirs(results_root)
         recognized_top = {
             ".sparkbench.lock",
             "content-battery-dspark-sglang-20260817.json",
@@ -5343,6 +5394,15 @@ def _export_evidence_locked(
         for run_dir in run_dirs:
             relative_run = run_dir.relative_to(results_root)
             if len(relative_run.parts) == 1:
+                recognized_top.add(relative_run.parts[0])
+            elif (
+                len(relative_run.parts) == 2
+                and relative_run.parts[0] in grouped_runs
+            ):
+                if run_dir not in grouped_runs[relative_run.parts[0]]:
+                    raise EvidenceError(
+                        "grouped run directory does not match the declared topology"
+                    )
                 recognized_top.add(relative_run.parts[0])
             elif relative_run.parts[0] != "matrices" or len(relative_run.parts) != 3:
                 raise EvidenceError(f"run directory has an unknown layout: {run_dir.name}")

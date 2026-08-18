@@ -686,6 +686,14 @@ class EvidenceExportTests(unittest.TestCase):
             if path.is_file()
         }
 
+    def move_run_to_group(self, group_name: str) -> Path:
+        group = self.fixture.results / group_name
+        group.mkdir()
+        target = group / self.fixture.run_id
+        self.fixture.run_dir.rename(target)
+        self.fixture.run_dir = target
+        return group
+
     def git(self, *arguments: str) -> None:
         subprocess.run(
             ["git", *arguments],
@@ -869,6 +877,59 @@ class EvidenceExportTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, all_keys)
         self.assertFalse(any(key.endswith("_path") for key in all_keys))
+
+    def test_allowlisted_grouped_run_roots_are_deterministic_and_verifiable(self) -> None:
+        grouped_roots = (
+            "qwen36-core-20260818T113704",
+            "reasoning-20260818",
+        )
+        top_level_run = self.fixture.results / self.fixture.run_id
+        for group_name in grouped_roots:
+            with self.subTest(group_name=group_name):
+                group = self.move_run_to_group(group_name)
+                output = Path(self.temporary.name) / f"evidence-{group_name}"
+
+                first = self.export(output=output)
+                original = {
+                    str(path.relative_to(output)): path.read_bytes()
+                    for path in output.rglob("*")
+                    if path.is_file()
+                }
+                second = self.export(output=output)
+
+                self.assertTrue(first["changed"])
+                self.assertFalse(second["changed"])
+                self.assertEqual(
+                    original,
+                    {
+                        str(path.relative_to(output)): path.read_bytes()
+                        for path in output.rglob("*")
+                        if path.is_file()
+                    },
+                )
+                self.assertEqual("verified", verify_evidence(output)["status"])
+                index = json.loads((output / "index.json").read_text(encoding="utf-8"))
+                self.assertEqual([self.fixture.run_id], [run["run_id"] for run in index["runs"]])
+
+                self.fixture.run_dir.rename(top_level_run)
+                group.rmdir()
+                self.fixture.run_dir = top_level_run
+
+    def test_grouped_run_roots_reject_unpinned_or_nonrun_topology(self) -> None:
+        unknown_group = self.move_run_to_group("reasoning-unpinned")
+        with self.assertRaisesRegex(EvidenceError, "unknown layout"):
+            self.export()
+        self.fixture.run_dir.rename(self.fixture.results / self.fixture.run_id)
+        unknown_group.rmdir()
+        self.fixture.run_dir = self.fixture.results / self.fixture.run_id
+
+        group = self.fixture.results / "reasoning-20260818"
+        group.mkdir()
+        (group / "private-raw-note.txt").write_text(RAW_SECRET, encoding="utf-8")
+        with self.assertRaisesRegex(
+            EvidenceError, "only direct run directories"
+        ):
+            self.export()
 
     def test_source_ordinals_and_columnar_telemetry_are_preserved(self) -> None:
         self.export()
