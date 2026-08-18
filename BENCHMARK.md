@@ -206,6 +206,182 @@ identifiers, and per-request tags remain excluded. The first complete campaign
 and its comparison limits are recorded in
 [the 2026-08-17 agentic tool-use report](docs/agentic-tools-results-2026-08-17.md).
 
+### Harbor terminal coding-agent campaign
+
+The Qwen3-Coder-Next Harbor campaign is a pre-run, paired comparison of two
+coding-agent clients against one locally served model. Its normative definition
+is
+[`manifests/campaigns/harbor_terminal_coder_next.toml`](manifests/campaigns/harbor_terminal_coder_next.toml).
+Do not infer a result from the presence of the manifest or this protocol.
+
+The fixed serving profile is
+`qwen3-coder-next-80b-a3b-ud-q4-k-xl-llamacpp`: the exact 49,608,478,720-byte
+Unsloth `Qwen3-Coder-Next-UD-Q4_K_XL.gguf` artifact, llama.cpp b10453 source
+revision and server-binary digest recorded in `manifests/models.toml`, one
+sequence, 65,536 allocated context tokens, an 8,192-token server output cap,
+Q8 key/value cache, full GPU offload, flash attention, and no speculative
+decoder. The server defaults to temperature 1.0, top-p 0.95, and top-k 40.
+Agent clients may send their own generation settings; the bridge does not
+rewrite requests. Results therefore describe the complete model-plus-client
+stack, not a sampling-controlled comparison of agent prompts alone.
+
+The remaining inputs are pinned in the campaign manifest:
+
+- Harbor 0.21.0 at revision
+  `64afbbcb62165950301e1a6407c729aa26d844ff`, executed from the manifest-pinned
+  read-only runtime tree that includes its CPython interpreter, virtual
+  environment, installed packages, and source;
+- Terminal-Bench 2.1 at revision
+  `7131e4375048a0e408a8fb404b5f499d726b695b`;
+- Qwen Code 0.21.13 and OpenCode 1.18.18, including their npm integrity and
+  shasum values, the actual `opencode-linux-arm64` executable package integrity,
+  and upstream source revisions; and
+- six tasks: `build-cython-ext`, `cancel-async-tasks`,
+  `fix-code-vulnerability`, `kv-store-grpc`, `polyglot-c-py`, and
+  `query-optimize`.
+
+The measured lifecycle performs no npm or NVM installation. A separate,
+credential-free bootstrap produced normalized read-only Node, Qwen Code, and
+OpenCode trees from the exact published distributions. The manifest pins the
+complete tree digests and byte counts, the Node executable digest, package
+integrities, source revisions, and the ARM64 OpenCode package. Before every
+trial, the lifecycle hashes every mounted entry through no-follow file
+descriptors and rejects path substitution, unsafe links, hardlinks, special
+files, ownership or mode drift, or a changed byte. Custom Harbor agent classes
+only add the admitted read-only prefixes to `PATH` and verify their versions;
+they never invoke a downloader or package manager. The complete Harbor runtime
+is admitted the same way, and commands execute only its verified entry point.
+
+Each task-agent pair runs once, with one active trial, no retry, and a 900-second
+agent timeout. The containing Harbor invocation has a separate 3,600-second
+wall ceiling covering native image build, agent setup, agent execution, and
+verification. The twelve trials use the manifest's fixed counterbalanced order:
+the starting client alternates across tasks so simple warmup or time-order drift
+does not consistently favor one client. Harbor must build each task image for
+the native ARM64 host instead of pulling an AMD64-only prebuilt image. The
+adapter records the exact built image ID, and a Qwen Code/OpenCode task pair is
+not a valid comparison unless both trials used the same image. A failure or
+timeout remains a measured failed attempt; it is not silently retried or
+replaced. This small, selected task panel is an exploratory admission screen,
+not a broad coding-quality claim.
+
+#### Execution lifecycle
+
+The outer orchestrator must acquire `hold_campaign_lock(workspace)` before it
+starts llama.cpp and retain that single repository lock across the model,
+authenticated Unix-socket bridge, every Harbor invocation, and teardown. While
+holding the lock, it creates the verified policy-only dataset and runtime
+overlay in an external owner-private cache, follows the manifest's exact
+`trial_order`, builds each command with `build_harbor_invocation(...)`, and
+executes it through `run_harbor_invocation(...)`. The generated Harbor command
+fixes Docker execution, native image building and deletion, one attempt, one
+concurrent agent, one trial, zero retries, the selected task, exact custom agent
+class, served model, frozen tool prefixes, and phase-specific network policy.
+Do not hand-edit that command.
+
+After each invocation, project the external raw job with the adapter's strict
+loader and canonical JSON serialization. Derived tasks and raw Harbor jobs must
+resolve outside the repository; only the later allowlisted scalar projection is
+eligible for the evidence exporter. Cleanup of Harbor containers, bridge,
+server, sampler, the derived task copy, and the key file belongs in the
+lock-owning `finally` path. The owner-private raw job tree remains ignored local
+evidence and must pass an exact ephemeral-key residue scan before cleanup is
+certified. An outer convenience CLI must preserve this lifecycle and the frozen
+manifest rather than creating a second execution contract.
+
+After the harness commit is clean and every admission input is present, run the
+frozen lifecycle with:
+
+```bash
+python3 harbor_campaign.py
+```
+
+Its defaults resolve the pinned Harbor runtime, tool prefixes, Terminal-Bench
+checkout, and owner-private raw/output root outside the repository. Optional
+path flags relocate only those exact-verified inputs; they do not change the
+model, task order, bridge endpoint, sampling geometry, or lifecycle contract.
+
+#### Isolation and credential boundary
+
+The inference server remains bound to `127.0.0.1`. Its authenticated host bridge
+listens only on an owner-private mode-0600 Unix socket and forwards only to that
+loopback server. A dedicated, read-only Node relay shares Harbor's egress
+sidecar network namespace, listens only on container loopback, and is the sole
+container with the socket/key directory mounted. The untrusted task receives a
+fixed non-secret placeholder; the relay validates it, substitutes a per-run
+internal bearer, and the host bridge validates and strips that bearer before
+connecting upstream. The real credential never enters Harbor arguments,
+environment, task files, or published evidence. Neither boundary logs headers
+or payloads, and both enforce bounded connections, headers, buffers, and
+timeouts. Delete the owner-only key and prove the Unix socket is absent after
+cleanup, including interruption paths.
+
+Task setup begins with `no-network` because the admitted clients require no
+installation. During the agent phase, one atomically updated, permanent
+default-drop nftables chain permits only IPv4 loopback TCP to the fixed relay
+port; DNS, ICMP, IPv6, raw sockets, the Docker gateway, public addresses, and
+all other loopback ports remain blocked. The verifier phase atomically returns
+to deny-all, preventing surviving agent children from regaining egress.
+Embedded probes certify these transitions in every invocation. The adapter
+verifies that instructions, tests, and every other task byte match the pinned
+source and records a deterministic digest of the derived policy. The model is
+never bound to a wildcard or LAN address, and neither task nor inference uses
+Docker host networking.
+
+This network-policy transformation intentionally differs from the upstream
+Terminal-Bench task bytes. Report the result as a Harbor/Terminal-Bench-derived
+harness-stack outcome, not an official Terminal-Bench 2.1 score.
+
+#### Admission and stop gates
+
+Before the measured matrix, require all of the following:
+
+1. exact model, runtime, Harbor, dataset, and agent pins resolve, and the model
+   file and runtime binary match their recorded sizes and digests;
+2. no unrelated GPU process or running container is present, port 8000 is free,
+   and available unified memory is at least the profile's 96 GiB estimate plus
+   an 8 GiB reserve;
+3. the loopback model passes basic chat, structured-output, and tool-call
+   admission, including one valid tool call;
+4. the full Harbor runtime and all Node/agent prefix trees match their complete
+   immutable admissions, and the relay image is native ARM64;
+5. a native ARM64 canary task image builds, yields a verifier result, and leaves
+   no campaign container running; and
+6. authenticated relay/bridge access succeeds, invalid access never reaches
+   the model, every forbidden network probe fails, the phase-policy and relay
+   assets match their digests, and no raw-payload publication path is enabled.
+
+Abort rather than reinterpret a run when model readiness exceeds its
+1,200-second profile timeout, the canary cannot finish within its 3,600-second
+containing invocation ceiling and clean up, available memory falls below the
+admission reserve, swap grows without
+recovering, or bridge/network isolation fails. Stop the campaign after two
+consecutive endpoint or chat-template failures. Do not start a new trial at the
+23,400-second campaign cutoff; preserve the remaining 5,400 seconds of the
+eight-hour window for cleanup, reconciliation, deterministic evidence export,
+verification, and documentation. Preserve all completed and failed attempts
+when a stop gate fires.
+
+#### Records and publication
+
+Harbor job results, task workspaces, trajectories, prompts, completions,
+reasoning, tool payloads, logs, identifiers, commands, environment state, local
+paths, and the ephemeral credential remain raw local records under ignored
+storage. They must never be copied into Git or quoted in a report. The campaign
+adapter may project only its strict allowlist of scalar outcomes and public,
+bounded provenance: task and agent labels, terminal status, verifier reward,
+token counts, durations, timestamps, version/digest pins, policy-patch digest,
+and cleanup/admission booleans. Unknown fields fail closed.
+
+Publication follows [the sanitized evidence workflow](#publishing-sanitized-evidence).
+Add campaign evidence only after the exporter supports its exact scalar schema,
+an offline synthetic fixture passes, two exports are byte-identical, the archive
+verifies, and `verify-evidence --staged` validates and secret-scans the exact Git
+index. A report must retain failures and partial states and must label the
+one-attempt design, task subset, client-controlled requests, derived network
+policy, serving geometry, and absence of a broad quality or official leaderboard
+claim.
+
 Concurrency results are comparable only when the serving-slot geometry is the
 same. A one-slot profile receiving C2, C4, or C8 requests measures queued
 aggregate service, not parallel-sequence scaling. Similarly, compare

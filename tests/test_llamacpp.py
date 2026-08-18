@@ -76,6 +76,137 @@ def _completed(
 
 
 class LlamaCppManifestTests(unittest.TestCase):
+    def test_qwen3_coder_next_profile_pins_exact_p1_agent_launch(self) -> None:
+        model = load_models(ROOT / "manifests" / "models.toml")[
+            "qwen3-coder-next-80b-a3b-ud-q4-k-xl-llamacpp"
+        ]
+
+        self.assertEqual(model.backend, "llamacpp")
+        self.assertEqual(model.lifecycle, "subprocess")
+        self.assertEqual(model.source, "unsloth/Qwen3-Coder-Next-GGUF")
+        self.assertEqual(
+            model.revision,
+            "ce09c67b53bc8739eef83fe67b2f5d293c270632",
+        )
+        self.assertEqual(model.served_name, "Qwen/Qwen3-Coder-Next")
+        self.assertEqual(
+            model.model_file,
+            "Qwen3-Coder-Next-UD-Q4_K_XL.gguf",
+        )
+        self.assertEqual(model.fetch_allow_patterns, (model.model_file,))
+        self.assertEqual(model.model_size_bytes, 49_608_478_720)
+        self.assertEqual(
+            model.model_digest,
+            "sha256:4bb93f0a0221ef4ff963ca9094df629c8dfdfabc3b4fdd85c1a2e4c0624fce36",
+        )
+        self.assertEqual(model.architecture, "qwen3next")
+        self.assertEqual(model.quantization, "ud-q4_k_xl")
+        self.assertEqual(model.tasks, ("chat", "json", "tools"))
+        self.assertEqual(model.runtime_parallel, 1)
+        self.assertEqual(model.max_context, 65_536)
+        self.assertEqual(model.native_context, 65_536)
+        self.assertEqual(model.estimated_ram_gib, 96.0)
+        self.assertEqual(model.startup_timeout_s, 1_200)
+        self.assertEqual(
+            model.runtime_digest,
+            "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40",
+        )
+        self.assertEqual(
+            model.runtime_revision,
+            "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70",
+        )
+        self.assertEqual(
+            model.runtime_binary,
+            "~/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server",
+        )
+        self.assertEqual(
+            model.runtime_source_dir,
+            "~/.cache/sparkbench/llama.cpp-b10453",
+        )
+        validate_model(model)
+        for invalid_locator in (
+            ".cache/llama-server",
+            "~other/llama-server",
+            "~/../llama-server",
+            "~//tmp/llama-server",
+        ):
+            with self.subTest(invalid_locator=invalid_locator):
+                with self.assertRaisesRegex(
+                    ManifestError, "absolute or portable ~/ path"
+                ):
+                    validate_model(
+                        replace(model, runtime_binary=invalid_locator)
+                    )
+        expected_args = (
+            "--n-gpu-layers",
+            "all",
+            "--flash-attn",
+            "on",
+            "--fit",
+            "off",
+            "--batch-size",
+            "8192",
+            "--ubatch-size",
+            "512",
+            "--cache-type-k",
+            "q8_0",
+            "--cache-type-v",
+            "q8_0",
+            "--jinja",
+            "--reasoning",
+            "off",
+            "--temp",
+            "1.0",
+            "--top-p",
+            "0.95",
+            "--top-k",
+            "40",
+            "--n-predict",
+            "8192",
+            "--no-context-shift",
+        )
+        self.assertEqual(model.args, expected_args)
+        self.assertNotIn("--parallel", model.args)
+        self.assertIsNone(model.draft_model_file)
+        self.assertFalse(llamacpp_mtp_requested(model.args))
+        self.assertFalse(llamacpp_dflash_requested(model.args))
+
+        command = _native_command(
+            model,
+            {
+                "runtime_binary": "/runtime/llama-server",
+                "model_path": "/verified/qwen3-coder-next.gguf",
+            },
+            port=8123,
+        )
+        self.assertEqual(
+            command,
+            [
+                "/runtime/llama-server",
+                "--model",
+                "/verified/qwen3-coder-next.gguf",
+                "--alias",
+                "Qwen/Qwen3-Coder-Next",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8123",
+                "--ctx-size",
+                "65536",
+                "--parallel",
+                "1",
+                "--no-ui",
+                "--offline",
+                "--metrics",
+                "--cors-origins",
+                "localhost",
+                "--no-cors-credentials",
+                *expected_args,
+            ],
+        )
+        self.assertNotIn("--spec-type", command)
+        self.assertNotIn("--spec-draft-model", command)
+
     def test_laguna_xs21_profile_pins_official_q4_k_m_baseline(self) -> None:
         model = load_models(ROOT / "manifests" / "models.toml")[
             "laguna-xs21-33b-a3b-q4-k-m-llamacpp"

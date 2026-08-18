@@ -493,6 +493,52 @@ args = [
 ]
 
 [[models]]
+id = "qwen3-coder-next-80b-a3b-ud-q4-k-xl-llamacpp"
+description = "Pinned Unsloth Qwen3-Coder-Next 80B-A3B Dynamic 2.0 UD-Q4_K_XL GGUF agent-serving baseline, single-slot at 64K and without speculation."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3-Coder-Next-GGUF"
+revision = "ce09c67b53bc8739eef83fe67b2f5d293c270632"
+served_name = "Qwen/Qwen3-Coder-Next"
+tasks = ["chat", "json", "tools"]
+architecture = "qwen3next"
+quantization = "ud-q4_k_xl"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3-Coder-Next-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3-Coder-Next-UD-Q4_K_XL.gguf"
+model_digest = "sha256:4bb93f0a0221ef4ff963ca9094df629c8dfdfabc3b4fdd85c1a2e4c0624fce36"
+model_size_bytes = 49608478720
+runtime_binary = "~/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 1
+runtime_source_dir = "~/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+# Apache-2.0. The model card advertises 262,144-token context; this P1
+# profile allocates 65,536 tokens and caps agent outputs at 8,192 tokens.
+max_context = 65536
+native_context = 65536
+startup_timeout_s = 1200
+estimated_ram_gib = 96.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+  "--temp", "1.0",
+  "--top-p", "0.95",
+  "--top-k", "40",
+  "--n-predict", "8192",
+  "--no-context-shift",
+]
+
+[[models]]
 id = "qwen36-35b-a3b-ud-q4-k-xl-llamacpp"
 description = "Single-slot 262K-context Unsloth Qwen3.6 MoE Q4_K_XL GGUF without speculation."
 support_status = "spark_other_backend"

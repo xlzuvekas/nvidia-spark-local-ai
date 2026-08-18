@@ -1,0 +1,130 @@
+schema_version = 1
+id = "qwen3-coder-next-harbor-terminal-2026-08-17"
+description = "Counterbalanced Qwen Code versus OpenCode admission on a pinned Terminal-Bench 2.1 subset, served by Qwen3-Coder-Next on one DGX Spark."
+
+[model]
+profile = "qwen3-coder-next-80b-a3b-ud-q4-k-xl-llamacpp"
+served_name = "Qwen/Qwen3-Coder-Next"
+context_tokens = 65536
+max_output_tokens = 8192
+parallel = 1
+
+[harbor]
+source = "harbor-framework/harbor"
+revision = "64afbbcb62165950301e1a6407c729aa26d844ff"
+version = "0.21.0"
+environment = "docker"
+force_build = true
+n_attempts = 1
+n_concurrent = 1
+max_retries = 0
+runtime_tree_sha256 = "sha256:9fe1a144b228d5f540726696d9d29a5ea01e9051bb6b6e293c3c23f2a5d0386b"
+runtime_tree_size_bytes = 2106386494
+runtime_tree_entries = 66729
+runtime_tree_files = 57355
+runtime_tree_links = 1053
+executable_path = ".venv/bin/harbor"
+executable_size_bytes = 348
+executable_sha256 = "sha256:95c7c1b6da6209f66179ba411e4b22addd6ec96dd4f206ca69564c8dde337f9d"
+agent_source_sha256 = "sha256:aa71d30b76d0a9bf9304c0796794f0ca48023d8c38409a2375e6d1cd14a82a8e"
+python_launcher_path = ".venv/bin/python"
+python_launcher_target = "../../.python-runtime/bin/python3.13"
+python_version = "3.13.11"
+python_path = ".python-runtime/bin/python3.13"
+python_size_bytes = 21558296
+python_sha256 = "sha256:f9a43df6c18466648773aacbd1b1a3db14a4bc23d222b866b8e5e088f9a4675a"
+
+[dataset]
+source = "harbor-framework/terminal-bench-2-1"
+revision = "7131e4375048a0e408a8fb404b5f499d726b695b"
+version = "2.1"
+tasks = [
+  "build-cython-ext",
+  "cancel-async-tasks",
+  "fix-code-vulnerability",
+  "kv-store-grpc",
+  "polyglot-c-py",
+  "query-optimize",
+]
+
+[[agents]]
+id = "qwen-coder"
+version = "0.21.13"
+npm_package = "@qwen-code/qwen-code"
+npm_integrity = "sha512-xXyOK166EEeTjHUh9BEdH4h7Afhz53k+jJAv5mgFxQYJbHf25oxif6WRk6jvYGwMxpEdL3vaoURP/QQiplN9lQ=="
+npm_shasum = "ca3ec34b0cd6179fe08ed757b861241c28178460"
+source = "QwenLM/qwen-code"
+revision = "d959015974302fb60ebd99adb81a68c2f482eaa3"
+install_tree_sha256 = "sha256:d8116cabe714aad8649d55cabe709903ce13d1944edafc13e9670f48b7f5a579"
+install_tree_size_bytes = 132176032
+
+[[agents]]
+id = "opencode"
+version = "1.18.18"
+npm_package = "opencode-ai"
+npm_integrity = "sha512-J+5HFq8tf+wPBBpBpMPSNjSytF2/EkNWYfFZh4si1d9auFbQriqDyqZv+vFUsLWERfdMU32Eajwuiq3rKBvZLQ=="
+npm_shasum = "a78971b6affe7ed27a207218465d1a80e36a018c"
+platform_package = "opencode-linux-arm64"
+platform_integrity = "sha512-e8D3g0qJEIzawEg2+ygW3vkZjAYL2ssyAx4GbihjwXwZFvlZZy5zRWWzdz5KLBoHSTl0FB73vNtnNeXONyHpVQ=="
+platform_shasum = "5d4952bb8c1c3bbcccc52bcd07a540a845e31408"
+source = "anomalyco/opencode"
+revision = "31406ccc51b4bd2a4e1e086b2bcaa5f7f804f26d"
+install_tree_sha256 = "sha256:39a28a0bb7c08720a54d1d533e26e5280f4f494a029be9751f2d2b3b41161883"
+install_tree_size_bytes = 366571144
+
+[relay]
+listen_host = "127.0.0.1"
+port = 18080
+sentinel_host = "sparkbench-relay.invalid"
+placeholder_api_key = "sparkbench-relay-placeholder-v1"
+uds_path = "/run/sparkbench/model.sock"
+internal_key_path = "/run/sparkbench/internal-api-key"
+node_image = "node@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d"
+relay_script_sha256 = "sha256:ebf7e377c0ae2b5597653979107cf39fd2582c7d200f6f08179db6c724fc5a81"
+network_policy_sha256 = "sha256:5b86e7b2f9f6b05e1f54318964a1db015fe0891b1d72fe4a59c02a9d55417f2f"
+
+[toolchain]
+node_version = "v22.22.1"
+npm_builder_version = "10.9.4"
+node_binary_sha256 = "sha256:1ea16f5e8d590ca819f1db81e61a6bc4c8e7d8b69776c9236f8ebbf717113225"
+node_tree_sha256 = "sha256:fe1c8f2403bdf6c1dbd38421ba26b8094b9faa35efc51bc2b6fb375b2fe9e147"
+node_tree_size_bytes = 121914536
+node_mount_path = "/opt/sparkbench/node"
+agent_mount_path = "/opt/sparkbench/agent"
+
+[execution]
+canary_task = "build-cython-ext"
+agent_timeout_s = 900
+trial_wall_timeout_s = 3600
+hard_campaign_cutoff_s = 23400
+reserve_for_audit_s = 5400
+trial_order = [
+  "build-cython-ext:qwen-coder",
+  "build-cython-ext:opencode",
+  "cancel-async-tasks:opencode",
+  "cancel-async-tasks:qwen-coder",
+  "fix-code-vulnerability:qwen-coder",
+  "fix-code-vulnerability:opencode",
+  "kv-store-grpc:opencode",
+  "kv-store-grpc:qwen-coder",
+  "polyglot-c-py:qwen-coder",
+  "polyglot-c-py:opencode",
+  "query-optimize:opencode",
+  "query-optimize:qwen-coder",
+]
+bridge_requires_bearer_auth = true
+bridge_target_is_loopback = true
+raw_trajectories_are_ignored = true
+publish_scalar_evidence_only = true
+harness_requests_are_not_rewritten = true
+server_default_temperature = 1.0
+server_default_top_p = 0.95
+server_default_top_k = 40
+
+[admission]
+require_native_arm64_build = true
+require_canary_container_cleanup = true
+require_model_tool_call = true
+require_verifier_result = true
+reject_unexpected_network = true
+reject_raw_payload_publication = true

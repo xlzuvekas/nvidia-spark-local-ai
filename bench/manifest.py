@@ -773,9 +773,19 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
             ("runtime_binary", model.runtime_binary),
             ("runtime_source_dir", model.runtime_source_dir),
         ):
-            if not value or not Path(value).is_absolute():
+            portable_home_path = bool(
+                value
+                and value.startswith("~/")
+                and len(value) > 2
+                and ".." not in Path(value[2:]).parts
+                and not Path(value[2:]).is_absolute()
+            )
+            if not value or not (
+                Path(value).is_absolute() or portable_home_path
+            ):
                 raise ManifestError(
-                    f"{context}.{name} must be an absolute path for llamacpp"
+                    f"{context}.{name} must be an absolute or portable ~/ path "
+                    "for llamacpp"
                 )
         if not model.runtime_revision or not _COMMIT_PATTERN.fullmatch(
             model.runtime_revision

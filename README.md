@@ -10,6 +10,7 @@ quality checks, and the provenance needed to interpret each number.
 | --- | --- |
 | Which MoE models are useful on Spark now? | [MoE landscape, including Laguna XS/S, G9v3, NInfer, and the dense Muse control](docs/moe-landscape-2026-08-17.md) |
 | Which models complete deterministic multi-turn tool tasks? | [Agentic tool-use results: strict success, trace correctness, MTP, and Laguna](docs/agentic-tools-results-2026-08-17.md) |
+| How will coding-agent harnesses be compared overnight? | [Pre-run Qwen3-Coder-Next Harbor/Terminal-Bench protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign) |
 | What ran in the latest overnight campaign? | [2026-08-17 results: Unsloth Qwen3.6/Qwen3.8, DSpark, perplexity, long context, and Muse DFlash](docs/benchmark-results-2026-08-17.md) |
 | What is the broad cross-runtime baseline? | [2026-08-16 campaign: vLLM, Ollama, SGLang, llama.cpp, TensorRT-LLM, and Transformers](docs/benchmark-results-2026-08-16.md) |
 | How was the original Qwen3.8 result produced? | [Focused Qwen3.8 study](docs/qwen38-27b.md) and [exact benchmark record](BENCHMARK.md) |
@@ -87,6 +88,7 @@ geometries, slot counts, or validation states.
 ### Method, scope, and specialized guides
 
 - [Benchmark protocol and evidence policy](BENCHMARK.md)
+- [Pre-run Harbor terminal coding-agent protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign)
 - [Benchmark strategy](docs/benchmark-strategy.md)
 - [Dated campaign plan](docs/benchmark-campaign-2026-08-15.md)
 - [Local model inventory](docs/local-model-inventory.md)

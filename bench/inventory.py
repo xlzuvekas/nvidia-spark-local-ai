@@ -347,7 +347,8 @@ def assess_model_availability(
                 and draft_model_available
             )
             runtime_available = bool(
-                model.runtime_binary and Path(model.runtime_binary).is_file()
+                model.runtime_binary
+                and Path(model.runtime_binary).expanduser().is_file()
             )
             if not model_file_available:
                 details.append(
