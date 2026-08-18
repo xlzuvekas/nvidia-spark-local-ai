@@ -26,15 +26,16 @@ explains how to create and verify both files.
 
 ## What the results say
 
-- In the exploratory agentic pilot, Laguna XS 2.1 was the fastest configuration
-  to pass all 12 deterministic multi-turn tool episodes; Laguna S 2.1 and both
-  Qwen3.8 configurations also
-  passed 12/12. All eight configurations produced correct tool traces, but
-  Qwen3.6 and Nemotron missed the strict final-answer envelope. Qwen3.8 MTP4
-  preserved 12/12 success while reducing summed episode wall time by 43.6%.
-  See the [agentic report](docs/agentic-tools-results-2026-08-17.md) for the
-  trace/answer distinction, dirty-plan provenance, and comparison limits. A
-  clean-revision replication is the publication gate.
+- In the clean-revision agentic campaign, Laguna XS 2.1 was the fastest
+  configuration to pass all 12 deterministic multi-turn tool episodes; Laguna
+  S 2.1 and both Qwen3.8 configurations also passed 12/12. All eight
+  configurations produced correct tool traces, but Qwen3.6 and Nemotron missed
+  the strict final-answer envelope. Qwen3.8 MTP4 preserved 12/12 success while
+  reducing matched summed episode wall time by 44.7%. The preceding dirty-tree
+  pilot had the same 62/96 strict and 96/96 trace outcomes and remains
+  separately labeled exploratory. See the
+  [agentic report](docs/agentic-tools-results-2026-08-17.md) for the
+  trace/answer distinction, clean provenance, and comparison limits.
 - Sparse models are the most promising way around Spark's shared-memory
   bandwidth ceiling. In the matched native kernel panel, the measured 30--35B
   MoE artifacts decoded far faster than the dense Qwen3.8 and Muse controls.

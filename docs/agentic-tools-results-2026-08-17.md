@@ -2,14 +2,12 @@
 
 ## Result summary
 
-The exploratory deterministic multi-turn tool campaign completed **96
+The clean-revision deterministic multi-turn tool campaign completed **96
 episodes** on one DGX Spark: four scenarios, three variants per scenario, and
-eight matched or candidate-serving configurations.
-
-The frozen plans recorded an uncommitted implementation, so these measurements
-are preserved as exploratory evidence rather than a fully reproducible release
-result. The harness is being committed before a clean-revision replication; the
-replication, not this pilot alone, is the publication-grade provenance gate.
+eight matched or candidate-serving configurations. Every frozen plan records
+harness commit `982e7defaa2c40364b9183d2634e0c0953c1fd97` and an empty Git
+status. A preceding dirty-tree pilot is retained below as an exploratory
+replication check, not as the primary result.
 
 - **All 96/96 tool traces were correct.** This includes correct tool
   abstention, selection and arguments, dependent two-hop execution, and all
@@ -19,25 +17,26 @@ replication, not this pilot alone, is the publication-grade provenance gate.
   There were no wrong-envelope answers, malformed calls, unknown calls, turn
   limit hits, or output-length terminations.
 - **Laguna XS 2.1 was the fastest fully passing configuration:** 12/12 strict
-  passes in 13.54 seconds of summed episode wall time. Its energy coverage was
+  passes in 13.72 seconds of summed episode wall time. Its energy coverage was
   incomplete for the shortest no-tool case, so no whole-panel joules-per-solve
   value is reported.
-- **Laguna S 2.1 also passed 12/12.** Its 34.66-second task total was 1.90× as
-  fast as dense Qwen3.8 without MTP and 1.07× as fast as Qwen3.8 with
-  MTP4, despite the Laguna artifact containing 118B total / 8B active
-  parameters and 68.35 GiB of verified weights.
+- **Laguna S 2.1 also passed 12/12.** Its 32.84-second clean task total was
+  below dense Qwen3.8's 66.18-second baseline and 36.60-second MTP4 totals,
+  despite the Laguna artifact containing 118B total / 8B active parameters and
+  68.35 GiB of verified weights. This unlike-model observation uses Laguna P1
+  versus Qwen P8 server geometry and is not a matched speedup claim.
 - **Qwen3.8 MTP4 preserved 12/12 strict success** while cutting matched summed
-  episode wall time by 43.6% and sampled case energy by 33.9%.
+  episode wall time by 44.7% and sampled case energy by 39.0% in the clean run.
 - **Qwen3.6 and Nemotron expose an envelope-format distinction.** Their tool
   traces were 12/12 both with and without MTP, but Qwen3.6 passed only 7/12
   strict envelopes and Nemotron passed 0/12. Nemotron MTP3 had the lowest raw
-  task total, 12.48 seconds, but it is not a passing end-to-end configuration.
+  task total, 12.27 seconds, but it is not a passing end-to-end configuration.
 
 These are small synthetic admission tasks, not broad agent benchmarks. The
 strict result remains the primary deployment result; trace correctness is a
 diagnostic that explains why a strict episode failed.
 
-## Overall outcomes
+## Clean-revision outcomes
 
 The table ranks fully passing configurations first. “Task wall” is the sum of
 the 12 measured episode wall times and excludes artifact verification, model
@@ -47,16 +46,16 @@ these short episodes.
 
 | Configuration | Strict success | Correct traces | Missing `FINAL:` | Task wall | Median episode | Sampled case energy (coverage) | Sampled J / strict solve |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Laguna XS 2.1 33B-A3B Q4_K_M | **12/12** | 12/12 | 0 | **13.54 s** | **1.064 s** | 466 J (3/4 cases) | — |
-| Laguna S 2.1 118B-A8B UD-Q4_K_XL | **12/12** | 12/12 | 0 | 34.66 s | 3.157 s | 1,608 J (4/4) | 134.0 J |
-| Qwen3.8 27B UD-Q4_K_XL + MTP4 | **12/12** | 12/12 | 0 | 37.18 s | 3.542 s | 2,057 J (4/4) | 171.5 J |
-| Qwen3.8 27B UD-Q4_K_XL | **12/12** | 12/12 | 0 | 65.95 s | 6.175 s | 3,112 J (4/4) | 259.3 J |
-| Qwen3.6 35B-A3B UD-Q4_K_XL + MTP2 | 7/12 | 12/12 | 5 | 15.77 s | 1.513 s | 525 J (4/4) | 75.0 J |
-| Qwen3.6 35B-A3B UD-Q4_K_XL | 7/12 | 12/12 | 5 | 17.73 s | 1.645 s | 580 J (3/4) | — |
-| Nemotron 3.5 Lightning 30B-A3B Q4_0 + MTP3 | 0/12 | 12/12 | 12 | 12.48 s | 1.155 s | 412 J (3/4) | — |
-| Nemotron 3.5 Lightning 30B-A3B Q4_0 | 0/12 | 12/12 | 12 | 14.48 s | 1.370 s | 490 J (4/4) | — |
+| Laguna XS 2.1 33B-A3B Q4_K_M | **12/12** | 12/12 | 0 | **13.72 s** | **1.072 s** | 467 J (3/4 cases) | — |
+| Laguna S 2.1 118B-A8B UD-Q4_K_XL | **12/12** | 12/12 | 0 | 32.84 s | 2.996 s | 1,548 J (4/4) | 129.0 J |
+| Qwen3.8 27B UD-Q4_K_XL + MTP4 | **12/12** | 12/12 | 0 | 36.60 s | 3.379 s | 1,945 J (4/4) | 162.1 J |
+| Qwen3.8 27B UD-Q4_K_XL | **12/12** | 12/12 | 0 | 66.18 s | 6.187 s | 3,189 J (4/4) | 265.7 J |
+| Qwen3.6 35B-A3B UD-Q4_K_XL + MTP2 | 7/12 | 12/12 | 5 | 15.61 s | 1.483 s | 560 J (4/4) | 80.1 J |
+| Qwen3.6 35B-A3B UD-Q4_K_XL | 7/12 | 12/12 | 5 | 17.71 s | 1.691 s | 590 J (4/4) | 84.3 J |
+| Nemotron 3.5 Lightning 30B-A3B Q4_0 + MTP3 | 0/12 | 12/12 | 12 | 12.27 s | 1.125 s | 402 J (3/4) | — |
+| Nemotron 3.5 Lightning 30B-A3B Q4_0 | 0/12 | 12/12 | 12 | 16.17 s | 1.521 s | 542 J (4/4) | — |
 
-Nemotron baseline's complete four-case energy coverage corresponds to 40.8 J
+Nemotron baseline's complete four-case energy coverage corresponds to 45.2 J
 per correct trace. The MTP3 run lacks energy for one case, so it has no
 comparable whole-panel value. Trace energy describes tool mechanics, not
 strictly solved episodes.
@@ -88,7 +87,7 @@ declared API contract. Formatter or chat-template work should be retested
 against the same oracle rather than retroactively treating these episodes as
 passes.
 
-## MTP: quality preservation and task latency
+## Clean MTP: quality preservation and task latency
 
 All three speculative pairs used the same main artifact and suite geometry as
 their non-MTP control. MTP preserved the exact strict/trace outcome pattern in
@@ -97,15 +96,31 @@ one server lifetime in each accelerated run.
 
 | Matched pair | Strict / trace, base → MTP | Accepted draft tokens | Mean accepted length | Task wall, base → MTP | Wall reduction | Task-rate gain | Common-case sampled energy reduction |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.6, MTP2 | 7/12 / 12/12 → same | 417/424 (98.35%) | 2.967 | 17.73 → 15.77 s | 11.0% | 12.4% | 18.0% (3 matched cases) |
-| Nemotron, MTP3 | 0/12 / 12/12 → same | 401/437 (91.76%) | 3.747 | 14.48 → 12.48 s | 13.9% | 16.1% | 5.8% (3 matched cases) |
-| Qwen3.8, MTP4 | 12/12 / 12/12 → same | 439/483 (90.89%) | 4.628 | 65.95 → 37.18 s | **43.6%** | **77.4%** | **33.9%** |
+| Qwen3.6, MTP2 | 7/12 / 12/12 → same | 417/424 (98.35%) | 2.967 | 17.71 → 15.61 s | 11.9% | 13.5% | 5.0% (4 matched cases) |
+| Nemotron, MTP3 | 0/12 / 12/12 → same | 401/437 (91.76%) | 3.747 | 16.17 → 12.27 s | 24.1% | 31.8% | 18.5% (3 matched cases) |
+| Qwen3.8, MTP4 | 12/12 / 12/12 → same | 440/479 (91.86%) | 4.667 | 66.18 → 36.60 s | **44.7%** | **80.8%** | **39.0%** |
 
 The acceptance counters cover the complete measured server lifetime, including
 the prime request, while task wall covers only the 12 episodes. The large
 Qwen3.8 gain is consistent with speculative decoding reducing the dense
 model's decode cost. The smaller sparse-model gains are still positive, but
 short tool episodes retain fixed TTFT and round-trip overhead.
+
+## Exploratory pilot replication check
+
+The earlier pilot ran the same eight profiles and produced the identical
+per-scenario pass pattern: 96/96 correct tool traces, 62/96 strict envelopes,
+34 `missing_final` failures, and 24/24 recoveries. Its frozen plans recorded
+base revision `c756d457732740f6b689053528fee4fbc5eee3ad` plus a dirty
+worktree, so the clean panel above is the reproducible result.
+
+Matched wall reductions were also directionally consistent: Qwen3.6 MTP2 was
+11.0% in the pilot versus 11.9% clean, Nemotron MTP3 was 13.9% versus 24.1%,
+and Qwen3.8 MTP4 was 43.6% versus 44.7%. Across individual configurations,
+clean task wall differed from the pilot by -5.3% to +1.4% except for Nemotron
+baseline, which was 11.6% slower. This makes the large Qwen3.8 result the most
+stable matched performance finding; Nemotron's direction replicated, but its
+precise short-run gain did not.
 
 ## Protocol
 
@@ -125,9 +140,11 @@ admission estimate is 26,624 tokens, below every tested served context.
 
 The in-process executor recognizes only the suite's bounded scalar tools.
 Model-provided call identifiers are replaced with episode-local identifiers,
-and arguments are parsed and schema-checked before dispatch. The journal keeps
-only aggregate scalar results. It does not retain the scenario text, response
-content, reasoning, arguments, tool responses, or per-request identifiers.
+and arguments are parsed and schema-checked before dispatch. Successful
+agentic request records keep only aggregate scalar results. The tracked
+evidence archive additionally drops arbitrary failure text and does not retain
+scenario text, response content, reasoning, arguments, tool responses, or
+per-request identifiers.
 
 Strict success requires all of the following:
 
@@ -138,8 +155,9 @@ Strict success requires all of the following:
 
 Across this campaign the maximum episode used three turns and 130 total
 completion tokens. There were zero length-terminated turns and zero turn-limit
-hits. The larger budget was therefore sufficient, but this campaign does not
-identify the minimum safe budget for harder agentic work.
+hits, and all 96 terminal finish reasons were `stop`. The larger budget was
+therefore sufficient, but this campaign does not identify the minimum safe
+budget for harder agentic work.
 
 ## Hardware, artifacts, and lifecycle
 
@@ -151,13 +169,13 @@ identify the minimum safe budget for harder agentic work.
 - Runtime revision: `3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70`.
 - Runtime binary SHA-256:
   `ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40`.
-- Harness base revision recorded by every frozen plan:
-  `c756d457732740f6b689053528fee4fbc5eee3ad`; every plan also recorded a dirty
-  worktree because the agentic implementation had not yet been committed. The
-  exact pilot-time source tree therefore cannot be reconstructed from that
-  revision alone, even though the scalar artifacts and later hardened harness
-  are retained here.
-- Measurement window: 2026-08-17 23:14:49 through 23:28:29 UTC.
+- Clean harness revision recorded by every replication plan:
+  `982e7defaa2c40364b9183d2634e0c0953c1fd97`; all eight plans recorded an
+  empty Git status. The earlier pilot plans record base revision
+  `c756d457732740f6b689053528fee4fbc5eee3ad` plus a dirty worktree and remain
+  exploratory.
+- Clean measurement window: 2026-08-18 00:11:36 through 00:25:19 UTC. The
+  exploratory pilot ran from 2026-08-17 23:14:49 through 23:28:29 UTC.
 
 | Model artifact | Pinned source and revision | Quantization | Verified weight size |
 | --- | --- | --- | ---: |
@@ -180,18 +198,37 @@ Nemotron MTP3 also used the pinned 1,155,907,520-byte draft artifact with
 SHA-256
 `19f964207d5236dc88662686f00604a5494974c23fb04dd16a5ad7b2eebbd5b4`.
 
-The configurations ran sequentially. Every run had one server-ready event,
-one verified server stop, four completed cases, no case exception, no run
-abort, valid startup measurement state, and zero measurement annotations.
-Runs with strict validation failures are terminal `partial` results rather than
-infrastructure failures.
+Both panels ran their configurations sequentially. Every clean run had one
+server-ready event, one verified server stop, four completed cases, no case
+exception, no run abort, valid startup measurement state, and zero measurement
+annotations. Runs with strict validation failures are terminal `partial`
+results rather than infrastructure failures.
+
+Laguna S was the lifecycle outlier: exact three-shard artifact validation took
+101.609 seconds and process startup took 72.181 seconds. It still retained
+42.108 GiB minimum host `MemAvailable` during measured cases. These lifecycle
+costs are excluded from task wall and should be budgeted separately in an
+interactive deployment.
 
 ## Exact local result directories
 
 These ignored raw directories are the source set used for this report. Their
-strict scalar projections are also tracked under matching directories in
+strict scalar projections are tracked under matching directories in
 `evidence/runs/`; the exporter excludes prompts, completions, reasoning, tool
 arguments and responses, request identifiers, paths, logs, and credentials.
+
+Clean-revision replication:
+
+- `results/20260818T001136Z-qwen36-35b-a3b-ud-q4-k-xl-llamacpp-agentic-tools-02b3617b`
+- `results/20260818T001259Z-laguna-xs21-33b-a3b-q4-k-m-llamacpp-agentic-tools-c5ca5827`
+- `results/20260818T001400Z-nemotron35-lightning-30b-a3b-q4-0-llamacpp-agentic-tools-07355fb3`
+- `results/20260818T001500Z-qwen38-27b-ud-q4-k-xl-llamacpp-agentic-tools-0013f56f`
+- `results/20260818T001638Z-qwen36-35b-a3b-ud-q4-k-xl-llamacpp-mtp2-agentic-tools-9c909ffe`
+- `results/20260818T001832Z-nemotron35-lightning-30b-a3b-q4-0-llamacpp-mtp3-agentic-tools-465072aa`
+- `results/20260818T001914Z-qwen38-27b-ud-q4-k-xl-llamacpp-mtp4-agentic-tools-38449200`
+- `results/20260818T002150Z-laguna-s21-118b-a8b-ud-q4-k-xl-llamacpp-agentic-tools-24322be1`
+
+Exploratory pilot:
 
 - `results/20260817T231449Z-qwen36-35b-a3b-ud-q4-k-xl-llamacpp-agentic-tools-02b3617b`
 - `results/20260817T231614Z-laguna-xs21-33b-a3b-q4-k-m-llamacpp-agentic-tools-c5ca5827`
@@ -221,10 +258,13 @@ arguments and responses, request identifiers, paths, logs, and credentials.
   mix slot geometry; matched Qwen3.8 base/MTP4 comparisons do not. These runs
   do not establish equivalent parser behavior or performance in vLLM, SGLang,
   Ollama, NInfer, or concurrent serving.
-- Because the frozen plans recorded a dirty worktree, this pilot is explicitly
-  exploratory. Committing the later hardened harness does not retroactively
-  make those plans clean; a same-matrix clean-revision replication is required
-  for the reproducible result.
+- The pilot's dirty plans remain explicitly exploratory. The clean panel, not
+  a retroactive reinterpretation of the pilot, supplies the reproducible
+  result.
+- The harness bounds turns and each model request but does not yet impose one
+  absolute per-episode deadline against a trickling transport. The operator
+  additionally wrapped each command in a 30-minute process timeout; that outer
+  timeout is not part of the frozen plan or tracked evidence.
 
 The next quality tier should keep this battery as a fast admission gate, then
 run the fully passing configurations through a pinned offline function-calling
