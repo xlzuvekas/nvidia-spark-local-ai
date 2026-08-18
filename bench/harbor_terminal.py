@@ -46,10 +46,12 @@ from .harbor_runtime_assets import (
 
 
 SCHEMA_VERSION = 1
-SUMMARY_SCHEMA_VERSION = 1
-SUMMARY_PROTOCOL = "harbor-terminal-scalar-v1"
+SUMMARY_SCHEMA_VERSION = 2
+SUMMARY_PROTOCOL = "harbor-terminal-scalar-v2"
 MAX_API_KEY_BYTES = 16 * 1024
 MAX_RAW_JSON_BYTES = 64 * 1024 * 1024
+MAX_IMAGE_INSPECT_BYTES = 1024 * 1024
+MAX_IMAGE_LAYERS = 4096
 MAX_NPM_TARBALL_BYTES = 512 * 1024 * 1024
 MAX_TASK_FILE_BYTES = 128 * 1024 * 1024
 RELAY_LISTEN_HOST = "127.0.0.1"
@@ -108,7 +110,7 @@ HARBOR_EXECUTABLE_SHA256 = (
     "sha256:95c7c1b6da6209f66179ba411e4b22addd6ec96dd4f206ca69564c8dde337f9d"
 )
 HARBOR_AGENT_SOURCE_SHA256 = (
-    "sha256:aa71d30b76d0a9bf9304c0796794f0ca48023d8c38409a2375e6d1cd14a82a8e"
+    "sha256:cc898eea830fc6a06505c7b07092234489468baf92b802e8c73bf94e133ae8c3"
 )
 HARBOR_AGENT_SOURCE_FILES = (
     "bench/harbor_pinned_agents.py",
@@ -562,6 +564,9 @@ class TaskPatch:
     derived_task_toml_sha256: str
     derived_task_toml_mode: int
     unchanged_tree_sha256: str
+    verifier_script_sha256: str
+    source_verifier_script_mode: int
+    derived_verifier_script_mode: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -598,6 +603,7 @@ class HarborRunStatus:
     timed_out: bool
     wall_s: float
     main_image_id: str | None
+    main_image_fingerprint: str | None
     main_image_arm64: bool
     relay_image_arm64: bool
     built_image_cleanup_succeeded: bool
@@ -1588,7 +1594,7 @@ def _file_tree(path: Path) -> dict[str, str]:
             candidate = root_path / name
             relative = candidate.relative_to(path).as_posix()
             data, mode = _read_owned_regular_file(candidate, context="task tree file")
-            if mode not in {0o644, 0o755}:
+            if mode not in {0o555, 0o644, 0o755}:
                 raise HarborCampaignError("Task tree file mode is not Git-normalized")
             files[relative] = f"{mode:04o}:{_sha256_bytes(data)}"
     return dict(sorted(files.items()))
@@ -2069,7 +2075,7 @@ def _file_record_parts(record: str) -> tuple[int, str]:
     mode_text, separator, digest = record.partition(":")
     if (
         separator != ":"
-        or mode_text not in {"0644", "0755"}
+        or mode_text not in {"0555", "0644", "0755"}
         or _SHA256_PATTERN.fullmatch(digest) is None
     ):
         raise HarborCampaignError("Task file provenance record is invalid")
@@ -2348,23 +2354,43 @@ def derive_private_task_dataset(
             os.unlink(derived_toml)
             _write_new_regular_file(derived_toml, patched_toml, source_mode)
 
+            verifier_relative = "tests/test.sh"
+            verifier_record = source_before[task_id].get(verifier_relative)
+            if verifier_record is None:
+                raise HarborCampaignError("Pinned task is missing tests/test.sh")
+            verifier_source_mode, verifier_digest = _file_record_parts(
+                verifier_record
+            )
+            if verifier_source_mode != 0o644:
+                raise HarborCampaignError(
+                    "Pinned verifier launcher mode changed from the dataset pin"
+                )
+            os.chmod(derived_task / verifier_relative, 0o555)
+
             source_after = tracked_tree_verifier(source_root, (task_id,))[task_id]
             if source_after != source_before[task_id]:
                 raise HarborCampaignError("Source task tree changed during derivation")
             derived_files = _file_tree(derived_task)
-            source_non_toml = {
+            source_unchanged = {
                 key: value
                 for key, value in source_before[task_id].items()
-                if key != "task.toml"
+                if key not in {"task.toml", verifier_relative}
             }
-            derived_non_toml = {
+            derived_unchanged = {
                 key: value
                 for key, value in derived_files.items()
-                if key != "task.toml"
+                if key not in {"task.toml", verifier_relative}
             }
-            if source_non_toml != derived_non_toml:
+            derived_verifier_mode, derived_verifier_digest = _file_record_parts(
+                derived_files[verifier_relative]
+            )
+            if (
+                source_unchanged != derived_unchanged
+                or derived_verifier_digest != verifier_digest
+                or derived_verifier_mode != 0o555
+            ):
                 raise HarborCampaignError(
-                    "Derived task changed instruction, tests, or fixtures"
+                    "Derived task changed content or an unapproved file mode"
                 )
             task_patches.append(
                 TaskPatch(
@@ -2377,7 +2403,10 @@ def derive_private_task_dataset(
                     derived_task_toml_mode=_file_record_parts(
                         derived_files["task.toml"]
                     )[0],
-                    unchanged_tree_sha256=_tree_digest(source_non_toml),
+                    unchanged_tree_sha256=_tree_digest(source_unchanged),
+                    verifier_script_sha256=verifier_digest,
+                    source_verifier_script_mode=verifier_source_mode,
+                    derived_verifier_script_mode=0o555,
                 )
             )
 
@@ -2396,6 +2425,13 @@ def derive_private_task_dataset(
                     "derived_task_toml_sha256": item.derived_task_toml_sha256,
                     "derived_task_toml_mode": item.derived_task_toml_mode,
                     "unchanged_tree_sha256": item.unchanged_tree_sha256,
+                    "verifier_script_sha256": item.verifier_script_sha256,
+                    "source_verifier_script_mode": (
+                        item.source_verifier_script_mode
+                    ),
+                    "derived_verifier_script_mode": (
+                        item.derived_verifier_script_mode
+                    ),
                 }
                 for item in task_patches
             ],
@@ -2452,9 +2488,25 @@ def verify_private_task_dataset(
             or not _SHA256_PATTERN.fullmatch(expected.source_task_toml_sha256)
         ):
             raise HarborCampaignError("Derived task.toml digest changed")
-        non_toml = {key: value for key, value in files.items() if key != "task.toml"}
-        if _tree_digest(non_toml) != expected.unchanged_tree_sha256:
-            raise HarborCampaignError("Derived task instruction, tests, or fixtures changed")
+        unchanged = {
+            key: value
+            for key, value in files.items()
+            if key not in {"task.toml", "tests/test.sh"}
+        }
+        verifier_record = files.get("tests/test.sh")
+        if verifier_record is None:
+            raise HarborCampaignError("Derived verifier launcher is missing")
+        verifier_mode, verifier_digest = _file_record_parts(verifier_record)
+        if (
+            _tree_digest(unchanged) != expected.unchanged_tree_sha256
+            or expected.verifier_script_sha256 != verifier_digest
+            or expected.source_verifier_script_mode != 0o644
+            or expected.derived_verifier_script_mode != 0o555
+            or verifier_mode != expected.derived_verifier_script_mode
+        ):
+            raise HarborCampaignError(
+                "Derived task content or verifier launcher mode changed"
+            )
         task_toml, _ = _read_owned_regular_file(
             root / expected.task_id / "task.toml", context="derived task.toml"
         )
@@ -3092,11 +3144,51 @@ def _built_main_image_reference(invocation: HarborInvocation) -> str:
     return f"{project}-main"
 
 
-def _inspect_image(
+def _reject_image_object_duplicates(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate Docker image JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_image_constant(value: str) -> None:
+    del value
+    raise ValueError("non-finite Docker image JSON value")
+
+
+def _parse_image_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite Docker image JSON value")
+    return parsed
+
+
+def _inspect_image_id(
     image: str,
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> tuple[str, bool]:
+) -> str:
+    result = _docker_command(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+        runner=runner,
+    )
+    if result.returncode != 0 or not isinstance(result.stdout, str):
+        raise HarborCampaignError("Could not inspect one Docker image ID")
+    lines = result.stdout.splitlines()
+    if len(lines) != 1 or _SHA256_PATTERN.fullmatch(lines[0]) is None:
+        raise HarborCampaignError("Docker image ID is invalid")
+    return lines[0]
+
+
+def _load_image_inspection(
+    image: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> Mapping[str, Any]:
     try:
         result = _docker_command(
             [
@@ -3104,23 +3196,119 @@ def _inspect_image(
                 "image",
                 "inspect",
                 "--format",
-                "{{.Id}}\t{{.Architecture}}",
+                "{{json .}}",
                 image,
             ],
             runner=runner,
         )
     except HarborCampaignError:
         raise
-    if result.returncode != 0 or not isinstance(result.stdout, str):
-        raise HarborCampaignError("Could not inspect one admitted Docker image")
-    fields = result.stdout.strip().split("\t")
     if (
-        len(fields) != 2
-        or _SHA256_PATTERN.fullmatch(fields[0]) is None
-        or fields[1] not in {"amd64", "arm64"}
+        result.returncode != 0
+        or not isinstance(result.stdout, str)
+        or len(result.stdout.encode("utf-8")) > MAX_IMAGE_INSPECT_BYTES
+    ):
+        raise HarborCampaignError("Could not inspect one admitted Docker image")
+    try:
+        inspected = json.loads(
+            result.stdout,
+            object_pairs_hook=_reject_image_object_duplicates,
+            parse_constant=_reject_image_constant,
+            parse_float=_parse_image_float,
+        )
+    except (json.JSONDecodeError, RecursionError, UnicodeError, ValueError) as error:
+        raise HarborCampaignError("Docker image inspection is not JSON") from error
+    if not isinstance(inspected, dict):
+        raise HarborCampaignError("Docker image inspection is not an object")
+    return inspected
+
+
+def _inspection_image_id(inspected: Mapping[str, Any]) -> str:
+    image_id = inspected.get("Id")
+    if not isinstance(image_id, str) or _SHA256_PATTERN.fullmatch(image_id) is None:
+        raise HarborCampaignError("Docker image ID is invalid")
+    return image_id
+
+
+def _project_image_inspection(
+    inspected: Mapping[str, Any],
+) -> tuple[str, str, bool]:
+    image_id = _inspection_image_id(inspected)
+    architecture = inspected.get("Architecture")
+    operating_system = inspected.get("Os")
+    raw_variant = inspected.get("Variant")
+    rootfs = inspected.get("RootFS")
+    config = inspected.get("Config")
+    if (
+        not isinstance(architecture, str)
+        or architecture not in {"amd64", "arm64"}
+        or operating_system != "linux"
+        or not isinstance(rootfs, dict)
+        or set(rootfs) != {"Type", "Layers"}
+        or rootfs.get("Type") != "layers"
+        or not isinstance(rootfs.get("Layers"), list)
+        or not rootfs["Layers"]
+        or len(rootfs["Layers"]) > MAX_IMAGE_LAYERS
+        or any(
+            not isinstance(layer, str)
+            or _SHA256_PATTERN.fullmatch(layer) is None
+            for layer in rootfs["Layers"]
+        )
+        or not isinstance(config, dict)
     ):
         raise HarborCampaignError("Docker image identity or architecture is invalid")
-    return fields[0], fields[1] == "arm64"
+    if raw_variant is not None and not isinstance(raw_variant, str):
+        raise HarborCampaignError("Docker image variant is invalid")
+    if architecture == "arm64":
+        if raw_variant not in {None, "", "v8"}:
+            raise HarborCampaignError("Docker ARM64 image variant is unsupported")
+        variant = "v8"
+    else:
+        if raw_variant not in {None, ""}:
+            raise HarborCampaignError("Docker AMD64 image variant is unsupported")
+        variant = ""
+    config_image = config.get("Image")
+    config_labels = config.get("Labels")
+    if config_image is not None and not isinstance(config_image, str):
+        raise HarborCampaignError("Docker image parent metadata is invalid")
+    if config_labels is not None and (
+        not isinstance(config_labels, dict)
+        or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in config_labels.items()
+        )
+    ):
+        raise HarborCampaignError("Docker image label metadata is invalid")
+    semantic_config = {
+        key: value for key, value in config.items() if key not in {"Image", "Labels"}
+    }
+    fingerprint_payload = {
+        "schema_version": 1,
+        "architecture": architecture,
+        "os": operating_system,
+        "variant": variant,
+        "rootfs": rootfs,
+        "config": semantic_config,
+    }
+    try:
+        encoded = json.dumps(
+            fingerprint_payload,
+            sort_keys=True,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("ascii")
+    except (RecursionError, TypeError, ValueError) as error:
+        raise HarborCampaignError("Docker image runtime config is invalid") from error
+    return image_id, _sha256_bytes(encoded), architecture == "arm64"
+
+
+def _inspect_image(
+    image: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> tuple[str, str, bool]:
+    return _project_image_inspection(_load_image_inspection(image, runner=runner))
 
 
 def _remove_built_image(
@@ -3202,6 +3390,7 @@ def run_harbor_invocation(
     exit_code: int | None = 127
     timed_out = False
     main_image_id: str | None = None
+    main_image_fingerprint: str | None = None
     inspected_main_image_id: str | None = None
     main_image_arm64 = False
     relay_image_arm64 = False
@@ -3227,15 +3416,37 @@ def run_harbor_invocation(
         built_image_reference: str | None = None
         try:
             built_image_reference = _built_main_image_reference(invocation)
-            inspected_main_image_id, main_image_arm64 = _inspect_image(
+            inspected_main = _load_image_inspection(
                 built_image_reference, runner=docker_runner
             )
-            main_image_id = inspected_main_image_id if main_image_arm64 else None
+            inspected_main_image_id = _inspection_image_id(inspected_main)
+        except HarborCampaignError:
+            inspected_main = None
+            try:
+                if built_image_reference is None:
+                    raise HarborCampaignError("Built image reference is unavailable")
+                inspected_main_image_id = _inspect_image_id(
+                    built_image_reference, runner=docker_runner
+                )
+            except HarborCampaignError:
+                inspected_main_image_id = None
+        try:
+            if inspected_main is None:
+                raise HarborCampaignError("Built image inspection is unavailable")
+            (
+                admitted_main_image_id,
+                inspected_main_image_fingerprint,
+                main_image_arm64,
+            ) = _project_image_inspection(inspected_main)
+            if main_image_arm64:
+                main_image_id = admitted_main_image_id
+                main_image_fingerprint = inspected_main_image_fingerprint
         except HarborCampaignError:
             main_image_id = None
+            main_image_fingerprint = None
             main_image_arm64 = False
         try:
-            _, relay_image_arm64 = _inspect_image(
+            _, _, relay_image_arm64 = _inspect_image(
                 invocation.relay_image, runner=docker_runner
             )
         except HarborCampaignError:
@@ -3277,6 +3488,7 @@ def run_harbor_invocation(
         timed_out=timed_out,
         wall_s=wall_s,
         main_image_id=main_image_id,
+        main_image_fingerprint=main_image_fingerprint,
         main_image_arm64=main_image_arm64,
         relay_image_arm64=relay_image_arm64,
         built_image_cleanup_succeeded=built_image_cleanup_succeeded,
@@ -3513,7 +3725,18 @@ def _status_projection(status: HarborRunStatus) -> dict[str, Any]:
                 or _SHA256_PATTERN.fullmatch(status.main_image_id) is None
             )
         )
-        or status.main_image_arm64 != (status.main_image_id is not None)
+        or (
+            status.main_image_fingerprint is not None
+            and (
+                not isinstance(status.main_image_fingerprint, str)
+                or _SHA256_PATTERN.fullmatch(status.main_image_fingerprint) is None
+            )
+        )
+        or status.main_image_arm64
+        != (
+            status.main_image_id is not None
+            and status.main_image_fingerprint is not None
+        )
         or not math.isfinite(status.wall_s)
         or status.wall_s < 0
         or (status.exit_code is None) != status.timed_out
@@ -3543,6 +3766,7 @@ def _status_projection(status: HarborRunStatus) -> dict[str, Any]:
         "harbor_exit_code": status.exit_code,
         "harbor_timed_out": status.timed_out,
         "main_image_id": status.main_image_id,
+        "main_image_fingerprint": status.main_image_fingerprint,
         "main_image_arm64": status.main_image_arm64,
         "relay_image_arm64": status.relay_image_arm64,
         "built_image_cleanup_succeeded": status.built_image_cleanup_succeeded,
@@ -3725,8 +3949,11 @@ def summarize_campaign_results(
     for task_items in by_task.values():
         if len(task_items) != 2:
             continue
-        first_id = task_items[0]["main_image_id"]
-        matches = first_id is not None and first_id == task_items[1]["main_image_id"]
+        first_fingerprint = task_items[0]["main_image_fingerprint"]
+        matches = (
+            first_fingerprint is not None
+            and first_fingerprint == task_items[1]["main_image_fingerprint"]
+        )
         for item in task_items:
             item["paired_image_match"] = matches
             if not matches:
@@ -4194,6 +4421,7 @@ _TRIAL_OUTPUT_KEYS = frozenset(
         "harbor_exit_code",
         "harbor_timed_out",
         "main_image_id",
+        "main_image_fingerprint",
         "main_image_arm64",
         "relay_image_arm64",
         "built_image_cleanup_succeeded",
@@ -4245,12 +4473,22 @@ def _validate_trial_projection(value: Any, index: int) -> Mapping[str, Any]:
     ):
         raise HarborCampaignError("Canonical trial identity or flags changed")
     image_id = trial.get("main_image_id")
+    image_fingerprint = trial.get("main_image_fingerprint")
     if image_id is not None and (
         not isinstance(image_id, str) or _SHA256_PATTERN.fullmatch(image_id) is None
     ):
         raise HarborCampaignError("Canonical trial image ID is invalid")
-    if trial["main_image_arm64"] != (image_id is not None):
-        raise HarborCampaignError("Canonical image admission lacks an immutable ID")
+    if image_fingerprint is not None and (
+        not isinstance(image_fingerprint, str)
+        or _SHA256_PATTERN.fullmatch(image_fingerprint) is None
+    ):
+        raise HarborCampaignError("Canonical trial image fingerprint is invalid")
+    if trial["main_image_arm64"] != (
+        image_id is not None and image_fingerprint is not None
+    ):
+        raise HarborCampaignError(
+            "Canonical image admission lacks an ID and runtime fingerprint"
+        )
     if trial["cleanup_succeeded"] and not trial["built_image_cleanup_succeeded"]:
         raise HarborCampaignError("Canonical built image cleanup is inconsistent")
     reward = trial.get("reward")
@@ -4353,8 +4591,9 @@ def _validate_scalar_summary(summary_value: Any) -> None:
         if first["task"] != second["task"]:
             raise HarborCampaignError("Canonical trial pairing changed")
         expected_match = (
-            first["main_image_id"] is not None
-            and first["main_image_id"] == second["main_image_id"]
+            first["main_image_fingerprint"] is not None
+            and first["main_image_fingerprint"]
+            == second["main_image_fingerprint"]
         )
         if (
             first["paired_image_match"] is not expected_match

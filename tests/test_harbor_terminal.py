@@ -26,6 +26,7 @@ from bench.harbor_terminal import (
     NpmArtifactRecord,
     RuntimeOverlayAdmission,
     _harbor_runtime_digest,
+    _inspect_image,
     _run_process_group,
     _runtime_admission_digest,
     build_harbor_invocation,
@@ -302,6 +303,8 @@ def _status(
         wall_s=20.0,
         main_image_id="sha256:"
         + hashlib.sha256(trial.task_id.encode("ascii")).hexdigest(),
+        main_image_fingerprint="sha256:"
+        + hashlib.sha256((trial.task_id + ":runtime").encode("ascii")).hexdigest(),
         main_image_arm64=True,
         relay_image_arm64=True,
         built_image_cleanup_succeeded=cleanup_succeeded,
@@ -394,8 +397,12 @@ class _FakeDocker:
         }
         self.commands: list[list[str]] = []
         self.inspect_failures: set[tuple[str, str]] = set()
-        self.image_architecture: dict[str, str] = {}
+        self.image_architecture: dict[str, object] = {}
         self.image_ids: dict[str, str] = {}
+        self.image_layers: dict[str, list[str]] = {}
+        self.image_variants: dict[str, object] = {}
+        self.image_configs: dict[str, object] = {}
+        self.image_rootfs: dict[str, object] = {}
         self.baseline_image_ids: set[str] = set()
         self.removed_images: set[str] = set()
 
@@ -411,8 +418,38 @@ class _FakeDocker:
                 return subprocess.CompletedProcess(argv, 1, stdout="")
             architecture = self.image_architecture.get(argv[-1], "arm64")
             image_id = self.image_ids.get(argv[-1], "sha256:" + "a" * 64)
+            if argv[4] == "{{.Id}}":
+                return subprocess.CompletedProcess(argv, 0, stdout=image_id + "\n")
+            layers = self.image_layers.get(
+                argv[-1], ["sha256:" + "b" * 64]
+            )
+            rootfs = self.image_rootfs.get(
+                argv[-1], {"Type": "layers", "Layers": layers}
+            )
+            config = self.image_configs.get(
+                argv[-1],
+                {
+                    "Image": "dynamic-parent-id",
+                    "Labels": {"com.docker.compose.project": "dynamic"},
+                    "Env": ["PATH=/usr/bin"],
+                    "Cmd": ["/bin/sh"],
+                },
+            )
             return subprocess.CompletedProcess(
-                argv, 0, stdout=f"{image_id}\t{architecture}\n"
+                argv,
+                0,
+                stdout=json.dumps(
+                    {
+                        "Id": image_id,
+                        "Architecture": architecture,
+                        "Os": "linux",
+                        "Variant": self.image_variants.get(argv[-1]),
+                        "RootFS": rootfs,
+                        "Config": config,
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
             )
         if argv[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(
@@ -491,8 +528,8 @@ class HarborManifestTests(unittest.TestCase):
                 'python_launcher_path = ".venv/bin/python"\n', "", 1
             ),
             source.replace(
-                'agent_source_sha256 = "sha256:aa71d30b',
-                'agent_source_sha256 = "sha256:ba71d30b',
+                'agent_source_sha256 = "sha256:cc898eea',
+                'agent_source_sha256 = "sha256:dc898eea',
                 1,
             ),
             source.replace(
@@ -679,7 +716,7 @@ class HarborNpmAdmissionTests(unittest.TestCase):
 
 
 class HarborNetworkPolicyTests(unittest.TestCase):
-    def test_derivation_changes_only_task_toml_and_is_deterministic(self) -> None:
+    def test_derivation_changes_only_policy_and_verifier_mode_deterministically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             campaign, workspace, cache, source, before, policy = _derive_fixture(root)
@@ -704,6 +741,14 @@ class HarborNetworkPolicyTests(unittest.TestCase):
                         (source_task / relative).read_bytes(),
                         (derived_task / relative).read_bytes(),
                     )
+                self.assertEqual(
+                    os.stat(source_task / "tests/test.sh").st_mode & 0o111,
+                    0,
+                )
+                self.assertEqual(
+                    os.stat(derived_task / "tests/test.sh").st_mode & 0o777,
+                    0o555,
+                )
                 task_text = (derived_task / "task.toml").read_text(encoding="utf-8")
                 self.assertIn('network_mode = "allowlist"', task_text)
                 self.assertIn(
@@ -727,6 +772,11 @@ class HarborNetworkPolicyTests(unittest.TestCase):
             verify_private_task_dataset(
                 campaign, policy, repo_root=workspace
             )
+
+            verifier = policy.dataset_dir / campaign.dataset.tasks[0] / "tests/test.sh"
+            verifier.chmod(0o755)
+            with self.assertRaisesRegex(HarborCampaignError, "verifier launcher mode"):
+                verify_private_task_dataset(campaign, policy, repo_root=workspace)
 
     def test_existing_agent_network_policy_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1012,6 +1062,9 @@ class HarborInvocationTests(unittest.TestCase):
             )
             self.assertTrue(status.cleanup_succeeded)
             self.assertEqual(status.main_image_id, "sha256:" + "a" * 64)
+            self.assertRegex(
+                status.main_image_fingerprint or "", r"^sha256:[0-9a-f]{64}$"
+            )
             self.assertTrue(status.built_image_cleanup_succeeded)
             self.assertTrue(status.agent_relay_passed)
             self.assertTrue(status.gost_rejected)
@@ -1044,6 +1097,100 @@ class HarborInvocationTests(unittest.TestCase):
                     process_runner=process_runner,
                     docker_runner=docker,
                 )
+
+    def test_image_fingerprint_ignores_metadata_but_binds_runtime_shape(self) -> None:
+        docker = _FakeDocker()
+        docker.image_ids["first"] = "sha256:" + "1" * 64
+        docker.image_ids["second"] = "sha256:" + "2" * 64
+        docker.image_variants["second"] = "v8"
+        docker.image_configs["first"] = {
+            "Image": "first-parent",
+            "Labels": {"build": "first"},
+            "Env": ["PATH=/usr/bin"],
+            "Cmd": ["/bin/sh"],
+        }
+        docker.image_configs["second"] = {
+            "Image": "second-parent",
+            "Labels": {"build": "second"},
+            "Env": ["PATH=/usr/bin"],
+            "Cmd": ["/bin/sh"],
+        }
+        first_id, first_fingerprint, first_arm64 = _inspect_image(
+            "first", runner=docker
+        )
+        second_id, second_fingerprint, second_arm64 = _inspect_image(
+            "second", runner=docker
+        )
+        self.assertNotEqual(first_id, second_id)
+        self.assertEqual(first_fingerprint, second_fingerprint)
+        self.assertTrue(first_arm64 and second_arm64)
+
+        docker.image_layers["second"] = ["sha256:" + "3" * 64]
+        _, changed_fingerprint, _ = _inspect_image("second", runner=docker)
+        self.assertNotEqual(first_fingerprint, changed_fingerprint)
+
+        docker.image_layers.pop("second")
+        docker.image_configs["second"]["Env"] = ["PATH=/different"]
+        _, changed_fingerprint, _ = _inspect_image("second", runner=docker)
+        self.assertNotEqual(first_fingerprint, changed_fingerprint)
+
+        docker.image_variants["second"] = "v7"
+        with self.assertRaisesRegex(HarborCampaignError, "variant"):
+            _inspect_image("second", runner=docker)
+
+    def test_image_fingerprint_rejects_malformed_or_unbounded_metadata(self) -> None:
+        docker = _FakeDocker()
+        docker.image_architecture["bad-architecture"] = []
+        with self.assertRaisesRegex(HarborCampaignError, "identity"):
+            _inspect_image("bad-architecture", runner=docker)
+
+        docker.image_variants["bad-variant"] = {}
+        with self.assertRaisesRegex(HarborCampaignError, "variant"):
+            _inspect_image("bad-variant", runner=docker)
+
+        docker.image_rootfs["extra-rootfs"] = {
+            "Type": "layers",
+            "Layers": ["sha256:" + "b" * 64],
+            "unexpected": True,
+        }
+        with self.assertRaisesRegex(HarborCampaignError, "identity"):
+            _inspect_image("extra-rootfs", runner=docker)
+
+        docker.image_configs["bad-label"] = {"Labels": {"key": 7}}
+        with self.assertRaisesRegex(HarborCampaignError, "label"):
+            _inspect_image("bad-label", runner=docker)
+
+        docker.image_configs["nonfinite"] = {"Memory": float("nan")}
+        with self.assertRaisesRegex(HarborCampaignError, "not JSON"):
+            _inspect_image("nonfinite", runner=docker)
+
+        with patch("bench.harbor_terminal.MAX_IMAGE_INSPECT_BYTES", 1):
+            with self.assertRaisesRegex(HarborCampaignError, "Could not inspect"):
+                _inspect_image("oversized", runner=docker)
+
+    def test_invalid_fingerprint_still_removes_the_exact_built_image(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, _, _, _, invocation = self._invocation_fixture(Path(directory))
+            docker = _FakeDocker()
+            reference = "build-cython-ext__abc1234__env-main"
+            image_id = "sha256:" + "a" * 64
+            docker.image_variants[reference] = {}
+            status = run_harbor_invocation(
+                invocation,
+                lock=CampaignLock(descriptor=9),
+                timeout_s=100,
+                process_runner=lambda *_: (0, False),
+                docker_runner=docker,
+                clock=iter((10.0, 20.0)).__next__,
+            )
+
+            self.assertIsNone(status.main_image_id)
+            self.assertIsNone(status.main_image_fingerprint)
+            self.assertFalse(status.main_image_arm64)
+            self.assertTrue(status.built_image_cleanup_succeeded)
+            self.assertTrue(status.cleanup_succeeded)
+            self.assertIn(reference, docker.removed_images)
+            self.assertIn(image_id, docker.removed_images)
 
     def test_network_marker_is_exact_owner_only_scalar_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1290,6 +1437,8 @@ class HarborSummaryTests(unittest.TestCase):
         self.assertNotIn(CANARY, encoded.decode())
         self.assertNotIn("raw-id", encoded.decode())
         self.assertNotIn("/local/private/path", encoded.decode())
+        self.assertEqual(summary["schema_version"], 2)
+        self.assertEqual(summary["protocol"], "harbor-terminal-scalar-v2")
         self.assertEqual(summary["summary"]["planned_attempts"], 12)
         self.assertEqual(summary["summary"]["attempts"], 12)
         self.assertEqual(summary["summary"]["passed"], 6)
@@ -1299,7 +1448,7 @@ class HarborSummaryTests(unittest.TestCase):
         self.assertEqual(len(summary["trials"]), 12)
         self.assertEqual(
             hashlib.sha256(encoded).hexdigest(),
-            "5f449a004a737d023c95445acca7866232086a1fe4d05b919049d90111744d62",
+            "87e8bd6599952929bd1ef5a21be2fe8cc3616bf0a902a4f2d51006acee02d180",
         )
 
     def test_partial_and_zero_summary_accept_only_an_exact_prefix(self) -> None:
@@ -1377,13 +1526,31 @@ class HarborSummaryTests(unittest.TestCase):
             "CampaignCutoffError",
         )
 
-    def test_paired_agents_require_the_same_built_image_id(self) -> None:
+    def test_paired_agents_compare_runtime_fingerprints_not_build_ids(self) -> None:
         campaign, attempts = self._attempts(2)
         attempts[1] = replace(
             attempts[1],
             status=replace(
                 attempts[1].status,
                 main_image_id="sha256:" + "f" * 64,
+            ),
+        )
+        summary = summarize_campaign_results(
+            campaign,
+            attempts,
+            network_policy_patch_digest="sha256:" + "6" * 64,
+            npm_artifact_admission=_fake_npm_admission(campaign),
+        )
+        self.assertEqual(summary["summary"]["image_pair_mismatches"], 0)
+        self.assertTrue(
+            all(item["paired_image_match"] is True for item in summary["trials"])
+        )
+
+        attempts[1] = replace(
+            attempts[1],
+            status=replace(
+                attempts[1].status,
+                main_image_fingerprint="sha256:" + "e" * 64,
             ),
         )
         summary = summarize_campaign_results(
@@ -1416,6 +1583,10 @@ class HarborSummaryTests(unittest.TestCase):
         unknown_root = deepcopy(valid)
         unknown_root["unknown"] = 1
         mutations.append(unknown_root)
+        old_schema = deepcopy(valid)
+        old_schema["schema_version"] = 1
+        old_schema["protocol"] = "harbor-terminal-scalar-v1"
+        mutations.append(old_schema)
         unknown_nested = deepcopy(valid)
         unknown_nested["trials"][0]["prompt"] = CANARY
         mutations.append(unknown_nested)

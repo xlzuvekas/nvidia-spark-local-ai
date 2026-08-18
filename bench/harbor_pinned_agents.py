@@ -26,6 +26,10 @@ NODE_VERSION = "v22.22.1"
 QWEN_CODE_VERSION = "0.21.13"
 OPENCODE_VERSION = "1.18.18"
 NETWORK_ADMISSION_FILENAME = "sparkbench-network-admission.json"
+_OPENCODE_EPHEMERAL_STATE = (
+    "/logs/agent/opencode/xdg-data",
+    "/logs/agent/opencode/xdg-state",
+)
 
 
 _NETWORK_PROBE_JS = r"""
@@ -363,5 +367,28 @@ class PinnedOpenCode(_PinnedNetworkAdmission, OpenCode):
         )
         try:
             await super().run(instruction, environment, context)
+        except BaseException:
+            try:
+                await self._remove_ephemeral_state(environment)
+            except BaseException:
+                pass
+            raise
+        else:
+            await self._remove_ephemeral_state(environment)
         finally:
             self._write_network_admission()
+
+    async def _remove_ephemeral_state(
+        self, environment: BaseEnvironment
+    ) -> None:
+        """Discard unneeded state without retaining agent-controlled links."""
+
+        trees = " ".join(shlex.quote(path) for path in _OPENCODE_EPHEMERAL_STATE)
+        await self.exec_as_agent(
+            environment,
+            command=(
+                "set -euo pipefail; "
+                f"rm -rf --one-file-system -- {trees}"
+            ),
+            timeout_sec=15,
+        )

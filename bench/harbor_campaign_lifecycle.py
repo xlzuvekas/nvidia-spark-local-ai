@@ -73,7 +73,7 @@ EXPECTED_MODEL_PROFILE = "qwen3-coder-next-80b-a3b-ud-q4-k-xl-llamacpp"
 EXPECTED_TRIALS = 12
 EXPECTED_HARD_CUTOFF_S = 23_400
 EXPECTED_AUDIT_RESERVE_S = 5_400
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DEFAULT_CAMPAIGN_PATH = (
     Path(__file__).resolve().parents[1]
@@ -1070,6 +1070,8 @@ def _canary_admitted(attempt: HarborAttempt, projection: Mapping[str, Any]) -> b
         and not status.timed_out
         and status.main_image_id is not None
         and _IMAGE_ID.fullmatch(status.main_image_id) is not None
+        and status.main_image_fingerprint is not None
+        and _IMAGE_ID.fullmatch(status.main_image_fingerprint) is not None
         and status.main_image_arm64
         and status.relay_image_arm64
         and status.built_image_cleanup_succeeded
@@ -1101,6 +1103,7 @@ def _attempt_gate(
         or not status.main_image_arm64
         or not status.relay_image_arm64
         or status.main_image_id is None
+        or status.main_image_fingerprint is None
     ):
         return "trial_failure"
     if latest.get("paired_image_match") is False:

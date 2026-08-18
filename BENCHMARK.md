@@ -248,9 +248,12 @@ integrities, source revisions, and the ARM64 OpenCode package. Before every
 trial, the lifecycle hashes every mounted entry through no-follow file
 descriptors and rejects path substitution, unsafe links, hardlinks, special
 files, ownership or mode drift, or a changed byte. Custom Harbor agent classes
-only add the admitted read-only prefixes to `PATH` and verify their versions;
-they never invoke a downloader or package manager. The complete Harbor runtime
-is admitted the same way, and commands execute only its verified entry point.
+replace the stock network installers with the admitted read-only prefixes and
+verify their versions; they never invoke a downloader or package manager. After
+OpenCode agent execution, its custom cleanup is limited to deleting the
+ephemeral `xdg-data` and `xdg-state` trees. The retained `opencode.txt` remains
+the OpenCode trajectory and metric source. The complete Harbor runtime is
+admitted the same way, and commands execute only its verified entry point.
 
 Each task-agent pair runs once, with one active trial, no retry, and a 900-second
 agent timeout. The containing Harbor invocation has a separate 3,600-second
@@ -259,8 +262,11 @@ verification. The twelve trials use the manifest's fixed counterbalanced order:
 the starting client alternates across tasks so simple warmup or time-order drift
 does not consistently favor one client. Harbor must build each task image for
 the native ARM64 host instead of pulling an AMD64-only prebuilt image. The
-adapter records the exact built image ID, and a Qwen Code/OpenCode task pair is
-not a valid comparison unless both trials used the same image. A failure or
+adapter retains each exact built image ID. Pair equivalence is not inferred from
+ID equality; it is defined by the campaign's bounded semantic runtime
+fingerprint over Linux/ARM64, RootFS layer digests, and runtime `Config`,
+excluding the non-runtime `Image` and `Labels` fields. A Qwen Code/OpenCode task
+pair is not a valid comparison unless those fingerprints match. A failure or
 timeout remains a measured failed attempt; it is not silently retried or
 replaced. This small, selected task panel is an exploratory admission screen,
 not a broad coding-quality claim.
@@ -270,17 +276,19 @@ not a broad coding-quality claim.
 The outer orchestrator must acquire `hold_campaign_lock(workspace)` before it
 starts llama.cpp and retain that single repository lock across the model,
 authenticated Unix-socket bridge, every Harbor invocation, and teardown. While
-holding the lock, it creates the verified policy-only dataset and runtime
-overlay in an external owner-private cache, follows the manifest's exact
-`trial_order`, builds each command with `build_harbor_invocation(...)`, and
-executes it through `run_harbor_invocation(...)`. The generated Harbor command
-fixes Docker execution, native image building and deletion, one attempt, one
-concurrent agent, one trial, zero retries, the selected task, exact custom agent
-class, served model, frozen tool prefixes, and phase-specific network policy.
-Do not hand-edit that command.
+holding the lock, it creates the verified derived dataset and runtime overlay in
+an external owner-private cache, follows the manifest's exact `trial_order`,
+builds each command with `build_harbor_invocation(...)`, and executes it through
+`run_harbor_invocation(...)`. The generated Harbor command fixes Docker
+execution, native image building and deletion, one attempt, one concurrent
+agent, one trial, zero retries, the selected task, exact custom agent class,
+served model, frozen tool prefixes, and phase-specific network policy. Do not
+hand-edit that command.
 
 After each invocation, project the external raw job with the adapter's strict
-loader and canonical JSON serialization. Derived tasks and raw Harbor jobs must
+loader and canonical JSON serialization. The fingerprint-bearing campaign
+summary and its outer lifecycle envelope both use schema version 2; version 1
+records are intentionally incompatible. Derived tasks and raw Harbor jobs must
 resolve outside the repository; only the later allowlisted scalar projection is
 eligible for the evidence exporter. Cleanup of Harbor containers, bridge,
 server, sampler, the derived task copy, and the key file belongs in the
@@ -323,14 +331,20 @@ port; DNS, ICMP, IPv6, raw sockets, the Docker gateway, public addresses, and
 all other loopback ports remain blocked. The verifier phase atomically returns
 to deny-all, preventing surviving agent children from regaining egress.
 Embedded probes certify these transitions in every invocation. The adapter
-verifies that instructions, tests, and every other task byte match the pinned
-source and records a deterministic digest of the derived policy. The model is
-never bound to a wildcard or LAN address, and neither task nor inference uses
-Docker host networking.
+verifies every byte not deliberately transformed against the pinned source.
+Derivation applies the fixed phase network policy to task metadata and preserves
+each selected `tests/test.sh` byte-for-byte while changing its Git source mode
+from `100644` to derived mode `0555`: Harbor directly executes that verifier
+under `cap_drop: ALL`, so the derived copy must be executable without adding
+capabilities. The deterministic patch digest binds the network policy,
+verifier-script digest, and exact source and derived modes. The model is never
+bound to a wildcard or LAN address, and neither task nor inference uses Docker
+host networking.
 
-This network-policy transformation intentionally differs from the upstream
-Terminal-Bench task bytes. Report the result as a Harbor/Terminal-Bench-derived
-harness-stack outcome, not an official Terminal-Bench 2.1 score.
+The network-policy and verifier-mode transformations intentionally differ from
+upstream Terminal-Bench 2.1. Report the result as a
+Harbor/Terminal-Bench-derived harness-stack outcome, not an official
+Terminal-Bench 2.1 score.
 
 #### Admission and stop gates
 
@@ -381,8 +395,8 @@ an offline synthetic fixture passes, two exports are byte-identical, the archive
 verifies, and `verify-evidence --staged` validates and secret-scans the exact Git
 index. A report must retain failures and partial states and must label the
 one-attempt design, task subset, client-controlled requests, derived network
-policy, serving geometry, and absence of a broad quality or official leaderboard
-claim.
+policy and verifier-script mode, serving geometry, and absence of a broad
+quality or official leaderboard claim.
 
 Concurrency results are comparable only when the serving-slot geometry is the
 same. A one-slot profile receiving C2, C4, or C8 requests measures queued

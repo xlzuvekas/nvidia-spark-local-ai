@@ -148,6 +148,7 @@ def _status(trial: object, **changes: object) -> HarborRunStatus:
         "timed_out": False,
         "wall_s": 1.0,
         "main_image_id": "sha256:" + "1" * 64,
+        "main_image_fingerprint": "sha256:" + "2" * 64,
         "main_image_arm64": True,
         "relay_image_arm64": True,
         "built_image_cleanup_succeeded": True,
@@ -200,9 +201,15 @@ class LifecycleSchemaTests(unittest.TestCase):
         )
 
     def test_zero_attempt_schema_is_exact_and_has_null_pass_rate(self) -> None:
+        self.assertEqual(self.payload["schema_version"], 2)
         self.assertEqual(self.payload["campaign"]["trials"], [])
         self.assertIsNone(self.payload["campaign"]["summary"]["pass_rate"])
         validate_lifecycle_envelope(self.payload, campaign=self.campaign)
+
+        old_schema = deepcopy(self.payload)
+        old_schema["schema_version"] = 1
+        with self.assertRaises(CampaignLifecycleError):
+            validate_lifecycle_envelope(old_schema, campaign=self.campaign)
 
     def test_unknown_fields_and_innocuous_raw_strings_fail_closed(self) -> None:
         cases = []
@@ -617,6 +624,17 @@ class LifecycleFilesystemTests(unittest.TestCase):
                 stat.S_IMODE((source / "bench" / "harbor_pinned_agents.py").stat().st_mode),
                 0o444,
             )
+            admitted_source = (
+                source / "bench" / "harbor_pinned_agents.py"
+            ).read_text(encoding="utf-8")
+            self.assertIn(
+                '"/logs/agent/opencode/xdg-data",', admitted_source
+            )
+            self.assertIn(
+                '"/logs/agent/opencode/xdg-state",', admitted_source
+            )
+            self.assertIn("rm -rf --one-file-system --", admitted_source)
+            self.assertNotIn("find {trees}", admitted_source)
 
 
 if __name__ == "__main__":
