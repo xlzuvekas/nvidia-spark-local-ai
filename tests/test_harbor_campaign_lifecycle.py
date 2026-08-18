@@ -20,6 +20,8 @@ from bench.harbor_campaign_lifecycle import (
     _cross_validate_model,
     _deadline_limited_timeout,
     _harbor_cleanup_certified,
+    _is_exact_admission_payload,
+    _parse_bounded_json_object,
     _record_status_then_load,
     _scalar_output_path,
     _trial_timeout_s,
@@ -286,6 +288,43 @@ class LifecycleGateTests(unittest.TestCase):
                 runner=lambda *args, **kwargs: wrong,
                 machine=lambda: "aarch64",
             )
+
+    def test_structured_admission_accepts_only_one_bounded_json_envelope(self) -> None:
+        expected = {"ok": True, "marker": "MARKER"}
+        bare = '{"ok":true,"marker":"MARKER"}'
+        fenced = '```json\n{"ok":true,"marker":"MARKER"}\n```'
+        self.assertEqual(_parse_bounded_json_object(bare), expected)
+        self.assertEqual(_parse_bounded_json_object(fenced), expected)
+
+        invalid = (
+            "prose " + bare,
+            fenced + " trailing",
+            '```json\n```json\n{}\n```\n```',
+            '{"ok":true,"ok":false}',
+            '{"value":NaN}',
+            '{"value":1e9999}',
+            "[]",
+            "",
+        )
+        for value in invalid:
+            with self.subTest(value_length=len(value)):
+                with self.assertRaises(CampaignLifecycleError):
+                    _parse_bounded_json_object(value)
+
+        self.assertTrue(_is_exact_admission_payload(expected, "MARKER"))
+        self.assertFalse(
+            _is_exact_admission_payload({"ok": 1, "marker": "MARKER"}, "MARKER")
+        )
+        self.assertFalse(
+            _is_exact_admission_payload(
+                {"ok": 1.0, "marker": "MARKER"}, "MARKER"
+            )
+        )
+        self.assertFalse(
+            _is_exact_admission_payload(
+                {"ok": True, "marker": "MARKER", "extra": 1}, "MARKER"
+            )
+        )
 
     def test_canary_requires_final_result_cleanup_native_images_and_probes(self) -> None:
         projection = {"reward": 1, "exception_class": None, "paired_image_match": None}

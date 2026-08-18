@@ -570,6 +570,63 @@ def admit_unix_bridge(
     return True
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("non-finite JSON constant")
+
+
+def _parse_finite_json_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON number")
+    return parsed
+
+
+def _parse_bounded_json_object(value: str) -> dict[str, Any]:
+    """Accept a bare object or one exact Markdown JSON fence, never prose."""
+
+    if not isinstance(value, str) or not 0 < len(value) <= 2_048:
+        raise CampaignLifecycleError("structured admission response is invalid")
+    candidate = value.strip()
+    if candidate.startswith("```json\n") and candidate.endswith("\n```"):
+        if candidate.count("```") != 2:
+            raise CampaignLifecycleError("structured admission response is invalid")
+        candidate = candidate[8:-4]
+    if not candidate.startswith("{") or not candidate.endswith("}"):
+        raise CampaignLifecycleError("structured admission response is invalid")
+    try:
+        payload = json.loads(
+            candidate,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+            parse_float=_parse_finite_json_float,
+        )
+    except (json.JSONDecodeError, TypeError, ValueError) as error:
+        raise CampaignLifecycleError(
+            "structured admission response is invalid"
+        ) from error
+    if not isinstance(payload, dict):
+        raise CampaignLifecycleError("structured admission response is invalid")
+    return payload
+
+
+def _is_exact_admission_payload(payload: Mapping[str, Any], marker: str) -> bool:
+    return (
+        frozenset(payload) == {"ok", "marker"}
+        and payload["ok"] is True
+        and type(payload["marker"]) is str
+        and payload["marker"] == marker
+    )
+
+
 def run_model_admission(*, base_url: str, served_name: str) -> ModelAdmission:
     """Run ephemeral chat, JSON, and tool-call gates without persistence."""
 
@@ -647,9 +704,10 @@ def run_model_admission(*, base_url: str, served_name: str) -> ModelAdmission:
                 tool_valid = arguments == {"marker": tool_marker}
     except Exception as error:
         raise CampaignLifecycleError("model admission request failed") from error
+    structured_payload = _parse_bounded_json_object(structured.content)
     if (
         chat.content.strip() != chat_marker
-        or json.loads(structured.content) != {"ok": True, "marker": json_marker}
+        or not _is_exact_admission_payload(structured_payload, json_marker)
         or not tool_valid
     ):
         raise CampaignLifecycleError("model admission response failed validation")
