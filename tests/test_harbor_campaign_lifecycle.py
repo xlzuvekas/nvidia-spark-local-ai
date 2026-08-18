@@ -13,11 +13,13 @@ import unittest
 from bench.harbor_campaign_lifecycle import (
     CampaignLifecycleError,
     CleanupStatus,
+    DEFAULT_RAW_ROOT,
     ModelAdmission,
     RuntimeAdmission,
     _EXPECTED_MODEL,
     _attempt_gate,
     _cross_validate_model,
+    _create_run_directory,
     _deadline_limited_timeout,
     _harbor_cleanup_certified,
     _is_exact_admission_payload,
@@ -431,6 +433,17 @@ class LifecycleGateTests(unittest.TestCase):
 
 
 class LifecycleFilesystemTests(unittest.TestCase):
+    def test_private_run_name_preserves_the_unix_socket_path_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            raw = Path(directory)
+            raw.chmod(0o700)
+            run = _create_run_directory(
+                raw, "qwen3-coder-next-harbor-terminal-2026-08-17"
+            )
+            self.assertTrue(run.name.startswith("hc-"))
+            candidate = DEFAULT_RAW_ROOT / run.name / "relay-private" / "model.sock"
+            self.assertLess(len(str(candidate).encode()), 100)
+
     def test_external_output_and_key_are_owner_private(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

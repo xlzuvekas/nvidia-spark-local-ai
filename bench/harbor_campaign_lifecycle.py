@@ -311,7 +311,10 @@ def prepare_external_raw_root(path: Path, *, workspace: Path) -> Path:
 def _create_run_directory(raw_root: Path, campaign_id: str) -> Path:
     if _SAFE_ID.fullmatch(campaign_id) is None:
         raise CampaignLifecycleError("campaign id is invalid")
-    created = Path(tempfile.mkdtemp(prefix=f"{campaign_id}-", dir=raw_root))
+    # Linux limits AF_UNIX pathnames to roughly 108 bytes. Keep the private
+    # directory deliberately short; the complete campaign ID is in the scalar
+    # envelope rather than encoded in this local locator.
+    created = Path(tempfile.mkdtemp(prefix="hc-", dir=raw_root))
     created.chmod(0o700)
     return created.resolve(strict=True)
 
