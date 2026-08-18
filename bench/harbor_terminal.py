@@ -45,7 +45,7 @@ from .harbor_runtime_assets import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SUMMARY_SCHEMA_VERSION = 2
 SUMMARY_PROTOCOL = "harbor-terminal-scalar-v2"
 MAX_API_KEY_BYTES = 16 * 1024
@@ -126,7 +126,22 @@ HARBOR_PYTHON_SHA256 = (
 DATASET_SOURCE = "harbor-framework/terminal-bench-2-1"
 DATASET_REVISION = "7131e4375048a0e408a8fb404b5f499d726b695b"
 DATASET_VERSION = "2.1"
-CAMPAIGN_ID = "qwen3-coder-next-harbor-terminal-2026-08-17"
+VERIFIER_PYTHON_313_IMAGE = (
+    "python@sha256:00faa2debb87529f9f0764e9491d8ba400a3678976616c3bd7cb193745ac20d1"
+)
+VERIFIER_PYTHON_311_IMAGE = (
+    "python@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7"
+)
+VERIFIER_UBUNTU_2404_IMAGE = (
+    "ubuntu@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea"
+)
+VERIFIER_VENV_PATH = "/opt/sparkbench-verifier"
+VERIFIER_VENV_UID = 65_532
+_VERIFIER_TESTS_DIRECTORY_RUN = (
+    f"RUN install -d -o {VERIFIER_VENV_UID} -g {VERIFIER_VENV_UID} "
+    "-m 0555 /tests\n"
+).encode("ascii")
+CAMPAIGN_ID = "qwen3-coder-next-harbor-terminal-offline-2026-08-18"
 MODEL_PROFILE = "qwen3-coder-next-80b-a3b-ud-q4-k-xl-llamacpp"
 MODEL_SERVED_NAME = "Qwen/Qwen3-Coder-Next"
 MODEL_CONTEXT_TOKENS = 65_536
@@ -140,23 +155,31 @@ SERVER_DEFAULT_TOP_P = 0.95
 SERVER_DEFAULT_TOP_K = 40
 
 EXPECTED_TASKS = (
-    "build-cython-ext",
+    "fix-git",
     "cancel-async-tasks",
     "fix-code-vulnerability",
-    "kv-store-grpc",
+    "regex-log",
     "polyglot-c-py",
     "query-optimize",
 )
+EXPECTED_VERIFIER_TRANSFORM_IDS = {
+    "fix-git": "fix-git-offline-pytest-v1",
+    "cancel-async-tasks": "cancel-async-tasks-offline-pytest-v1",
+    "fix-code-vulnerability": "fix-code-vulnerability-offline-pytest-v1",
+    "regex-log": "regex-log-offline-pytest-v1",
+    "polyglot-c-py": "polyglot-c-py-offline-pytest-v1",
+    "query-optimize": "query-optimize-offline-pytest-v1",
+}
 EXPECTED_AGENT_IDS = ("qwen-coder", "opencode")
 EXPECTED_TRIAL_ORDER = (
-    "build-cython-ext:qwen-coder",
-    "build-cython-ext:opencode",
+    "fix-git:qwen-coder",
+    "fix-git:opencode",
     "cancel-async-tasks:opencode",
     "cancel-async-tasks:qwen-coder",
     "fix-code-vulnerability:qwen-coder",
     "fix-code-vulnerability:opencode",
-    "kv-store-grpc:opencode",
-    "kv-store-grpc:qwen-coder",
+    "regex-log:opencode",
+    "regex-log:qwen-coder",
     "polyglot-c-py:qwen-coder",
     "polyglot-c-py:opencode",
     "query-optimize:opencode",
@@ -263,7 +286,26 @@ _HARBOR_KEYS = frozenset(
         "python_sha256",
     }
 )
-_DATASET_KEYS = frozenset({"source", "revision", "version", "tasks"})
+_DATASET_KEYS = frozenset(
+    {"source", "revision", "version", "tasks", "verifier_transforms"}
+)
+_VERIFIER_TRANSFORM_KEYS = frozenset(
+    {
+        "task_id",
+        "transformation_id",
+        "source_dockerfile_sha256",
+        "source_dockerfile_mode",
+        "derived_dockerfile_sha256",
+        "derived_dockerfile_mode",
+        "source_test_script_sha256",
+        "source_test_script_mode",
+        "derived_test_script_sha256",
+        "derived_test_script_mode",
+        "derived_tests_directory_mode",
+        "verifier_network_mode",
+        "verifier_allowed_hosts",
+    }
+)
 _AGENT_REQUIRED_KEYS = frozenset(
     {
         "id",
@@ -463,11 +505,29 @@ class HarborPin:
 
 
 @dataclass(frozen=True, slots=True)
+class VerifierTransformPin:
+    task_id: str
+    transformation_id: str
+    source_dockerfile_sha256: str
+    source_dockerfile_mode: int
+    derived_dockerfile_sha256: str
+    derived_dockerfile_mode: int
+    source_test_script_sha256: str
+    source_test_script_mode: int
+    derived_test_script_sha256: str
+    derived_test_script_mode: int
+    derived_tests_directory_mode: int
+    verifier_network_mode: str
+    verifier_allowed_hosts: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class DatasetPin:
     source: str
     revision: str
     version: str
     tasks: tuple[str, ...]
+    verifier_transforms: tuple[VerifierTransformPin, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -559,14 +619,23 @@ class TrialSpec:
 @dataclass(frozen=True, slots=True)
 class TaskPatch:
     task_id: str
+    transformation_id: str
     source_task_toml_sha256: str
     source_task_toml_mode: int
     derived_task_toml_sha256: str
     derived_task_toml_mode: int
     unchanged_tree_sha256: str
-    verifier_script_sha256: str
-    source_verifier_script_mode: int
-    derived_verifier_script_mode: int
+    source_dockerfile_sha256: str
+    source_dockerfile_mode: int
+    derived_dockerfile_sha256: str
+    derived_dockerfile_mode: int
+    source_test_script_sha256: str
+    source_test_script_mode: int
+    derived_test_script_sha256: str
+    derived_test_script_mode: int
+    derived_tests_directory_mode: int
+    verifier_network_mode: str
+    verifier_allowed_hosts: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -755,6 +824,12 @@ def _boolean(value: Any, context: str) -> bool:
     return value
 
 
+def _file_mode(value: Any, context: str) -> int:
+    if not isinstance(value, str) or value not in {"0555", "0644", "0755"}:
+        raise HarborCampaignError(f"{context} must be one exact normalized mode")
+    return int(value, 8)
+
+
 def _pinned_string(value: Any, pattern: re.Pattern[str], context: str) -> str:
     result = _string(value, context)
     if pattern.fullmatch(result) is None:
@@ -941,6 +1016,90 @@ def load_campaign(path: Path) -> CampaignSpec:
     if not isinstance(task_values, list):
         raise HarborCampaignError("dataset.tasks must be an array")
     tasks = tuple(_string(value, "dataset.tasks entry") for value in task_values)
+    transform_values = dataset_raw["verifier_transforms"]
+    if not isinstance(transform_values, list):
+        raise HarborCampaignError("dataset.verifier_transforms must be an array")
+    verifier_transforms: list[VerifierTransformPin] = []
+    for index, raw_transform_value in enumerate(transform_values):
+        raw_transform = _mapping(
+            raw_transform_value, f"dataset.verifier_transforms[{index}]"
+        )
+        _expect_keys(
+            raw_transform,
+            _VERIFIER_TRANSFORM_KEYS,
+            f"dataset.verifier_transforms[{index}]",
+        )
+        network_mode = _string(
+            raw_transform["verifier_network_mode"],
+            f"dataset.verifier_transforms[{index}].verifier_network_mode",
+        )
+        allowed_host_values = raw_transform["verifier_allowed_hosts"]
+        if not isinstance(allowed_host_values, list):
+            raise HarborCampaignError(
+                "dataset verifier_allowed_hosts must be an array"
+            )
+        allowed_hosts = tuple(
+            _string(
+                value,
+                f"dataset.verifier_transforms[{index}].verifier_allowed_hosts",
+            )
+            for value in allowed_host_values
+        )
+        verifier_transforms.append(
+            VerifierTransformPin(
+                task_id=_string(
+                    raw_transform["task_id"],
+                    f"dataset.verifier_transforms[{index}].task_id",
+                ),
+                transformation_id=_pinned_string(
+                    raw_transform["transformation_id"],
+                    _ID_PATTERN,
+                    f"dataset.verifier_transforms[{index}].transformation_id",
+                ),
+                source_dockerfile_sha256=_pinned_string(
+                    raw_transform["source_dockerfile_sha256"],
+                    _SHA256_PATTERN,
+                    f"dataset.verifier_transforms[{index}].source_dockerfile_sha256",
+                ),
+                source_dockerfile_mode=_file_mode(
+                    raw_transform["source_dockerfile_mode"],
+                    f"dataset.verifier_transforms[{index}].source_dockerfile_mode",
+                ),
+                derived_dockerfile_sha256=_pinned_string(
+                    raw_transform["derived_dockerfile_sha256"],
+                    _SHA256_PATTERN,
+                    f"dataset.verifier_transforms[{index}].derived_dockerfile_sha256",
+                ),
+                derived_dockerfile_mode=_file_mode(
+                    raw_transform["derived_dockerfile_mode"],
+                    f"dataset.verifier_transforms[{index}].derived_dockerfile_mode",
+                ),
+                source_test_script_sha256=_pinned_string(
+                    raw_transform["source_test_script_sha256"],
+                    _SHA256_PATTERN,
+                    f"dataset.verifier_transforms[{index}].source_test_script_sha256",
+                ),
+                source_test_script_mode=_file_mode(
+                    raw_transform["source_test_script_mode"],
+                    f"dataset.verifier_transforms[{index}].source_test_script_mode",
+                ),
+                derived_test_script_sha256=_pinned_string(
+                    raw_transform["derived_test_script_sha256"],
+                    _SHA256_PATTERN,
+                    f"dataset.verifier_transforms[{index}].derived_test_script_sha256",
+                ),
+                derived_test_script_mode=_file_mode(
+                    raw_transform["derived_test_script_mode"],
+                    f"dataset.verifier_transforms[{index}].derived_test_script_mode",
+                ),
+                derived_tests_directory_mode=_file_mode(
+                    raw_transform["derived_tests_directory_mode"],
+                    f"dataset.verifier_transforms[{index}].derived_tests_directory_mode",
+                ),
+                verifier_network_mode=network_mode,
+                verifier_allowed_hosts=allowed_hosts,
+            )
+        )
     dataset = DatasetPin(
         source=_pinned_string(
             dataset_raw["source"], _REPOSITORY_PATTERN, "dataset.source"
@@ -950,12 +1109,35 @@ def load_campaign(path: Path) -> CampaignSpec:
         ),
         version=_string(dataset_raw["version"], "dataset.version"),
         tasks=tasks,
+        verifier_transforms=tuple(verifier_transforms),
     )
     if (
         dataset.source != DATASET_SOURCE
         or dataset.revision != DATASET_REVISION
         or dataset.version != DATASET_VERSION
         or dataset.tasks != EXPECTED_TASKS
+        or tuple(item.task_id for item in dataset.verifier_transforms) != EXPECTED_TASKS
+        or {
+            item.task_id: item.transformation_id
+            for item in dataset.verifier_transforms
+        }
+        != EXPECTED_VERIFIER_TRANSFORM_IDS
+        or any(
+            item.source_dockerfile_mode != 0o644
+            or item.derived_dockerfile_mode != 0o644
+            or item.source_test_script_mode != 0o644
+            or item.derived_test_script_mode != 0o555
+            or item.derived_tests_directory_mode != 0o555
+            for item in dataset.verifier_transforms
+        )
+        or any(
+            (
+                item.verifier_network_mode,
+                item.verifier_allowed_hosts,
+            )
+            != ("no-network", ())
+            for item in dataset.verifier_transforms
+        )
     ):
         raise HarborCampaignError("Terminal-Bench dataset pin or task subset changed")
 
@@ -1578,6 +1760,91 @@ def _validate_task_directory(path: Path) -> None:
         raise HarborCampaignError("Could not inspect task tree directory") from error
     if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
         raise HarborCampaignError("Task tree contains a linked or unowned directory")
+
+
+def _owned_directory_mode(path: Path, *, context: str) -> int:
+    try:
+        metadata = os.lstat(path)
+    except OSError as error:
+        raise HarborCampaignError(f"Could not inspect {context}") from error
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
+        raise HarborCampaignError(f"{context} is linked or foreign-owned")
+    return stat.S_IMODE(metadata.st_mode)
+
+
+def _change_tests_directory_modes(
+    root: Path,
+    task_ids: Sequence[str],
+    *,
+    expected_mode: int,
+    derived_mode: int,
+) -> None:
+    descriptors: list[tuple[int, Path, tuple[int, int, int]]] = []
+    changed: list[int] = []
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        for task_id in task_ids:
+            path = root / task_id / "tests"
+            descriptor = os.open(path, flags)
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) != expected_mode
+            ):
+                os.close(descriptor)
+                raise HarborCampaignError("Derived tests directory mode changed")
+            descriptors.append(
+                (
+                    descriptor,
+                    path,
+                    (metadata.st_dev, metadata.st_ino, metadata.st_uid),
+                )
+            )
+        for descriptor, path, identity in descriptors:
+            os.fchmod(descriptor, derived_mode)
+            changed.append(descriptor)
+            descriptor_metadata = os.fstat(descriptor)
+            path_metadata = os.lstat(path)
+            if (
+                (
+                    descriptor_metadata.st_dev,
+                    descriptor_metadata.st_ino,
+                    descriptor_metadata.st_uid,
+                )
+                != identity
+                or (
+                    path_metadata.st_dev,
+                    path_metadata.st_ino,
+                    path_metadata.st_uid,
+                )
+                != identity
+                or not stat.S_ISDIR(path_metadata.st_mode)
+                or stat.S_IMODE(descriptor_metadata.st_mode) != derived_mode
+                or stat.S_IMODE(path_metadata.st_mode) != derived_mode
+            ):
+                raise HarborCampaignError(
+                    "Derived tests directory changed during mode transition"
+                )
+    except BaseException as error:
+        for descriptor in changed:
+            try:
+                os.fchmod(descriptor, expected_mode)
+            except OSError:
+                pass
+        if isinstance(error, OSError):
+            raise HarborCampaignError(
+                "Could not change exact derived tests directory modes"
+            ) from error
+        raise
+    finally:
+        for descriptor, _, _ in descriptors:
+            os.close(descriptor)
 
 
 def _file_tree(path: Path) -> dict[str, str]:
@@ -2232,7 +2499,13 @@ def _git_bound_task_trees(
     return trees
 
 
-def _patch_task_toml(source: bytes, timeout_s: int) -> bytes:
+def _patch_task_toml(
+    source: bytes,
+    timeout_s: int,
+    *,
+    verifier_network_mode: str,
+    verifier_allowed_hosts: Sequence[str],
+) -> bytes:
     try:
         text = source.decode("utf-8")
         parsed = tomllib.loads(text)
@@ -2254,13 +2527,19 @@ def _patch_task_toml(source: bytes, timeout_s: int) -> bytes:
         raise HarborCampaignError("Task environment baseline is no longer public")
     if "network_mode" in environment or "allowed_hosts" in environment:
         raise HarborCampaignError("Task environment baseline network schema changed")
+    if (verifier_network_mode, tuple(verifier_allowed_hosts)) != (
+        "no-network",
+        (),
+    ):
+        raise HarborCampaignError("Verifier network policy pin is invalid")
+    verifier_insertion = '[verifier]\nnetwork_mode = "no-network"\n'
     insertions = {
         "[environment]\n": '[environment]\nnetwork_mode = "no-network"\n',
         "[agent]\n": (
             '[agent]\nnetwork_mode = "allowlist"\n'
             f'allowed_hosts = ["{RELAY_SENTINEL_HOST}"]\n'
         ),
-        "[verifier]\n": '[verifier]\nnetwork_mode = "no-network"\n',
+        "[verifier]\n": verifier_insertion,
     }
     patched_text = text
     for marker, insertion in insertions.items():
@@ -2273,12 +2552,299 @@ def _patch_task_toml(source: bytes, timeout_s: int) -> bytes:
         "allowed_hosts"
     ) != [RELAY_SENTINEL_HOST]:
         raise HarborCampaignError("Could not derive the private agent network policy")
-    if (
-        derived["environment"].get("network_mode") != "no-network"
-        or derived["verifier"].get("network_mode") != "no-network"
-    ):
+    derived_verifier = derived["verifier"]
+    if derived["environment"].get("network_mode") != "no-network" or (
+        derived_verifier.get("network_mode"),
+        tuple(derived_verifier.get("allowed_hosts", ())),
+    ) != (verifier_network_mode, tuple(verifier_allowed_hosts)):
         raise HarborCampaignError("Could not derive baseline/verifier deny-all policy")
     return patched
+
+
+_OFFLINE_VERIFIER_PACKAGES = {
+    "fix-git": (
+        ("pytest", "8.4.1"),
+        ("pytest-json-ctrf", "0.3.5"),
+    ),
+    "cancel-async-tasks": (
+        ("pytest", "8.4.1"),
+        ("pytest-json-ctrf", "0.3.5"),
+    ),
+    "fix-code-vulnerability": (
+        ("pytest", "8.4.1"),
+        ("pytest-json-ctrf", "0.3.5"),
+    ),
+    "regex-log": (
+        ("pytest", "8.4.1"),
+        ("pytest-json-ctrf", "0.3.5"),
+    ),
+    "polyglot-c-py": (
+        ("pytest", "8.4.1"),
+        ("pytest-json-ctrf", "0.3.5"),
+    ),
+    "query-optimize": (
+        ("pytest", "8.4.1"),
+        ("pytest-json-ctrf", "0.3.5"),
+    ),
+}
+_OFFLINE_VERIFIER_BASE_LINES = {
+    "fix-git": (
+        b"FROM python:3.13-slim-bookworm\n",
+        f"FROM {VERIFIER_PYTHON_313_IMAGE}\n".encode("ascii"),
+    ),
+    "cancel-async-tasks": (
+        b"FROM python:3.13-slim-bookworm\n",
+        f"FROM {VERIFIER_PYTHON_313_IMAGE}\n".encode("ascii"),
+    ),
+    "fix-code-vulnerability": (
+        b"FROM python:3.11-slim\n",
+        f"FROM {VERIFIER_PYTHON_311_IMAGE}\n".encode("ascii"),
+    ),
+    "regex-log": (
+        b"FROM ubuntu:24.04\n",
+        f"FROM {VERIFIER_UBUNTU_2404_IMAGE}\n".encode("ascii"),
+    ),
+    "polyglot-c-py": (
+        b"FROM ubuntu:24.04\n",
+        f"FROM {VERIFIER_UBUNTU_2404_IMAGE}\n".encode("ascii"),
+    ),
+    "query-optimize": (
+        b"FROM ubuntu:24.04\n",
+        f"FROM {VERIFIER_UBUNTU_2404_IMAGE}\n".encode("ascii"),
+    ),
+}
+_OFFLINE_VERIFIER_UBUNTU_TASKS = frozenset(
+    {"regex-log", "polyglot-c-py", "query-optimize"}
+)
+_ONLINE_TEST_BOOTSTRAPS = {
+    "fix-git": (
+        b"# Install curl\n"
+        b"apt-get update\n"
+        b"apt-get install -y curl\n\n"
+        b"# Install uv\n"
+        b"curl -LsSf https://astral.sh/uv/0.9.5/install.sh | sh\n\n"
+        b"source $HOME/.local/bin/env\n\n"
+    ),
+    "cancel-async-tasks": (
+        b"# Install curl\n"
+        b"apt-get update\n"
+        b"apt-get install -y curl\n\n"
+        b"# Install uv\n"
+        b"curl -LsSf https://astral.sh/uv/0.9.5/install.sh | sh\n"
+        b"source $HOME/.local/bin/env\n\n"
+    ),
+    "fix-code-vulnerability": (
+        b"pip install pytest==8.4.1 pytest-json-ctrf==0.3.5\n\n"
+    ),
+    "regex-log": (
+        b"# Install curl\n"
+        b"apt-get update\n"
+        b"apt-get install -y curl\n\n"
+        b"# Install uv\n"
+        b"curl -LsSf https://astral.sh/uv/0.9.5/install.sh | sh\n\n"
+        b"source $HOME/.local/bin/env\n\n"
+    ),
+    "polyglot-c-py": (
+        b"# Install curl\n"
+        b"apt-get update\n"
+        b"apt-get install -y curl\n\n"
+        b"# Install uv\n"
+        b"curl -LsSf https://astral.sh/uv/0.9.5/install.sh | sh\n\n"
+        b"source $HOME/.local/bin/env\n\n"
+    ),
+    "query-optimize": (
+        b"# Install curl\n"
+        b"apt-get update\n"
+        b"apt-get install -y curl\n\n"
+        b"# Install uv\n"
+        b"curl -LsSf https://astral.sh/uv/0.9.5/install.sh | sh\n\n"
+        b"source $HOME/.local/bin/env\n\n"
+    ),
+}
+_UVX_PYTEST_INVOCATION = (
+    b"uvx \\\n"
+    b"  -p 3.13 \\\n"
+    b"  -w pytest==8.4.1 \\\n"
+    b"  -w pytest-json-ctrf==0.3.5 \\\n"
+    b"  pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA\n"
+)
+_ABSOLUTE_PYTEST = f"{VERIFIER_VENV_PATH}/bin/pytest".encode("ascii")
+_ABSOLUTE_PYTHON = f"{VERIFIER_VENV_PATH}/bin/python".encode("ascii")
+
+
+def _replace_exact_bytes(
+    source: bytes, old: bytes, new: bytes, *, count: int, context: str
+) -> bytes:
+    if not old or source.count(old) != count:
+        raise HarborCampaignError(f"Pinned {context} transformation source changed")
+    return source.replace(old, new, count)
+
+
+def _offline_verifier_run(packages: Sequence[tuple[str, str]]) -> bytes:
+    package_lines = " \\\n        ".join(
+        f"{package}=={version}" for package, version in packages
+    )
+    assertions = "; ".join(
+        f'assert m.version("{package}") == "{version}"'
+        for package, version in packages
+    )
+    return (
+        f"RUN python -m venv {VERIFIER_VENV_PATH} && \\\n"
+        f"    {VERIFIER_VENV_PATH}/bin/python -m pip install "
+        "--disable-pip-version-check --no-cache-dir \\\n"
+        f"        {package_lines} && \\\n"
+        f"    {VERIFIER_VENV_PATH}/bin/python -c 'import importlib.metadata as m; "
+        f"{assertions}' && \\\n"
+        f"    chown -R {VERIFIER_VENV_UID}:{VERIFIER_VENV_UID} "
+        f"{VERIFIER_VENV_PATH} && \\\n"
+        f"    chmod -R a-w {VERIFIER_VENV_PATH}\n"
+    ).encode("ascii")
+
+
+def _derive_offline_verifier_dockerfile(task_id: str, source: bytes) -> bytes:
+    transformation_id = EXPECTED_VERIFIER_TRANSFORM_IDS[task_id]
+    source_from, pinned_from = _OFFLINE_VERIFIER_BASE_LINES[task_id]
+    pinned_source = _replace_exact_bytes(
+        source,
+        source_from,
+        pinned_from,
+        count=1,
+        context=f"{task_id} Docker base",
+    )
+    install = _offline_verifier_run(_OFFLINE_VERIFIER_PACKAGES[task_id])
+    marker = (
+        f"\n# SparkBench derived offline verifier: {transformation_id}\n"
+    ).encode("ascii")
+    if task_id not in _OFFLINE_VERIFIER_UBUNTU_TASKS:
+        return pinned_source + marker + install + _VERIFIER_TESTS_DIRECTORY_RUN
+    builder = (
+        f"FROM {VERIFIER_PYTHON_313_IMAGE} AS sparkbench-verifier-build\n\n"
+    ).encode("ascii") + install + b"\n"
+    copy = (
+        f"COPY --from=sparkbench-verifier-build --chown={VERIFIER_VENV_UID}:"
+        f"{VERIFIER_VENV_UID} /usr/local/ /usr/local/\n"
+        f"COPY --from=sparkbench-verifier-build --chown={VERIFIER_VENV_UID}:"
+        f"{VERIFIER_VENV_UID} {VERIFIER_VENV_PATH}/ {VERIFIER_VENV_PATH}/\n"
+        f"RUN chown -R {VERIFIER_VENV_UID}:{VERIFIER_VENV_UID} /usr/local "
+        f"{VERIFIER_VENV_PATH} && \\\n"
+        f"    chmod -R a-w /usr/local {VERIFIER_VENV_PATH}\n"
+    ).encode("ascii")
+    return (
+        builder
+        + pinned_source
+        + marker
+        + copy
+        + _VERIFIER_TESTS_DIRECTORY_RUN
+    )
+
+
+def _derive_offline_test_script(task_id: str, source: bytes) -> bytes:
+    derived = _replace_exact_bytes(
+        source,
+        _ONLINE_TEST_BOOTSTRAPS[task_id],
+        b"",
+        count=1,
+        context=f"{task_id} online verifier bootstrap",
+    )
+    derived = _replace_exact_bytes(
+        derived,
+        b"#!/bin/bash\n\n",
+        (
+            b"#!/bin/bash\n\n"
+            + f"export PATH={VERIFIER_VENV_PATH}/bin:$PATH\n\n".encode("ascii")
+        ),
+        count=1,
+        context=f"{task_id} verifier PATH",
+    )
+    if task_id in _OFFLINE_VERIFIER_UBUNTU_TASKS or task_id in {
+        "fix-git",
+        "cancel-async-tasks",
+    }:
+        derived = _replace_exact_bytes(
+            derived,
+            _UVX_PYTEST_INVOCATION,
+            _ABSOLUTE_PYTEST
+            + b" --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA\n",
+            count=1,
+            context=f"{task_id} pytest invocation",
+        )
+    elif task_id == "fix-code-vulnerability":
+        derived = _replace_exact_bytes(
+            derived,
+            b"python -m pytest ",
+            _ABSOLUTE_PYTHON + b" -m pytest ",
+            count=2,
+            context=f"{task_id} pytest invocation",
+        )
+    else:
+        derived = _replace_exact_bytes(
+            derived,
+            b"pytest --ctrf ",
+            _ABSOLUTE_PYTEST + b" --ctrf ",
+            count=1,
+            context=f"{task_id} pytest invocation",
+        )
+    forbidden = (
+        b"apt-get update",
+        b"pip install",
+        b"curl -",
+        b"\nuvx ",
+        b"source $HOME/.local/bin/env",
+    )
+    if any(value in derived for value in forbidden):
+        raise HarborCampaignError("Derived verifier launcher retained online bootstrap")
+    return derived
+
+
+def _network_policy_patch_payload(
+    dataset_revision: str, tasks: Sequence[TaskPatch]
+) -> dict[str, Any]:
+    return {
+        "schema_version": 2,
+        "dataset_revision": dataset_revision,
+        "environment_network_mode": "no-network",
+        "agent_network_mode": "allowlist",
+        "agent_allowed_hosts": [RELAY_SENTINEL_HOST],
+        "verifier_network_policy": "per-task",
+        "tasks": [
+            {
+                "task_id": item.task_id,
+                "transformation_id": item.transformation_id,
+                "source_task_toml_sha256": item.source_task_toml_sha256,
+                "source_task_toml_mode": item.source_task_toml_mode,
+                "derived_task_toml_sha256": item.derived_task_toml_sha256,
+                "derived_task_toml_mode": item.derived_task_toml_mode,
+                "unchanged_tree_sha256": item.unchanged_tree_sha256,
+                "source_dockerfile_sha256": item.source_dockerfile_sha256,
+                "source_dockerfile_mode": item.source_dockerfile_mode,
+                "derived_dockerfile_sha256": item.derived_dockerfile_sha256,
+                "derived_dockerfile_mode": item.derived_dockerfile_mode,
+                "source_test_script_sha256": item.source_test_script_sha256,
+                "source_test_script_mode": item.source_test_script_mode,
+                "derived_test_script_sha256": item.derived_test_script_sha256,
+                "derived_test_script_mode": item.derived_test_script_mode,
+                "derived_tests_directory_mode": (
+                    item.derived_tests_directory_mode
+                ),
+                "verifier_network_mode": item.verifier_network_mode,
+                "verifier_allowed_hosts": list(item.verifier_allowed_hosts),
+            }
+            for item in tasks
+        ],
+    }
+
+
+def _network_policy_patch_digest(
+    dataset_revision: str, tasks: Sequence[TaskPatch]
+) -> str:
+    return _sha256_bytes(
+        json.dumps(
+            _network_policy_patch_payload(dataset_revision, tasks),
+            sort_keys=True,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+    )
 
 
 def derive_private_task_dataset(
@@ -2347,26 +2913,91 @@ def derive_private_task_dataset(
                 or bool(source_actual_mode & 0o111) != (source_mode == 0o755)
             ):
                 raise HarborCampaignError("Tracked source task.toml changed")
+            transform = campaign.dataset.verifier_transforms[
+                campaign.dataset.tasks.index(task_id)
+            ]
+            if (
+                transform.task_id != task_id
+                or transform.transformation_id
+                != EXPECTED_VERIFIER_TRANSFORM_IDS[task_id]
+            ):
+                raise HarborCampaignError("Pinned verifier transformation changed")
             patched_toml = _patch_task_toml(
-                source_toml, campaign.execution.agent_timeout_s
+                source_toml,
+                campaign.execution.agent_timeout_s,
+                verifier_network_mode=transform.verifier_network_mode,
+                verifier_allowed_hosts=transform.verifier_allowed_hosts,
             )
             derived_toml = derived_task / "task.toml"
             os.unlink(derived_toml)
             _write_new_regular_file(derived_toml, patched_toml, source_mode)
 
+            dockerfile_relative = "environment/Dockerfile"
             verifier_relative = "tests/test.sh"
+            dockerfile_record = source_before[task_id].get(dockerfile_relative)
             verifier_record = source_before[task_id].get(verifier_relative)
-            if verifier_record is None:
-                raise HarborCampaignError("Pinned task is missing tests/test.sh")
-            verifier_source_mode, verifier_digest = _file_record_parts(
+            if dockerfile_record is None or verifier_record is None:
+                raise HarborCampaignError(
+                    "Pinned task is missing its Dockerfile or tests/test.sh"
+                )
+            dockerfile_source_mode, dockerfile_source_digest = _file_record_parts(
+                dockerfile_record
+            )
+            verifier_source_mode, verifier_source_digest = _file_record_parts(
                 verifier_record
             )
-            if verifier_source_mode != 0o644:
+            source_dockerfile, dockerfile_actual_mode = _read_owned_regular_file(
+                source_task / dockerfile_relative,
+                context="source verifier Dockerfile",
+            )
+            source_verifier, verifier_actual_mode = _read_owned_regular_file(
+                source_task / verifier_relative,
+                context="source verifier launcher",
+            )
+            if (
+                dockerfile_source_digest != transform.source_dockerfile_sha256
+                or dockerfile_source_mode != transform.source_dockerfile_mode
+                or dockerfile_actual_mode & 0o111
+                or _sha256_bytes(source_dockerfile)
+                != transform.source_dockerfile_sha256
+                or verifier_source_digest != transform.source_test_script_sha256
+                or verifier_source_mode != transform.source_test_script_mode
+                or verifier_actual_mode & 0o111
+                or _sha256_bytes(source_verifier)
+                != transform.source_test_script_sha256
+            ):
                 raise HarborCampaignError(
-                    "Pinned verifier launcher mode changed from the dataset pin"
+                    "Pinned offline verifier transformation source changed"
                 )
-            os.chmod(derived_task / verifier_relative, 0o555)
-
+            derived_dockerfile_bytes = _derive_offline_verifier_dockerfile(
+                task_id, source_dockerfile
+            )
+            derived_verifier_bytes = _derive_offline_test_script(
+                task_id, source_verifier
+            )
+            if (
+                _sha256_bytes(derived_dockerfile_bytes)
+                != transform.derived_dockerfile_sha256
+                or _sha256_bytes(derived_verifier_bytes)
+                != transform.derived_test_script_sha256
+            ):
+                raise HarborCampaignError(
+                    "Derived offline verifier transformation changed"
+                )
+            derived_dockerfile = derived_task / dockerfile_relative
+            os.unlink(derived_dockerfile)
+            _write_new_regular_file(
+                derived_dockerfile,
+                derived_dockerfile_bytes,
+                transform.derived_dockerfile_mode,
+            )
+            derived_verifier = derived_task / verifier_relative
+            os.unlink(derived_verifier)
+            _write_new_regular_file(
+                derived_verifier,
+                derived_verifier_bytes,
+                transform.derived_test_script_mode,
+            )
             source_after = tracked_tree_verifier(source_root, (task_id,))[task_id]
             if source_after != source_before[task_id]:
                 raise HarborCampaignError("Source task tree changed during derivation")
@@ -2374,20 +3005,38 @@ def derive_private_task_dataset(
             source_unchanged = {
                 key: value
                 for key, value in source_before[task_id].items()
-                if key not in {"task.toml", verifier_relative}
+                if key not in {
+                    "task.toml",
+                    dockerfile_relative,
+                    verifier_relative,
+                }
             }
             derived_unchanged = {
                 key: value
                 for key, value in derived_files.items()
-                if key not in {"task.toml", verifier_relative}
+                if key not in {
+                    "task.toml",
+                    dockerfile_relative,
+                    verifier_relative,
+                }
             }
+            derived_dockerfile_mode, derived_dockerfile_digest = _file_record_parts(
+                derived_files[dockerfile_relative]
+            )
             derived_verifier_mode, derived_verifier_digest = _file_record_parts(
                 derived_files[verifier_relative]
             )
             if (
                 source_unchanged != derived_unchanged
-                or derived_verifier_digest != verifier_digest
-                or derived_verifier_mode != 0o555
+                or derived_dockerfile_digest
+                != transform.derived_dockerfile_sha256
+                or derived_dockerfile_mode != transform.derived_dockerfile_mode
+                or derived_verifier_digest != transform.derived_test_script_sha256
+                or derived_verifier_mode != transform.derived_test_script_mode
+                or _owned_directory_mode(
+                    derived_task / "tests", context="derived tests directory"
+                )
+                != 0o700
             ):
                 raise HarborCampaignError(
                     "Derived task changed content or an unapproved file mode"
@@ -2395,6 +3044,7 @@ def derive_private_task_dataset(
             task_patches.append(
                 TaskPatch(
                     task_id=task_id,
+                    transformation_id=transform.transformation_id,
                     source_task_toml_sha256=source_digest,
                     source_task_toml_mode=source_mode,
                     derived_task_toml_sha256=_file_record_parts(
@@ -2404,52 +3054,36 @@ def derive_private_task_dataset(
                         derived_files["task.toml"]
                     )[0],
                     unchanged_tree_sha256=_tree_digest(source_unchanged),
-                    verifier_script_sha256=verifier_digest,
-                    source_verifier_script_mode=verifier_source_mode,
-                    derived_verifier_script_mode=0o555,
+                    source_dockerfile_sha256=dockerfile_source_digest,
+                    source_dockerfile_mode=dockerfile_source_mode,
+                    derived_dockerfile_sha256=derived_dockerfile_digest,
+                    derived_dockerfile_mode=derived_dockerfile_mode,
+                    source_test_script_sha256=verifier_source_digest,
+                    source_test_script_mode=verifier_source_mode,
+                    derived_test_script_sha256=derived_verifier_digest,
+                    derived_test_script_mode=derived_verifier_mode,
+                    derived_tests_directory_mode=(
+                        transform.derived_tests_directory_mode
+                    ),
+                    verifier_network_mode=transform.verifier_network_mode,
+                    verifier_allowed_hosts=transform.verifier_allowed_hosts,
                 )
             )
 
-        patch_payload = {
-            "schema_version": 1,
-            "dataset_revision": campaign.dataset.revision,
-            "environment_network_mode": "no-network",
-            "agent_network_mode": "allowlist",
-            "agent_allowed_hosts": [RELAY_SENTINEL_HOST],
-            "verifier_network_mode": "no-network",
-            "tasks": [
-                {
-                    "task_id": item.task_id,
-                    "source_task_toml_sha256": item.source_task_toml_sha256,
-                    "source_task_toml_mode": item.source_task_toml_mode,
-                    "derived_task_toml_sha256": item.derived_task_toml_sha256,
-                    "derived_task_toml_mode": item.derived_task_toml_mode,
-                    "unchanged_tree_sha256": item.unchanged_tree_sha256,
-                    "verifier_script_sha256": item.verifier_script_sha256,
-                    "source_verifier_script_mode": (
-                        item.source_verifier_script_mode
-                    ),
-                    "derived_verifier_script_mode": (
-                        item.derived_verifier_script_mode
-                    ),
-                }
-                for item in task_patches
-            ],
-        }
-        digest = _sha256_bytes(
-            json.dumps(
-                patch_payload,
-                sort_keys=True,
-                ensure_ascii=True,
-                separators=(",", ":"),
-            ).encode("ascii")
-        )
-        return NetworkPolicyPatch(
+        digest = _network_policy_patch_digest(campaign.dataset.revision, task_patches)
+        result = NetworkPolicyPatch(
             dataset_revision=campaign.dataset.revision,
             digest=digest,
             tasks=tuple(task_patches),
             dataset_dir=destination_root,
         )
+        _change_tests_directory_modes(
+            destination_root,
+            campaign.dataset.tasks,
+            expected_mode=0o700,
+            derived_mode=0o555,
+        )
+        return result
     except BaseException:
         shutil.rmtree(destination_root)
         raise
@@ -2464,6 +3098,8 @@ def verify_private_task_dataset(
         patch.dataset_revision != campaign.dataset.revision
         or not _SHA256_PATTERN.fullmatch(patch.digest)
         or tuple(item.task_id for item in patch.tasks) != campaign.dataset.tasks
+        or patch.digest
+        != _network_policy_patch_digest(patch.dataset_revision, patch.tasks)
     ):
         raise HarborCampaignError("Derived network patch provenance changed")
     root = _resolved_external(
@@ -2474,7 +3110,29 @@ def verify_private_task_dataset(
     )
     if {path.name for path in root.iterdir()} != set(campaign.dataset.tasks):
         raise HarborCampaignError("Derived task directory topology changed")
-    for expected in patch.tasks:
+    for index, expected in enumerate(patch.tasks):
+        transform = campaign.dataset.verifier_transforms[index]
+        if (
+            expected.task_id != transform.task_id
+            or expected.transformation_id != transform.transformation_id
+            or expected.source_dockerfile_sha256
+            != transform.source_dockerfile_sha256
+            or expected.source_dockerfile_mode != transform.source_dockerfile_mode
+            or expected.derived_dockerfile_sha256
+            != transform.derived_dockerfile_sha256
+            or expected.derived_dockerfile_mode != transform.derived_dockerfile_mode
+            or expected.source_test_script_sha256
+            != transform.source_test_script_sha256
+            or expected.source_test_script_mode != transform.source_test_script_mode
+            or expected.derived_test_script_sha256
+            != transform.derived_test_script_sha256
+            or expected.derived_test_script_mode != transform.derived_test_script_mode
+            or expected.derived_tests_directory_mode
+            != transform.derived_tests_directory_mode
+            or expected.verifier_network_mode != transform.verifier_network_mode
+            or expected.verifier_allowed_hosts != transform.verifier_allowed_hosts
+        ):
+            raise HarborCampaignError("Derived verifier transformation pin changed")
         files = _file_tree(root / expected.task_id)
         record = files.get("task.toml")
         if record is None:
@@ -2491,33 +3149,71 @@ def verify_private_task_dataset(
         unchanged = {
             key: value
             for key, value in files.items()
-            if key not in {"task.toml", "tests/test.sh"}
+            if key
+            not in {"task.toml", "environment/Dockerfile", "tests/test.sh"}
         }
+        dockerfile_record = files.get("environment/Dockerfile")
         verifier_record = files.get("tests/test.sh")
-        if verifier_record is None:
-            raise HarborCampaignError("Derived verifier launcher is missing")
+        if dockerfile_record is None or verifier_record is None:
+            raise HarborCampaignError(
+                "Derived verifier Dockerfile or launcher is missing"
+            )
+        dockerfile_mode, dockerfile_digest = _file_record_parts(dockerfile_record)
         verifier_mode, verifier_digest = _file_record_parts(verifier_record)
         if (
             _tree_digest(unchanged) != expected.unchanged_tree_sha256
-            or expected.verifier_script_sha256 != verifier_digest
-            or expected.source_verifier_script_mode != 0o644
-            or expected.derived_verifier_script_mode != 0o555
-            or verifier_mode != expected.derived_verifier_script_mode
+            or dockerfile_digest != expected.derived_dockerfile_sha256
+            or dockerfile_mode != expected.derived_dockerfile_mode
+            or verifier_digest != expected.derived_test_script_sha256
+            or verifier_mode != expected.derived_test_script_mode
+            or _owned_directory_mode(
+                root / expected.task_id / "tests",
+                context="derived tests directory",
+            )
+            != expected.derived_tests_directory_mode
         ):
             raise HarborCampaignError(
-                "Derived task content or verifier launcher mode changed"
+                "Derived task content or offline verifier mode changed"
             )
         task_toml, _ = _read_owned_regular_file(
             root / expected.task_id / "task.toml", context="derived task.toml"
         )
         parsed = tomllib.loads(task_toml.decode("utf-8"))
+        parsed_verifier = parsed["verifier"]
         if (
             parsed["environment"].get("network_mode") != "no-network"
             or parsed["agent"].get("network_mode") != "allowlist"
             or parsed["agent"].get("allowed_hosts") != [RELAY_SENTINEL_HOST]
-            or parsed["verifier"].get("network_mode") != "no-network"
+            or (
+                parsed_verifier.get("network_mode"),
+                tuple(parsed_verifier.get("allowed_hosts", ())),
+            )
+            != (expected.verifier_network_mode, expected.verifier_allowed_hosts)
         ):
             raise HarborCampaignError("Derived task agent network policy changed")
+
+
+def prepare_private_task_dataset_removal(
+    campaign: CampaignSpec, patch: NetworkPolicyPatch, *, repo_root: Path
+) -> Path:
+    """Verify the full tree, then unlock only its six exact tests directories."""
+
+    verify_private_task_dataset(campaign, patch, repo_root=repo_root)
+    root = _resolved_external(
+        patch.dataset_dir,
+        repo_root=repo_root,
+        context="derived task directory",
+        must_exist=True,
+    )
+    if any(item.derived_tests_directory_mode != 0o555 for item in patch.tasks):
+        raise HarborCampaignError("Derived tests directory removal pin changed")
+    _change_tests_directory_modes(
+        root,
+        tuple(item.task_id for item in patch.tasks),
+        expected_mode=0o555,
+        derived_mode=0o700,
+    )
+    return root
 
 
 def verify_staged_agent_source(

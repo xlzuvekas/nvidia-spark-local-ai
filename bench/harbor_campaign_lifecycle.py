@@ -53,6 +53,7 @@ from .harbor_terminal import (
     iter_trials,
     load_campaign,
     load_trial_job_result,
+    prepare_private_task_dataset_removal,
     prepare_runtime_overlay,
     run_harbor_invocation,
     summarize_campaign_results,
@@ -68,7 +69,9 @@ from .runtime import start_llamacpp, validate_llamacpp_artifacts
 from .telemetry import TelemetrySampler
 
 
-EXPECTED_CAMPAIGN_ID = "qwen3-coder-next-harbor-terminal-2026-08-17"
+EXPECTED_CAMPAIGN_ID = (
+    "qwen3-coder-next-harbor-terminal-offline-2026-08-18"
+)
 EXPECTED_MODEL_PROFILE = "qwen3-coder-next-80b-a3b-ud-q4-k-xl-llamacpp"
 EXPECTED_TRIALS = 12
 EXPECTED_HARD_CUTOFF_S = 23_400
@@ -2018,9 +2021,23 @@ def _execute_campaign_locked(
                 pass
 
         cleanup_values["key_removed"] = remove_ephemeral_key(key_path)
-        cleanup_values["derived_dataset_removed"] = _remove_owned_tree(
-            derived_dir, owner=run_root
-        )
+        if patch is not None:
+            try:
+                prepare_private_task_dataset_removal(
+                    campaign,
+                    patch,
+                    repo_root=workspace,
+                )
+            except BaseException:
+                cleanup_values["derived_dataset_removed"] = False
+            else:
+                cleanup_values["derived_dataset_removed"] = _remove_owned_tree(
+                    derived_dir, owner=run_root
+                )
+        else:
+            cleanup_values["derived_dataset_removed"] = _remove_owned_tree(
+                derived_dir, owner=run_root
+            )
         cleanup_values["runtime_overlays_removed"] = _remove_owned_tree(
             overlay_dir, owner=run_root
         )

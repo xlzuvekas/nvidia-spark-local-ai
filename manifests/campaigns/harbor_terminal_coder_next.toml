@@ -1,6 +1,6 @@
-schema_version = 1
-id = "qwen3-coder-next-harbor-terminal-2026-08-17"
-description = "Counterbalanced Qwen Code versus OpenCode admission on a pinned Terminal-Bench 2.1 subset, served by Qwen3-Coder-Next on one DGX Spark."
+schema_version = 2
+id = "qwen3-coder-next-harbor-terminal-offline-2026-08-18"
+description = "Counterbalanced Qwen Code versus OpenCode admission on an offline-compatible pinned Terminal-Bench 2.1 subset, served by Qwen3-Coder-Next on one DGX Spark."
 
 [model]
 profile = "qwen3-coder-next-80b-a3b-ud-q4-k-xl-llamacpp"
@@ -39,13 +39,103 @@ source = "harbor-framework/terminal-bench-2-1"
 revision = "7131e4375048a0e408a8fb404b5f499d726b695b"
 version = "2.1"
 tasks = [
-  "build-cython-ext",
+  "fix-git",
   "cancel-async-tasks",
   "fix-code-vulnerability",
-  "kv-store-grpc",
+  "regex-log",
   "polyglot-c-py",
   "query-optimize",
 ]
+
+[[dataset.verifier_transforms]]
+task_id = "fix-git"
+transformation_id = "fix-git-offline-pytest-v1"
+source_dockerfile_sha256 = "sha256:7ac844613e00e29cfa5644e6257a12bd79177b26932d085f6624644f81cbb474"
+source_dockerfile_mode = "0644"
+derived_dockerfile_sha256 = "sha256:54d278e20971225f495171fb46ffb89d8ed9b3954cf23928db94b9e600376032"
+derived_dockerfile_mode = "0644"
+source_test_script_sha256 = "sha256:4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334"
+source_test_script_mode = "0644"
+derived_test_script_sha256 = "sha256:6e42ee057f4606e6ef6e12dfdad6e43c41e85dfaca019f3f708d281649a999a1"
+derived_test_script_mode = "0555"
+derived_tests_directory_mode = "0555"
+verifier_network_mode = "no-network"
+verifier_allowed_hosts = []
+
+[[dataset.verifier_transforms]]
+task_id = "cancel-async-tasks"
+transformation_id = "cancel-async-tasks-offline-pytest-v1"
+source_dockerfile_sha256 = "sha256:1ee7bdb4a7536f5f114c11a3ac6ff42790abfea901fcba6b2a8ea8685f19140e"
+source_dockerfile_mode = "0644"
+derived_dockerfile_sha256 = "sha256:5afa6aa887580434965592ad441b748b2ed664df43d352c0e6e2fced1101f662"
+derived_dockerfile_mode = "0644"
+source_test_script_sha256 = "sha256:79600a6b863def31b4daa008297423010cd2d6243e689d67503e118e4dc53397"
+source_test_script_mode = "0644"
+derived_test_script_sha256 = "sha256:b13bc010af61bbd6b172f5eb3755e85df9d6039484a733f9115dd504c0906148"
+derived_test_script_mode = "0555"
+derived_tests_directory_mode = "0555"
+verifier_network_mode = "no-network"
+verifier_allowed_hosts = []
+
+[[dataset.verifier_transforms]]
+task_id = "fix-code-vulnerability"
+transformation_id = "fix-code-vulnerability-offline-pytest-v1"
+source_dockerfile_sha256 = "sha256:0917470986224df4daf4854a71302ae81c73ba5dd6e25be1232d29b758a5b3ab"
+source_dockerfile_mode = "0644"
+derived_dockerfile_sha256 = "sha256:852fa7f402bbbc310723e10667ab23e092eb4e18294c460a2433316050e7fe63"
+derived_dockerfile_mode = "0644"
+source_test_script_sha256 = "sha256:f1611da693cb4cfc5e8482698c6a1858a5c67220ae9db89b50aed66584e9b17f"
+source_test_script_mode = "0644"
+derived_test_script_sha256 = "sha256:ed828a0ed9c08b0ef0395132b8a21e25fd0a77ff47e409d07f931df87af40619"
+derived_test_script_mode = "0555"
+derived_tests_directory_mode = "0555"
+verifier_network_mode = "no-network"
+verifier_allowed_hosts = []
+
+[[dataset.verifier_transforms]]
+task_id = "regex-log"
+transformation_id = "regex-log-offline-pytest-v1"
+source_dockerfile_sha256 = "sha256:5f264ff0bf62a49aee3c6398447de5108df141e7a2ad35c6de8ef39fa62049c6"
+source_dockerfile_mode = "0644"
+derived_dockerfile_sha256 = "sha256:52abfd2911c3f00b7ee9d63a8a5ac9da9fa13603e32d764ea2526a2926ca3f85"
+derived_dockerfile_mode = "0644"
+source_test_script_sha256 = "sha256:4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334"
+source_test_script_mode = "0644"
+derived_test_script_sha256 = "sha256:6e42ee057f4606e6ef6e12dfdad6e43c41e85dfaca019f3f708d281649a999a1"
+derived_test_script_mode = "0555"
+derived_tests_directory_mode = "0555"
+verifier_network_mode = "no-network"
+verifier_allowed_hosts = []
+
+[[dataset.verifier_transforms]]
+task_id = "polyglot-c-py"
+transformation_id = "polyglot-c-py-offline-pytest-v1"
+source_dockerfile_sha256 = "sha256:2eb537f29d2bc4ab30e1b35ff352578437a08b90f91ef6360ee28d8195d5098a"
+source_dockerfile_mode = "0644"
+derived_dockerfile_sha256 = "sha256:25d0b4a4de58dd937cfd4e7d0fd7487d4d97393cfa7469fdfa8d9b57fc8e8262"
+derived_dockerfile_mode = "0644"
+source_test_script_sha256 = "sha256:4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334"
+source_test_script_mode = "0644"
+derived_test_script_sha256 = "sha256:6e42ee057f4606e6ef6e12dfdad6e43c41e85dfaca019f3f708d281649a999a1"
+derived_test_script_mode = "0555"
+derived_tests_directory_mode = "0555"
+verifier_network_mode = "no-network"
+verifier_allowed_hosts = []
+
+[[dataset.verifier_transforms]]
+task_id = "query-optimize"
+transformation_id = "query-optimize-offline-pytest-v1"
+source_dockerfile_sha256 = "sha256:064818771f200e0517d22068f87229a7a95d0a82b0778c84ca7203bf1926a0b8"
+source_dockerfile_mode = "0644"
+derived_dockerfile_sha256 = "sha256:9e3e983c082c0271fd11cb0f2de210f33e53e6affe2abec77a64dda7801cb2b2"
+derived_dockerfile_mode = "0644"
+source_test_script_sha256 = "sha256:4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334"
+source_test_script_mode = "0644"
+derived_test_script_sha256 = "sha256:6e42ee057f4606e6ef6e12dfdad6e43c41e85dfaca019f3f708d281649a999a1"
+derived_test_script_mode = "0555"
+derived_tests_directory_mode = "0555"
+verifier_network_mode = "no-network"
+verifier_allowed_hosts = []
 
 [[agents]]
 id = "qwen-coder"
@@ -93,20 +183,20 @@ node_mount_path = "/opt/sparkbench/node"
 agent_mount_path = "/opt/sparkbench/agent"
 
 [execution]
-canary_task = "build-cython-ext"
+canary_task = "fix-git"
 agent_timeout_s = 900
 trial_wall_timeout_s = 3600
 hard_campaign_cutoff_s = 23400
 reserve_for_audit_s = 5400
 trial_order = [
-  "build-cython-ext:qwen-coder",
-  "build-cython-ext:opencode",
+  "fix-git:qwen-coder",
+  "fix-git:opencode",
   "cancel-async-tasks:opencode",
   "cancel-async-tasks:qwen-coder",
   "fix-code-vulnerability:qwen-coder",
   "fix-code-vulnerability:opencode",
-  "kv-store-grpc:opencode",
-  "kv-store-grpc:qwen-coder",
+  "regex-log:opencode",
+  "regex-log:qwen-coder",
   "polyglot-c-py:qwen-coder",
   "polyglot-c-py:opencode",
   "query-optimize:opencode",

@@ -213,6 +213,11 @@ coding-agent clients against one locally served model. Its normative definition
 is
 [`manifests/campaigns/harbor_terminal_coder_next.toml`](manifests/campaigns/harbor_terminal_coder_next.toml).
 Do not infer a result from the presence of the manifest or this protocol.
+The corrected campaign ID is
+`qwen3-coder-next-harbor-terminal-offline-2026-08-18`. Earlier trials under the
+2026-08-17 ID are diagnostic only: their verifier upload was not traversable
+under the capability-dropped container, so they must not be repaired, regraded,
+or combined with a fresh run.
 
 The fixed serving profile is
 `qwen3-coder-next-80b-a3b-ud-q4-k-xl-llamacpp`: the exact 49,608,478,720-byte
@@ -236,9 +241,9 @@ The remaining inputs are pinned in the campaign manifest:
 - Qwen Code 0.21.13 and OpenCode 1.18.18, including their npm integrity and
   shasum values, the actual `opencode-linux-arm64` executable package integrity,
   and upstream source revisions; and
-- six tasks: `build-cython-ext`, `cancel-async-tasks`,
-  `fix-code-vulnerability`, `kv-store-grpc`, `polyglot-c-py`, and
-  `query-optimize`.
+- six tasks whose agent and verifier phases are runtime-offline:
+  `fix-git`, `cancel-async-tasks`, `fix-code-vulnerability`, `regex-log`,
+  `polyglot-c-py`, and `query-optimize`.
 
 The measured lifecycle performs no npm or NVM installation. A separate,
 credential-free bootstrap produced normalized read-only Node, Qwen Code, and
@@ -332,17 +337,33 @@ all other loopback ports remain blocked. The verifier phase atomically returns
 to deny-all, preventing surviving agent children from regaining egress.
 Embedded probes certify these transitions in every invocation. The adapter
 verifies every byte not deliberately transformed against the pinned source.
-Derivation applies the fixed phase network policy to task metadata and preserves
-each selected `tests/test.sh` byte-for-byte while changing its Git source mode
-from `100644` to derived mode `0555`: Harbor directly executes that verifier
-under `cap_drop: ALL`, so the derived copy must be executable without adding
-capabilities. The deterministic patch digest binds the network policy,
-verifier-script digest, and exact source and derived modes. The model is never
-bound to a wildcard or LAN address, and neither task nor inference uses Docker
-host networking.
+Derivation applies the fixed phase policy to task metadata, pins each mutable
+base-image tag to one Linux/ARM64 digest, and appends a dedicated Python verifier
+environment. It narrowly removes the upstream online `apt`/`curl`/`pip`/`uvx`
+bootstrap from each `tests/test.sh`, points the same pytest invocation at the
+preinstalled environment, and retains the task assertions and reward logic.
+Both the derived `tests/` directory and `test.sh` are mode `0555`: Harbor
+directly executes that verifier under `cap_drop: ALL`, so the uploaded copy must
+be traversable and executable without adding capabilities. Each final task
+image reserves `/tests` as UID/GID 65532 mode `0555`; admission requires the
+pinned Compose copy path to populate that foreign-owned directory, and a
+fallback upload failure stops the canary. The deterministic
+patch digest binds the source and derived Dockerfile, task metadata, test
+launcher bytes, and every source/derived mode.
 
-The network-policy and verifier-mode transformations intentionally differ from
-upstream Terminal-Bench 2.1. Report the result as a
+The verifier packages are available without runtime networking, but the task
+images are still built through the ordinary Docker builder. Direct verifier
+package versions and base-image digests are pinned; transitive Python artifacts
+are not hash-locked. Exact semantic image fingerprints therefore establish a
+matched pair within this run, not byte-for-byte rebuild determinism. Harbor's
+shared verifier also remains a task-harness trust model, not a tamper-resistant
+anti-cheat boundary: the verifier runtime is visible to the root agent before
+the tests are uploaded. Keep that limitation attached to any result. The model
+is never bound to a wildcard or LAN address, and neither task nor inference uses
+Docker host networking.
+
+The network-policy, Dockerfile, verifier-bootstrap, and mode transformations
+intentionally differ from upstream Terminal-Bench 2.1. Report the result as a
 Harbor/Terminal-Bench-derived harness-stack outcome, not an official
 Terminal-Bench 2.1 score.
 
@@ -359,11 +380,15 @@ Before the measured matrix, require all of the following:
    admission, including one valid tool call;
 4. the full Harbor runtime and all Node/agent prefix trees match their complete
    immutable admissions, and the relay image is native ARM64;
-5. a native ARM64 canary task image builds, yields a terminal Harbor result,
-   and leaves no campaign container running; a finalized `AgentTimeoutError`
-   remains a failed measurement but may continue the panel when every image,
-   network, process, and cleanup proof passes; and
-6. authenticated relay/bridge access succeeds, invalid access never reaches
+5. the exact derived dataset is deterministic and failure injection leaves no
+   partial tree; one Python 3.13, one Python 3.11, and one Ubuntu-derived image
+   certify their pinned verifier runtime under `cap_drop: ALL` and verifier
+   deny-all;
+6. the public oracle solution earns reward `1` once for every selected task
+   through the exact derived Harbor path, with `query-optimize` repeated once
+   to screen its timing threshold, and every canary image/container cleans up;
+   and
+7. authenticated relay/bridge access succeeds, invalid access never reaches
    the model, every forbidden network probe fails, the phase-policy and relay
    assets match their digests, and no raw-payload publication path is enabled.
 
@@ -395,8 +420,9 @@ an offline synthetic fixture passes, two exports are byte-identical, the archive
 verifies, and `verify-evidence --staged` validates and secret-scans the exact Git
 index. A report must retain failures and partial states and must label the
 one-attempt design, task subset, client-controlled requests, derived network
-policy and verifier-script mode, serving geometry, and absence of a broad
-quality or official leaderboard claim.
+policy and verifier transformation, shared-verifier trust, non-hash-locked
+build dependencies, serving geometry, and absence of a broad quality or
+official leaderboard claim.
 
 Concurrency results are comparable only when the serving-slot geometry is the
 same. A one-slot profile receiving C2, C4, or C8 requests measures queued

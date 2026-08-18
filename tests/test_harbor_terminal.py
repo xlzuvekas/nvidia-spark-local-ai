@@ -25,6 +25,9 @@ from bench.harbor_terminal import (
     NpmArtifactAdmission,
     NpmArtifactRecord,
     RuntimeOverlayAdmission,
+    _copy_task_tree,
+    _derive_offline_test_script,
+    _derive_offline_verifier_dockerfile,
     _harbor_runtime_digest,
     _inspect_image,
     _run_process_group,
@@ -39,6 +42,7 @@ from bench.harbor_terminal import (
     load_campaign,
     load_network_admission,
     load_trial_job_result,
+    prepare_private_task_dataset_removal,
     read_api_key,
     run_harbor_invocation,
     snapshot_harbor_resources,
@@ -234,6 +238,66 @@ mcp_servers = []
 '''
 
 
+def _synthetic_verifier_script(task_id: str) -> str:
+    reward = '''
+
+if [ $? -eq 0 ]; then
+  echo 1 > /logs/verifier/reward.txt
+else
+  echo 0 > /logs/verifier/reward.txt
+fi
+'''
+    uv_bootstrap = '''# Install curl
+apt-get update
+apt-get install -y curl
+
+# Install uv
+curl -LsSf https://astral.sh/uv/0.9.5/install.sh | sh
+'''
+    uv_invocation = '''uvx \\
+  -p 3.13 \\
+  -w pytest==8.4.1 \\
+  -w pytest-json-ctrf==0.3.5 \\
+  pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA
+'''
+    if task_id == "cancel-async-tasks":
+        body = (
+            uv_bootstrap
+            + "source $HOME/.local/bin/env\n\n"
+            + "cp /tests/test.py /app/test.py\n\n"
+            + uv_invocation
+        )
+    elif task_id == "fix-code-vulnerability":
+        body = (
+            "pip install pytest==8.4.1 pytest-json-ctrf==0.3.5\n\n"
+            "python -m pytest --ctrf /logs/verifier/original-repo-ctrf.json -rA\n"
+            "ORIGINAL_EXIT_CODE=$?\n"
+            "python -m pytest --ctrf /logs/verifier/ctrf.json "
+            "/tests/test_outputs.py -rA\n"
+            "ADDITIONAL_EXIT_CODE=$?\n"
+        )
+        reward = '''
+if [ $ORIGINAL_EXIT_CODE -eq 0 ] && [ $ADDITIONAL_EXIT_CODE -eq 0 ]; then
+  echo 1 > /logs/verifier/reward.txt
+else
+  echo 0 > /logs/verifier/reward.txt
+fi
+'''
+    else:
+        body = uv_bootstrap + "\nsource $HOME/.local/bin/env\n\n" + uv_invocation
+    return "#!/bin/bash\n\n" + body + reward
+
+
+def _synthetic_dockerfile(task_id: str) -> str:
+    if task_id == "fix-code-vulnerability":
+        base = "python:3.11-slim"
+    elif task_id in {"regex-log", "polyglot-c-py", "query-optimize"}:
+        base = "ubuntu:24.04"
+    else:
+        base = "python:3.13-slim-bookworm"
+    return f"FROM {base}\nWORKDIR /app\n"
+
+
 def _make_source_checkout(root: Path) -> Path:
     checkout = root / "terminal-bench"
     tasks_root = checkout / "tasks"
@@ -247,9 +311,11 @@ def _make_source_checkout(root: Path) -> Path:
         (task / "instruction.md").write_text(
             f"Synthetic instruction for {task_id}\n", encoding="utf-8"
         )
-        (task / "tests" / "test.sh").write_text("exit 0\n", encoding="utf-8")
+        (task / "tests" / "test.sh").write_text(
+            _synthetic_verifier_script(task_id), encoding="utf-8"
+        )
         (task / "environment" / "Dockerfile").write_text(
-            "FROM scratch\n", encoding="utf-8"
+            _synthetic_dockerfile(task_id), encoding="utf-8"
         )
     subprocess.run(
         ["git", "init", "--quiet", str(checkout)],
@@ -266,6 +332,36 @@ def _make_source_checkout(root: Path) -> Path:
     return checkout
 
 
+def _campaign_for_source(source: Path):
+    campaign = _campaign()
+    transforms = []
+    for transform in campaign.dataset.verifier_transforms:
+        task = source / "tasks" / transform.task_id
+        source_dockerfile = (task / "environment" / "Dockerfile").read_bytes()
+        source_test = (task / "tests" / "test.sh").read_bytes()
+        derived_dockerfile = _derive_offline_verifier_dockerfile(
+            transform.task_id, source_dockerfile
+        )
+        derived_test = _derive_offline_test_script(transform.task_id, source_test)
+        transforms.append(
+            replace(
+                transform,
+                source_dockerfile_sha256="sha256:"
+                + hashlib.sha256(source_dockerfile).hexdigest(),
+                derived_dockerfile_sha256="sha256:"
+                + hashlib.sha256(derived_dockerfile).hexdigest(),
+                source_test_script_sha256="sha256:"
+                + hashlib.sha256(source_test).hexdigest(),
+                derived_test_script_sha256="sha256:"
+                + hashlib.sha256(derived_test).hexdigest(),
+            )
+        )
+    return replace(
+        campaign,
+        dataset=replace(campaign.dataset, verifier_transforms=tuple(transforms)),
+    )
+
+
 def _derive_fixture(root: Path):
     workspace = root / "workspace"
     workspace.mkdir()
@@ -273,7 +369,7 @@ def _derive_fixture(root: Path):
     cache.mkdir()
     source = _make_source_checkout(cache)
     destination = cache / "derived"
-    campaign = _campaign()
+    campaign = _campaign_for_source(source)
     source_snapshot = {
         path.relative_to(source).as_posix(): path.read_bytes()
         for path in source.rglob("*")
@@ -502,7 +598,7 @@ class HarborManifestTests(unittest.TestCase):
         self.assertEqual(campaign.dataset.version, "2.1")
         self.assertEqual(campaign.execution.trial_wall_timeout_s, 3_600)
         self.assertEqual(len(iter_trials(campaign)), 12)
-        self.assertEqual(iter_trials(campaign)[0].task_id, "build-cython-ext")
+        self.assertEqual(iter_trials(campaign)[0].task_id, "fix-git")
         self.assertEqual(iter_trials(campaign)[0].agent_id, "qwen-coder")
         self.assertEqual(
             campaign.agent("opencode").platform_package, "opencode-linux-arm64"
@@ -512,11 +608,12 @@ class HarborManifestTests(unittest.TestCase):
         source = CAMPAIGN_PATH.read_text(encoding="utf-8")
         mutations = (
             "unexpected = true\n" + source,
+            source.replace("schema_version = 2", "schema_version = 1", 1),
             source.replace('version = "0.21.0"', 'version = "0.21.1"', 1),
             source.replace("n_attempts = 1", "n_attempts = true", 1),
             source.replace(
-                '  "build-cython-ext:opencode",',
-                '  "build-cython-ext:qwen-coder",',
+                '  "fix-git:opencode",',
+                '  "fix-git:qwen-coder",',
                 1,
             ),
             source.replace(
@@ -567,6 +664,26 @@ class HarborManifestTests(unittest.TestCase):
             ),
             source.replace(
                 "server_default_top_k = 40", "server_default_top_k = 41", 1
+            ),
+            source.replace(
+                'transformation_id = "fix-git-offline-pytest-v1"',
+                'transformation_id = "fix-git-online-pytest-v1"',
+                1,
+            ),
+            source.replace(
+                'derived_dockerfile_mode = "0644"',
+                'derived_dockerfile_mode = "0755"',
+                1,
+            ),
+            source.replace(
+                'verifier_network_mode = "no-network"',
+                'verifier_network_mode = "allowlist"',
+                1,
+            ),
+            source.replace(
+                "verifier_allowed_hosts = []",
+                'verifier_allowed_hosts = ["public.invalid"]',
+                1,
             ),
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -716,7 +833,7 @@ class HarborNpmAdmissionTests(unittest.TestCase):
 
 
 class HarborNetworkPolicyTests(unittest.TestCase):
-    def test_derivation_changes_only_policy_and_verifier_mode_deterministically(self) -> None:
+    def test_derivation_pins_offline_verifier_and_network_policy_deterministically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             campaign, workspace, cache, source, before, policy = _derive_fixture(root)
@@ -732,21 +849,63 @@ class HarborNetworkPolicyTests(unittest.TestCase):
             for task_id in campaign.dataset.tasks:
                 source_task = source / "tasks" / task_id
                 derived_task = policy.dataset_dir / task_id
-                for relative in (
-                    "instruction.md",
-                    "tests/test.sh",
-                    "environment/Dockerfile",
-                ):
+                transform = next(
+                    item
+                    for item in campaign.dataset.verifier_transforms
+                    if item.task_id == task_id
+                )
+                self.assertEqual(
+                    (source_task / "instruction.md").read_bytes(),
+                    (derived_task / "instruction.md").read_bytes(),
+                )
+                derived_script = (derived_task / "tests" / "test.sh").read_bytes()
+                derived_dockerfile = (
+                    derived_task / "environment" / "Dockerfile"
+                ).read_bytes()
+                self.assertEqual(
+                    "sha256:" + hashlib.sha256(derived_script).hexdigest(),
+                    transform.derived_test_script_sha256,
+                )
+                self.assertEqual(
+                    "sha256:" + hashlib.sha256(derived_dockerfile).hexdigest(),
+                    transform.derived_dockerfile_sha256,
+                )
+                self.assertIn(
+                    b"export PATH=/opt/sparkbench-verifier/bin:$PATH",
+                    derived_script,
+                )
+                if task_id == "fix-code-vulnerability":
                     self.assertEqual(
-                        (source_task / relative).read_bytes(),
-                        (derived_task / relative).read_bytes(),
+                        derived_script.count(
+                            b"/opt/sparkbench-verifier/bin/python -m pytest"
+                        ),
+                        2,
                     )
+                    self.assertNotIn(
+                        b"/opt/sparkbench-verifier/bin/pytest", derived_script
+                    )
+                else:
+                    self.assertIn(
+                        b"/opt/sparkbench-verifier/bin/pytest", derived_script
+                    )
+                for forbidden in (b"pip install", b"curl -", b"\nuvx "):
+                    self.assertNotIn(forbidden, derived_script)
+                self.assertNotIn(b"--system-site-packages", derived_dockerfile)
+                tests_directory_run = (
+                    b"RUN install -d -o 65532 -g 65532 -m 0555 /tests\n"
+                )
+                self.assertEqual(derived_dockerfile.count(tests_directory_run), 1)
+                self.assertTrue(derived_dockerfile.endswith(tests_directory_run))
                 self.assertEqual(
                     os.stat(source_task / "tests/test.sh").st_mode & 0o111,
                     0,
                 )
                 self.assertEqual(
                     os.stat(derived_task / "tests/test.sh").st_mode & 0o777,
+                    0o555,
+                )
+                self.assertEqual(
+                    os.stat(derived_task / "tests").st_mode & 0o777,
                     0o555,
                 )
                 task_text = (derived_task / "task.toml").read_text(encoding="utf-8")
@@ -775,7 +934,7 @@ class HarborNetworkPolicyTests(unittest.TestCase):
 
             verifier = policy.dataset_dir / campaign.dataset.tasks[0] / "tests/test.sh"
             verifier.chmod(0o755)
-            with self.assertRaisesRegex(HarborCampaignError, "verifier launcher mode"):
+            with self.assertRaisesRegex(HarborCampaignError, "offline verifier mode"):
                 verify_private_task_dataset(campaign, policy, repo_root=workspace)
 
     def test_existing_agent_network_policy_is_rejected(self) -> None:
@@ -786,7 +945,7 @@ class HarborNetworkPolicyTests(unittest.TestCase):
             cache = root / "cache"
             cache.mkdir()
             source = _make_source_checkout(cache)
-            task = source / "tasks" / "build-cython-ext" / "task.toml"
+            task = source / "tasks" / "fix-git" / "task.toml"
             task.write_text(
                 task.read_text().replace(
                     "[agent]\n", '[agent]\nnetwork_mode = "public"\n', 1
@@ -798,9 +957,10 @@ class HarborNetworkPolicyTests(unittest.TestCase):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            campaign = _campaign_for_source(source)
             with self.assertRaisesRegex(HarborCampaignError, "already has"):
                 derive_private_task_dataset(
-                    _campaign(),
+                    campaign,
                     source_checkout=source,
                     destination=cache / "derived",
                     repo_root=workspace,
@@ -815,12 +975,13 @@ class HarborNetworkPolicyTests(unittest.TestCase):
             cache = root / "cache"
             cache.mkdir()
             source = _make_source_checkout(cache)
-            linked = source / "tasks" / "build-cython-ext" / "instruction.md"
+            campaign = _campaign_for_source(source)
+            linked = source / "tasks" / "fix-git" / "instruction.md"
             second = cache / "instruction-hardlink"
             os.link(linked, second)
             with self.assertRaisesRegex(HarborCampaignError, "linked"):
                 derive_private_task_dataset(
-                    _campaign(),
+                    campaign,
                     source_checkout=source,
                     destination=cache / "derived-linked",
                     repo_root=workspace,
@@ -835,7 +996,7 @@ class HarborNetworkPolicyTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(HarborCampaignError, "synthetic race"):
                     derive_private_task_dataset(
-                        _campaign(),
+                        campaign,
                         source_checkout=source,
                         destination=destination,
                         repo_root=workspace,
@@ -854,7 +1015,8 @@ class HarborNetworkPolicyTests(unittest.TestCase):
                     workspace.mkdir(parents=True)
                     cache.mkdir()
                     source = _make_source_checkout(cache)
-                    task = source / "tasks" / "build-cython-ext"
+                    campaign = _campaign_for_source(source)
+                    task = source / "tasks" / "fix-git"
                     if case == "mode":
                         (task / "instruction.md").chmod(0o755)
                         pattern = "blob or mode"
@@ -863,17 +1025,128 @@ class HarborNetworkPolicyTests(unittest.TestCase):
                         if case == "ignored":
                             exclude = source / ".git" / "info" / "exclude"
                             with exclude.open("a", encoding="utf-8") as handle:
-                                handle.write("tasks/build-cython-ext/ignored.secret\n")
+                                handle.write("tasks/fix-git/ignored.secret\n")
                         extra.write_text(CANARY, encoding="utf-8")
                         pattern = "ignored or untracked"
                     with self.assertRaisesRegex(HarborCampaignError, pattern):
                         derive_private_task_dataset(
-                            _campaign(),
+                            campaign,
                             source_checkout=source,
                             destination=cache / "derived",
                             repo_root=workspace,
                             checkout_verifier=lambda *_: None,
                         )
+
+    def test_later_task_failure_preserves_error_and_removes_partial_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            cache = root / "cache"
+            workspace.mkdir()
+            cache.mkdir()
+            source = _make_source_checkout(cache)
+            campaign = _campaign_for_source(source)
+            destination = cache / "derived-late-failure"
+            calls = 0
+
+            def fail_on_fourth_task(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 4:
+                    raise HarborCampaignError("synthetic later-task failure")
+                return _copy_task_tree(*args, **kwargs)
+
+            with patch(
+                "bench.harbor_terminal._copy_task_tree",
+                side_effect=fail_on_fourth_task,
+            ):
+                with self.assertRaisesRegex(
+                    HarborCampaignError, "synthetic later-task failure"
+                ):
+                    derive_private_task_dataset(
+                        campaign,
+                        source_checkout=source,
+                        destination=destination,
+                        repo_root=workspace,
+                        checkout_verifier=lambda *_: None,
+                    )
+            self.assertEqual(calls, 4)
+            self.assertFalse(destination.exists())
+
+    def test_derived_verifier_mutations_fail_closed(self) -> None:
+        cases = ("dockerfile", "test-script", "tests-directory", "patch-digest")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for case in cases:
+                with self.subTest(case=case):
+                    case_root = root / case
+                    case_root.mkdir()
+                    campaign, workspace, _, _, _, policy = _derive_fixture(case_root)
+                    first = policy.dataset_dir / campaign.dataset.tasks[0]
+                    candidate = policy
+                    if case == "dockerfile":
+                        dockerfile = first / "environment" / "Dockerfile"
+                        dockerfile.write_bytes(dockerfile.read_bytes() + b"# drift\n")
+                    elif case == "test-script":
+                        script = first / "tests" / "test.sh"
+                        script.chmod(0o644)
+                        script.write_bytes(script.read_bytes() + b"# drift\n")
+                    elif case == "tests-directory":
+                        (first / "tests").chmod(0o755)
+                    else:
+                        candidate = replace(
+                            policy, digest="sha256:" + "0" * 64
+                        )
+                    with self.assertRaises(HarborCampaignError):
+                        verify_private_task_dataset(
+                            campaign, candidate, repo_root=workspace
+                        )
+
+    def test_prepare_removal_unlocks_only_verified_tests_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            campaign, workspace, _, _, _, policy = _derive_fixture(root)
+            before = {
+                (task_id, relative): os.stat(
+                    policy.dataset_dir / task_id / relative
+                ).st_mode
+                & 0o777
+                for task_id in campaign.dataset.tasks
+                for relative in (".", "environment")
+            }
+            prepare_private_task_dataset_removal(
+                campaign, policy, repo_root=workspace
+            )
+            for task_id in campaign.dataset.tasks:
+                self.assertEqual(
+                    os.stat(policy.dataset_dir / task_id / "tests").st_mode
+                    & 0o777,
+                    0o700,
+                )
+                for relative in (".", "environment"):
+                    self.assertEqual(
+                        os.stat(policy.dataset_dir / task_id / relative).st_mode
+                        & 0o777,
+                        before[(task_id, relative)],
+                    )
+            with self.assertRaisesRegex(HarborCampaignError, "offline verifier mode"):
+                verify_private_task_dataset(campaign, policy, repo_root=workspace)
+
+    def test_exact_offline_transforms_reject_source_drift(self) -> None:
+        source_script = _synthetic_verifier_script("fix-git").encode("utf-8")
+        source_dockerfile = _synthetic_dockerfile("fix-git").encode("utf-8")
+        with self.assertRaisesRegex(HarborCampaignError, "transformation source"):
+            _derive_offline_test_script(
+                "fix-git", source_script.replace(b"# Install curl", b"# curl")
+            )
+        with self.assertRaisesRegex(HarborCampaignError, "transformation source"):
+            _derive_offline_verifier_dockerfile(
+                "fix-git",
+                source_dockerfile.replace(
+                    b"FROM python:3.13-slim-bookworm",
+                    b"FROM python:latest",
+                ),
+            )
 
 
 class HarborInvocationTests(unittest.TestCase):
@@ -908,7 +1181,7 @@ class HarborInvocationTests(unittest.TestCase):
             },
             runtime_admission_validator=lambda *_: None,
         )
-        trial_dir = invocation.raw_job_dir / "build-cython-ext__AbC1234"
+        trial_dir = invocation.raw_job_dir / "fix-git__AbC1234"
         trial_dir.mkdir(parents=True)
         _write_network_marker(trial_dir / "sparkbench-network-admission.json")
         return campaign, workspace, cache, jobs, policy, invocation
@@ -1043,7 +1316,7 @@ class HarborInvocationTests(unittest.TestCase):
                 self.assertEqual(
                     env["OPENAI_API_KEY"], "sparkbench-relay-placeholder-v1"
                 )
-                project = "build-cython-ext__abc1234__env"
+                project = "fix-git__abc1234__env"
                 docker.resources["container"]["b" * 64] = project
                 docker.resources["network"]["c" * 64] = project
                 docker.resources["volume"]["owned-volume"] = project
@@ -1083,7 +1356,7 @@ class HarborInvocationTests(unittest.TestCase):
                     "image",
                     "rm",
                     "--force",
-                    "build-cython-ext__abc1234__env-main",
+                    "fix-git__abc1234__env-main",
                 ],
                 docker.commands,
             )
@@ -1172,7 +1445,7 @@ class HarborInvocationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             _, _, _, _, _, invocation = self._invocation_fixture(Path(directory))
             docker = _FakeDocker()
-            reference = "build-cython-ext__abc1234__env-main"
+            reference = "fix-git__abc1234__env-main"
             image_id = "sha256:" + "a" * 64
             docker.image_variants[reference] = {}
             status = run_harbor_invocation(
@@ -1199,7 +1472,7 @@ class HarborInvocationTests(unittest.TestCase):
             self.assertTrue(all(admitted.values()))
             marker = (
                 invocation.raw_job_dir
-                / "build-cython-ext__AbC1234"
+                / "fix-git__AbC1234"
                 / "sparkbench-network-admission.json"
             )
             payload = json.loads(marker.read_text(encoding="ascii"))
@@ -1300,7 +1573,7 @@ class HarborInvocationTests(unittest.TestCase):
 
             def interrupted_runner(*_):
                 docker.resources["container"][owned] = (
-                    "build-cython-ext__abc1234__env"
+                    "fix-git__abc1234__env"
                 )
                 raise KeyboardInterrupt
 
@@ -1380,7 +1653,7 @@ class HarborInvocationTests(unittest.TestCase):
             docker = _FakeDocker()
             identifier = "e" * 64
             docker.resources["container"][identifier] = (
-                "build-cython-ext__abc1234__env"
+                "fix-git__abc1234__env"
             )
             docker.inspect_failures.add(("container", identifier))
             status = cleanup_harbor_containers(
@@ -1448,7 +1721,7 @@ class HarborSummaryTests(unittest.TestCase):
         self.assertEqual(len(summary["trials"]), 12)
         self.assertEqual(
             hashlib.sha256(encoded).hexdigest(),
-            "87e8bd6599952929bd1ef5a21be2fe8cc3616bf0a902a4f2d51006acee02d180",
+            "363e8a46c6fa0763dace427661bcd594550f4b6f3c02e7f7cfea98ad898f006a",
         )
 
     def test_partial_and_zero_summary_accept_only_an_exact_prefix(self) -> None:
@@ -1621,7 +1894,7 @@ class HarborSummaryTests(unittest.TestCase):
         campaign, attempts = self._attempts(1)
         cases = []
         wrong_task = deepcopy(attempts[0].job_result)
-        wrong_task.trial["task_name"] = "build-cython-ext"
+        wrong_task.trial["task_name"] = "not-selected-task"
         cases.append(wrong_task)
         wrong_version = deepcopy(attempts[0].job_result)
         wrong_version.trial["agent_info"]["version"] = "latest"
@@ -1729,7 +2002,7 @@ class HarborSummaryTests(unittest.TestCase):
                 env={},
             )
             job_dir = jobs / invocation.job_name
-            child = job_dir / "build-cython-ext__AbC1234"
+            child = job_dir / "fix-git__AbC1234"
             child.mkdir(parents=True)
             raw = _job_result(campaign, trial)
             raw.trial["trial_name"] = child.name
@@ -1743,7 +2016,7 @@ class HarborSummaryTests(unittest.TestCase):
                 invocation, jobs_dir=jobs, repo_root=workspace
             )
             self.assertIsNotNone(loaded)
-            self.assertEqual(loaded.trial["task_name"], "terminal-bench/build-cython-ext")
+            self.assertEqual(loaded.trial["task_name"], "terminal-bench/fix-git")
 
 
 if __name__ == "__main__":

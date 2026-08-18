@@ -479,7 +479,8 @@ class LifecycleFilesystemTests(unittest.TestCase):
             raw = Path(directory)
             raw.chmod(0o700)
             run = _create_run_directory(
-                raw, "qwen3-coder-next-harbor-terminal-2026-08-17"
+                raw,
+                "qwen3-coder-next-harbor-terminal-offline-2026-08-18",
             )
             self.assertTrue(run.name.startswith("hc-"))
             candidate = DEFAULT_RAW_ROOT / run.name / "relay-private" / "model.sock"
