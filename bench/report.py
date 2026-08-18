@@ -39,6 +39,21 @@ def percentile(values: list[float], fraction: float) -> float | None:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
+def _reported_reasoning_tokens(result: dict[str, Any]) -> int | None:
+    """Return a separately reported token count without guessing missing usage."""
+
+    value = result.get("reasoning_tokens")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if not isinstance(value, float):
+        return None
+    if not math.isfinite(value) or value < 0 or not value.is_integer():
+        return None
+    return int(value)
+
+
 def _read_events(path: Path) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     if not path.exists():
@@ -261,6 +276,18 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         }
         prompt_tokens = sum(int(event["result"]["prompt_tokens"]) for event in requests)
         completion_tokens = sum(int(event["result"]["completion_tokens"]) for event in requests)
+        reported_reasoning_counts = [
+            _reported_reasoning_tokens(event["result"]) for event in requests
+        ]
+        reasoning_tokens = (
+            sum(
+                count
+                for count in reported_reasoning_counts
+                if count is not None
+            )
+            if all(count is not None for count in reported_reasoning_counts)
+            else None
+        )
         case_event = case_events[(case_id, attempt_id)]
         kind = str(case_event.get("kind") or requests[0].get("kind", "unknown"))
         valid_generation = case_event.get("validation_passed") is not False
@@ -276,6 +303,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
             "concurrency": case_event.get("concurrency", 1),
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
+            "reasoning_tokens": reasoning_tokens,
             "median_ttft_s": (
                 statistics.median(ttfts)
                 if ttfts and not diffusion_generation
@@ -684,6 +712,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
                     "quality_accuracy": quality_correct / len(requests),
                     "quality_total_prompt_tokens": prompt_tokens,
                     "quality_total_completion_tokens": completion_tokens,
+                    "quality_total_reasoning_tokens": reasoning_tokens,
                     "quality_total_request_latency_s": sum(elapsed),
                     "quality_accuracy_by_category": {
                         category: category_correct.get(category, 0) / total

@@ -41,6 +41,7 @@ def _result(request_id: str, content: str, *, reasoning: str = "") -> RequestRes
         started_at_ns=1,
         prompt_tokens=30,
         completion_tokens=3,
+        reasoning_tokens=None,
         ttft_s=0.01,
         elapsed_s=0.03,
         decode_s=0.02,

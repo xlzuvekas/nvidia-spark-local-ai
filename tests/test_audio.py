@@ -55,6 +55,7 @@ def _result(request_id: str, content: str) -> RequestResult:
         started_at_ns=1,
         prompt_tokens=500,
         completion_tokens=64,
+        reasoning_tokens=None,
         ttft_s=0.02,
         elapsed_s=0.08,
         decode_s=0.06,

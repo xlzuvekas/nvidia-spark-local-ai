@@ -133,7 +133,16 @@ class StreamingClientTests(unittest.TestCase):
                     ]
                 }
             ),
-            _event({"usage": {"prompt_tokens": 4, "completion_tokens": 6}, "choices": []}),
+            _event(
+                {
+                    "usage": {
+                        "prompt_tokens": 4,
+                        "completion_tokens": 6,
+                        "reasoning_tokens": 12,
+                    },
+                    "choices": [],
+                }
+            ),
             b"data: [DONE]\n\n",
         ]
         self.server.response_body = b"".join(events)  # type: ignore[attr-defined]
@@ -144,6 +153,7 @@ class StreamingClientTests(unittest.TestCase):
         self.assertEqual(result.reasoning, "think ")
         self.assertEqual(result.prompt_tokens, 4)
         self.assertEqual(result.completion_tokens, 6)
+        self.assertEqual(result.reasoning_tokens, 12)
         self.assertEqual(result.finish_reason, "tool_calls")
         self.assertEqual(result.response_model, "served")
         self.assertEqual(result.emission_events, 5)
@@ -254,6 +264,92 @@ class StreamingClientTests(unittest.TestCase):
 
         self.assertEqual(result.content, "ok")
         self.assertEqual(result.completion_tokens, 1)
+
+    def test_missing_reasoning_tokens_remain_unreported(self) -> None:
+        self.server.response_body = b"".join(  # type: ignore[attr-defined]
+            [
+                _event({"choices": [{"delta": {"content": "ok"}}]},
+                       space=False),
+                _event(
+                    {"usage": {"prompt_tokens": 1, "completion_tokens": 2}, "choices": []},
+                    space=False,
+                ),
+                b"data:[DONE]\n\n",
+            ]
+        )
+
+        result = self._request()
+
+        self.assertIsNone(result.reasoning_tokens)
+
+    def test_parses_nested_reasoning_tokens(self) -> None:
+        self.server.response_body = b"".join(  # type: ignore[attr-defined]
+            [
+                _event({"choices": [{"delta": {"content": "ok"}}]}),
+                _event(
+                    {
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 2,
+                            "reasoning_tokens": "untrusted",
+                            "completion_tokens_details": {"reasoning_tokens": 7},
+                        },
+                        "choices": [],
+                    }
+                ),
+                b"data: [DONE]\n\n",
+            ]
+        )
+
+        result = self._request()
+
+        self.assertEqual(result.reasoning_tokens, 7)
+
+    def test_top_level_reasoning_tokens_preserve_reported_zero(self) -> None:
+        self.server.response_body = b"".join(  # type: ignore[attr-defined]
+            [
+                _event({"choices": [{"delta": {"content": "ok"}}]}),
+                _event(
+                    {
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 2,
+                            "reasoning_tokens": 0,
+                            "completion_tokens_details": {"reasoning_tokens": 7},
+                        },
+                        "choices": [],
+                    }
+                ),
+                b"data: [DONE]\n\n",
+            ]
+        )
+
+        result = self._request()
+
+        self.assertEqual(result.reasoning_tokens, 0)
+
+    def test_invalid_reasoning_token_usage_remains_unreported(self) -> None:
+        self.server.response_body = b"".join(  # type: ignore[attr-defined]
+            [
+                _event({"choices": [{"delta": {"content": "ok"}}]}),
+                _event(
+                    {
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 2,
+                            "reasoning_tokens": True,
+                            "completion_tokens_details": {"reasoning_tokens": "7"},
+                        },
+                        "choices": [],
+                    }
+                ),
+                b"data: [DONE]\n\n",
+            ]
+        )
+
+        result = self._request()
+
+        self.assertIsNone(result.reasoning_tokens)
 
     def test_chat_connection_resets_are_wrapped_with_request_context(self) -> None:
         failures = (
@@ -588,6 +684,7 @@ class StreamingClientTests(unittest.TestCase):
         self.assertFalse(request["think"])
         self.assertNotIn("tool_choice", request)
         self.assertEqual(result.content, "one two")
+        self.assertIsNone(result.reasoning_tokens)
         self.assertEqual(result.decode_metric_source, "server_reported_eval_duration")
         self.assertAlmostEqual(result.decode_tps, 20.0)
         self.assertAlmostEqual(result.load_s or 0, 0.025)

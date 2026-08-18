@@ -18,6 +18,7 @@ def _request(
     decode_tps: float | None,
     prompt_tokens: int = 10,
     completion_tokens: int = 20,
+    reasoning_tokens: int | None = None,
     kind: str = "decode",
 ) -> dict[str, object]:
     return {
@@ -31,6 +32,7 @@ def _request(
             "decode_tps": decode_tps,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
+            "reasoning_tokens": reasoning_tokens,
         },
     }
 
@@ -54,11 +56,39 @@ class ReportTests(unittest.TestCase):
 
     def test_summarizes_only_latest_completed_attempt_and_writes_outputs(self) -> None:
         events = [
-            _request("decode", "old", ttft_s=9, elapsed_s=9, decode_tps=1),
+            _request(
+                "decode",
+                "old",
+                ttft_s=9,
+                elapsed_s=9,
+                decode_tps=1,
+                reasoning_tokens=3,
+            ),
             {"event": "case_complete", "case_id": "decode", "attempt_id": "old", "elapsed_s": 9},
-            _request("decode", "new", ttft_s=0.1, elapsed_s=1.0, decode_tps=19),
-            _request("decode", "new", ttft_s=0.2, elapsed_s=1.2, decode_tps=20),
-            _request("decode", "new", ttft_s=0.3, elapsed_s=1.4, decode_tps=21),
+            _request(
+                "decode",
+                "new",
+                ttft_s=0.1,
+                elapsed_s=1.0,
+                decode_tps=19,
+                reasoning_tokens=3,
+            ),
+            _request(
+                "decode",
+                "new",
+                ttft_s=0.2,
+                elapsed_s=1.2,
+                decode_tps=20,
+                reasoning_tokens=3,
+            ),
+            _request(
+                "decode",
+                "new",
+                ttft_s=0.3,
+                elapsed_s=1.4,
+                decode_tps=21,
+                reasoning_tokens=3,
+            ),
             {
                 "event": "case_complete",
                 "case_id": "decode",
@@ -80,6 +110,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(row["concurrency"], 2)
         self.assertEqual(row["prompt_tokens"], 30)
         self.assertEqual(row["completion_tokens"], 60)
+        self.assertEqual(row["reasoning_tokens"], 9)
         self.assertAlmostEqual(row["median_ttft_s"], 0.2)
         self.assertAlmostEqual(row["median_e2e_s"], 1.2)
         self.assertAlmostEqual(row["median_estimated_decode_tps"], 20)
@@ -91,6 +122,43 @@ class ReportTests(unittest.TestCase):
             csv_rows = list(csv.DictReader(stream))
         self.assertEqual(len(csv_rows), 1)
         self.assertEqual(csv_rows[0]["attempt_id"], "new")
+
+    def test_reasoning_token_totals_remain_unknown_when_any_request_omits_them(
+        self,
+    ) -> None:
+        events = [
+            _request(
+                "decode",
+                "attempt",
+                ttft_s=0.1,
+                elapsed_s=1.0,
+                decode_tps=10.0,
+                reasoning_tokens=0,
+                kind="quality",
+            ),
+            _request(
+                "decode",
+                "attempt",
+                ttft_s=0.2,
+                elapsed_s=1.1,
+                decode_tps=10.0,
+                reasoning_tokens=None,
+                kind="quality",
+            ),
+            {
+                "event": "case_complete",
+                "case_id": "decode",
+                "attempt_id": "attempt",
+                "elapsed_s": 2.0,
+                "validation_passed": True,
+            },
+        ]
+        self._write_events(events)
+
+        row = summarize_run(self.run_dir)["cases"][0]
+
+        self.assertIsNone(row["reasoning_tokens"])
+        self.assertIsNone(row["quality_total_reasoning_tokens"])
 
     def test_prefill_and_p95_metrics(self) -> None:
         events = [
@@ -452,6 +520,7 @@ class ReportTests(unittest.TestCase):
                 decode_tps=10.0,
                 prompt_tokens=25,
                 completion_tokens=2,
+                reasoning_tokens=index + 1,
                 kind="quality",
             )
             request["validation"] = {
@@ -482,6 +551,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(row["quality_accuracy"], 0.75)
         self.assertEqual(row["quality_total_prompt_tokens"], 100)
         self.assertEqual(row["quality_total_completion_tokens"], 8)
+        self.assertEqual(row["quality_total_reasoning_tokens"], 10)
         self.assertAlmostEqual(row["quality_total_request_latency_s"], 1.0)
         self.assertEqual(row["quality_accuracy_by_category"]["logic"], 1.0)
         self.assertEqual(

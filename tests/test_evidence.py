@@ -1262,6 +1262,26 @@ class EvidenceValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(EvidenceError, "unknown request result fields"):
             _project_request_result({"completion_tokens": 1, "new_raw_field": "x"})
 
+    def test_reasoning_token_count_is_scalar_allowlisted_without_raw_reasoning(
+        self,
+    ) -> None:
+        projected = _project_request_result(
+            {
+                "completion_tokens": 5,
+                "reasoning_tokens": 7,
+                "reasoning": f"{RAW_REASONING} {RAW_HOST_PATH}",
+            }
+        )
+
+        self.assertEqual(projected["reasoning_tokens"], 7)
+        self.assertNotIn("reasoning", projected)
+        self.assertNotIn(RAW_REASONING, json.dumps(projected))
+        self.assertNotIn(RAW_HOST_PATH, json.dumps(projected))
+        self.assertEqual(
+            _project_request_result({"reasoning_tokens": None}),
+            {"reasoning_tokens": None},
+        )
+
     def test_agentic_suite_projection_is_an_exact_four_case_contract(self) -> None:
         suite = _agentic_suite()
         scenarios = tuple(case["id"] for case in suite["cases"])

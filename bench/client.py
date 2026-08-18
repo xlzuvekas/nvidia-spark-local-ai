@@ -22,6 +22,7 @@ class RequestResult:
     started_at_ns: int
     prompt_tokens: int
     completion_tokens: int
+    reasoning_tokens: int | None
     ttft_s: float
     elapsed_s: float
     decode_s: float | None
@@ -545,6 +546,35 @@ def _has_output(delta: dict[str, Any]) -> bool:
     )
 
 
+def _reported_reasoning_tokens(usage: dict[str, Any]) -> int | None:
+    """Return an exact, separately reported reasoning count when available.
+
+    Different OpenAI-compatible servers publish the count either at the top
+    level or under ``completion_tokens_details``.  Do not coerce strings,
+    booleans, fractional values, or negative values: an unavailable or invalid
+    counter must remain distinct from a server-reported zero.
+    """
+
+    def integer(value: Any) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value if value >= 0 else None
+        if not isinstance(value, float):
+            return None
+        if not math.isfinite(value) or value < 0 or not value.is_integer():
+            return None
+        return int(value)
+
+    top_level = integer(usage.get("reasoning_tokens"))
+    if top_level is not None:
+        return top_level
+    details = usage.get("completion_tokens_details")
+    if not isinstance(details, dict):
+        return None
+    return integer(details.get("reasoning_tokens"))
+
+
 def stream_chat_request(
     *,
     base_url: str,
@@ -652,12 +682,14 @@ def stream_chat_request(
         raise BenchmarkRequestError("Streaming response did not emit content or reasoning")
     prompt_tokens = int(usage.get("prompt_tokens", 0))
     completion_tokens = int(usage.get("completion_tokens", 0))
+    reasoning_tokens = _reported_reasoning_tokens(usage)
     decode_s = max(finished - first_output_at, 1e-9)
     return RequestResult(
         request_id=request_id,
         started_at_ns=started_wall_ns,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        reasoning_tokens=reasoning_tokens,
         ttft_s=first_output_at - started,
         elapsed_s=finished - started,
         decode_s=decode_s,
@@ -973,6 +1005,7 @@ def stream_ollama_chat_request(
         started_at_ns=started_wall_ns,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        reasoning_tokens=None,
         ttft_s=first_output_at - started,
         elapsed_s=finished - started,
         decode_s=decode_s,

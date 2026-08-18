@@ -257,6 +257,7 @@ _REQUEST_NUMERIC_FIELDS = {
     "unrelated_text_latency_s",
     "wall_time_s",
 }
+_REQUEST_NULLABLE_NUMERIC_FIELDS = {"reasoning_tokens"}
 _REQUEST_BOOLEAN_FIELDS = {
     "finite",
     "transcription_exact",
@@ -496,6 +497,8 @@ _CASE_FIELDS = {
     "quality_scored_items",
     "quality_total_completion_tokens",
     "quality_total_prompt_tokens",
+    "quality_total_reasoning_tokens",
+    "reasoning_tokens",
     "quality_total_request_latency_s",
     "request_tps",
     "requests",
@@ -547,6 +550,8 @@ _CASE_NULLABLE_FIELDS = {
     "p95_e2e_s",
     "p95_prefill_tps",
     "p95_ttft_s",
+    "quality_total_reasoning_tokens",
+    "reasoning_tokens",
     "request_tps",
     "validation_passed",
 }
@@ -2270,6 +2275,7 @@ def _project_request_result(
         raise EvidenceError("request result must be an object")
     unknown = set(result) - (
         _REQUEST_NUMERIC_FIELDS
+        | _REQUEST_NULLABLE_NUMERIC_FIELDS
         | _REQUEST_BOOLEAN_FIELDS
         | _REQUEST_NUMERIC_SEQUENCE_FIELDS
         | _REQUEST_STRING_FIELDS
@@ -2281,6 +2287,11 @@ def _project_request_result(
     for key in sorted(_REQUEST_NUMERIC_FIELDS & result.keys()):
         target = "emission_event_count" if key == "emission_events" else key
         projected[target] = _finite(result[key], name=f"request.{key}")
+    for key in sorted(_REQUEST_NULLABLE_NUMERIC_FIELDS & result.keys()):
+        value = result[key]
+        projected[key] = (
+            None if value is None else _finite(value, name=f"request.{key}")
+        )
     for key in sorted(_REQUEST_BOOLEAN_FIELDS & result.keys()):
         if result[key] is not None and not isinstance(result[key], bool):
             raise EvidenceError(f"request.{key} must be boolean")
