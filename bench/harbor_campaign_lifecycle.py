@@ -833,7 +833,11 @@ def admit_native_platform(
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise CampaignLifecycleError("Docker platform admission failed") from error
-    docker_arm64 = completed.returncode == 0 and completed.stdout.strip() == "arm64"
+    docker_architecture = completed.stdout.strip().lower()
+    docker_arm64 = (
+        completed.returncode == 0
+        and docker_architecture in {"aarch64", "arm64"}
+    )
     if not host_arm64 or not docker_arm64:
         raise CampaignLifecycleError("native ARM64 admission failed")
     return host_arm64, docker_arm64

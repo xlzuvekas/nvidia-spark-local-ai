@@ -23,6 +23,7 @@ from bench.harbor_campaign_lifecycle import (
     _record_status_then_load,
     _scalar_output_path,
     _trial_timeout_s,
+    admit_native_platform,
     build_lifecycle_envelope,
     build_parser,
     certify_private_raw_jobs,
@@ -262,6 +263,29 @@ class LifecycleGateTests(unittest.TestCase):
         )
         projection = {"reward": 0, "exception_class": None, "paired_image_match": None}
         self.assertIsNone(_attempt_gate((attempt,), {"trials": [projection]}))
+
+    def test_native_platform_normalizes_arm64_spellings(self) -> None:
+        for spelling in ("aarch64", "arm64"):
+            with self.subTest(spelling=spelling):
+                result = subprocess.CompletedProcess(
+                    args=("docker", "info"), returncode=0, stdout=spelling + "\n"
+                )
+                self.assertEqual(
+                    admit_native_platform(
+                        runner=lambda *args, **kwargs: result,
+                        machine=lambda: "aarch64",
+                    ),
+                    (True, True),
+                )
+
+        wrong = subprocess.CompletedProcess(
+            args=("docker", "info"), returncode=0, stdout="x86_64\n"
+        )
+        with self.assertRaises(CampaignLifecycleError):
+            admit_native_platform(
+                runner=lambda *args, **kwargs: wrong,
+                machine=lambda: "aarch64",
+            )
 
     def test_canary_requires_final_result_cleanup_native_images_and_probes(self) -> None:
         projection = {"reward": 1, "exception_class": None, "paired_image_match": None}
