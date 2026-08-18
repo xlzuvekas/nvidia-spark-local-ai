@@ -341,6 +341,119 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
             "elapsed_s": wall_s,
             "validation_passed": case_event.get("validation_passed"),
         }
+        if kind == "agentic":
+            agentic_results = [event["result"] for event in requests]
+            model_requests = sum(
+                int(result["turns_used"]) for result in agentic_results
+            )
+            task_wall_times = [
+                float(result["wall_s"]) for result in agentic_results
+            ]
+            request_elapsed_times = [
+                float(result["request_elapsed_s"])
+                for result in agentic_results
+            ]
+            first_turn_ttfts = [
+                float(result["first_turn_ttft_s"])
+                for result in agentic_results
+            ]
+            tasks_succeeded = sum(
+                result.get("passed") is True for result in agentic_results
+            )
+            recovery_required = sum(
+                result.get("recovery_required") is True
+                for result in agentic_results
+            )
+            recovery_succeeded = sum(
+                result.get("recovery_succeeded") is True
+                for result in agentic_results
+            )
+            row.update(
+                {
+                    "aggregate_output_tps": None,
+                    "median_ttft_s": None,
+                    "p95_ttft_s": None,
+                    "request_tps": None,
+                    "agentic_tasks": len(agentic_results),
+                    "agentic_tasks_succeeded": tasks_succeeded,
+                    "agentic_task_success_rate": (
+                        tasks_succeeded / len(agentic_results)
+                    ),
+                    "agentic_tasks_per_s": (
+                        len(agentic_results) / max(wall_s, 1e-9)
+                    ),
+                    "agentic_model_requests": model_requests,
+                    "agentic_model_requests_per_s": (
+                        model_requests / max(wall_s, 1e-9)
+                    ),
+                    "agentic_max_turns": int(agentic_results[0]["max_turns"]),
+                    "agentic_max_output_tokens_per_turn": int(
+                        agentic_results[0]["max_output_tokens"]
+                    ),
+                    "median_agentic_turns_used": statistics.median(
+                        int(result["turns_used"]) for result in agentic_results
+                    ),
+                    "median_agentic_task_wall_s": statistics.median(
+                        task_wall_times
+                    ),
+                    "median_agentic_model_request_sum_s": statistics.median(
+                        request_elapsed_times
+                    ),
+                    "median_agentic_first_turn_ttft_s": statistics.median(
+                        first_turn_ttfts
+                    ),
+                    "agentic_expected_tool_calls": sum(
+                        int(result["expected_tool_calls"])
+                        for result in agentic_results
+                    ),
+                    "agentic_tool_calls_requested": sum(
+                        int(result["tool_calls_requested"])
+                        for result in agentic_results
+                    ),
+                    "agentic_tool_calls_executed": sum(
+                        int(result["tool_calls_executed"])
+                        for result in agentic_results
+                    ),
+                    "agentic_tool_calls_succeeded": sum(
+                        int(result["tool_calls_succeeded"])
+                        for result in agentic_results
+                    ),
+                    "agentic_tool_errors": sum(
+                        int(result["tool_errors"])
+                        for result in agentic_results
+                    ),
+                    "agentic_malformed_tool_calls": sum(
+                        int(result["malformed_tool_calls"])
+                        for result in agentic_results
+                    ),
+                    "agentic_unknown_tool_calls": sum(
+                        int(result["unknown_tool_calls"])
+                        for result in agentic_results
+                    ),
+                    "agentic_final_answers_emitted": sum(
+                        result.get("final_answer_emitted") is True
+                        for result in agentic_results
+                    ),
+                    "agentic_final_answers_correct": sum(
+                        result.get("final_answer_correct") is True
+                        for result in agentic_results
+                    ),
+                    "agentic_tool_sequences_correct": sum(
+                        result.get("tool_sequence_correct") is True
+                        for result in agentic_results
+                    ),
+                    "agentic_recoveries_required": recovery_required,
+                    "agentic_recoveries_succeeded": recovery_succeeded,
+                    "agentic_turn_limit_hits": sum(
+                        result.get("turn_limit_reached") is True
+                        for result in agentic_results
+                    ),
+                    "agentic_length_terminated_turns": sum(
+                        int(result["length_terminated_turns"])
+                        for result in agentic_results
+                    ),
+                }
+            )
         if diffusion_generation:
             row["median_time_to_first_emission_s"] = (
                 statistics.median(first_emission_times)
@@ -585,7 +698,17 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
             row["telemetry"] = phase_telemetry
             sampled_energy_j = phase_telemetry.get("sampled_energy_j")
             if isinstance(sampled_energy_j, (int, float)) and sampled_energy_j > 0:
-                if embedding_results:
+                if kind == "agentic":
+                    tasks_succeeded = int(row["agentic_tasks_succeeded"])
+                    row["agentic_tasks_succeeded_per_sampled_joule"] = (
+                        tasks_succeeded / sampled_energy_j
+                    )
+                    row["agentic_sampled_energy_j_per_solved_task"] = (
+                        sampled_energy_j / tasks_succeeded
+                        if tasks_succeeded
+                        else None
+                    )
+                elif embedding_results:
                     embedded_items = sum(
                         int(result["batch_size"]) for result in embedding_results
                     )
@@ -760,6 +883,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
                         "mmproj_sha256",
                         "draft_model_sha256",
                     )
+                    if key in event
                 }
                 for event in reversed(events)
                 if event.get("event") == "artifact_validation_complete"

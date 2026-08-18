@@ -41,7 +41,23 @@ KNOWN_SUPPORT_STATUSES = frozenset(
     }
 )
 KNOWN_CASE_KINDS = frozenset(
-    {"capability", "concurrency", "decode", "diffusion", "prefill", "quality"}
+    {
+        "agentic",
+        "capability",
+        "concurrency",
+        "decode",
+        "diffusion",
+        "prefill",
+        "quality",
+    }
+)
+KNOWN_AGENTIC_CASE_IDS = frozenset(
+    {
+        "agentic-no-tool",
+        "agentic-select-and-call",
+        "agentic-tool-error-recovery",
+        "agentic-two-hop",
+    }
 )
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
@@ -227,6 +243,7 @@ _CASE_KEYS = frozenset(
         "concurrency",
         "prompt_repetitions",
         "max_output_tokens",
+        "max_turns",
         "temperature",
     }
 )
@@ -311,6 +328,7 @@ class CaseSpec:
     temperature: float = 0.0
     concurrency: int = 1
     prompt_repetitions: int = 0
+    max_turns: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -470,6 +488,7 @@ def load_suite(path: str | Path) -> SuiteSpec:
             prompt_repetitions=_optional_int(
                 row, "prompt_repetitions", context, default=0
             ),
+            max_turns=_optional_int(row, "max_turns", context, default=1),
         )
         validate_case(case, context=context)
         cases.append(case)
@@ -985,6 +1004,8 @@ def validate_case(case: CaseSpec, *, context: str = "case") -> None:
         raise ManifestError(f"{context}.prompt_repetitions must not be negative")
     if case.max_output_tokens <= 0:
         raise ManifestError(f"{context}.max_output_tokens must be positive")
+    if case.max_turns <= 0:
+        raise ManifestError(f"{context}.max_turns must be positive")
     if not 0 <= case.temperature <= 2:
         raise ManifestError(f"{context}.temperature must be between 0 and 2")
     if case.kind == "decode" and case.prompt_repetitions != 0:
@@ -1006,6 +1027,37 @@ def validate_case(case: CaseSpec, *, context: str = "case") -> None:
             )
         if case.temperature != 0:
             raise ManifestError(f"{context}.temperature must be 0 for quality cases")
+    if case.kind == "agentic":
+        if case.id not in KNOWN_AGENTIC_CASE_IDS:
+            raise ManifestError(f"{context}.id is not a supported agentic scenario")
+        if case.repetitions != 3:
+            raise ManifestError(
+                f"{context}.repetitions must be 3 for the three fixed agentic variants"
+            )
+        if case.requires != ("chat", "tools"):
+            raise ManifestError(
+                f"{context}.requires must be ['chat', 'tools'] for agentic cases"
+            )
+        if case.warmups != 0:
+            raise ManifestError(f"{context}.warmups must be 0 for agentic cases")
+        if case.concurrency != 1:
+            raise ManifestError(f"{context}.concurrency must be 1 for agentic cases")
+        if case.prompt_repetitions != 0:
+            raise ManifestError(
+                f"{context}.prompt_repetitions must be 0 for agentic cases"
+            )
+        if case.temperature != 0:
+            raise ManifestError(f"{context}.temperature must be 0 for agentic cases")
+        if not 2 <= case.max_turns <= 8:
+            raise ManifestError(
+                f"{context}.max_turns must be between 2 and 8 for agentic cases"
+            )
+        if case.max_output_tokens < 2048:
+            raise ManifestError(
+                f"{context}.max_output_tokens must be at least 2048 for agentic cases"
+            )
+    elif case.max_turns != 1:
+        raise ManifestError(f"{context}.max_turns must be 1 for non-agentic cases")
     if case.kind == "diffusion":
         if case.requires != ("diffusion",):
             raise ManifestError(

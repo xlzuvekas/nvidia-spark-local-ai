@@ -19,7 +19,9 @@ from bench.evidence import (
     _project_ninfer_report,
     _project_request_result,
     _project_requests,
+    _project_suite,
     _project_summary,
+    _validate_agentic_aggregates,
     _validate_output_value,
     _write_bundle,
     export_evidence,
@@ -33,6 +35,39 @@ RAW_REASONING = "RAW_REASONING_SENTINEL"
 RAW_REQUEST_ID = "RAW_REQUEST_ID_SENTINEL"
 RAW_HOST_PATH = "/home/private-user/benchmark-cache/model.gguf"
 RAW_SECRET = "hf" + "_" + "0123456789abcdefghijklmnop"
+
+
+def _agentic_suite() -> dict[str, object]:
+    scenarios = (
+        ("agentic-select-and-call", 1),
+        ("agentic-no-tool", 2),
+        ("agentic-two-hop", 0),
+        ("agentic-tool-error-recovery", 3),
+    )
+    return {
+        "id": "agentic-tools",
+        "description": (
+            "Deterministic multi-turn tool selection, abstention, dependency, "
+            "and recovery checks with scalar-only results."
+        ),
+        "schema_version": 1,
+        "cases": [
+            {
+                "case_id": f"{scenario}--{suffix:012x}",
+                "concurrency": 1,
+                "id": scenario,
+                "kind": "agentic",
+                "max_output_tokens": 4096,
+                "max_turns": 6,
+                "prompt_repetitions": 0,
+                "repetitions": 3,
+                "requires": ["chat", "tools"],
+                "temperature": 0.0,
+                "warmups": 0,
+            }
+            for scenario, suffix in scenarios
+        ],
+    }
 
 
 class EvidenceFixture:
@@ -678,6 +713,209 @@ class EvidenceValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(EvidenceError, "unknown request result fields"):
             _project_request_result({"completion_tokens": 1, "new_raw_field": "x"})
 
+    def test_agentic_suite_projection_is_an_exact_four_case_contract(self) -> None:
+        suite = _agentic_suite()
+        scenarios = tuple(case["id"] for case in suite["cases"])
+
+        projected = _project_suite({"suite": suite})
+        self.assertEqual("agentic-tools", projected["id"])
+        self.assertNotIn("description", projected)
+
+        invalid_suites = []
+        unknown_root = json.loads(json.dumps(suite))
+        unknown_root["extra"] = 1
+        invalid_suites.append(unknown_root)
+        wrong_budget = json.loads(json.dumps(suite))
+        wrong_budget["cases"][0]["max_turns"] = 5
+        invalid_suites.append(wrong_budget)
+        duplicate_scenario = json.loads(json.dumps(suite))
+        duplicate_scenario["cases"][1]["id"] = scenarios[0]
+        duplicate_scenario["cases"][1]["case_id"] = f"{scenarios[0]}--ffffffffffff"
+        invalid_suites.append(duplicate_scenario)
+        unknown_case_field = json.loads(json.dumps(suite))
+        unknown_case_field["cases"][0]["payload"] = "hidden"
+        invalid_suites.append(unknown_case_field)
+        for invalid in invalid_suites:
+            with self.subTest(invalid=invalid), self.assertRaises(EvidenceError):
+                _project_suite({"suite": invalid})
+
+    def test_agentic_request_and_case_metrics_are_scalar_allowlisted(self) -> None:
+        agentic_payload = {
+            "schema_version": 1,
+            "scenario_id": "agentic-two-hop",
+            "variant": 2,
+            "passed": True,
+            "failure_code": None,
+            "max_turns": 6,
+            "max_output_tokens": 4096,
+            "turns_used": 3,
+            "expected_tool_calls": 2,
+            "tool_calls_requested": 2,
+            "tool_calls_executed": 2,
+            "tool_calls_succeeded": 2,
+            "tool_errors": 0,
+            "malformed_tool_calls": 0,
+            "unknown_tool_calls": 0,
+            "final_answer_emitted": True,
+            "final_answer_correct": True,
+            "tool_sequence_correct": True,
+            "recovery_required": False,
+            "recovery_succeeded": False,
+            "turn_limit_reached": False,
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "emission_events": 4,
+            "first_turn_ttft_s": 0.25,
+            "request_elapsed_s": 1.5,
+            "wall_s": 1.6,
+            "length_terminated_turns": 0,
+            "elapsed_s": 1.6,
+            "ttft_s": 0.25,
+            "finish_reason": "stop",
+            "output_tps": 12.5,
+            "decode_s": None,
+            "decode_tps": None,
+            "decode_metric_source": None,
+        }
+        projected_request = _project_request_result(
+            agentic_payload,
+            kind="agentic",
+        )
+        self.assertEqual(projected_request["scenario_id"], "agentic-two-hop")
+        self.assertEqual(projected_request["tool_calls_executed"], 2)
+        self.assertTrue(projected_request["final_answer_correct"])
+        self.assertNotIn("content", projected_request)
+        self.assertNotIn("tool_calls", projected_request)
+
+        projected_case = _project_case(
+            {
+                "case_id": "agentic-two-hop--000000000000",
+                "kind": "agentic",
+                "requests": 3,
+                "concurrency": 1,
+                "prompt_tokens": 300,
+                "completion_tokens": 60,
+                "elapsed_s": 9.0,
+                "measurement_valid": True,
+                "measurement_annotations": [],
+                "validation_passed": False,
+                "agentic_tasks": 3,
+                "agentic_tasks_succeeded": 2,
+                "agentic_task_success_rate": 2 / 3,
+                "agentic_tasks_per_s": 3 / 9,
+                "agentic_max_turns": 6,
+                "agentic_max_output_tokens_per_turn": 4096,
+                "agentic_model_requests": 12,
+                "agentic_model_requests_per_s": 12 / 9,
+                "agentic_expected_tool_calls": 6,
+                "agentic_tool_calls_requested": 7,
+                "agentic_tool_calls_executed": 6,
+                "agentic_tool_calls_succeeded": 6,
+                "agentic_tool_errors": 0,
+                "agentic_malformed_tool_calls": 1,
+                "agentic_unknown_tool_calls": 0,
+                "agentic_final_answers_emitted": 3,
+                "agentic_final_answers_correct": 2,
+                "agentic_tool_sequences_correct": 2,
+                "agentic_recoveries_required": 0,
+                "agentic_recoveries_succeeded": 0,
+                "agentic_turn_limit_hits": 0,
+                "agentic_length_terminated_turns": 0,
+                "median_agentic_turns_used": 4,
+                "median_agentic_task_wall_s": 3.0,
+                "median_agentic_model_request_sum_s": 2.5,
+                "median_agentic_first_turn_ttft_s": 0.2,
+                "aggregate_output_tps": None,
+                "decode_estimate_one_token_chunks": None,
+                "decode_metric_source": None,
+                "median_decode_tps": None,
+                "median_e2e_s": 3.0,
+                "median_estimated_decode_tps": None,
+                "median_ttft_s": None,
+                "p95_e2e_s": None,
+                "p95_ttft_s": None,
+                "request_tps": None,
+                "telemetry": {},
+            }
+        )
+        self.assertEqual(projected_case["kind"], "agentic")
+        self.assertEqual(projected_case["agentic_tasks_succeeded"], 2)
+        self.assertIsNone(projected_case["aggregate_output_tps"])
+
+        for mutation in (
+            {"schema_version": 2},
+            {"variant": 3},
+            {"completion_tokens": -1},
+            {"tool_calls_executed": 3},
+            {"failure_code": "missing_final"},
+        ):
+            with self.subTest(mutation=mutation):
+                invalid = {**agentic_payload, **mutation}
+                with self.assertRaises(EvidenceError):
+                    _project_request_result(invalid, kind="agentic")
+
+        with self.assertRaises(EvidenceError):
+            _project_case(
+                {
+                    "kind": "decode",
+                    "agentic_tasks": 3,
+                }
+            )
+
+        base_event = {
+            "event": "request_complete",
+            "case_id": "agentic-two-hop--000000000000",
+            "attempt_id": "attempt",
+            "kind": "agentic",
+            "repetition": 2,
+            "burst_elapsed_s": 1.6,
+            "result": agentic_payload,
+            "validation": {"passed": True},
+        }
+        case_start = {
+            "event": "case_start",
+            "case_id": "agentic-two-hop--000000000000",
+            "attempt_id": "attempt",
+        }
+        for missing in ("repetition", "validation"):
+            malformed_event = dict(base_event)
+            malformed_event.pop(missing)
+            with self.subTest(missing=missing), self.assertRaises(EvidenceError):
+                _project_requests(
+                    [case_start, malformed_event],
+                    None,
+                    evidence_kind="serving",
+                )
+
+        events = [case_start]
+        for variant in range(3):
+            events.append(
+                {
+                    **base_event,
+                    "repetition": variant,
+                    "result": {**agentic_payload, "variant": variant},
+                }
+            )
+        selected_summary = {
+            "cases": [
+                {
+                    "case_id": "agentic-two-hop--000000000000",
+                    "attempt_id": "attempt",
+                }
+            ]
+        }
+        samples = _project_requests(
+            events, selected_summary, evidence_kind="serving"
+        )
+        with self.assertRaisesRegex(EvidenceError, "exact agentic-tools suite"):
+            _validate_agentic_aggregates(samples, {"cases": [projected_case]})
+        with self.assertRaisesRegex(EvidenceError, "aggregate disagrees"):
+            _validate_agentic_aggregates(
+                samples,
+                {"cases": [projected_case]},
+                suite=_project_suite({"suite": _agentic_suite()}),
+            )
+
     def test_source_tree_rejects_symlinks_hardlinks_and_fifos(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -833,6 +1071,41 @@ class EvidenceValidationTests(unittest.TestCase):
             },
             projected,
         )
+
+    def test_single_file_artifact_validation_omits_null_shard_fields(self) -> None:
+        projected = _project_summary(
+            {
+                "artifact_validation": {
+                    "model_shard_count": None,
+                    "model_shard_sha256s": None,
+                    "model_total_size_bytes": None,
+                }
+            }
+        )
+
+        self.assertEqual(
+            {"artifact_validation": {}},
+            projected,
+        )
+
+    def test_artifact_validation_requires_atomic_shard_metadata(self) -> None:
+        invalid = (
+            {"model_shard_count": 3},
+            {
+                "model_shard_count": 3,
+                "model_shard_sha256s": ["a" * 64, "b" * 64],
+                "model_total_size_bytes": 42,
+            },
+            {
+                "model_shard_count": True,
+                "model_shard_sha256s": ["a" * 64],
+                "model_total_size_bytes": 42,
+            },
+        )
+        for artifact_validation in invalid:
+            with self.subTest(artifact_validation=artifact_validation):
+                with self.assertRaises(EvidenceError):
+                    _project_summary({"artifact_validation": artifact_validation})
 
     def test_quality_accuracy_category_rejects_null(self) -> None:
         with self.assertRaises(EvidenceError):

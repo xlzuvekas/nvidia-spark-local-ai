@@ -9,6 +9,7 @@ quality checks, and the provenance needed to interpret each number.
 | Question | Best entry point |
 | --- | --- |
 | Which MoE models are useful on Spark now? | [MoE landscape, including Laguna XS/S, G9v3, NInfer, and the dense Muse control](docs/moe-landscape-2026-08-17.md) |
+| Which models complete deterministic multi-turn tool tasks? | [Agentic tool-use results: strict success, trace correctness, MTP, and Laguna](docs/agentic-tools-results-2026-08-17.md) |
 | What ran in the latest overnight campaign? | [2026-08-17 results: Unsloth Qwen3.6/Qwen3.8, DSpark, perplexity, long context, and Muse DFlash](docs/benchmark-results-2026-08-17.md) |
 | What is the broad cross-runtime baseline? | [2026-08-16 campaign: vLLM, Ollama, SGLang, llama.cpp, TensorRT-LLM, and Transformers](docs/benchmark-results-2026-08-16.md) |
 | How was the original Qwen3.8 result produced? | [Focused Qwen3.8 study](docs/qwen38-27b.md) and [exact benchmark record](BENCHMARK.md) |
@@ -25,6 +26,15 @@ explains how to create and verify both files.
 
 ## What the results say
 
+- In the exploratory agentic pilot, Laguna XS 2.1 was the fastest configuration
+  to pass all 12 deterministic multi-turn tool episodes; Laguna S 2.1 and both
+  Qwen3.8 configurations also
+  passed 12/12. All eight configurations produced correct tool traces, but
+  Qwen3.6 and Nemotron missed the strict final-answer envelope. Qwen3.8 MTP4
+  preserved 12/12 success while reducing summed episode wall time by 43.6%.
+  See the [agentic report](docs/agentic-tools-results-2026-08-17.md) for the
+  trace/answer distinction, dirty-plan provenance, and comparison limits. A
+  clean-revision replication is the publication gate.
 - Sparse models are the most promising way around Spark's shared-memory
   bandwidth ceiling. In the matched native kernel panel, the measured 30--35B
   MoE artifacts decoded far faster than the dense Qwen3.8 and Muse controls.
@@ -32,8 +42,9 @@ explains how to create and verify both files.
   [MoE report](docs/moe-landscape-2026-08-17.md) keeps unlike results separate.
 - Laguna XS 2.1 is a validated one-slot MoE candidate. Laguna S 2.1 proves that
   a quantized 118B-A8B model can fit and execute
-  on one Spark, but its one-slot concurrency is queued and its core quality
-  result is partial.
+  on one Spark. Its earlier core quality result is partial, while the newer
+  deterministic agentic tool battery passed 12/12; neither result is a broad
+  quality score. Its one-slot concurrency remains queued.
 - Speculative heads can materially improve sustained decode: Qwen3.6 MTP,
   Qwen3.8 MTP, Nemotron MTP, and Muse DFlash all exercised their draft paths.
   They do not improve every prefill workload, and accelerated invalid output
@@ -55,6 +66,9 @@ geometries, slot counts, or validation states.
 
 ### Measured results
 
+- [Agentic tool-use results — 2026-08-17](docs/agentic-tools-results-2026-08-17.md):
+  four deterministic multi-turn scenarios across Laguna, Qwen3.6, Qwen3.8,
+  Nemotron, and matched MTP controls, with strict and trace outcomes separated.
 - [MoE landscape — 2026-08-17](docs/moe-landscape-2026-08-17.md): current
   sparse-model options, same-binary kernel panel, Laguna 33B-A3B and 118B-A8B,
   G9v3 admission, NInfer's experimental port, and Muse as a dense control.
@@ -151,8 +165,8 @@ The default `smoke.toml` suite checks admission and basic capabilities;
 `quick.toml` is a short performance screen; `core.toml` repeats decode,
 prefill, concurrency, long-context, structured-output, tool, and small
 exact-answer cases. Specialized suites under `manifests/suites/` cover
-reasoning, embeddings, reranking, vision, OCR, ASR, diffusion, speculative
-depth, and long context.
+agentic tool loops, reasoning, embeddings, reranking, vision, OCR, ASR,
+diffusion, speculative depth, and long context.
 
 For matched perplexity, hold the base model, dataset hash, runtime, chunk count,
 and context size constant:

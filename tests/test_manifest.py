@@ -681,6 +681,34 @@ class ManifestLoaderTests(unittest.TestCase):
             with self.subTest(case=case), self.assertRaises(ManifestError):
                 validate_case(case)
 
+    def test_agentic_case_requires_long_bounded_single_stream_episodes(self) -> None:
+        valid = CaseSpec(
+            id="agentic-select-and-call",
+            kind="agentic",
+            requires=("chat", "tools"),
+            repetitions=3,
+            max_output_tokens=4096,
+            max_turns=6,
+        )
+        validate_case(valid)
+
+        invalid_cases = (
+            replace(valid, id="agentic-unknown"),
+            replace(valid, repetitions=2),
+            replace(valid, requires=("tools",)),
+            replace(valid, warmups=1),
+            replace(valid, concurrency=2),
+            replace(valid, prompt_repetitions=1),
+            replace(valid, temperature=0.1),
+            replace(valid, max_output_tokens=1024),
+            replace(valid, max_turns=1),
+            replace(valid, max_turns=9),
+            replace(CaseSpec(id="decode", kind="decode", requires=("chat",)), max_turns=2),
+        )
+        for case in invalid_cases:
+            with self.subTest(case=case), self.assertRaises(ManifestError):
+                validate_case(case)
+
     def test_model_rejects_remote_endpoint_bad_json_and_bad_digest(self) -> None:
         valid = ModelSpec(
             id="safe",

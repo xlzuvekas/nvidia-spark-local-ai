@@ -22,6 +22,7 @@ import unicodedata
 import uuid
 import zlib
 
+from .agentic_tools import estimate_agentic_context_tokens, run_agentic_scenario
 from .client import (
     concurrent_chat_requests,
     concurrent_multimodal_embedding_requests,
@@ -676,6 +677,14 @@ def _estimated_context_tokens(case: SimpleNamespace) -> tuple[int, str]:
     """Return a conservative workload estimate without model-specific tokenizers."""
 
     output_tokens = int(case.max_output_tokens)
+    if str(case.kind) == "agentic":
+        return (
+            estimate_agentic_context_tokens(
+                max_turns=int(case.max_turns),
+                max_output_tokens=output_tokens,
+            ),
+            "agentic_episode_max_turns_times_output_plus_tool_history_margin",
+        )
     if str(case.kind) == "quality":
         prompt_words = max(
             len(_quality_prompt(item, "context-estimate").split())
@@ -856,8 +865,8 @@ def _chat_request_function(server: Any, case: SimpleNamespace | None = None):
 
 
 def _authorization_argument(server: Any) -> dict[str, str]:
-    authorization = getattr(server, "authorization", None)
-    return {"authorization": str(authorization)} if authorization else {}
+    managed_auth = getattr(server, "authorization", None)
+    return {"authorization": str(managed_auth)} if managed_auth else {}
 
 
 def _rerank_request_arguments(
@@ -1202,7 +1211,30 @@ def _execute_case(
         for repetition in range(int(case.repetitions)):
             quality_items_by_request_id: dict[str, QualityItem] = {}
             quality_bursts_by_request_id: dict[str, float] = {}
-            if str(case.kind) == "quality":
+            if str(case.kind) == "agentic":
+                request_id_prefix = (
+                    f"{case.case_id}-r{repetition}-w0-{time.time_ns()}"
+                )
+                request_body_json = getattr(model, "request_body_json", None)
+                extra_body = json.loads(request_body_json) if request_body_json else {}
+                result = run_agentic_scenario(
+                    scenario_id=str(case.id),
+                    variant=repetition,
+                    request_function=stream_chat_request,
+                    request_kwargs={
+                        "base_url": server.base_url,
+                        "model": str(model.served_name),
+                        **_authorization_argument(server),
+                    },
+                    request_id_prefix=request_id_prefix,
+                    max_turns=int(case.max_turns),
+                    max_output_tokens=int(case.max_output_tokens),
+                    temperature=float(case.temperature),
+                    extra_body=extra_body,
+                )
+                results = [result]
+                burst_s = float(result.wall_s)
+            elif str(case.kind) == "quality":
                 results = []
                 configured_concurrency = int(case.concurrency)
                 for offset in range(0, len(_QUALITY_ITEMS), configured_concurrency):
@@ -1306,7 +1338,15 @@ def _execute_case(
                     request_function=_chat_request_function(server, case),
                 )
             for result in results:
-                if str(case.kind) == "quality":
+                if str(case.kind) == "agentic":
+                    validation = {
+                        "passed": bool(result.passed),
+                        "reason": (
+                            None if result.passed else str(result.failure_code)
+                        ),
+                    }
+                    result_burst_s = burst_s
+                elif str(case.kind) == "quality":
                     validation = _validate_quality_item(
                         quality_items_by_request_id[result.request_id], result
                     )
@@ -1721,6 +1761,11 @@ def execute_plan(
                 unavailable_adapters.update({"embeddings", "vision"})
                 adapter_reasons.append(
                     "multimodal embeddings require the vLLM Chat Embeddings adapter"
+                )
+            if str(case.kind) == "agentic" and str(model.backend) == "ollama":
+                unavailable_adapters.add("tools")
+                adapter_reasons.append(
+                    "multi-turn tool history requires an OpenAI-compatible chat adapter"
                 )
             if unavailable_adapters:
                 journal.append(

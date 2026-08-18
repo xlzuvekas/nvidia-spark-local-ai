@@ -20,10 +20,13 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import statistics
 import subprocess
 import tempfile
 from typing import Any
 import unicodedata
+
+from .manifest import KNOWN_AGENTIC_CASE_IDS
 
 
 SCHEMA_VERSION = "sparkbench-evidence-v1"
@@ -220,7 +223,10 @@ _REQUEST_NUMERIC_FIELDS = {
     "unrelated_text_latency_s",
     "wall_time_s",
 }
-_REQUEST_BOOLEAN_FIELDS = {"finite", "transcription_exact"}
+_REQUEST_BOOLEAN_FIELDS = {
+    "finite",
+    "transcription_exact",
+}
 _REQUEST_NUMERIC_SEQUENCE_FIELDS = {"norms", "ranking", "scores"}
 _REQUEST_STRING_FIELDS = {
     "block_generation_metric_source",
@@ -239,6 +245,116 @@ _REQUEST_DROPPED_FIELDS = {
     "token_ids_sha256",
     "tool_calls",
 }
+
+_AGENTIC_RESULT_FIELDS = frozenset(
+    {
+        "completion_tokens",
+        "decode_metric_source",
+        "decode_s",
+        "decode_tps",
+        "elapsed_s",
+        "emission_events",
+        "expected_tool_calls",
+        "failure_code",
+        "final_answer_correct",
+        "final_answer_emitted",
+        "finish_reason",
+        "first_turn_ttft_s",
+        "length_terminated_turns",
+        "malformed_tool_calls",
+        "max_output_tokens",
+        "max_turns",
+        "output_tps",
+        "passed",
+        "prompt_tokens",
+        "recovery_required",
+        "recovery_succeeded",
+        "request_elapsed_s",
+        "scenario_id",
+        "schema_version",
+        "tool_calls_executed",
+        "tool_calls_requested",
+        "tool_calls_succeeded",
+        "tool_errors",
+        "tool_sequence_correct",
+        "ttft_s",
+        "turn_limit_reached",
+        "turns_used",
+        "unknown_tool_calls",
+        "variant",
+        "wall_s",
+    }
+)
+_AGENTIC_FAILURE_CODES = frozenset(
+    {
+        "final_answer",
+        "malformed_tool_call",
+        "missing_final",
+        "output_limit",
+        "tool_call_limit",
+        "tool_sequence",
+        "turn_limit",
+        "unknown_tool",
+    }
+)
+_AGENTIC_FINISH_REASONS = frozenset(
+    {
+        "content_filter",
+        "length",
+        "other",
+        "stop",
+        "tool_call_limit",
+        "tool_calls",
+        "turn_limit",
+    }
+)
+_AGENTIC_EXPECTED_CALLS = {
+    "agentic-no-tool": 0,
+    "agentic-select-and-call": 1,
+    "agentic-tool-error-recovery": 2,
+    "agentic-two-hop": 2,
+}
+_AGENTIC_TOOL_COUNTS = {
+    "agentic-no-tool": (0, 0, 0, 0, 1),
+    "agentic-select-and-call": (1, 1, 1, 0, 2),
+    "agentic-tool-error-recovery": (2, 2, 1, 1, 3),
+    "agentic-two-hop": (2, 2, 2, 0, 3),
+}
+_AGENTIC_SUITE_FIELDS = frozenset({"cases", "id", "schema_version"})
+_AGENTIC_SUITE_DESCRIPTION = (
+    "Deterministic multi-turn tool selection, abstention, dependency, and "
+    "recovery checks with scalar-only results."
+)
+_AGENTIC_SUITE_CASE_FIELDS = frozenset(
+    {
+        "case_id",
+        "concurrency",
+        "id",
+        "kind",
+        "max_output_tokens",
+        "max_turns",
+        "prompt_repetitions",
+        "repetitions",
+        "requires",
+        "temperature",
+        "warmups",
+    }
+)
+_AGENTIC_PROJECTED_RESULT_FIELDS = (
+    _AGENTIC_RESULT_FIELDS - {"emission_events", "output_tps"}
+) | {"emission_event_count"}
+_AGENTIC_SAMPLE_FIELDS = _AGENTIC_PROJECTED_RESULT_FIELDS | {
+    "burst_elapsed_s",
+    "case_attempt",
+    "case_id",
+    "case_sample_index",
+    "kind",
+    "repetition",
+    "sample_index",
+    "sample_type",
+    "selected_attempt",
+    "validation_passed",
+}
 _VALIDATION_FIELDS = {
     "expected_answer",
     "expected_transcription",
@@ -251,6 +367,30 @@ _VALIDATION_FIELDS = {
 }
 
 _CASE_FIELDS = {
+    "agentic_expected_tool_calls",
+    "agentic_final_answers_correct",
+    "agentic_final_answers_emitted",
+    "agentic_length_terminated_turns",
+    "agentic_malformed_tool_calls",
+    "agentic_max_output_tokens_per_turn",
+    "agentic_max_turns",
+    "agentic_model_requests",
+    "agentic_model_requests_per_s",
+    "agentic_recoveries_required",
+    "agentic_recoveries_succeeded",
+    "agentic_sampled_energy_j_per_solved_task",
+    "agentic_task_success_rate",
+    "agentic_tasks",
+    "agentic_tasks_per_s",
+    "agentic_tasks_succeeded",
+    "agentic_tasks_succeeded_per_sampled_joule",
+    "agentic_tool_calls_executed",
+    "agentic_tool_calls_requested",
+    "agentic_tool_calls_succeeded",
+    "agentic_tool_errors",
+    "agentic_tool_sequences_correct",
+    "agentic_turn_limit_hits",
+    "agentic_unknown_tool_calls",
     "aggregate_block_generation_blocks_per_s",
     "aggregate_block_generation_output_tps",
     "aggregate_output_tps",
@@ -270,6 +410,10 @@ _CASE_FIELDS = {
     "measured_wall_time_s",
     "measurement_valid",
     "median_approximate_prefill_tps",
+    "median_agentic_first_turn_ttft_s",
+    "median_agentic_model_request_sum_s",
+    "median_agentic_task_wall_s",
+    "median_agentic_turns_used",
     "median_block_generation_blocks_per_s",
     "median_block_generation_output_tps",
     "median_character_edit_distance",
@@ -353,6 +497,7 @@ _CASE_BOOLEAN_FIELDS = {
 }
 _CASE_OBJECT_FIELDS = {"quality_accuracy_by_category", "telemetry"}
 _CASE_NULLABLE_FIELDS = {
+    "agentic_sampled_energy_j_per_solved_task",
     "aggregate_output_tps",
     "case_id",
     "decode_estimate_one_token_chunks",
@@ -368,6 +513,72 @@ _CASE_NULLABLE_FIELDS = {
     "p95_e2e_s",
     "p95_prefill_tps",
     "p95_ttft_s",
+    "request_tps",
+    "validation_passed",
+}
+_AGENTIC_CASE_FIELDS = frozenset(
+    {
+        "agentic_expected_tool_calls",
+        "agentic_final_answers_correct",
+        "agentic_final_answers_emitted",
+        "agentic_length_terminated_turns",
+        "agentic_malformed_tool_calls",
+        "agentic_max_output_tokens_per_turn",
+        "agentic_max_turns",
+        "agentic_model_requests",
+        "agentic_model_requests_per_s",
+        "agentic_recoveries_required",
+        "agentic_recoveries_succeeded",
+        "agentic_sampled_energy_j_per_solved_task",
+        "agentic_task_success_rate",
+        "agentic_tasks",
+        "agentic_tasks_per_s",
+        "agentic_tasks_succeeded",
+        "agentic_tasks_succeeded_per_sampled_joule",
+        "agentic_tool_calls_executed",
+        "agentic_tool_calls_requested",
+        "agentic_tool_calls_succeeded",
+        "agentic_tool_errors",
+        "agentic_tool_sequences_correct",
+        "agentic_turn_limit_hits",
+        "agentic_unknown_tool_calls",
+        "median_agentic_first_turn_ttft_s",
+        "median_agentic_model_request_sum_s",
+        "median_agentic_task_wall_s",
+        "median_agentic_turns_used",
+    }
+)
+_AGENTIC_CASE_REQUIRED_FIELDS = _AGENTIC_CASE_FIELDS - {
+    "agentic_sampled_energy_j_per_solved_task",
+    "agentic_tasks_succeeded_per_sampled_joule",
+}
+_AGENTIC_CASE_ENERGY_FIELDS = frozenset(
+    {
+        "agentic_sampled_energy_j_per_solved_task",
+        "agentic_tasks_succeeded_per_sampled_joule",
+    }
+)
+_AGENTIC_PROJECTED_CASE_BASE_FIELDS = _AGENTIC_CASE_REQUIRED_FIELDS | {
+    "aggregate_output_tps",
+    "case_id",
+    "completion_tokens",
+    "concurrency",
+    "decode_estimate_one_token_chunks",
+    "decode_metric_source",
+    "elapsed_s",
+    "kind",
+    "measurement_annotation_count",
+    "measurement_valid",
+    "median_decode_tps",
+    "median_e2e_s",
+    "median_estimated_decode_tps",
+    "median_ttft_s",
+    "p95_e2e_s",
+    "p95_ttft_s",
+    "prompt_tokens",
+    "request_tps",
+    "requests",
+    "telemetry",
     "validation_passed",
 }
 _TELEMETRY_SUMMARY_FIELDS = {
@@ -970,6 +1181,87 @@ def _project_model(plan: dict[str, Any], summary: dict[str, Any] | None) -> dict
     return result
 
 
+def _agentic_case_identifier(case_id: Any, scenario_id: str) -> str:
+    value = _safe_id(case_id, name="agentic suite case_id")
+    if not re.fullmatch(rf"{re.escape(scenario_id)}--[0-9a-f]{{12}}", value):
+        raise EvidenceError("agentic case identifier does not match its scenario")
+    return value
+
+
+def _agentic_exact_integer(value: Any, expected: int, *, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value != expected:
+        raise EvidenceError(f"{name} must be the integer {expected}")
+    return value
+
+
+def _project_agentic_suite(suite: Any) -> dict[str, Any]:
+    if not isinstance(suite, dict) or frozenset(suite) not in {
+        _AGENTIC_SUITE_FIELDS,
+        _AGENTIC_SUITE_FIELDS | {"description"},
+    }:
+        raise EvidenceError("agentic suite does not match its exact schema")
+    if "description" in suite and suite["description"] != _AGENTIC_SUITE_DESCRIPTION:
+        raise EvidenceError("agentic suite description changed")
+    if suite.get("id") != "agentic-tools":
+        raise EvidenceError("agentic suite identifier must be agentic-tools")
+    _agentic_exact_integer(
+        suite.get("schema_version"), 1, name="agentic suite schema_version"
+    )
+    cases = suite.get("cases")
+    if not isinstance(cases, list) or len(cases) != len(KNOWN_AGENTIC_CASE_IDS):
+        raise EvidenceError("agentic suite must contain exactly four cases")
+
+    projected_cases: list[dict[str, Any]] = []
+    scenarios: list[str] = []
+    case_ids: list[str] = []
+    for case in cases:
+        if not isinstance(case, dict) or set(case) != _AGENTIC_SUITE_CASE_FIELDS:
+            raise EvidenceError("agentic suite case does not match its exact schema")
+        scenario_id = case.get("id")
+        if scenario_id not in KNOWN_AGENTIC_CASE_IDS:
+            raise EvidenceError("agentic suite contains an unsupported scenario")
+        if case.get("kind") != "agentic":
+            raise EvidenceError("agentic suite case kind must be agentic")
+        case_id = _agentic_case_identifier(case.get("case_id"), scenario_id)
+        for key, expected in (
+            ("concurrency", 1),
+            ("max_output_tokens", 4_096),
+            ("max_turns", 6),
+            ("prompt_repetitions", 0),
+            ("repetitions", 3),
+            ("warmups", 0),
+        ):
+            _agentic_exact_integer(
+                case.get(key), expected, name=f"agentic suite case {key}"
+            )
+        temperature = case.get("temperature")
+        if (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, (int, float))
+            or float(temperature) != 0.0
+        ):
+            raise EvidenceError("agentic suite case temperature must be numeric zero")
+        if case.get("requires") != ["chat", "tools"]:
+            raise EvidenceError(
+                "agentic suite case requires must be exactly ['chat', 'tools']"
+            )
+        scenarios.append(scenario_id)
+        case_ids.append(case_id)
+        projected_cases.append(dict(case))
+
+    if len(case_ids) != len(set(case_ids)):
+        raise EvidenceError("agentic suite case identifiers must be unique")
+    if len(scenarios) != len(set(scenarios)) or set(scenarios) != set(
+        KNOWN_AGENTIC_CASE_IDS
+    ):
+        raise EvidenceError("agentic suite must contain each known scenario once")
+    return {
+        "cases": projected_cases,
+        "id": "agentic-tools",
+        "schema_version": 1,
+    }
+
+
 def _project_suite(plan: dict[str, Any]) -> dict[str, Any] | None:
     suite = plan.get("suite")
     if not isinstance(suite, dict):
@@ -984,6 +1276,15 @@ def _project_suite(plan: dict[str, Any]) -> dict[str, Any] | None:
                 },
             }
         return None
+    raw_cases = suite.get("cases")
+    if suite.get("id") == "agentic-tools" or (
+        isinstance(raw_cases, list)
+        and any(
+            isinstance(case, dict) and case.get("kind") == "agentic"
+            for case in raw_cases
+        )
+    ):
+        return _project_agentic_suite(suite)
     result: dict[str, Any] = {
         "id": _safe_id(suite.get("id"), name="suite.id"),
         "schema_version": suite.get("schema_version"),
@@ -999,6 +1300,7 @@ def _project_suite(plan: dict[str, Any]) -> dict[str, Any] | None:
         "id",
         "kind",
         "max_output_tokens",
+        "max_turns",
         "prompt_repetitions",
         "repetitions",
         "requires",
@@ -1268,7 +1570,297 @@ def _project_hardware(plan: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _project_request_result(result: Any) -> dict[str, Any]:
+def _agentic_int(
+    result: dict[str, Any], key: str, *, minimum: int = 0
+) -> int:
+    value = result[key]
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise EvidenceError(f"agentic request {key} must be an integer >= {minimum}")
+    return value
+
+
+def _agentic_number(
+    result: dict[str, Any], key: str, *, nullable: bool = False
+) -> float | None:
+    value = result[key]
+    if value is None and nullable:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise EvidenceError(f"agentic request {key} must be numeric")
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise EvidenceError(f"agentic request {key} must be finite and nonnegative")
+    return number
+
+
+def _project_agentic_request_result(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict) or set(result) != _AGENTIC_RESULT_FIELDS:
+        raise EvidenceError("agentic request result does not match schema version 1")
+    if result["schema_version"] != 1 or isinstance(result["schema_version"], bool):
+        raise EvidenceError("agentic request schema_version must be 1")
+    scenario_id = result["scenario_id"]
+    if scenario_id not in KNOWN_AGENTIC_CASE_IDS:
+        raise EvidenceError("agentic request scenario is unsupported")
+    variant = _agentic_int(result, "variant")
+    if variant > 2:
+        raise EvidenceError("agentic request variant must be between 0 and 2")
+    max_turns = _agentic_int(result, "max_turns", minimum=2)
+    if max_turns > 8:
+        raise EvidenceError("agentic request max_turns must not exceed 8")
+    max_output_tokens = _agentic_int(
+        result, "max_output_tokens", minimum=2_048
+    )
+    turns_used = _agentic_int(result, "turns_used", minimum=1)
+    if turns_used > max_turns:
+        raise EvidenceError("agentic request turns_used exceeds max_turns")
+
+    integer_keys = (
+        "completion_tokens",
+        "emission_events",
+        "expected_tool_calls",
+        "length_terminated_turns",
+        "malformed_tool_calls",
+        "prompt_tokens",
+        "tool_calls_executed",
+        "tool_calls_requested",
+        "tool_calls_succeeded",
+        "tool_errors",
+        "unknown_tool_calls",
+    )
+    integers = {key: _agentic_int(result, key) for key in integer_keys}
+    if integers["expected_tool_calls"] != _AGENTIC_EXPECTED_CALLS[scenario_id]:
+        raise EvidenceError("agentic request expected-tool count changed")
+    if not (
+        integers["tool_calls_succeeded"]
+        <= integers["tool_calls_executed"]
+        <= integers["tool_calls_requested"]
+    ):
+        raise EvidenceError("agentic request tool-call counters are inconsistent")
+    if (
+        integers["tool_calls_succeeded"] + integers["tool_errors"]
+        != integers["tool_calls_executed"]
+    ):
+        raise EvidenceError("agentic request tool outcomes do not match executions")
+    if (
+        integers["malformed_tool_calls"] + integers["unknown_tool_calls"]
+        + integers["tool_calls_executed"]
+        > integers["tool_calls_requested"]
+    ):
+        raise EvidenceError("agentic request classified too many tool calls")
+    if integers["length_terminated_turns"] > turns_used:
+        raise EvidenceError("agentic request length terminations exceed turns")
+
+    boolean_keys = (
+        "final_answer_correct",
+        "final_answer_emitted",
+        "passed",
+        "recovery_required",
+        "recovery_succeeded",
+        "tool_sequence_correct",
+        "turn_limit_reached",
+    )
+    booleans: dict[str, bool] = {}
+    for key in boolean_keys:
+        value = result[key]
+        if not isinstance(value, bool):
+            raise EvidenceError(f"agentic request {key} must be boolean")
+        booleans[key] = value
+    if booleans["final_answer_correct"] and not booleans["final_answer_emitted"]:
+        raise EvidenceError("agentic correct final answer was not emitted")
+    if booleans["tool_sequence_correct"]:
+        (
+            expected_requested,
+            expected_executed,
+            expected_succeeded,
+            expected_errors,
+            minimum_turns,
+        ) = _AGENTIC_TOOL_COUNTS[scenario_id]
+        for key, expected in (
+            ("tool_calls_requested", expected_requested),
+            ("tool_calls_executed", expected_executed),
+            ("tool_calls_succeeded", expected_succeeded),
+            ("tool_errors", expected_errors),
+            ("malformed_tool_calls", 0),
+            ("unknown_tool_calls", 0),
+        ):
+            if integers[key] != expected:
+                raise EvidenceError(
+                    f"agentic request {key} disagrees with scenario {scenario_id}"
+                )
+        if turns_used < minimum_turns:
+            raise EvidenceError("agentic request used too few turns for its scenario")
+    recovery_expected = scenario_id == "agentic-tool-error-recovery"
+    if booleans["recovery_required"] != recovery_expected:
+        raise EvidenceError("agentic recovery requirement disagrees with scenario")
+    expected_recovery = bool(
+        recovery_expected
+        and booleans["tool_sequence_correct"]
+        and integers["tool_errors"] == 1
+        and integers["tool_calls_succeeded"] == 1
+    )
+    if booleans["recovery_succeeded"] != expected_recovery:
+        raise EvidenceError("agentic recovery outcome is inconsistent")
+    expected_pass = bool(
+        booleans["tool_sequence_correct"]
+        and booleans["final_answer_emitted"]
+        and booleans["final_answer_correct"]
+        and not booleans["turn_limit_reached"]
+        and integers["length_terminated_turns"] == 0
+    )
+    if booleans["passed"] != expected_pass:
+        raise EvidenceError("agentic pass flag is internally inconsistent")
+
+    failure_code = result["failure_code"]
+    if integers["tool_calls_requested"] > 16:
+        expected_failure = "tool_call_limit"
+    elif integers["length_terminated_turns"]:
+        expected_failure = "output_limit"
+    elif integers["malformed_tool_calls"]:
+        expected_failure = "malformed_tool_call"
+    elif integers["unknown_tool_calls"]:
+        expected_failure = "unknown_tool"
+    elif booleans["turn_limit_reached"]:
+        expected_failure = "turn_limit"
+    elif not booleans["tool_sequence_correct"]:
+        expected_failure = "tool_sequence"
+    elif not booleans["final_answer_emitted"]:
+        expected_failure = "missing_final"
+    elif not booleans["final_answer_correct"]:
+        expected_failure = "final_answer"
+    else:
+        expected_failure = None
+    if failure_code != expected_failure:
+        raise EvidenceError("agentic request failure code is inconsistent")
+    if failure_code is not None and failure_code not in _AGENTIC_FAILURE_CODES:
+        raise EvidenceError("failed agentic request has an invalid failure code")
+    finish_reason = result["finish_reason"]
+    if finish_reason is not None and finish_reason not in _AGENTIC_FINISH_REASONS:
+        raise EvidenceError("agentic request has an invalid finish reason")
+    if booleans["turn_limit_reached"] and finish_reason != "turn_limit":
+        raise EvidenceError("agentic turn-limit result has the wrong finish reason")
+    if any(result[key] is not None for key in ("decode_s", "decode_tps", "decode_metric_source")):
+        raise EvidenceError("agentic request must not publish decode-token metrics")
+
+    first_ttft = _agentic_number(result, "first_turn_ttft_s", nullable=True)
+    ttft = _agentic_number(result, "ttft_s", nullable=True)
+    request_elapsed = _agentic_number(result, "request_elapsed_s")
+    wall_s = _agentic_number(result, "wall_s")
+    elapsed_s = _agentic_number(result, "elapsed_s")
+    output_tps = _agentic_number(result, "output_tps")
+    assert request_elapsed is not None and wall_s is not None
+    assert elapsed_s is not None and output_tps is not None
+    if wall_s <= 0 or request_elapsed > wall_s + 1e-6:
+        raise EvidenceError("agentic request wall time is inconsistent")
+    if not math.isclose(elapsed_s, wall_s, rel_tol=1e-9, abs_tol=1e-9):
+        raise EvidenceError("agentic elapsed and wall times disagree")
+    if first_ttft != ttft:
+        raise EvidenceError("agentic first-turn TTFT fields disagree")
+    expected_tps = integers["completion_tokens"] / wall_s
+    if not math.isclose(output_tps, expected_tps, rel_tol=1e-9, abs_tol=1e-9):
+        raise EvidenceError("agentic request output rate is inconsistent")
+
+    return {
+        "completion_tokens": integers["completion_tokens"],
+        "decode_metric_source": None,
+        "decode_s": None,
+        "decode_tps": None,
+        "elapsed_s": elapsed_s,
+        "emission_event_count": integers["emission_events"],
+        "expected_tool_calls": integers["expected_tool_calls"],
+        "failure_code": failure_code,
+        "final_answer_correct": booleans["final_answer_correct"],
+        "final_answer_emitted": booleans["final_answer_emitted"],
+        "finish_reason": finish_reason,
+        "first_turn_ttft_s": first_ttft,
+        "length_terminated_turns": integers["length_terminated_turns"],
+        "malformed_tool_calls": integers["malformed_tool_calls"],
+        "max_output_tokens": max_output_tokens,
+        "max_turns": max_turns,
+        "passed": booleans["passed"],
+        "prompt_tokens": integers["prompt_tokens"],
+        "recovery_required": booleans["recovery_required"],
+        "recovery_succeeded": booleans["recovery_succeeded"],
+        "request_elapsed_s": request_elapsed,
+        "scenario_id": scenario_id,
+        "schema_version": 1,
+        "tool_calls_executed": integers["tool_calls_executed"],
+        "tool_calls_requested": integers["tool_calls_requested"],
+        "tool_calls_succeeded": integers["tool_calls_succeeded"],
+        "tool_errors": integers["tool_errors"],
+        "tool_sequence_correct": booleans["tool_sequence_correct"],
+        "ttft_s": ttft,
+        "turn_limit_reached": booleans["turn_limit_reached"],
+        "turns_used": turns_used,
+        "unknown_tool_calls": integers["unknown_tool_calls"],
+        "variant": variant,
+        "wall_s": wall_s,
+    }
+
+
+def _positive_integer(value: Any, *, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise EvidenceError(f"{name} must be a positive integer")
+    return value
+
+
+def _validate_projected_agentic_sample(sample: Any) -> None:
+    if not isinstance(sample, dict) or set(sample) != _AGENTIC_SAMPLE_FIELDS:
+        raise EvidenceError("agentic evidence sample does not match its exact schema")
+    if sample.get("kind") != "agentic" or sample.get("sample_type") != "measured_request":
+        raise EvidenceError("agentic evidence sample has an invalid classification")
+    for key in ("case_attempt", "case_sample_index", "sample_index"):
+        _positive_integer(sample.get(key), name=f"agentic sample {key}")
+    for key in ("selected_attempt", "validation_passed"):
+        if not isinstance(sample.get(key), bool):
+            raise EvidenceError(f"agentic sample {key} must be boolean")
+
+    scenario_id = sample.get("scenario_id")
+    if scenario_id not in KNOWN_AGENTIC_CASE_IDS:
+        raise EvidenceError("agentic evidence sample has an unsupported scenario")
+    _agentic_case_identifier(sample.get("case_id"), scenario_id)
+    repetition = sample.get("repetition")
+    variant = sample.get("variant")
+    if (
+        isinstance(repetition, bool)
+        or not isinstance(repetition, int)
+        or repetition not in {0, 1, 2}
+        or repetition != variant
+        or sample["case_sample_index"] != repetition + 1
+    ):
+        raise EvidenceError("agentic sample repetition metadata is inconsistent")
+    if sample["validation_passed"] is not sample["passed"]:
+        raise EvidenceError("agentic sample validation and result flags disagree")
+
+    wall_s = _agentic_number(sample, "wall_s")
+    if wall_s is None or wall_s <= 0:
+        raise EvidenceError("agentic sample wall time must be positive")
+    raw_result = {
+        key: sample[key]
+        for key in _AGENTIC_RESULT_FIELDS
+        if key not in {"emission_events", "output_tps"}
+    }
+    raw_result["emission_events"] = sample["emission_event_count"]
+    raw_result["output_tps"] = sample["completion_tokens"] / wall_s
+    projected = _project_agentic_request_result(raw_result)
+    if projected != {
+        key: sample[key] for key in _AGENTIC_PROJECTED_RESULT_FIELDS
+    }:
+        raise EvidenceError("agentic evidence sample result projection changed")
+    burst_elapsed_s = _agentic_number(
+        sample, "burst_elapsed_s"
+    )
+    assert burst_elapsed_s is not None
+    if not math.isclose(
+        burst_elapsed_s, wall_s, rel_tol=1e-9, abs_tol=1e-9
+    ):
+        raise EvidenceError("agentic sample burst and task wall times disagree")
+
+
+def _project_request_result(
+    result: Any, *, kind: str | None = None
+) -> dict[str, Any]:
+    if kind == "agentic":
+        return _project_agentic_request_result(result)
     if not isinstance(result, dict):
         raise EvidenceError("request result must be an object")
     unknown = set(result) - (
@@ -1328,7 +1920,9 @@ def _project_requests(
                 attempt_ordinals[(case_id, attempt_id)] = next_attempt[case_id]
         if name not in {"request_complete", "first_request_complete"}:
             continue
-        result = _project_request_result(event.get("result"))
+        raw_kind = event.get("kind") if name == "request_complete" else None
+        kind = _safe_id(raw_kind, name="request.kind", nullable=True)
+        result = _project_request_result(event.get("result"), kind=kind)
         sample: dict[str, Any] = {
             "sample_index": len(projected) + 1,
             "sample_type": "first_request" if name == "first_request_complete" else "measured_request",
@@ -1336,7 +1930,6 @@ def _project_requests(
         }
         if name == "request_complete":
             case_id = _safe_id(event.get("case_id"), name="request.case_id")
-            kind = _safe_id(event.get("kind"), name="request.kind", nullable=True)
             attempt_id = event.get("attempt_id")
             if attempt_id is None:
                 if evidence_kind not in {"diffusion_direct", "trtllm_direct"}:
@@ -1365,15 +1958,37 @@ def _project_requests(
                     ),
                 }
             )
+            if kind == "agentic" and event.get("repetition") is None:
+                raise EvidenceError("agentic request repetition is missing")
             if event.get("repetition") is not None:
+                repetition = event["repetition"]
+                if kind == "agentic":
+                    if (
+                        isinstance(repetition, bool)
+                        or not isinstance(repetition, int)
+                        or not 0 <= repetition <= 2
+                    ):
+                        raise EvidenceError(
+                            "agentic request repetition must be an integer from 0 to 2"
+                        )
+                    if repetition != result["variant"]:
+                        raise EvidenceError(
+                            "agentic request repetition and variant disagree"
+                        )
+                    if case_id.split("--", 1)[0] != result["scenario_id"]:
+                        raise EvidenceError(
+                            "agentic request case and scenario identifiers disagree"
+                        )
                 sample["repetition"] = _finite(
-                    event["repetition"], name="request.repetition"
+                    repetition, name="request.repetition"
                 )
             if event.get("burst_elapsed_s") is not None:
                 sample["burst_elapsed_s"] = _finite(
                     event["burst_elapsed_s"], name="request.burst_elapsed_s"
                 )
             validation = event.get("validation")
+            if kind == "agentic" and validation is None:
+                raise EvidenceError("agentic request validation is missing")
             if validation is not None:
                 if not isinstance(validation, dict):
                     raise EvidenceError("request validation must be an object")
@@ -1387,13 +2002,207 @@ def _project_requests(
                 if passed is not None and not isinstance(passed, bool):
                     raise EvidenceError("validation.passed must be boolean or null")
                 sample["validation_passed"] = passed
+                if kind == "agentic" and passed is not result["passed"]:
+                    raise EvidenceError(
+                        "agentic request validation and result pass flags disagree"
+                    )
                 if validation.get("quality_category") is not None:
                     sample["quality_category"] = _safe_id(
                         validation["quality_category"],
                         name="validation.quality_category",
                     )
+            if kind == "agentic":
+                _validate_projected_agentic_sample(sample)
         projected.append(sample)
     return projected
+
+
+def _validate_agentic_aggregates(
+    requests: list[dict[str, Any]],
+    summary: dict[str, Any],
+    *,
+    suite: dict[str, Any] | None = None,
+    terminal: bool = False,
+) -> None:
+    planned_cases: dict[str, dict[str, Any]] = {}
+    if isinstance(suite, dict) and suite.get("id") == "agentic-tools":
+        validated_suite = _project_agentic_suite(suite)
+        planned_cases = {
+            str(case["case_id"]): case for case in validated_suite["cases"]
+        }
+    cases = summary.get("cases")
+    agentic_samples = [
+        sample for sample in requests if sample.get("kind") == "agentic"
+    ]
+    if not isinstance(cases, list):
+        if agentic_samples or planned_cases:
+            raise EvidenceError("agentic evidence requires summary cases")
+        return
+    agentic_cases = [
+        case for case in cases if isinstance(case, dict) and case.get("kind") == "agentic"
+    ]
+    if (agentic_samples or agentic_cases) and not planned_cases:
+        raise EvidenceError("agentic evidence requires the exact agentic-tools suite")
+    if not agentic_samples and not agentic_cases and not planned_cases:
+        return
+    if len(agentic_cases) != len(cases):
+        raise EvidenceError("agentic summary must contain only agentic cases")
+    for sample in agentic_samples:
+        _validate_projected_agentic_sample(sample)
+    for case in agentic_cases:
+        _validate_agentic_case(case)
+
+    samples_by_case: dict[str, list[dict[str, Any]]] = {}
+    for sample in agentic_samples:
+        if sample.get("selected_attempt") is not True:
+            continue
+        case_id = sample.get("case_id")
+        if not isinstance(case_id, str):
+            raise EvidenceError("agentic evidence sample lacks a case identifier")
+        samples_by_case.setdefault(case_id, []).append(sample)
+    summary_case_ids = [case.get("case_id") for case in agentic_cases]
+    if (
+        any(not isinstance(case_id, str) for case_id in summary_case_ids)
+        or len(summary_case_ids) != len(set(summary_case_ids))
+    ):
+        raise EvidenceError("agentic summary case identifiers must be unique")
+    if set(summary_case_ids) != set(samples_by_case):
+        raise EvidenceError("agentic sample and summary case sets disagree")
+    summary_scenarios = [str(case_id).split("--", 1)[0] for case_id in summary_case_ids]
+    if (
+        len(summary_scenarios) != len(set(summary_scenarios))
+        or not set(summary_scenarios) <= set(KNOWN_AGENTIC_CASE_IDS)
+    ):
+        raise EvidenceError("agentic summary scenarios must be a unique known subset")
+    if planned_cases and not set(summary_case_ids) <= set(planned_cases):
+        raise EvidenceError("agentic completed cases are not in the planned suite")
+    if planned_cases:
+        accounting_fields = (
+            "context_limited_cases",
+            "failed_cases",
+            "unimplemented_cases",
+            "unsupported_cases",
+        )
+        accounted = list(summary_case_ids)
+        for key in accounting_fields:
+            values = summary.get(key)
+            if values is None and not terminal:
+                continue
+            if not isinstance(values, list):
+                raise EvidenceError(f"agentic summary {key} must be a list")
+            accounted.extend(values)
+        if any(value not in planned_cases for value in accounted):
+            raise EvidenceError("agentic summary accounts for an unplanned case")
+        if len(accounted) != len(set(accounted)):
+            raise EvidenceError("agentic summary case accounting is not unique")
+        if terminal and set(accounted) != set(planned_cases):
+            raise EvidenceError("terminal agentic summary does not account for every case")
+
+    for case in agentic_cases:
+        case_id = str(case["case_id"])
+        if planned_cases:
+            planned = planned_cases[case_id]
+            if (
+                case["agentic_max_turns"] != planned["max_turns"]
+                or case["agentic_max_output_tokens_per_turn"]
+                != planned["max_output_tokens"]
+            ):
+                raise EvidenceError("agentic case budgets disagree with the planned suite")
+        samples = samples_by_case.get(str(case_id), [])
+        if len(samples) != 3 or {sample.get("repetition") for sample in samples} != {
+            0,
+            1,
+            2,
+        }:
+            raise EvidenceError("agentic case must export variants 0, 1, and 2 once")
+        if planned_cases and any(
+            sample["max_turns"] != planned_cases[case_id]["max_turns"]
+            or sample["max_output_tokens"]
+            != planned_cases[case_id]["max_output_tokens"]
+            for sample in samples
+        ):
+            raise EvidenceError("agentic sample budgets disagree with the planned suite")
+        sums = {
+            "agentic_expected_tool_calls": sum(
+                int(sample["expected_tool_calls"]) for sample in samples
+            ),
+            "agentic_final_answers_correct": sum(
+                sample["final_answer_correct"] is True for sample in samples
+            ),
+            "agentic_final_answers_emitted": sum(
+                sample["final_answer_emitted"] is True for sample in samples
+            ),
+            "agentic_length_terminated_turns": sum(
+                int(sample["length_terminated_turns"]) for sample in samples
+            ),
+            "agentic_malformed_tool_calls": sum(
+                int(sample["malformed_tool_calls"]) for sample in samples
+            ),
+            "agentic_model_requests": sum(
+                int(sample["turns_used"]) for sample in samples
+            ),
+            "agentic_recoveries_required": sum(
+                sample["recovery_required"] is True for sample in samples
+            ),
+            "agentic_recoveries_succeeded": sum(
+                sample["recovery_succeeded"] is True for sample in samples
+            ),
+            "agentic_tasks": len(samples),
+            "agentic_tasks_succeeded": sum(
+                sample["passed"] is True for sample in samples
+            ),
+            "agentic_tool_calls_executed": sum(
+                int(sample["tool_calls_executed"]) for sample in samples
+            ),
+            "agentic_tool_calls_requested": sum(
+                int(sample["tool_calls_requested"]) for sample in samples
+            ),
+            "agentic_tool_calls_succeeded": sum(
+                int(sample["tool_calls_succeeded"]) for sample in samples
+            ),
+            "agentic_tool_errors": sum(
+                int(sample["tool_errors"]) for sample in samples
+            ),
+            "agentic_tool_sequences_correct": sum(
+                sample["tool_sequence_correct"] is True for sample in samples
+            ),
+            "agentic_turn_limit_hits": sum(
+                sample["turn_limit_reached"] is True for sample in samples
+            ),
+            "agentic_unknown_tool_calls": sum(
+                int(sample["unknown_tool_calls"]) for sample in samples
+            ),
+            "completion_tokens": sum(
+                int(sample["completion_tokens"]) for sample in samples
+            ),
+            "prompt_tokens": sum(
+                int(sample["prompt_tokens"]) for sample in samples
+            ),
+            "requests": len(samples),
+        }
+        for key, expected in sums.items():
+            if case.get(key) != expected:
+                raise EvidenceError(f"agentic case aggregate disagrees for {key}")
+        medians = {
+            "median_agentic_first_turn_ttft_s": statistics.median(
+                float(sample["first_turn_ttft_s"]) for sample in samples
+            ),
+            "median_agentic_model_request_sum_s": statistics.median(
+                float(sample["request_elapsed_s"]) for sample in samples
+            ),
+            "median_agentic_task_wall_s": statistics.median(
+                float(sample["wall_s"]) for sample in samples
+            ),
+            "median_agentic_turns_used": statistics.median(
+                int(sample["turns_used"]) for sample in samples
+            ),
+        }
+        for key, expected in medians.items():
+            value = case.get(key)
+            if not isinstance(value, (int, float)) or not math.isclose(
+                float(value), float(expected), rel_tol=1e-9, abs_tol=1e-9
+            ):
+                raise EvidenceError(f"agentic case median disagrees for {key}")
 
 
 def _project_numeric_tree(value: Any, *, name: str, depth: int = 0) -> Any:
@@ -1451,12 +2260,266 @@ def _project_quality_accuracy(value: Any) -> dict[str, int | float]:
     return result
 
 
+def _case_integer(case: dict[str, Any], key: str) -> int:
+    value = case[key]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise EvidenceError(f"agentic case {key} must be a nonnegative integer")
+    return value
+
+
+def _case_number(case: dict[str, Any], key: str) -> float:
+    value = case[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise EvidenceError(f"agentic case {key} must be numeric")
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise EvidenceError(f"agentic case {key} must be finite and nonnegative")
+    return number
+
+
+def _validate_agentic_case(case: dict[str, Any]) -> None:
+    fields = frozenset(case)
+    if fields not in {
+        _AGENTIC_PROJECTED_CASE_BASE_FIELDS,
+        _AGENTIC_PROJECTED_CASE_BASE_FIELDS | _AGENTIC_CASE_ENERGY_FIELDS,
+    }:
+        raise EvidenceError("agentic case does not match its exact evidence schema")
+    missing = _AGENTIC_CASE_REQUIRED_FIELDS - set(case)
+    if missing:
+        raise EvidenceError(f"agentic case lacks required fields: {sorted(missing)!r}")
+    case_id = case.get("case_id")
+    if not isinstance(case_id, str):
+        raise EvidenceError("agentic case must have a stable case identifier")
+    scenario_id = case_id.split("--", 1)[0]
+    if scenario_id not in KNOWN_AGENTIC_CASE_IDS:
+        raise EvidenceError("agentic case identifier is unsupported")
+    _agentic_case_identifier(case_id, scenario_id)
+    if case.get("kind") != "agentic":
+        raise EvidenceError("agentic case kind must be agentic")
+
+    integer_keys = (
+        "agentic_expected_tool_calls",
+        "agentic_final_answers_correct",
+        "agentic_final_answers_emitted",
+        "agentic_length_terminated_turns",
+        "agentic_malformed_tool_calls",
+        "agentic_max_output_tokens_per_turn",
+        "agentic_max_turns",
+        "agentic_model_requests",
+        "agentic_recoveries_required",
+        "agentic_recoveries_succeeded",
+        "agentic_tasks",
+        "agentic_tasks_succeeded",
+        "agentic_tool_calls_executed",
+        "agentic_tool_calls_requested",
+        "agentic_tool_calls_succeeded",
+        "agentic_tool_errors",
+        "agentic_tool_sequences_correct",
+        "agentic_turn_limit_hits",
+        "agentic_unknown_tool_calls",
+    )
+    values = {key: _case_integer(case, key) for key in integer_keys}
+    tasks = values["agentic_tasks"]
+    if tasks != 3 or case.get("requests") != tasks or case.get("concurrency") != 1:
+        raise EvidenceError("agentic case must contain three single-stream episodes")
+    max_turns = values["agentic_max_turns"]
+    if not 2 <= max_turns <= 8:
+        raise EvidenceError("agentic case max-turn bound is invalid")
+    if values["agentic_max_output_tokens_per_turn"] < 2_048:
+        raise EvidenceError("agentic case output bound is too small")
+    model_requests = values["agentic_model_requests"]
+    if not tasks <= model_requests <= tasks * max_turns:
+        raise EvidenceError("agentic case model-request count is inconsistent")
+    if values["agentic_expected_tool_calls"] != (
+        _AGENTIC_EXPECTED_CALLS[scenario_id] * tasks
+    ):
+        raise EvidenceError("agentic case expected-tool count changed")
+    minimum_turns = _AGENTIC_TOOL_COUNTS[scenario_id][4]
+    if values["agentic_tool_sequences_correct"] == tasks:
+        (
+            expected_requested,
+            expected_executed,
+            expected_succeeded,
+            expected_errors,
+            _,
+        ) = _AGENTIC_TOOL_COUNTS[scenario_id]
+        for key, expected in (
+            ("agentic_tool_calls_requested", expected_requested * tasks),
+            ("agentic_tool_calls_executed", expected_executed * tasks),
+            ("agentic_tool_calls_succeeded", expected_succeeded * tasks),
+            ("agentic_tool_errors", expected_errors * tasks),
+            ("agentic_malformed_tool_calls", 0),
+            ("agentic_unknown_tool_calls", 0),
+        ):
+            if values[key] != expected:
+                raise EvidenceError(
+                    f"agentic case {key} disagrees with scenario {scenario_id}"
+                )
+    if not (
+        values["agentic_tool_calls_succeeded"]
+        <= values["agentic_tool_calls_executed"]
+        <= values["agentic_tool_calls_requested"]
+    ):
+        raise EvidenceError("agentic case tool-call counters are inconsistent")
+    if (
+        values["agentic_tool_calls_succeeded"] + values["agentic_tool_errors"]
+        != values["agentic_tool_calls_executed"]
+    ):
+        raise EvidenceError("agentic case tool outcomes do not match executions")
+    if (
+        values["agentic_malformed_tool_calls"]
+        + values["agentic_unknown_tool_calls"]
+        + values["agentic_tool_calls_executed"]
+        > values["agentic_tool_calls_requested"]
+    ):
+        raise EvidenceError("agentic case classified too many tool calls")
+    for key in (
+        "agentic_final_answers_correct",
+        "agentic_final_answers_emitted",
+        "agentic_recoveries_required",
+        "agentic_recoveries_succeeded",
+        "agentic_tasks_succeeded",
+        "agentic_tool_sequences_correct",
+        "agentic_turn_limit_hits",
+    ):
+        if values[key] > tasks:
+            raise EvidenceError(f"agentic case {key} exceeds episode count")
+    if values["agentic_final_answers_correct"] > values["agentic_final_answers_emitted"]:
+        raise EvidenceError("agentic case final-answer counters are inconsistent")
+    recovery_tasks = tasks if scenario_id == "agentic-tool-error-recovery" else 0
+    if values["agentic_recoveries_required"] != recovery_tasks:
+        raise EvidenceError("agentic case recovery requirement changed")
+    if values["agentic_recoveries_succeeded"] > recovery_tasks:
+        raise EvidenceError("agentic case recovery count is inconsistent")
+    if values["agentic_length_terminated_turns"] > model_requests:
+        raise EvidenceError("agentic case length terminations exceed model requests")
+    if (
+        values["agentic_tool_sequences_correct"] == tasks
+        and model_requests < tasks * minimum_turns
+    ):
+        raise EvidenceError("agentic case used too few model turns for its scenario")
+
+    numeric_keys = (
+        "agentic_model_requests_per_s",
+        "agentic_task_success_rate",
+        "agentic_tasks_per_s",
+        "median_agentic_first_turn_ttft_s",
+        "median_agentic_model_request_sum_s",
+        "median_agentic_task_wall_s",
+        "median_agentic_turns_used",
+    )
+    numbers = {key: _case_number(case, key) for key in numeric_keys}
+    minimum_median_turns = (
+        minimum_turns if values["agentic_tool_sequences_correct"] == tasks else 1
+    )
+    if not minimum_median_turns <= numbers["median_agentic_turns_used"] <= max_turns:
+        raise EvidenceError("agentic case median turns is out of range")
+    elapsed_s = _case_number(case, "elapsed_s")
+    if elapsed_s <= 0:
+        raise EvidenceError("agentic case elapsed time must be positive")
+    expected_success_rate = values["agentic_tasks_succeeded"] / tasks
+    if not math.isclose(
+        numbers["agentic_task_success_rate"],
+        expected_success_rate,
+        rel_tol=1e-9,
+        abs_tol=1e-9,
+    ):
+        raise EvidenceError("agentic case success rate is inconsistent")
+    for key, numerator in (
+        ("agentic_tasks_per_s", tasks),
+        ("agentic_model_requests_per_s", model_requests),
+    ):
+        if not math.isclose(
+            numbers[key], numerator / elapsed_s, rel_tol=1e-9, abs_tol=1e-9
+        ):
+            raise EvidenceError(f"agentic case {key} is inconsistent")
+    validation_passed = case.get("validation_passed")
+    if not isinstance(validation_passed, bool) or validation_passed != (
+        values["agentic_tasks_succeeded"] == tasks
+    ):
+        raise EvidenceError("agentic case validation flag is inconsistent")
+    for key in ("aggregate_output_tps", "median_ttft_s", "p95_ttft_s", "request_tps"):
+        if case.get(key) is not None:
+            raise EvidenceError(f"agentic case must suppress generic metric {key}")
+    for key in (
+        "decode_estimate_one_token_chunks",
+        "decode_metric_source",
+        "median_decode_tps",
+        "median_estimated_decode_tps",
+        "p95_e2e_s",
+    ):
+        if case.get(key) is not None:
+            raise EvidenceError(f"agentic case must suppress generic metric {key}")
+    if not isinstance(case.get("measurement_valid"), bool):
+        raise EvidenceError("agentic case measurement_valid must be boolean")
+    for key in (
+        "completion_tokens",
+        "measurement_annotation_count",
+        "prompt_tokens",
+    ):
+        _case_integer(case, key)
+    if not math.isclose(
+        _case_number(case, "median_e2e_s"),
+        numbers["median_agentic_task_wall_s"],
+        rel_tol=1e-9,
+        abs_tol=1e-9,
+    ):
+        raise EvidenceError("agentic case generic and task wall medians disagree")
+
+    telemetry = case.get("telemetry")
+    if _project_telemetry_summary(telemetry, name="case.telemetry") != telemetry:
+        raise EvidenceError("agentic case telemetry projection changed")
+    has_energy_metrics = any(
+        key in case
+        for key in (
+            "agentic_sampled_energy_j_per_solved_task",
+            "agentic_tasks_succeeded_per_sampled_joule",
+        )
+    )
+    sampled_energy = telemetry.get("sampled_energy_j") if isinstance(telemetry, dict) else None
+    if isinstance(sampled_energy, (int, float)) and sampled_energy > 0:
+        if not has_energy_metrics:
+            raise EvidenceError("agentic case omitted sampled-energy metrics")
+        tasks_per_joule = _case_number(
+            case, "agentic_tasks_succeeded_per_sampled_joule"
+        )
+        expected_tasks_per_joule = values["agentic_tasks_succeeded"] / sampled_energy
+        if not math.isclose(
+            tasks_per_joule,
+            expected_tasks_per_joule,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            raise EvidenceError("agentic tasks-per-joule metric is inconsistent")
+        joules_per_task = case.get("agentic_sampled_energy_j_per_solved_task")
+        if values["agentic_tasks_succeeded"] == 0:
+            if joules_per_task is not None:
+                raise EvidenceError("unsolved agentic case has joules-per-task")
+        else:
+            measured_joules = _case_number(
+                case, "agentic_sampled_energy_j_per_solved_task"
+            )
+            if not math.isclose(
+                measured_joules,
+                sampled_energy / values["agentic_tasks_succeeded"],
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            ):
+                raise EvidenceError("agentic joules-per-task metric is inconsistent")
+    elif has_energy_metrics:
+        raise EvidenceError("agentic case has energy metrics without sampled energy")
+
+
 def _project_case(case: Any) -> dict[str, Any]:
     if not isinstance(case, dict):
         raise EvidenceError("summary case must be an object")
     unknown = set(case) - _CASE_FIELDS - _CASE_DROPPED_FIELDS
     if unknown:
         raise EvidenceError(f"unknown summary case fields: {sorted(unknown)!r}")
+    kind = case.get("kind")
+    present_agentic = set(case) & _AGENTIC_CASE_FIELDS
+    if kind != "agentic" and present_agentic:
+        raise EvidenceError("non-agentic case contains agentic metrics")
     projected: dict[str, Any] = {}
     for key, value in case.items():
         if key in _CASE_DROPPED_FIELDS:
@@ -1481,6 +2544,8 @@ def _project_case(case: Any) -> dict[str, Any]:
             projected[key] = _finite(value, name=f"case.{key}")
         else:
             raise EvidenceError(f"invalid summary case value for {key}")
+    if kind == "agentic":
+        _validate_agentic_case(projected)
     return projected
 
 
@@ -1681,6 +2746,39 @@ def _project_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
                     raise EvidenceError(f"aggregate root must not be null: {key}")
             elif not isinstance(value, dict):
                 raise EvidenceError(f"aggregate root must be an object: {key}")
+            if key == "artifact_validation" and isinstance(value, dict):
+                value = dict(value)
+                shard_keys = {
+                    "model_shard_count",
+                    "model_shard_sha256s",
+                    "model_total_size_bytes",
+                }
+                populated = {name for name in shard_keys if value.get(name) is not None}
+                if not populated:
+                    for name in shard_keys:
+                        value.pop(name, None)
+                elif populated != shard_keys:
+                    raise EvidenceError(
+                        "artifact shard count, hashes, and total bytes must be all present"
+                    )
+                else:
+                    count = value["model_shard_count"]
+                    total_size = value["model_total_size_bytes"]
+                    hashes = value["model_shard_sha256s"]
+                    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+                        raise EvidenceError("artifact shard count must be a positive integer")
+                    if (
+                        isinstance(total_size, bool)
+                        or not isinstance(total_size, int)
+                        or total_size <= 0
+                    ):
+                        raise EvidenceError(
+                            "artifact shard total bytes must be a positive integer"
+                        )
+                    if not isinstance(hashes, list) or len(hashes) != count:
+                        raise EvidenceError(
+                            "artifact shard hashes must match the declared shard count"
+                        )
             result[key] = _safe_summary_tree(value, name=key)
     for key in ("measurement_annotations", "startup_measurement_annotations"):
         annotations = summary.get(key)
@@ -1995,6 +3093,13 @@ def _export_run(
             )
         )
     telemetry = _project_telemetry(telemetry_records)
+    projected_summary = _project_summary(summary)
+    _validate_agentic_aggregates(
+        requests,
+        projected_summary,
+        suite=suite,
+        terminal=lifecycle.get("terminal_event") == "run_complete",
+    )
     relative = Path("runs") / run_id
     bundle_files: dict[str, Any] = {
         "manifest.json": manifest,
@@ -2004,7 +3109,7 @@ def _export_run(
             "schema_version": SCHEMA_VERSION,
         },
         "summary.json": {
-            "aggregates": _project_summary(summary),
+            "aggregates": projected_summary,
             "schema_version": SCHEMA_VERSION,
         },
         **_telemetry_files(telemetry),
@@ -3153,6 +4258,22 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
         lifecycle.get("terminal_event") == "run_complete"
     ):
         raise EvidenceError(f"run terminal classification mismatch: {run_id}")
+    suite = manifest.get("suite")
+    agentic_suite: dict[str, Any] | None = None
+    manifest_cases = suite.get("cases") if isinstance(suite, dict) else None
+    if isinstance(suite, dict) and (
+        suite.get("id") == "agentic-tools"
+        or (
+            isinstance(manifest_cases, list)
+            and any(
+                isinstance(case, dict) and case.get("kind") == "agentic"
+                for case in manifest_cases
+            )
+        )
+    ):
+        agentic_suite = _project_agentic_suite(suite)
+        if agentic_suite != suite:
+            raise EvidenceError(f"agentic suite projection mismatch: {run_id}")
 
     samples = _load_json(directory / "samples.json", root)
     samples = _expect_object_keys(
@@ -3170,6 +4291,15 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     )
     if summary["schema_version"] != SCHEMA_VERSION:
         raise EvidenceError(f"run summary schema mismatch: {run_id}")
+    aggregates = summary["aggregates"]
+    if not isinstance(aggregates, dict):
+        raise EvidenceError(f"run aggregates must be an object: {run_id}")
+    _validate_agentic_aggregates(
+        samples["samples"],
+        aggregates,
+        suite=agentic_suite,
+        terminal=bool(entry["measurement_terminal"]),
+    )
 
     telemetry = _load_json(directory / "telemetry.json", root)
     telemetry = _expect_object_keys(

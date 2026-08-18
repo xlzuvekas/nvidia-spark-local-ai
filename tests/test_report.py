@@ -218,6 +218,81 @@ class ReportTests(unittest.TestCase):
         self.assertIn("validation_passed", row)
         self.assertFalse(row["validation_passed"])
 
+    def test_agentic_summary_reports_task_metrics_without_token_throughput(self) -> None:
+        requests = []
+        for index, passed in enumerate((True, False, True)):
+            request = _request(
+                "agentic-two-hop",
+                "attempt",
+                ttft_s=0.1 + index * 0.1,
+                elapsed_s=2.0 + index,
+                decode_tps=None,
+                prompt_tokens=100 + index,
+                completion_tokens=20 + index,
+                kind="agentic",
+            )
+            request["result"].update(  # type: ignore[union-attr]
+                {
+                    "passed": passed,
+                    "wall_s": 2.0 + index,
+                    "request_elapsed_s": 1.5 + index,
+                    "first_turn_ttft_s": 0.1 + index * 0.1,
+                    "max_turns": 6,
+                    "max_output_tokens": 4096,
+                    "turns_used": 3 + index,
+                    "expected_tool_calls": 2,
+                    "tool_calls_requested": 2,
+                    "tool_calls_executed": 2,
+                    "tool_calls_succeeded": 2 if passed else 1,
+                    "tool_errors": 0,
+                    "malformed_tool_calls": 0 if passed else 1,
+                    "unknown_tool_calls": 0,
+                    "final_answer_emitted": True,
+                    "final_answer_correct": passed,
+                    "tool_sequence_correct": passed,
+                    "recovery_required": False,
+                    "recovery_succeeded": False,
+                    "turn_limit_reached": False,
+                    "length_terminated_turns": 0,
+                }
+            )
+            request["repetition"] = index
+            requests.append(request)
+        self._write_events(
+            [
+                *requests,
+                {
+                    "event": "case_complete",
+                    "case_id": "agentic-two-hop",
+                    "attempt_id": "attempt",
+                    "kind": "agentic",
+                    "elapsed_s": 9.0,
+                    "concurrency": 1,
+                    "validation_passed": False,
+                },
+            ]
+        )
+
+        row = summarize_run(self.run_dir)["cases"][0]
+
+        self.assertEqual(row["agentic_tasks"], 3)
+        self.assertEqual(row["agentic_tasks_succeeded"], 2)
+        self.assertEqual(row["agentic_model_requests"], 12)
+        self.assertAlmostEqual(row["agentic_model_requests_per_s"], 12 / 9)
+        self.assertAlmostEqual(row["agentic_task_success_rate"], 2 / 3)
+        self.assertEqual(row["agentic_expected_tool_calls"], 6)
+        self.assertEqual(row["agentic_tool_calls_executed"], 6)
+        self.assertEqual(row["agentic_malformed_tool_calls"], 1)
+        self.assertEqual(row["agentic_final_answers_correct"], 2)
+        self.assertEqual(row["agentic_tool_sequences_correct"], 2)
+        self.assertEqual(row["median_agentic_turns_used"], 4)
+        self.assertEqual(row["median_agentic_task_wall_s"], 3)
+        self.assertEqual(row["median_agentic_first_turn_ttft_s"], 0.2)
+        self.assertIsNone(row["aggregate_output_tps"])
+        self.assertIsNone(row["median_ttft_s"])
+        self.assertIsNone(row["request_tps"])
+        self.assertFalse(row["validation_passed"])
+
     def test_capability_with_unavailable_native_decode_timing_stays_null(self) -> None:
         request = _request(
             "ocr",

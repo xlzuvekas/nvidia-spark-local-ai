@@ -166,6 +166,46 @@ decode rates are secondary when a server can bundle multiple tokens into one
 stream event. Client-TTFT prefill is an approximation unless the runtime reports
 an isolated prompt-evaluation duration.
 
+### Agentic tool-use protocol
+
+The `agentic-tools` suite is a bounded admission gate for multi-turn function
+calling. It covers tool selection with distractors, correct no-tool abstention,
+two dependent calls, and recovery from one typed transient tool error. Each
+scenario has three deterministic variants. Tool ordering varies by variant,
+tools execute only through an in-process allowlist, and model-provided calls are
+schema-checked before dispatch.
+
+An episode runs at temperature zero with automatic tool choice, one active
+request, a maximum of six model turns, and up to 4,096 completion tokens per
+turn. Server slot geometry remains profile-specific and must match for paired
+performance claims.
+The frozen context admission estimate includes all six output budgets plus tool
+history overhead. Agentic cases do not run concurrently and do not use a
+per-case warm-up.
+
+Report two outcomes separately:
+
+- **strict task success** requires the declared call sequence and exact
+  argument values, successful dependency or error-recovery behavior, and a
+  final answer accepted by the bounded `FINAL:` envelope grammar before either
+  limit;
+- **tool-trace correctness** validates selection, abstention, arguments,
+  ordering, dependency, and recovery without waiving the final envelope-format
+  requirement.
+
+Strict success is the primary deployment result. Trace correctness is a
+diagnostic, not an alternate pass criterion. Rank matched configurations by
+success first, then turns, malformed or unknown calls, recovery rate, episode
+wall time, and sampled energy per strict solve. MTP comparisons additionally
+require runtime-native proof of draft activity and the same scenario variants,
+budgets, runtime, main artifact, and serving geometry.
+
+Only scalar episode outcomes may enter journals or exported evidence. Scenario
+text, response content, reasoning, tool arguments and responses, call
+identifiers, and per-request tags remain excluded. The first complete campaign
+and its comparison limits are recorded in
+[the 2026-08-17 agentic tool-use report](docs/agentic-tools-results-2026-08-17.md).
+
 Concurrency results are comparable only when the serving-slot geometry is the
 same. A one-slot profile receiving C2, C4, or C8 requests measures queued
 aggregate service, not parallel-sequence scaling. Similarly, compare
