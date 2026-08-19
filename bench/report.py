@@ -20,6 +20,11 @@ from .llamacpp_metrics import (
     llamacpp_mtp_depth,
     llamacpp_mtp_requested,
 )
+from .prefix_cache_protocol import (
+    PREFIX_CACHE_PROTOCOL,
+    prefix_cache_conditions,
+    prefix_cache_steps,
+)
 from .vllm_metrics import aggregate_vllm_spec_decode_metrics
 
 
@@ -52,6 +57,209 @@ def _reported_reasoning_tokens(result: dict[str, Any]) -> int | None:
     if not math.isfinite(value) or value < 0 or not value.is_integer():
         return None
     return int(value)
+
+
+def _prefix_cache_number(result: dict[str, Any], key: str) -> float:
+    value = result.get(key)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) < 0
+    ):
+        raise ValueError(f"prefix-cache result {key} must be a non-negative scalar")
+    return float(value)
+
+
+def _prefix_cache_count(result: dict[str, Any], key: str) -> int:
+    value = _prefix_cache_number(result, key)
+    if not value.is_integer():
+        raise ValueError(f"prefix-cache result {key} must be an integer")
+    return int(value)
+
+
+def _summarize_prefix_cache_case(
+    requests: list[dict[str, Any]], *, case_session_wall_s: float
+) -> dict[str, Any]:
+    """Aggregate the dedicated serial prompt-KV protocol without ambiguity.
+
+    ``logical_prompt_tokens`` includes reused tokens, whereas
+    ``physical_uncached_prompt_tokens`` comes from llama.cpp's cumulative
+    native counters and excludes them.  Condition request wall is the sum of
+    end-to-end client request elapsed times; session wall also includes the
+    protocol's local before/after counter snapshots.
+    """
+
+    if case_session_wall_s <= 0:
+        raise ValueError("prefix-cache session wall time must be positive")
+    records: dict[str, list[dict[str, Any]]] = {}
+    pair_records: dict[int, dict[str, dict[str, Any]]] = {}
+    modes: set[str] = set()
+    prefix_targets: set[int] = set()
+    for event in requests:
+        result = event.get("result")
+        if not isinstance(result, dict):
+            raise ValueError("prefix-cache request result must be an object")
+        mode = result.get("cache_profile_mode")
+        condition = result.get("cache_condition")
+        if mode not in {"off", "on"} or not isinstance(condition, str):
+            raise ValueError("prefix-cache result lacks a valid control label")
+        steps = prefix_cache_steps(mode)
+        step_ordinal = _prefix_cache_count(result, "cache_step_ordinal")
+        if not 1 <= step_ordinal <= len(steps):
+            raise ValueError("prefix-cache step ordinal is invalid")
+        expected_condition, _, expected_control = steps[step_ordinal - 1]
+        if condition != expected_condition:
+            raise ValueError("prefix-cache condition does not match its ordinal")
+        if result.get("cache_prompt_control") != expected_control:
+            raise ValueError("prefix-cache request control does not match its ordinal")
+        pair_index = _prefix_cache_count(result, "cache_pair_index")
+        if pair_index <= 0:
+            raise ValueError("prefix-cache pair index must be positive")
+        prefix_target = _prefix_cache_count(result, "cache_prefix_target_words")
+        if prefix_target <= 0:
+            raise ValueError("prefix-cache target must be positive")
+        prompt_tokens = _prefix_cache_count(result, "prompt_tokens")
+        cached_tokens = _prefix_cache_count(result, "cached_prompt_tokens")
+        if cached_tokens > prompt_tokens:
+            raise ValueError("prefix-cache cached tokens exceed logical prompt tokens")
+        if _prefix_cache_count(result, "native_prompt_tokens") != (
+            prompt_tokens - cached_tokens
+        ):
+            raise ValueError("prefix-cache native prompt tokens did not reconcile")
+        if _prefix_cache_count(result, "native_cached_prompt_tokens") != cached_tokens:
+            raise ValueError("prefix-cache native cached tokens did not reconcile")
+        if _prefix_cache_count(result, "native_decode_tokens") != _prefix_cache_count(
+            result, "completion_tokens"
+        ):
+            raise ValueError("prefix-cache native decode tokens did not reconcile")
+        records.setdefault(condition, []).append(result)
+        per_pair = pair_records.setdefault(pair_index, {})
+        if condition in per_pair:
+            raise ValueError("prefix-cache pair has duplicate conditions")
+        per_pair[condition] = result
+        modes.add(mode)
+        prefix_targets.add(prefix_target)
+    if len(modes) != 1 or len(prefix_targets) != 1:
+        raise ValueError("prefix-cache case mixed modes or prefix targets")
+    mode = next(iter(modes))
+    expected_conditions = prefix_cache_conditions(mode)
+    if set(records) != set(expected_conditions):
+        raise ValueError("prefix-cache case has an unexpected condition set")
+    expected_pairs = set(range(1, 6))
+    if set(pair_records) != expected_pairs or any(
+        set(record) != set(expected_conditions) for record in pair_records.values()
+    ):
+        raise ValueError("prefix-cache case does not contain five complete paired blocks")
+
+    conditions: list[dict[str, Any]] = []
+    for step_ordinal, (condition, _, cache_prompt_control) in enumerate(
+        prefix_cache_steps(mode), start=1
+    ):
+        values = records[condition]
+        if len(values) != 5:
+            raise ValueError("prefix-cache condition does not contain five requests")
+        logical_tokens = sum(_prefix_cache_count(value, "prompt_tokens") for value in values)
+        cached_tokens = sum(
+            _prefix_cache_count(value, "cached_prompt_tokens") for value in values
+        )
+        physical_tokens = sum(
+            _prefix_cache_count(value, "native_prompt_tokens") for value in values
+        )
+        completion_tokens = sum(
+            _prefix_cache_count(value, "completion_tokens") for value in values
+        )
+        native_prompt_s = sum(
+            _prefix_cache_number(value, "native_prompt_s") for value in values
+        )
+        native_decode_s = sum(
+            _prefix_cache_number(value, "native_decode_s") for value in values
+        )
+        condition_request_wall_s = sum(
+            _prefix_cache_number(value, "elapsed_s") for value in values
+        )
+        ttfts = [_prefix_cache_number(value, "ttft_s") for value in values]
+        client_decode_tps = [
+            _prefix_cache_number(value, "decode_tps") for value in values
+        ]
+        if condition_request_wall_s <= 0 or native_decode_s <= 0:
+            raise ValueError("prefix-cache request or native decode wall time was zero")
+        conditions.append(
+            {
+                "cache_condition": condition,
+                "cache_prompt_control": cache_prompt_control,
+                "protocol_step_ordinal": step_ordinal,
+                "request_count": len(values),
+                "logical_prompt_tokens": logical_tokens,
+                "physical_uncached_prompt_tokens": physical_tokens,
+                "cached_prompt_tokens": cached_tokens,
+                "cache_hit_fraction": cached_tokens / logical_tokens,
+                "native_prompt_processing_s": native_prompt_s,
+                "native_decode_s": native_decode_s,
+                "native_decode_tps": completion_tokens / native_decode_s,
+                "logical_prompt_tokens_per_native_prompt_s": (
+                    logical_tokens / native_prompt_s if native_prompt_s > 0 else None
+                ),
+                "physical_uncached_prompt_tokens_per_native_prompt_s": (
+                    physical_tokens / native_prompt_s if native_prompt_s > 0 else None
+                ),
+                "condition_request_wall_s": condition_request_wall_s,
+                "end_to_end_output_tokens_per_condition_request_wall_s": (
+                    completion_tokens / condition_request_wall_s
+                ),
+                "median_ttft_s": statistics.median(ttfts),
+                "median_e2e_s": statistics.median(
+                    _prefix_cache_number(value, "elapsed_s") for value in values
+                ),
+                "median_client_decode_tps": statistics.median(client_decode_tps),
+            }
+        )
+    summary: dict[str, Any] = {
+        "protocol": PREFIX_CACHE_PROTOCOL,
+        "profile_mode": mode,
+        "prefix_target_words": next(iter(prefix_targets)),
+        "case_session_wall_s": case_session_wall_s,
+        "conditions": conditions,
+    }
+    second_condition = "forced-cold-b"
+    third_condition = expected_conditions[2]
+    paired: list[dict[str, Any]] = []
+    for pair_index in range(1, 6):
+        second = pair_records[pair_index][second_condition]
+        third = pair_records[pair_index][third_condition]
+        paired.append(
+            {
+                "cache_pair_index": pair_index,
+                "ttft_second_minus_third_s": (
+                    _prefix_cache_number(second, "ttft_s")
+                    - _prefix_cache_number(third, "ttft_s")
+                ),
+                "e2e_second_minus_third_s": (
+                    _prefix_cache_number(second, "elapsed_s")
+                    - _prefix_cache_number(third, "elapsed_s")
+                ),
+                "native_prompt_second_minus_third_s": (
+                    _prefix_cache_number(second, "native_prompt_s")
+                    - _prefix_cache_number(third, "native_prompt_s")
+                ),
+            }
+        )
+    summary["paired_second_to_third"] = {
+        "paired_blocks": 5,
+        "second_condition": second_condition,
+        "third_condition": third_condition,
+        "per_pair": paired,
+        "median_ttft_second_minus_third_s": statistics.median(
+            item["ttft_second_minus_third_s"] for item in paired
+        ),
+        "median_e2e_second_minus_third_s": statistics.median(
+            item["e2e_second_minus_third_s"] for item in paired
+        ),
+        "median_native_prompt_second_minus_third_s": statistics.median(
+            item["native_prompt_second_minus_third_s"] for item in paired
+        ),
+    }
+    return summary
 
 
 def _read_events(path: Path) -> list[dict[str, Any]]:
@@ -369,6 +577,28 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
             "elapsed_s": wall_s,
             "validation_passed": case_event.get("validation_passed"),
         }
+        if kind == "cache":
+            # Cache conditions have deliberately different semantics.  Do not
+            # present a mixed cold/warm average as a generic TTFT, E2E, or TPS
+            # value.  Emit only the fixed protocol report and its unambiguous
+            # scalar totals so evidence validation can reject generic metrics.
+            row = {
+                "case_id": case_id,
+                "attempt_id": attempt_id,
+                "kind": "cache",
+                "measurement_valid": not row_annotations,
+                "measurement_annotations": row_annotations,
+                "requests": len(requests),
+                "concurrency": case_event.get("concurrency", 1),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "reasoning_tokens": reasoning_tokens,
+                "elapsed_s": wall_s,
+                "validation_passed": case_event.get("validation_passed"),
+                "prefix_cache": _summarize_prefix_cache_case(
+                    requests, case_session_wall_s=wall_s
+                ),
+            }
         if kind == "agentic":
             agentic_results = [event["result"] for event in requests]
             model_requests = sum(

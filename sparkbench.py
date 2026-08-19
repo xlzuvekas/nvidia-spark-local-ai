@@ -23,7 +23,13 @@ from bench.inventory import (
     inventory_to_dict,
 )
 from bench.llamacpp_perplexity import run_llamacpp_perplexity
-from bench.manifest import ManifestError, load_models, load_suite
+from bench.manifest import (
+    ManifestError,
+    load_models,
+    load_suite,
+    validate_benchmark_selection,
+)
+from bench.prefix_cache_protocol import PREFIX_CACHE_SUITE_ID
 from bench.journal import utc_now, write_json
 from bench.report import summarize_run
 from bench.runner import create_plan, execute_plan
@@ -121,6 +127,7 @@ def _select(args: argparse.Namespace):
         choices = ", ".join(sorted(models))
         raise ManifestError(f"unknown model {args.model!r}; choices: {choices}") from error
     suite = load_suite(args.suite)
+    validate_benchmark_selection(model, suite)
     return model, suite
 
 
@@ -253,6 +260,12 @@ def command_matrix(args: argparse.Namespace) -> int:
             continue
         if args.match and not fnmatch.fnmatch(model.id, args.match):
             continue
+        prefix_cache_mode = getattr(model, "prefix_cache_mode", None)
+        if suite.id == PREFIX_CACHE_SUITE_ID:
+            if prefix_cache_mode is None:
+                continue
+        elif prefix_cache_mode is not None:
+            continue
         if not args.allow_download and not availability[model.id].available:
             continue
         selected.append(model)
@@ -260,6 +273,8 @@ def command_matrix(args: argparse.Namespace) -> int:
         selected = selected[: args.limit]
     if not selected:
         raise ManifestError("matrix filters selected no runnable model configurations")
+    for model in selected:
+        validate_benchmark_selection(model, suite, context="matrix selection")
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     matrix_dir = args.results / "matrices" / f"{stamp}-{suite.id}"

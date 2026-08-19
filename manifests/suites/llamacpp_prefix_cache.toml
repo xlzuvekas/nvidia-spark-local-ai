@@ -1,0 +1,27 @@
+schema_version = 1
+
+[suite]
+id = "llamacpp-prefix-cache"
+description = "Serial native llama.cpp same-slot prompt-KV cache controls at 8K and 32K shared synthetic prefixes."
+
+[[cases]]
+id = "llamacpp-prefix-cache-8192"
+kind = "cache"
+requires = ["chat"]
+warmups = 0
+repetitions = 5
+max_output_tokens = 128
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 8192
+
+[[cases]]
+id = "llamacpp-prefix-cache-32768"
+kind = "cache"
+requires = ["chat"]
+warmups = 0
+repetitions = 5
+max_output_tokens = 128
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 32768

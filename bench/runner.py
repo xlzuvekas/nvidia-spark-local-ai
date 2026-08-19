@@ -35,6 +35,12 @@ from .client import (
     stream_ollama_chat_request,
 )
 from .journal import Journal, content_hash, utc_now, write_json
+from .llamacpp_cache_metrics import (
+    LlamaCppCacheMetricsError,
+    delta_llamacpp_cache_metrics,
+    require_llamacpp_cache_delta,
+    snapshot_llamacpp_cache_metrics,
+)
 from .llamacpp_metrics import (
     llamacpp_dflash_requested,
     llamacpp_mtp_requested,
@@ -43,6 +49,14 @@ from .llamacpp_metrics import (
     require_mtp_activity,
     require_speculative_activity,
     snapshot_llamacpp_spec_decode_metrics,
+)
+from .manifest import validate_benchmark_selection
+from .prefix_cache_protocol import (
+    PREFIX_CACHE_CONTEXT_TOKENS,
+    PREFIX_CACHE_PREFIX_TARGETS,
+    PREFIX_CACHE_SUITE_ID,
+    prefix_cache_llamacpp_args,
+    prefix_cache_steps,
 )
 from .report import summarize_run
 from .runtime import (
@@ -65,6 +79,7 @@ class PreflightError(RuntimeError):
 
 
 _MULTI_HOP_FAILURE_MESSAGE = "multi-hop case failed; error details omitted"
+_PREFIX_CACHE_FAILURE_MESSAGE = "prefix-cache case failed; error details omitted"
 
 
 class MultiHopNeedleError(RuntimeError):
@@ -72,6 +87,13 @@ class MultiHopNeedleError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__(_MULTI_HOP_FAILURE_MESSAGE)
+
+
+class PrefixCacheError(RuntimeError):
+    """A public-safe failure for the native llama.cpp prompt-KV protocol."""
+
+    def __init__(self) -> None:
+        super().__init__(_PREFIX_CACHE_FAILURE_MESSAGE)
 
 
 def _command_output(command: list[str]) -> str | None:
@@ -137,6 +159,7 @@ def create_plan(
         raise RuntimeError(
             f"{model.backend} direct profiles require the {direct_command} command"
         )
+    validate_benchmark_selection(model, suite, context="plan")
     model_data = asdict(model)
     suite_data = asdict(suite)
     cases = [_canonical_case(model_data, case) for case in suite_data["cases"]]
@@ -317,6 +340,373 @@ def _multi_hop_needle_prompt(
         )
     )
     return "".join(parts)
+
+
+_PREFIX_CACHE_RESULT_SCALAR_FIELDS = (
+    "cache_condition",
+    "cache_pair_index",
+    "cache_prompt_control",
+    "cache_prefix_target_words",
+    "cache_profile_mode",
+    "cache_step_ordinal",
+    "cached_prompt_tokens",
+    "completion_tokens",
+    "decode_metric_source",
+    "decode_s",
+    "decode_tps",
+    "elapsed_s",
+    "emission_events",
+    "finish_reason",
+    "native_cached_prompt_tokens",
+    "native_decode_s",
+    "native_decode_tokens",
+    "native_prompt_s",
+    "native_prompt_tokens",
+    "output_tps",
+    "prompt_tokens",
+    "reasoning_tokens",
+    "server_cached_prompt_tokens",
+    "server_decode_s",
+    "server_decode_tokens",
+    "server_prompt_s",
+    "server_prompt_tokens",
+    "ttft_s",
+)
+
+
+def _is_prefix_cache_case(case: Any) -> bool:
+    return str(getattr(case, "kind", "")) == "cache"
+
+
+def _prefix_cache_shared_prefix(case: Any, pair_index: int) -> str:
+    """Create a deterministic shared prefix for one serial cold/warm block.
+
+    The pair key changes before the filler so blocks cannot accidentally reuse
+    a preceding block.  It is deterministic case metadata, not the request
+    nonce; each request nonce is appended only in the short suffix.
+    """
+
+    if pair_index <= 0:
+        raise ValueError("prefix-cache pair index must be positive")
+    # Use the stable suite case ID, not the profile-specific frozen case ID,
+    # so matching cache-off/cache-on runs exercise the exact same long prefix.
+    pair_key = hashlib.sha256(
+        f"prefix-cache-v1:{case.id}:{pair_index}".encode()
+    ).hexdigest()[:16]
+    repetitions = max(int(case.prompt_repetitions), 1)
+    return (
+        "Synthetic static prefix-cache corpus. "
+        f"Pair control {pair_key}. "
+        + "shared-ledger-entry " * repetitions
+    )
+
+
+def _prefix_cache_prompt(case: Any, pair_index: int, request_id: str) -> str:
+    """Append the only request-unique nonce material after a shared prefix."""
+
+    suffix_nonce = hashlib.sha256(request_id.encode()).hexdigest()[:16]
+    return (
+        _prefix_cache_shared_prefix(case, pair_index)
+        + f" Request suffix nonce {suffix_nonce}. "
+        "Write an unbroken numbered list of distinct two-word phrases. "
+        "Continue until the output limit; do not conclude or summarize."
+    )
+
+
+def _prefix_cache_steps(
+    mode: str,
+) -> tuple[tuple[str, bool | None, str], ...]:
+    """Return the exact serial control/treatment schedule for one block."""
+
+    try:
+        return prefix_cache_steps(mode)
+    except ValueError as error:
+        raise PrefixCacheError() from error
+
+
+def _prefix_cache_scalar(
+    value: Any,
+    *,
+    name: str,
+    integer: bool = False,
+    positive: bool = False,
+    nullable: bool = False,
+) -> int | float | None:
+    """Validate a scalar retained by the privacy-safe cache journal."""
+
+    if value is None and nullable:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or (integer and not isinstance(value, int))
+        or not math.isfinite(float(value))
+        or float(value) < 0
+        or (positive and float(value) <= 0)
+    ):
+        raise PrefixCacheError()
+    return int(value) if integer else float(value)
+
+
+def _prefix_cache_result_payload(
+    result: Any,
+    *,
+    mode: str,
+    condition: str,
+    pair_index: int,
+    step_ordinal: int,
+    cache_prompt_control: str,
+    prefix_target_words: int,
+    native_metrics: dict[str, int | float],
+) -> dict[str, Any]:
+    """Serialize the cache protocol's fixed scalar-only measurement record."""
+
+    payload = {
+        "cache_condition": condition,
+        "cache_pair_index": pair_index,
+        "cache_prompt_control": cache_prompt_control,
+        "cache_prefix_target_words": prefix_target_words,
+        "cache_profile_mode": mode,
+        "cache_step_ordinal": step_ordinal,
+        "cached_prompt_tokens": result.cached_prompt_tokens,
+        "completion_tokens": result.completion_tokens,
+        "decode_metric_source": result.decode_metric_source,
+        "decode_s": result.decode_s,
+        "decode_tps": result.decode_tps,
+        "elapsed_s": result.elapsed_s,
+        "emission_events": result.emission_events,
+        "finish_reason": result.finish_reason,
+        "native_cached_prompt_tokens": native_metrics["cached_prompt_tokens"],
+        "native_decode_s": native_metrics["decode_s"],
+        "native_decode_tokens": native_metrics["decode_tokens"],
+        "native_prompt_s": native_metrics["prompt_s"],
+        "native_prompt_tokens": native_metrics["prompt_tokens"],
+        "output_tps": result.output_tps,
+        "prompt_tokens": result.prompt_tokens,
+        "reasoning_tokens": result.reasoning_tokens,
+        "server_cached_prompt_tokens": result.server_cached_prompt_tokens,
+        "server_decode_s": result.server_decode_s,
+        "server_decode_tokens": result.server_decode_tokens,
+        "server_prompt_s": result.server_prompt_s,
+        "server_prompt_tokens": result.server_prompt_tokens,
+        "ttft_s": result.ttft_s,
+    }
+    if set(payload) != set(_PREFIX_CACHE_RESULT_SCALAR_FIELDS):
+        raise PrefixCacheError()
+    for field in (
+        "cache_pair_index",
+        "cache_prefix_target_words",
+        "cache_step_ordinal",
+        "cached_prompt_tokens",
+        "completion_tokens",
+        "emission_events",
+        "native_cached_prompt_tokens",
+        "native_decode_tokens",
+        "native_prompt_tokens",
+        "prompt_tokens",
+        "server_cached_prompt_tokens",
+        "server_decode_tokens",
+        "server_prompt_tokens",
+    ):
+        _prefix_cache_scalar(payload[field], name=field, integer=True)
+    for field in (
+        "decode_s",
+        "decode_tps",
+        "elapsed_s",
+        "native_decode_s",
+        "native_prompt_s",
+        "output_tps",
+        "server_decode_s",
+        "server_prompt_s",
+        "ttft_s",
+    ):
+        _prefix_cache_scalar(
+            payload[field],
+            name=field,
+            positive=field in {"decode_s", "elapsed_s", "native_decode_s", "server_decode_s"},
+        )
+    _prefix_cache_scalar(
+        payload["reasoning_tokens"],
+        name="reasoning_tokens",
+        integer=True,
+        nullable=True,
+    )
+    if (
+        payload["cache_condition"] not in {
+            "forced-cold-a",
+            "forced-cold-b",
+            "forced-cold-c",
+            "warm-prefix-hit",
+        }
+        or payload["cache_prompt_control"]
+        not in {"profile-default", "force-off"}
+        or payload["cache_profile_mode"] not in {"off", "on"}
+        or not isinstance(payload["decode_metric_source"], str)
+        or payload["finish_reason"] != "length"
+    ):
+        raise PrefixCacheError()
+    return payload
+
+
+def _prefix_cache_control_mode(model: Any, server: Any, case: Any) -> str:
+    """Validate the frozen same-slot native cache control before measuring."""
+
+    mode = getattr(model, "prefix_cache_mode", None)
+    if (
+        str(getattr(server, "backend", "")) != "llamacpp"
+        or mode not in {"off", "on"}
+        or int(getattr(model, "runtime_parallel", 0)) != 1
+        or int(getattr(case, "concurrency", 0)) != 1
+    ):
+        raise PrefixCacheError()
+    argument_values = tuple(str(argument) for argument in getattr(model, "args", ()))
+    argument_names = [argument.split("=", 1)[0] for argument in argument_values]
+    cache_controls = [
+        argument
+        for argument in argument_values
+        if argument.split("=", 1)[0]
+        in {"--cache-prompt", "--no-cache-prompt"}
+    ]
+    if any(
+        argument not in {"--cache-prompt", "--no-cache-prompt"}
+        for argument in cache_controls
+    ):
+        raise PrefixCacheError()
+    if "--cache-reuse" in argument_names:
+        raise PrefixCacheError()
+    enabled = argument_values.count("--cache-prompt")
+    disabled = argument_values.count("--no-cache-prompt")
+    if enabled + disabled != 1:
+        raise PrefixCacheError()
+    if (mode == "on" and enabled != 1) or (mode == "off" and disabled != 1):
+        raise PrefixCacheError()
+    return str(mode)
+
+
+def _prefix_cache_request_arguments(
+    *,
+    server: Any,
+    model: Any,
+    case: Any,
+    pair_index: int,
+    request_id: str,
+    cache_prompt: bool | None,
+) -> dict[str, Any]:
+    """Build one forced-cold or warm same-slot native request."""
+
+    extra_body: dict[str, Any] = {"id_slot": 0}
+    if cache_prompt is not None:
+        extra_body["cache_prompt"] = cache_prompt
+    arguments: dict[str, Any] = {
+        "base_url": server.base_url,
+        "model": str(model.served_name),
+        "prompt": _prefix_cache_prompt(case, pair_index, request_id),
+        "max_tokens": int(case.max_output_tokens),
+        "temperature": float(case.temperature),
+        "request_id": request_id,
+        "extra_body": extra_body,
+        "require_native_cache_metrics": True,
+        "require_native_timing": True,
+    }
+    if getattr(server, "authorization", None):
+        arguments["authorization"] = str(server.authorization)
+    return arguments
+
+
+def _validate_prefix_cache_result(
+    *,
+    result: Any,
+    native_metrics: dict[str, int | float],
+    case: Any,
+    condition: str,
+) -> dict[str, Any]:
+    """Prove one request is a real cache control or a substantial prefix hit."""
+
+    cached = getattr(result, "cached_prompt_tokens", None)
+    prompt_tokens = getattr(result, "prompt_tokens", None)
+    completion_tokens = getattr(result, "completion_tokens", None)
+    ttft_s = _prefix_cache_scalar(getattr(result, "ttft_s", None), name="ttft_s")
+    elapsed_s = _prefix_cache_scalar(
+        getattr(result, "elapsed_s", None), name="elapsed_s", positive=True
+    )
+    decode_s = _prefix_cache_scalar(
+        getattr(result, "decode_s", None), name="decode_s", positive=True
+    )
+    decode_tps = _prefix_cache_scalar(
+        getattr(result, "decode_tps", None), name="decode_tps"
+    )
+    output_tps = _prefix_cache_scalar(
+        getattr(result, "output_tps", None), name="output_tps"
+    )
+    valid = (
+        isinstance(cached, int)
+        and not isinstance(cached, bool)
+        and cached >= 0
+        and isinstance(prompt_tokens, int)
+        and not isinstance(prompt_tokens, bool)
+        and prompt_tokens > 0
+        and cached <= prompt_tokens
+        and isinstance(completion_tokens, int)
+        and not isinstance(completion_tokens, bool)
+        and completion_tokens == int(case.max_output_tokens)
+        and getattr(result, "finish_reason", None) == "length"
+        and _prefix_cache_scalar(
+            getattr(result, "server_prompt_s", None), name="server_prompt_s"
+        ) is not None
+        and _prefix_cache_scalar(
+            getattr(result, "server_decode_s", None),
+            name="server_decode_s",
+            positive=True,
+        ) is not None
+        and getattr(result, "decode_metric_source", None) == "client_estimate"
+        and ttft_s is not None
+        and elapsed_s is not None
+        and decode_s is not None
+        and decode_tps is not None
+        and output_tps is not None
+        and ttft_s <= elapsed_s
+        and math.isclose(
+            float(decode_tps),
+            max(int(completion_tokens) - 1, 0) / float(decode_s),
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        )
+        and math.isclose(
+            float(output_tps),
+            int(completion_tokens) / float(elapsed_s),
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        )
+    )
+    if valid:
+        try:
+            require_llamacpp_cache_delta(
+                native_metrics,
+                prompt_tokens=prompt_tokens,
+                cached_prompt_tokens=cached,
+                completion_tokens=completion_tokens,
+            )
+        except LlamaCppCacheMetricsError:
+            valid = False
+    if valid:
+        server_counts = (
+            getattr(result, "server_prompt_tokens", None),
+            getattr(result, "server_cached_prompt_tokens", None),
+            getattr(result, "server_decode_tokens", None),
+        )
+        valid = server_counts == (
+            int(native_metrics["prompt_tokens"]),
+            int(native_metrics["cached_prompt_tokens"]),
+            int(native_metrics["decode_tokens"]),
+        )
+    if valid and condition.startswith("forced-cold"):
+        valid = cached == 0
+    if valid and condition == "warm-prefix-hit":
+        valid = cached / prompt_tokens >= 0.90
+    return {
+        "passed": valid,
+        "reason": None if valid else "native prefix-cache control did not validate",
+    }
 
 
 def _solid_color_png_data_url(
@@ -815,6 +1205,14 @@ def _estimated_context_tokens(case: SimpleNamespace) -> tuple[int, str]:
     """Return a conservative workload estimate without model-specific tokenizers."""
 
     output_tokens = int(case.max_output_tokens)
+    if _is_prefix_cache_case(case):
+        # ``shared-ledger-entry`` tokenizes to multiple pieces on common BPE
+        # vocabularies.  Six tokens per synthetic corpus word leaves generous
+        # headroom without pretending this workload is a one-token repetition.
+        return (
+            max(int(case.prompt_repetitions), 1) * 6 + output_tokens + 1_024,
+            "prefix_cache_words_times_six_plus_output_and_template_margin",
+        )
     if str(case.kind) == "agentic":
         return (
             estimate_agentic_context_tokens(
@@ -1329,6 +1727,112 @@ def _prime_model(server: Any, model: SimpleNamespace) -> Any:
     )
 
 
+def _execute_prefix_cache_case(
+    *,
+    server: Any,
+    model: SimpleNamespace,
+    case: SimpleNamespace,
+    journal: Journal,
+    telemetry: TelemetrySampler,
+) -> None:
+    """Run the fixed serial same-slot llama.cpp prompt-KV A/B protocol."""
+
+    attempt_id = uuid.uuid4().hex
+    journal.append(
+        {
+            "event": "case_start",
+            "case_id": case.case_id,
+            "attempt_id": attempt_id,
+            "kind": case.kind,
+            "concurrency": case.concurrency,
+        }
+    )
+    telemetry.set_phase(f"case:{case.case_id}:{attempt_id}")
+    started = time.perf_counter()
+    try:
+        mode = _prefix_cache_control_mode(model, server, case)
+        validations: list[dict[str, Any]] = []
+        for pair_index in range(1, int(case.repetitions) + 1):
+            for step_ordinal, (
+                condition,
+                cache_prompt,
+                cache_prompt_control,
+            ) in enumerate(
+                _prefix_cache_steps(mode), start=1
+            ):
+                request_id = (
+                    f"prefix-cache-{case.case_id}-p{pair_index}-{condition}-"
+                    f"{time.time_ns()}"
+                )
+                before = snapshot_llamacpp_cache_metrics(server.base_url)
+                result = stream_chat_request(
+                    **_prefix_cache_request_arguments(
+                        server=server,
+                        model=model,
+                        case=case,
+                        pair_index=pair_index,
+                        request_id=request_id,
+                        cache_prompt=cache_prompt,
+                    )
+                )
+                after = snapshot_llamacpp_cache_metrics(server.base_url)
+                native_metrics = delta_llamacpp_cache_metrics(before, after)
+                validation = _validate_prefix_cache_result(
+                    result=result,
+                    native_metrics=native_metrics,
+                    case=case,
+                    condition=condition,
+                )
+                validations.append(validation)
+                journal.append(
+                    {
+                        "event": "request_complete",
+                        "case_id": case.case_id,
+                        "attempt_id": attempt_id,
+                        "kind": case.kind,
+                        "repetition": pair_index - 1,
+                        "burst_elapsed_s": result.elapsed_s,
+                        "result": _prefix_cache_result_payload(
+                            result,
+                            mode=mode,
+                            condition=condition,
+                            pair_index=pair_index,
+                            step_ordinal=step_ordinal,
+                            cache_prompt_control=cache_prompt_control,
+                            prefix_target_words=int(case.prompt_repetitions),
+                            native_metrics=native_metrics,
+                        ),
+                        "validation": validation,
+                    }
+                )
+        journal.append(
+            {
+                "event": "case_complete",
+                "case_id": case.case_id,
+                "attempt_id": attempt_id,
+                "kind": case.kind,
+                "concurrency": case.concurrency,
+                "elapsed_s": time.perf_counter() - started,
+                "validation_passed": all(item["passed"] for item in validations),
+            }
+        )
+    except Exception as error:
+        safe_error = PrefixCacheError()
+        journal.append(
+            {
+                "event": "case_failed",
+                "case_id": case.case_id,
+                "attempt_id": attempt_id,
+                "error_type": type(safe_error).__name__,
+                "error": str(safe_error),
+                "elapsed_s": time.perf_counter() - started,
+            }
+        )
+        raise safe_error from error
+    finally:
+        telemetry.set_phase("between_cases")
+
+
 def _execute_case(
     *,
     server: Any,
@@ -1337,6 +1841,15 @@ def _execute_case(
     journal: Journal,
     telemetry: TelemetrySampler,
 ) -> None:
+    if _is_prefix_cache_case(case):
+        _execute_prefix_cache_case(
+            server=server,
+            model=model,
+            case=case,
+            journal=journal,
+            telemetry=telemetry,
+        )
+        return
     attempt_id = uuid.uuid4().hex
     journal.append(
         {
@@ -1747,6 +2260,111 @@ def _record_run_aborted(
     )
 
 
+def _validate_prefix_cache_plan_selection(model: Any, suite: Any) -> None:
+    """Reject mismatched or legacy cache plans before any server is started."""
+
+    raw_suite_id = getattr(suite, "id", None)
+    suite_id = raw_suite_id if isinstance(raw_suite_id, str) else ""
+    raw_cases = getattr(suite, "cases", ())
+    cases = list(raw_cases) if isinstance(raw_cases, (list, tuple)) else []
+    cache_cases = [case for case in cases if _is_prefix_cache_case(case)]
+    mode = getattr(model, "prefix_cache_mode", None)
+    cache_profile = mode in {"off", "on"}
+    cache_suite = suite_id == PREFIX_CACHE_SUITE_ID
+    if mode is not None and not cache_profile:
+        raise PreflightError("Frozen prefix-cache profile mode is invalid")
+    if (
+        cache_profile != cache_suite
+        or bool(cache_cases) != cache_suite
+        or (cache_suite and len(cache_cases) != len(cases))
+    ):
+        raise PreflightError(
+            "Frozen prefix-cache model profile and suite do not match"
+        )
+    if not cache_suite:
+        return
+    if not isinstance(raw_cases, list):
+        raise PreflightError("Frozen prefix-cache suite cases must be a JSON list")
+    if (
+        getattr(model, "backend", None) != "llamacpp"
+        or type(getattr(model, "runtime_parallel", None)) is not int
+        or getattr(model, "runtime_parallel", None) != 1
+        or type(getattr(model, "max_context", None)) is not int
+        or type(getattr(model, "native_context", None)) is not int
+        or getattr(model, "max_context", None) != PREFIX_CACHE_CONTEXT_TOKENS
+        or getattr(model, "native_context", None) != PREFIX_CACHE_CONTEXT_TOKENS
+    ):
+        raise PreflightError("Frozen prefix-cache model does not match its protocol")
+    expected_case_fields = {
+        "case_id",
+        "concurrency",
+        "id",
+        "kind",
+        "max_output_tokens",
+        "max_turns",
+        "prompt_repetitions",
+        "repetitions",
+        "requires",
+        "temperature",
+        "warmups",
+    }
+    expected_cases = tuple(PREFIX_CACHE_PREFIX_TARGETS.items())
+    if (
+        len(cases) != len(expected_cases)
+        or len(cache_cases) != len(expected_cases)
+    ):
+        raise PreflightError("Frozen prefix-cache plan does not match its protocol")
+    for case, (expected_id, expected_target) in zip(cases, expected_cases, strict=True):
+        try:
+            fields = vars(case)
+        except TypeError as error:
+            raise PreflightError(
+                "Frozen prefix-cache case is not a typed plan object"
+            ) from error
+        if set(fields) != expected_case_fields:
+            raise PreflightError("Frozen prefix-cache case schema does not match protocol")
+        case_id = fields["case_id"]
+        if (
+            fields["id"] != expected_id
+            or fields["kind"] != "cache"
+            or type(fields["requires"]) is not list
+            or fields["requires"] != ["chat"]
+            or type(fields["warmups"]) is not int
+            or fields["warmups"] != 0
+            or type(fields["repetitions"]) is not int
+            or fields["repetitions"] != 5
+            or type(fields["max_output_tokens"]) is not int
+            or fields["max_output_tokens"] != 128
+            or type(fields["max_turns"]) is not int
+            or fields["max_turns"] != 1
+            or type(fields["temperature"]) is not float
+            or fields["temperature"] != 0.0
+            or type(fields["concurrency"]) is not int
+            or fields["concurrency"] != 1
+            or type(fields["prompt_repetitions"]) is not int
+            or fields["prompt_repetitions"] != expected_target
+            or not isinstance(case_id, str)
+            or re.fullmatch(rf"{re.escape(expected_id)}--[0-9a-f]{{12}}", case_id)
+            is None
+        ):
+            raise PreflightError("Frozen prefix-cache case does not match protocol")
+        required_context = expected_target * 6 + 128 + 1_024
+        if required_context > getattr(model, "max_context") or required_context > getattr(
+            model, "native_context"
+        ):
+            raise PreflightError("Frozen prefix-cache context admission is insufficient")
+    raw_arguments = getattr(model, "args", None)
+    if not isinstance(raw_arguments, list) or not all(
+        isinstance(argument, str) for argument in raw_arguments
+    ):
+        raise PreflightError("Frozen prefix-cache arguments must be a JSON string list")
+    arguments = tuple(raw_arguments)
+    if arguments != prefix_cache_llamacpp_args(mode):
+        raise PreflightError(
+            "Frozen prefix-cache arguments do not match the exact protocol"
+        )
+
+
 def execute_plan(
     run_dir: Path,
     *,
@@ -1816,7 +2434,9 @@ def execute_plan(
         raise PreflightError(
             f"{model.backend} direct profiles require the {direct_command} command"
         )
-    cases = [_namespace(case) for case in plan["suite"]["cases"]]
+    suite = _namespace(plan["suite"])
+    cases = list(suite.cases)
+    _validate_prefix_cache_plan_selection(model, suite)
     journal = Journal(run_dir / "events.jsonl")
     completed = journal.completed_cases()
     terminal = journal.terminal_cases()

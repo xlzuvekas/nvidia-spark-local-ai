@@ -827,6 +827,7 @@ def _cross_validate_model(campaign: CampaignSpec, model: Any) -> None:
         "mmproj_file": None,
         "mmproj_digest": None,
         "mmproj_size_bytes": None,
+        "prefix_cache_mode": None,
         "support_status": "spark_other_backend",
     }
     locators_valid = (

@@ -578,6 +578,88 @@ args = [
 ]
 
 [[models]]
+id = "qwen36-35b-a3b-ud-q4-k-xl-llamacpp-prefix-cache-off"
+description = "Dedicated single-slot Qwen3.6 native prompt-KV cache-off control."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+revision = "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d"
+served_name = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "qwen35moe"
+quantization = "ud-q4_k_xl"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1"
+model_size_bytes = 22853663008
+runtime_binary = "~/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 1
+runtime_source_dir = "~/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 262144
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 100.0
+endpoint = "http://127.0.0.1:8000/v1"
+prefix_cache_mode = "off"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+  "--no-cache-prompt",
+]
+
+[[models]]
+id = "qwen36-35b-a3b-ud-q4-k-xl-llamacpp-prefix-cache-on"
+description = "Dedicated single-slot Qwen3.6 native prompt-KV cache-on treatment."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+revision = "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d"
+served_name = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "qwen35moe"
+quantization = "ud-q4_k_xl"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1"
+model_size_bytes = 22853663008
+runtime_binary = "~/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 1
+runtime_source_dir = "~/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 262144
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 100.0
+endpoint = "http://127.0.0.1:8000/v1"
+prefix_cache_mode = "on"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+  "--cache-prompt",
+]
+
+[[models]]
 id = "qwen36-35b-a3b-ud-q4-k-xl-llamacpp-p8"
 description = "Eight-slot 32K-context Unsloth Qwen3.6 MoE Q4_K_XL GGUF throughput profile without speculation."
 support_status = "spark_other_backend"
@@ -736,6 +818,88 @@ args = [
   "--cache-type-v", "q8_0",
   "--jinja",
   "--reasoning", "off",
+]
+
+[[models]]
+id = "qwen38-27b-ud-q4-k-xl-llamacpp-long-context-prefix-cache-off"
+description = "Dedicated single-slot Qwen3.8 262K native prompt-KV cache-off control."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.8-27B-GGUF"
+revision = "f1bfb127c64f7072bdd2cad55f258b9c8b2910fe"
+served_name = "unsloth/Qwen3.8-27B-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "dense"
+quantization = "ud-q4_k_xl"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.8-27B-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372"
+model_size_bytes = 17923394624
+runtime_binary = "~/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 1
+runtime_source_dir = "~/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 262144
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 96.0
+endpoint = "http://127.0.0.1:8000/v1"
+prefix_cache_mode = "off"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+  "--no-cache-prompt",
+]
+
+[[models]]
+id = "qwen38-27b-ud-q4-k-xl-llamacpp-long-context-prefix-cache-on"
+description = "Dedicated single-slot Qwen3.8 262K native prompt-KV cache-on treatment."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.8-27B-GGUF"
+revision = "f1bfb127c64f7072bdd2cad55f258b9c8b2910fe"
+served_name = "unsloth/Qwen3.8-27B-GGUF"
+tasks = ["chat", "json", "tools"]
+architecture = "dense"
+quantization = "ud-q4_k_xl"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.8-27B-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372"
+model_size_bytes = 17923394624
+runtime_binary = "~/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 1
+runtime_source_dir = "~/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 262144
+native_context = 262144
+startup_timeout_s = 600
+estimated_ram_gib = 96.0
+endpoint = "http://127.0.0.1:8000/v1"
+prefix_cache_mode = "on"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+  "--cache-prompt",
 ]
 
 [[models]]

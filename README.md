@@ -10,6 +10,7 @@ quality checks, and the provenance needed to interpret each number.
 | --- | --- |
 | Which MoE models are useful on Spark now? | [MoE landscape, including Laguna XS/S, G9v3, NInfer, and the dense Muse control](docs/moe-landscape-2026-08-17.md) |
 | Which models complete deterministic multi-turn tool tasks? | [Agentic tool-use results: strict success, trace correctness, MTP, and Laguna](docs/agentic-tools-results-2026-08-17.md) |
+| How does Qwen3.6 perform on a strict two-hop long-context needle? | [Two-hop retrieval: Qwen3.6 baseline versus MTP2 through the 245,760-target tier](docs/multihop-long-context-results-2026-08-18.md) |
 | How did Qwen3-Coder-Next fare on terminal coding tasks? | [Harbor/Terminal-Bench-derived results: Qwen Code versus OpenCode](docs/harbor-terminal-results-2026-08-18.md) |
 | How are offline coding-agent harnesses compared? | [Qwen3-Coder-Next Harbor campaign protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign) |
 | What ran in the 2026-08-17 overnight campaign? | [Unsloth Qwen3.6/Qwen3.8, DSpark, perplexity, long context, and Muse DFlash](docs/benchmark-results-2026-08-17.md) |
@@ -77,6 +78,9 @@ geometries, slot counts, or validation states.
 
 ### Measured results
 
+- [Qwen3.6 two-hop long-context retrieval — 2026-08-18](docs/multihop-long-context-results-2026-08-18.md):
+  matched baseline and MTP2 measurements through the 245,760-target tier,
+  with exact final-key validation, timing, and lifetime draft-token counters.
 - [Qwen3-Coder-Next Harbor terminal results — 2026-08-18](docs/harbor-terminal-results-2026-08-18.md):
   two complete replicates of a fixed six-task Terminal-Bench 2.1 subset through
   Qwen Code and OpenCode, with strict rewards, failure labels, infrastructure

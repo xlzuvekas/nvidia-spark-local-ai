@@ -27,6 +27,15 @@ from typing import Any, Sequence
 import unicodedata
 
 from .manifest import KNOWN_AGENTIC_CASE_IDS
+from .prefix_cache_protocol import (
+    PREFIX_CACHE_CONTEXT_TOKENS,
+    PREFIX_CACHE_PREFIX_TARGETS,
+    PREFIX_CACHE_PROTOCOL,
+    PREFIX_CACHE_SUITE_ID,
+    prefix_cache_conditions,
+    prefix_cache_steps,
+)
+from .report import _summarize_prefix_cache_case
 
 
 SCHEMA_VERSION = "sparkbench-evidence-v1"
@@ -223,7 +232,11 @@ _REQUEST_NUMERIC_FIELDS = {
     "batch_size",
     "block_generation_blocks_per_s",
     "block_generation_output_tps",
+    "cache_pair_index",
+    "cache_step_ordinal",
+    "cache_prefix_target_words",
     "candidate_count",
+    "cached_prompt_tokens",
     "character_edit_distance",
     "character_error_rate",
     "completion_tokens",
@@ -241,6 +254,11 @@ _REQUEST_NUMERIC_FIELDS = {
     "nfe_per_block",
     "nfe_per_output_token",
     "nfe_per_s",
+    "native_cached_prompt_tokens",
+    "native_decode_s",
+    "native_decode_tokens",
+    "native_prompt_s",
+    "native_prompt_tokens",
     "normalized_output_length",
     "output_blocks",
     "output_tokens",
@@ -253,6 +271,10 @@ _REQUEST_NUMERIC_FIELDS = {
     "repetition",
     "seed",
     "server_prompt_s",
+    "server_cached_prompt_tokens",
+    "server_decode_s",
+    "server_decode_tokens",
+    "server_prompt_tokens",
     "similarity_margin",
     "temperature",
     "top_index",
@@ -269,6 +291,9 @@ _REQUEST_BOOLEAN_FIELDS = {
 _REQUEST_NUMERIC_SEQUENCE_FIELDS = {"norms", "ranking", "scores"}
 _REQUEST_STRING_FIELDS = {
     "block_generation_metric_source",
+    "cache_condition",
+    "cache_prompt_control",
+    "cache_profile_mode",
     "decode_metric_source",
     "finish_reason",
 }
@@ -284,6 +309,72 @@ _REQUEST_DROPPED_FIELDS = {
     "token_ids_sha256",
     "tool_calls",
 }
+
+# The native llama.cpp prefix-KV experiment is intentionally narrower than a
+# generic serving result.  Keeping this contract separate prevents an
+# otherwise allowlisted metric (for example an audio score) from quietly
+# becoming part of the cache evidence corpus.
+_PREFIX_CACHE_RAW_RESULT_FIELDS = frozenset(
+    {
+        "cache_condition",
+        "cache_pair_index",
+        "cache_prefix_target_words",
+        "cache_profile_mode",
+        "cache_prompt_control",
+        "cache_step_ordinal",
+        "cached_prompt_tokens",
+        "completion_tokens",
+        "decode_metric_source",
+        "decode_s",
+        "decode_tps",
+        "elapsed_s",
+        "emission_events",
+        "finish_reason",
+        "native_cached_prompt_tokens",
+        "native_decode_s",
+        "native_decode_tokens",
+        "native_prompt_s",
+        "native_prompt_tokens",
+        "output_tps",
+        "prompt_tokens",
+        "reasoning_tokens",
+        "server_cached_prompt_tokens",
+        "server_decode_s",
+        "server_decode_tokens",
+        "server_prompt_s",
+        "server_prompt_tokens",
+        "ttft_s",
+    }
+)
+_PREFIX_CACHE_RAW_RESULT_INTEGER_FIELDS = frozenset(
+    {
+        "cache_pair_index",
+        "cache_prefix_target_words",
+        "cache_step_ordinal",
+        "cached_prompt_tokens",
+        "completion_tokens",
+        "emission_events",
+        "native_cached_prompt_tokens",
+        "native_decode_tokens",
+        "native_prompt_tokens",
+        "prompt_tokens",
+        "server_cached_prompt_tokens",
+        "server_decode_tokens",
+        "server_prompt_tokens",
+    }
+)
+_PREFIX_CACHE_RAW_RESULT_POSITIVE_INTEGER_FIELDS = frozenset(
+    {
+        "cache_pair_index",
+        "cache_prefix_target_words",
+        "cache_step_ordinal",
+        "completion_tokens",
+        "emission_events",
+        "native_decode_tokens",
+        "prompt_tokens",
+        "server_decode_tokens",
+    }
+)
 
 _AGENTIC_RESULT_FIELDS = frozenset(
     {
@@ -447,6 +538,7 @@ _CASE_FIELDS = {
     "exact_matches",
     "kind",
     "measured_wall_time_s",
+    "measurement_annotation_count",
     "measurement_valid",
     "median_approximate_prefill_tps",
     "median_agentic_first_turn_ttft_s",
@@ -492,6 +584,7 @@ _CASE_FIELDS = {
     "p95_prefill_tps",
     "p95_ttft_s",
     "prefill_metric_source",
+    "prefix_cache",
     "prompt_tokens",
     "prompt_tokens_per_sampled_joule",
     "quality_accuracy",
@@ -536,7 +629,7 @@ _CASE_BOOLEAN_FIELDS = {
     "rerank_validation_passed",
     "validation_passed",
 }
-_CASE_OBJECT_FIELDS = {"quality_accuracy_by_category", "telemetry"}
+_CASE_OBJECT_FIELDS = {"prefix_cache", "quality_accuracy_by_category", "telemetry"}
 _CASE_NULLABLE_FIELDS = {
     "agentic_sampled_energy_j_per_solved_task",
     "aggregate_output_tps",
@@ -545,6 +638,7 @@ _CASE_NULLABLE_FIELDS = {
     "decode_metric_source",
     "median_approximate_prefill_tps",
     "median_decode_tps",
+    "median_e2e_s",
     "median_elapsed_s",
     "median_estimated_decode_tps",
     "median_output_tps",
@@ -1582,7 +1676,14 @@ def _project_model(plan: dict[str, Any], summary: dict[str, Any] | None) -> dict
     if not isinstance(model, dict):
         return {}
     result: dict[str, Any] = {}
-    for key in ("id", "backend", "architecture", "quantization", "source"):
+    for key in (
+        "id",
+        "backend",
+        "architecture",
+        "prefix_cache_mode",
+        "quantization",
+        "source",
+    ):
         if model.get(key) is not None:
             result[key] = _safe_id(model[key], name=f"model.{key}")
     if model.get("revision") is not None:
@@ -1607,6 +1708,8 @@ def _project_model(plan: dict[str, Any], summary: dict[str, Any] | None) -> dict
     tasks = model.get("tasks")
     if isinstance(tasks, list):
         result["tasks"] = [_safe_id(item, name="model.task") for item in tasks]
+    if result.get("prefix_cache_mode") is not None:
+        return _project_prefix_cache_model(result)
     return result
 
 
@@ -1753,6 +1856,8 @@ def _project_suite(plan: dict[str, Any]) -> dict[str, Any] | None:
             else:
                 projected[key] = _finite(value, name=f"suite.case.{key}")
         result["cases"].append(projected)
+    if result["id"] == PREFIX_CACHE_SUITE_ID:
+        return _project_prefix_cache_suite(result)
     return result
 
 
@@ -2285,11 +2390,81 @@ def _validate_projected_agentic_sample(sample: Any) -> None:
         raise EvidenceError("agentic sample burst and task wall times disagree")
 
 
+def _project_prefix_cache_request_result(result: Any) -> dict[str, Any]:
+    """Project the fixed, scalar-only native cache measurement record.
+
+    This is deliberately not a specialization of the broad serving-result
+    allowlist.  A cache result is protocol evidence, so every retained field
+    is named here and token counters retain their original JSON integer type.
+    """
+
+    if not isinstance(result, dict) or set(result) != _PREFIX_CACHE_RAW_RESULT_FIELDS:
+        raise EvidenceError("prefix-cache request result does not match its exact schema")
+
+    projected: dict[str, Any] = {}
+    for key in _PREFIX_CACHE_RAW_RESULT_INTEGER_FIELDS:
+        target = "emission_event_count" if key == "emission_events" else key
+        projected[target] = _prefix_cache_integer(
+            result.get(key),
+            name=f"prefix-cache request.{key}",
+            positive=key in _PREFIX_CACHE_RAW_RESULT_POSITIVE_INTEGER_FIELDS,
+        )
+    for key in (
+        "decode_s",
+        "decode_tps",
+        "elapsed_s",
+        "native_decode_s",
+        "native_prompt_s",
+        "output_tps",
+        "server_decode_s",
+        "server_prompt_s",
+        "ttft_s",
+    ):
+        value = _finite(result.get(key), name=f"prefix-cache request.{key}")
+        if value is None or value < 0 or (
+            key in {"decode_s", "elapsed_s", "native_decode_s", "server_decode_s"}
+            and value <= 0
+        ):
+            raise EvidenceError(f"prefix-cache request.{key} is invalid")
+        projected[key] = value
+    reasoning = result.get("reasoning_tokens")
+    projected["reasoning_tokens"] = (
+        None
+        if reasoning is None
+        else _prefix_cache_integer(
+            reasoning, name="prefix-cache request.reasoning_tokens"
+        )
+    )
+    for key in (
+        "cache_condition",
+        "cache_profile_mode",
+        "cache_prompt_control",
+        "decode_metric_source",
+    ):
+        projected[key] = _safe_id(result.get(key), name=f"prefix-cache request.{key}")
+    if projected["cache_profile_mode"] not in {"off", "on"}:
+        raise EvidenceError("prefix-cache request has an invalid profile mode")
+    if projected["decode_metric_source"] != "client_estimate":
+        raise EvidenceError("prefix-cache request must use the client decode metric")
+    if result.get("finish_reason") != "length":
+        raise EvidenceError("prefix-cache request must be length terminated")
+    projected["finish_reason"] = "length"
+    source_projection = {
+        "emission_events" if key == "emission_event_count" else key: value
+        for key, value in projected.items()
+    }
+    if not _json_strict_equal(source_projection, result):
+        raise EvidenceError("prefix-cache request result projection changed")
+    return projected
+
+
 def _project_request_result(
     result: Any, *, kind: str | None = None
 ) -> dict[str, Any]:
     if kind == "agentic":
         return _project_agentic_request_result(result)
+    if kind == "cache":
+        return _project_prefix_cache_request_result(result)
     if not isinstance(result, dict):
         raise EvidenceError("request result must be an object")
     unknown = set(result) - (
@@ -2945,9 +3120,1071 @@ def _validate_agentic_case(case: dict[str, Any]) -> None:
         raise EvidenceError("agentic case has energy metrics without sampled energy")
 
 
+def _prefix_cache_integer(value: Any, *, name: str, positive: bool = False) -> int:
+    # These fields originate as native token/counter values.  Do not accept an
+    # integral float here: cache evidence must retain the distinction between
+    # a server-reported JSON integer and a value that was coerced somewhere in
+    # the publication path.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise EvidenceError(f"{name} must be an integer")
+    result = value
+    if result < 0 or (positive and result <= 0):
+        raise EvidenceError(f"{name} must be non-negative")
+    return result
+
+
+def _project_prefix_cache_metrics(value: Any) -> dict[str, Any]:
+    """Project the exact scalar report for the native same-slot KV protocol."""
+
+    if not isinstance(value, dict):
+        raise EvidenceError("prefix-cache summary must be an object")
+    mode = value.get("profile_mode")
+    expected_root = {
+        "protocol",
+        "profile_mode",
+        "prefix_target_words",
+        "case_session_wall_s",
+        "conditions",
+        "paired_second_to_third",
+    }
+    if set(value) != expected_root:
+        raise EvidenceError("prefix-cache summary does not match its exact schema")
+    if value.get("protocol") != PREFIX_CACHE_PROTOCOL:
+        raise EvidenceError("prefix-cache protocol identifier changed")
+    if mode not in {"off", "on"}:
+        raise EvidenceError("prefix-cache profile mode is invalid")
+
+    prefix_target = _prefix_cache_integer(
+        value.get("prefix_target_words"),
+        name="prefix_cache.prefix_target_words",
+        positive=True,
+    )
+    session_wall_s = _finite(
+        value.get("case_session_wall_s"), name="prefix_cache.case_session_wall_s"
+    )
+    if session_wall_s is None or session_wall_s <= 0:
+        raise EvidenceError("prefix-cache session wall must be positive")
+    conditions = value.get("conditions")
+    steps = prefix_cache_steps(mode)
+    if not isinstance(conditions, list) or len(conditions) != len(steps):
+        raise EvidenceError("prefix-cache condition count is invalid")
+    condition_fields = {
+        "cache_condition",
+        "cache_prompt_control",
+        "protocol_step_ordinal",
+        "request_count",
+        "logical_prompt_tokens",
+        "physical_uncached_prompt_tokens",
+        "cached_prompt_tokens",
+        "cache_hit_fraction",
+        "native_prompt_processing_s",
+        "native_decode_s",
+        "native_decode_tps",
+        "logical_prompt_tokens_per_native_prompt_s",
+        "physical_uncached_prompt_tokens_per_native_prompt_s",
+        "condition_request_wall_s",
+        "end_to_end_output_tokens_per_condition_request_wall_s",
+        "median_ttft_s",
+        "median_e2e_s",
+        "median_client_decode_tps",
+    }
+    projected_conditions: list[dict[str, Any]] = []
+    for ordinal, ((expected_condition, _, expected_control), condition) in enumerate(
+        zip(steps, conditions), start=1
+    ):
+        if not isinstance(condition, dict) or set(condition) != condition_fields:
+            raise EvidenceError("prefix-cache condition does not match its schema")
+        if (
+            condition.get("cache_condition") != expected_condition
+            or condition.get("cache_prompt_control") != expected_control
+            or _prefix_cache_integer(
+                condition.get("protocol_step_ordinal"),
+                name="prefix_cache.protocol_step_ordinal",
+                positive=True,
+            )
+            != ordinal
+        ):
+            raise EvidenceError("prefix-cache conditions are not in protocol order")
+        request_count = _prefix_cache_integer(
+            condition.get("request_count"),
+            name="prefix_cache.request_count",
+            positive=True,
+        )
+        if request_count != 5:
+            raise EvidenceError("prefix-cache condition must contain five requests")
+        logical_tokens = _prefix_cache_integer(
+            condition.get("logical_prompt_tokens"),
+            name="prefix_cache.logical_prompt_tokens",
+            positive=True,
+        )
+        physical_tokens = _prefix_cache_integer(
+            condition.get("physical_uncached_prompt_tokens"),
+            name="prefix_cache.physical_uncached_prompt_tokens",
+        )
+        cached_tokens = _prefix_cache_integer(
+            condition.get("cached_prompt_tokens"),
+            name="prefix_cache.cached_prompt_tokens",
+        )
+        if physical_tokens + cached_tokens != logical_tokens:
+            raise EvidenceError("prefix-cache logical and physical prompt totals disagree")
+        cache_fraction = _finite(
+            condition.get("cache_hit_fraction"), name="prefix_cache.cache_hit_fraction"
+        )
+        if (
+            cache_fraction is None
+            or not 0 <= cache_fraction <= 1
+            or not math.isclose(
+                float(cache_fraction),
+                cached_tokens / logical_tokens,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+        ):
+            raise EvidenceError("prefix-cache hit fraction is inconsistent")
+        prompt_s = _finite(
+            condition.get("native_prompt_processing_s"),
+            name="prefix_cache.native_prompt_processing_s",
+        )
+        decode_s = _finite(
+            condition.get("native_decode_s"), name="prefix_cache.native_decode_s"
+        )
+        condition_wall_s = _finite(
+            condition.get("condition_request_wall_s"),
+            name="prefix_cache.condition_request_wall_s",
+        )
+        if (
+            prompt_s is None
+            or prompt_s < 0
+            or decode_s is None
+            or decode_s <= 0
+            or condition_wall_s is None
+            or condition_wall_s <= 0
+        ):
+            raise EvidenceError("prefix-cache native timing or request wall is invalid")
+        projected: dict[str, Any] = {
+            "cache_condition": expected_condition,
+            "cache_prompt_control": expected_control,
+            "protocol_step_ordinal": ordinal,
+            "request_count": request_count,
+            "logical_prompt_tokens": logical_tokens,
+            "physical_uncached_prompt_tokens": physical_tokens,
+            "cached_prompt_tokens": cached_tokens,
+            "cache_hit_fraction": cache_fraction,
+            "native_prompt_processing_s": prompt_s,
+            "native_decode_s": decode_s,
+            "condition_request_wall_s": condition_wall_s,
+        }
+        for field in (
+            "native_decode_tps",
+            "end_to_end_output_tokens_per_condition_request_wall_s",
+            "median_ttft_s",
+            "median_e2e_s",
+            "median_client_decode_tps",
+        ):
+            item = _finite(condition.get(field), name=f"prefix_cache.{field}")
+            if item is None or item < 0:
+                raise EvidenceError(f"prefix-cache {field} must be non-negative")
+            projected[field] = item
+        for field in (
+            "logical_prompt_tokens_per_native_prompt_s",
+            "physical_uncached_prompt_tokens_per_native_prompt_s",
+        ):
+            item = _finite(condition.get(field), name=f"prefix_cache.{field}")
+            if prompt_s == 0:
+                if item is not None:
+                    raise EvidenceError("prefix-cache zero native prompt time needs null rates")
+            elif item is None or item < 0:
+                raise EvidenceError("prefix-cache native prompt rate is invalid")
+            projected[field] = item
+        if expected_condition.startswith("forced-cold") and cached_tokens != 0:
+            raise EvidenceError("prefix-cache forced-cold condition reused tokens")
+        if expected_condition == "warm-prefix-hit" and cache_fraction < 0.90:
+            raise EvidenceError("prefix-cache warm condition did not prove substantial reuse")
+        projected_conditions.append(projected)
+
+    paired = value.get("paired_second_to_third")
+    paired_fields = {
+        "paired_blocks",
+        "second_condition",
+        "third_condition",
+        "per_pair",
+        "median_ttft_second_minus_third_s",
+        "median_e2e_second_minus_third_s",
+        "median_native_prompt_second_minus_third_s",
+    }
+    if not isinstance(paired, dict) or set(paired) != paired_fields:
+        raise EvidenceError("prefix-cache paired summary does not match its schema")
+    expected_third = prefix_cache_conditions(mode)[2]
+    if (
+        _prefix_cache_integer(
+            paired.get("paired_blocks"),
+            name="prefix_cache.paired_blocks",
+            positive=True,
+        )
+        != 5
+        or paired.get("second_condition") != "forced-cold-b"
+        or paired.get("third_condition") != expected_third
+        or not isinstance(paired.get("per_pair"), list)
+    ):
+        raise EvidenceError("prefix-cache paired protocol is invalid")
+    pair_fields = {
+        "cache_pair_index",
+        "ttft_second_minus_third_s",
+        "e2e_second_minus_third_s",
+        "native_prompt_second_minus_third_s",
+    }
+    projected_pairs: list[dict[str, Any]] = []
+    for expected_index, item in enumerate(paired["per_pair"], start=1):
+        if not isinstance(item, dict) or set(item) != pair_fields:
+            raise EvidenceError("prefix-cache paired observation schema is invalid")
+        if _prefix_cache_integer(
+            item.get("cache_pair_index"),
+            name="prefix_cache.cache_pair_index",
+            positive=True,
+        ) != expected_index:
+            raise EvidenceError("prefix-cache paired observations are not ordered")
+        projected_item: dict[str, Any] = {"cache_pair_index": expected_index}
+        for field in pair_fields - {"cache_pair_index"}:
+            scalar = _finite(item.get(field), name=f"prefix_cache.{field}")
+            if scalar is None:
+                raise EvidenceError("prefix-cache paired observation is invalid")
+            projected_item[field] = scalar
+        projected_pairs.append(projected_item)
+    if len(projected_pairs) != 5:
+        raise EvidenceError("prefix-cache paired summary must contain five blocks")
+    projected_paired: dict[str, Any] = {
+        "paired_blocks": 5,
+        "second_condition": "forced-cold-b",
+        "third_condition": expected_third,
+        "per_pair": projected_pairs,
+    }
+    for field in paired_fields - {
+        "paired_blocks",
+        "second_condition",
+        "third_condition",
+        "per_pair",
+    }:
+        scalar = _finite(paired.get(field), name=f"prefix_cache.{field}")
+        if scalar is None:
+            raise EvidenceError("prefix-cache paired summary is invalid")
+        projected_paired[field] = scalar
+    return {
+        "protocol": PREFIX_CACHE_PROTOCOL,
+        "profile_mode": mode,
+        "prefix_target_words": prefix_target,
+        "case_session_wall_s": session_wall_s,
+        "conditions": projected_conditions,
+        "paired_second_to_third": projected_paired,
+    }
+
+
+_PREFIX_CACHE_MODEL_FIELDS = frozenset(
+    {
+        "architecture",
+        "backend",
+        "estimated_ram_gib",
+        "id",
+        "lifecycle",
+        "max_context",
+        "native_context",
+        "prefix_cache_mode",
+        "quantization",
+        "revision",
+        "runtime_parallel",
+        "source",
+        "startup_timeout_s",
+        "support_status",
+        "tasks",
+        "weight_file_count",
+        "weight_size_bytes",
+    }
+)
+_PREFIX_CACHE_MODEL_REQUIRED_FIELDS = frozenset(
+    {
+        "architecture",
+        "backend",
+        "id",
+        "lifecycle",
+        "max_context",
+        "native_context",
+        "prefix_cache_mode",
+        "quantization",
+        "revision",
+        "runtime_parallel",
+        "source",
+        "startup_timeout_s",
+        "support_status",
+        "tasks",
+    }
+)
+_PREFIX_CACHE_SUITE_FIELDS = frozenset({"cases", "id", "schema_version"})
+_PREFIX_CACHE_SUITE_CASE_FIELDS = frozenset(
+    {
+        "case_id",
+        "concurrency",
+        "id",
+        "kind",
+        "max_output_tokens",
+        "max_turns",
+        "prompt_repetitions",
+        "repetitions",
+        "requires",
+        "temperature",
+        "warmups",
+    }
+)
+_PREFIX_CACHE_CASE_FIELDS = frozenset(
+    {
+        "case_id",
+        "completion_tokens",
+        "concurrency",
+        "elapsed_s",
+        "kind",
+        "measurement_annotation_count",
+        "measurement_valid",
+        "prefix_cache",
+        "prompt_tokens",
+        "reasoning_tokens",
+        "requests",
+        "validation_passed",
+    }
+)
+_PREFIX_CACHE_RAW_CASE_FIELDS = (
+    _PREFIX_CACHE_CASE_FIELDS - {"measurement_annotation_count"}
+) | frozenset({"attempt_id", "measurement_annotations"})
+_PREFIX_CACHE_SAMPLE_FIELDS = frozenset(
+    {
+        "burst_elapsed_s",
+        "cache_condition",
+        "cache_pair_index",
+        "cache_prefix_target_words",
+        "cache_profile_mode",
+        "cache_prompt_control",
+        "cache_step_ordinal",
+        "cached_prompt_tokens",
+        "case_attempt",
+        "case_id",
+        "case_sample_index",
+        "completion_tokens",
+        "decode_metric_source",
+        "decode_s",
+        "decode_tps",
+        "elapsed_s",
+        "emission_event_count",
+        "finish_reason",
+        "kind",
+        "native_cached_prompt_tokens",
+        "native_decode_s",
+        "native_decode_tokens",
+        "native_prompt_s",
+        "native_prompt_tokens",
+        "output_tps",
+        "prompt_tokens",
+        "reasoning_tokens",
+        "repetition",
+        "sample_index",
+        "sample_type",
+        "selected_attempt",
+        "server_cached_prompt_tokens",
+        "server_decode_s",
+        "server_decode_tokens",
+        "server_prompt_s",
+        "server_prompt_tokens",
+        "ttft_s",
+        "validation_passed",
+    }
+)
+_PREFIX_CACHE_SUMMARY_FIELDS = frozenset(
+    {
+        "cases",
+        "completed_cases",
+        "run_completion_status",
+        "startup_measurement_valid",
+        "status",
+        "suite",
+    }
+)
+_PREFIX_CACHE_SUMMARY_SOURCE_EMPTY_LIST_FIELDS = frozenset(
+    {
+        "context_limited_cases",
+        "failed_cases",
+        "measurement_invalid_cases",
+        "unimplemented_cases",
+        "unsupported_cases",
+        "validation_failed_cases",
+    }
+)
+_PREFIX_CACHE_SUMMARY_SOURCE_ZERO_FIELDS = frozenset(
+    {
+        "measurement_annotations_count",
+        "startup_measurement_annotations_count",
+    }
+)
+_PREFIX_CACHE_SUMMARY_SOURCE_DROPPED_FIELDS = frozenset(
+    {
+        "artifact_validation",
+        "artifact_validation_telemetry",
+        "first_request",
+        "first_request_telemetry",
+        "shutdown_telemetry",
+        "startup_telemetry",
+    }
+)
+_PREFIX_CACHE_SUMMARY_SOURCE_NULL_FIELDS = frozenset(
+    {"llamacpp_dflash_evidence", "llamacpp_mtp_evidence", "speculative_decoding"}
+)
+
+# A cache result is a tightly scoped protocol bundle rather than a generic
+# serving report.  In particular, do not let the broad generic manifest grow
+# an unreviewed field which could carry trace text or another non-protocol
+# value after its checksums have been refreshed.  The source manifest has one
+# extra runtime-only field (``versions``) which is intentionally discarded;
+# the published cache manifest is reconstructed from this smaller contract.
+_PREFIX_CACHE_MANIFEST_REQUIRED_FIELDS = frozenset(
+    {
+        "artifacts",
+        "evidence_kind",
+        "lifecycle",
+        "model",
+        "run_date_utc",
+        "runtime",
+        "sanitization",
+        "schema_version",
+        "source_run_id",
+        "status",
+        "suite",
+    }
+)
+_PREFIX_CACHE_MANIFEST_OPTIONAL_FIELDS = frozenset({"hardware", "matrix_id"})
+_PREFIX_CACHE_RUNTIME_FIELDS = frozenset(
+    {
+        "backend",
+        "binary_sha256",
+        "image",
+        "image_sha256",
+        "lifecycle",
+        "recipe_revision",
+        "runtime_revision",
+        "source_revision",
+    }
+)
+_PREFIX_CACHE_RUNTIME_SOURCE_FIELDS = _PREFIX_CACHE_RUNTIME_FIELDS | frozenset(
+    {"versions"}
+)
+_PREFIX_CACHE_HARDWARE_FIELDS = frozenset(
+    {
+        "compute_capability",
+        "driver_version",
+        "gpu",
+        "harness_revision",
+        "harness_worktree_dirty",
+        "platform",
+        "unified_memory_bytes",
+    }
+)
+_PREFIX_CACHE_ARTIFACT_REQUIRED_FIELDS = frozenset({"role", "sha256", "target"})
+_PREFIX_CACHE_ARTIFACT_FIELDS = _PREFIX_CACHE_ARTIFACT_REQUIRED_FIELDS | frozenset(
+    {"duration_s", "revision", "size_bytes", "source"}
+)
+_PREFIX_CACHE_LIFECYCLE_REQUIRED_FIELDS = frozenset(
+    {"event_count", "event_counts", "terminal", "terminal_event"}
+)
+_PREFIX_CACHE_LIFECYCLE_FIELDS = _PREFIX_CACHE_LIFECYCLE_REQUIRED_FIELDS | frozenset(
+    {"failure", "journal_elapsed_s"}
+)
+_PREFIX_CACHE_SANITIZATION = {
+    "free_form_text_included": False,
+    "payloads_included": False,
+    "policy": SANITIZATION_POLICY,
+    "raw_identifiers_included": False,
+}
+
+def _project_prefix_cache_model(value: Any) -> dict[str, Any]:
+    """Canonicalize the cache profile provenance retained in a manifest."""
+
+    if not isinstance(value, dict):
+        raise EvidenceError("prefix-cache model metadata must be an object")
+    if set(value) - _PREFIX_CACHE_MODEL_FIELDS or not _PREFIX_CACHE_MODEL_REQUIRED_FIELDS <= set(value):
+        raise EvidenceError("prefix-cache model metadata does not match its exact schema")
+    projected: dict[str, Any] = {}
+    for key in (
+        "id",
+        "backend",
+        "architecture",
+        "prefix_cache_mode",
+        "quantization",
+        "source",
+        "lifecycle",
+        "support_status",
+    ):
+        projected[key] = _safe_id(value.get(key), name=f"prefix-cache model.{key}")
+    projected["revision"] = _revision(
+        value.get("revision"), name="prefix-cache model.revision"
+    )
+    if projected["backend"] != "llamacpp":
+        raise EvidenceError("prefix-cache model backend must be llamacpp")
+    if projected["prefix_cache_mode"] not in {"off", "on"}:
+        raise EvidenceError("prefix-cache model mode is invalid")
+    projected["runtime_parallel"] = _prefix_cache_integer(
+        value.get("runtime_parallel"),
+        name="prefix-cache model.runtime_parallel",
+        positive=True,
+    )
+    if projected["runtime_parallel"] != 1:
+        raise EvidenceError("prefix-cache model must use exactly one runtime slot")
+    for key in ("max_context", "native_context", "startup_timeout_s"):
+        projected[key] = _prefix_cache_integer(
+            value.get(key), name=f"prefix-cache model.{key}", positive=True
+        )
+    if (
+        projected["max_context"] != PREFIX_CACHE_CONTEXT_TOKENS
+        or projected["native_context"] != PREFIX_CACHE_CONTEXT_TOKENS
+    ):
+        raise EvidenceError(
+            "prefix-cache model contexts must equal the fixed protocol context"
+        )
+    tasks = value.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        raise EvidenceError("prefix-cache model tasks must be a non-empty list")
+    projected["tasks"] = [
+        _safe_id(task, name="prefix-cache model.task") for task in tasks
+    ]
+    if "chat" not in projected["tasks"]:
+        raise EvidenceError("prefix-cache model must declare chat support")
+    if "estimated_ram_gib" in value:
+        ram = _finite(value["estimated_ram_gib"], name="prefix-cache model.estimated_ram_gib")
+        if ram is None or ram <= 0:
+            raise EvidenceError("prefix-cache model estimated RAM is invalid")
+        projected["estimated_ram_gib"] = ram
+    for key in ("weight_file_count", "weight_size_bytes"):
+        if key in value:
+            projected[key] = _prefix_cache_integer(
+                value[key], name=f"prefix-cache model.{key}", positive=True
+            )
+    if not _json_strict_equal(projected, value):
+        raise EvidenceError("prefix-cache model projection changed")
+    return projected
+
+
+def _project_prefix_cache_suite(value: Any) -> dict[str, Any]:
+    """Retain an exact, typed copy of the fixed cache-suite controls."""
+
+    if not isinstance(value, dict) or set(value) != _PREFIX_CACHE_SUITE_FIELDS:
+        raise EvidenceError("prefix-cache suite does not match its exact schema")
+    if value.get("id") != PREFIX_CACHE_SUITE_ID:
+        raise EvidenceError("prefix-cache suite identifier changed")
+    _prefix_cache_integer(
+        value.get("schema_version"),
+        name="prefix-cache suite.schema_version",
+        positive=True,
+    )
+    if value["schema_version"] != 1:
+        raise EvidenceError("prefix-cache suite schema version is invalid")
+    cases = value.get("cases")
+    if not isinstance(cases, list) or len(cases) != len(PREFIX_CACHE_PREFIX_TARGETS):
+        raise EvidenceError("prefix-cache suite must contain both fixed cases")
+    projected_cases: list[dict[str, Any]] = []
+    observed: dict[str, int] = {}
+    case_ids: set[str] = set()
+    for case in cases:
+        if not isinstance(case, dict) or set(case) != _PREFIX_CACHE_SUITE_CASE_FIELDS:
+            raise EvidenceError("prefix-cache suite case does not match its exact schema")
+        case_name = _safe_id(case.get("id"), name="prefix-cache suite case.id")
+        case_id = _safe_id(case.get("case_id"), name="prefix-cache suite case.case_id")
+        if not re.fullmatch(rf"{re.escape(case_name)}--[0-9a-f]{{12}}", case_id):
+            raise EvidenceError("prefix-cache suite case identifier is invalid")
+        if case.get("kind") != "cache" or case.get("requires") != ["chat"]:
+            raise EvidenceError("prefix-cache suite case classification is invalid")
+        for key, expected in (
+            ("warmups", 0),
+            ("repetitions", 5),
+            ("max_output_tokens", 128),
+            ("max_turns", 1),
+            ("concurrency", 1),
+        ):
+            if _prefix_cache_integer(
+                case.get(key), name=f"prefix-cache suite case.{key}"
+            ) != expected:
+                raise EvidenceError(f"prefix-cache suite case {key} is invalid")
+        temperature = case.get("temperature")
+        if type(temperature) is not float or temperature != 0.0:
+            raise EvidenceError("prefix-cache suite case temperature must be JSON 0.0")
+        target = _prefix_cache_integer(
+            case.get("prompt_repetitions"),
+            name="prefix-cache suite case.prompt_repetitions",
+            positive=True,
+        )
+        if case_name in observed or case_id in case_ids:
+            raise EvidenceError("prefix-cache suite cases are duplicated")
+        observed[case_name] = target
+        case_ids.add(case_id)
+        projected_cases.append(
+            {
+                "case_id": case_id,
+                "concurrency": 1,
+                "id": case_name,
+                "kind": "cache",
+                "max_output_tokens": 128,
+                "max_turns": 1,
+                "prompt_repetitions": target,
+                "repetitions": 5,
+                "requires": ["chat"],
+                "temperature": 0.0,
+                "warmups": 0,
+            }
+        )
+    if observed != PREFIX_CACHE_PREFIX_TARGETS or [
+        case["id"] for case in projected_cases
+    ] != list(PREFIX_CACHE_PREFIX_TARGETS):
+        raise EvidenceError("prefix-cache suite targets do not match protocol")
+    projected = {
+        "cases": projected_cases,
+        "id": PREFIX_CACHE_SUITE_ID,
+        "schema_version": 1,
+    }
+    if not _json_strict_equal(projected, value):
+        raise EvidenceError("prefix-cache suite projection changed")
+    return projected
+
+
+def _project_prefix_cache_artifacts(value: Any) -> list[dict[str, Any]]:
+    """Validate the scalar model/runtime pins retained by a cache bundle."""
+
+    if not isinstance(value, list):
+        raise EvidenceError("prefix-cache artifacts must be a list")
+    projected: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in value:
+        if (
+            not isinstance(item, dict)
+            or set(item) - _PREFIX_CACHE_ARTIFACT_FIELDS
+            or not _PREFIX_CACHE_ARTIFACT_REQUIRED_FIELDS <= set(item)
+        ):
+            raise EvidenceError("prefix-cache artifact does not match its exact schema")
+        artifact = {
+            "role": _safe_id(item.get("role"), name="prefix-cache artifact.role"),
+            "sha256": _sha256(item.get("sha256"), name="prefix-cache artifact.sha256"),
+            "target": _safe_id(item.get("target"), name="prefix-cache artifact.target"),
+        }
+        if "size_bytes" in item:
+            artifact["size_bytes"] = _prefix_cache_integer(
+                item["size_bytes"],
+                name="prefix-cache artifact.size_bytes",
+                positive=True,
+            )
+        if "source" in item:
+            artifact["source"] = _safe_id(
+                item["source"], name="prefix-cache artifact.source"
+            )
+        if "revision" in item:
+            artifact["revision"] = _revision(
+                item["revision"], name="prefix-cache artifact.revision"
+            )
+        if "duration_s" in item:
+            duration_s = _finite(
+                item["duration_s"], name="prefix-cache artifact.duration_s"
+            )
+            if duration_s is None or duration_s < 0:
+                raise EvidenceError("prefix-cache artifact duration is invalid")
+            artifact["duration_s"] = duration_s
+        key = (artifact["role"], artifact["sha256"], artifact["target"])
+        if key in seen:
+            raise EvidenceError("prefix-cache artifacts are duplicated")
+        seen.add(key)
+        projected.append(artifact)
+    if projected != sorted(
+        projected, key=lambda item: (item["role"], item["sha256"], item["target"])
+    ):
+        raise EvidenceError("prefix-cache artifacts are not in canonical order")
+    roles = {item["role"] for item in projected}
+    if not {"model", "runtime_binary"} <= roles:
+        raise EvidenceError("prefix-cache artifacts must pin model and runtime binary")
+    if not _json_strict_equal(projected, value):
+        raise EvidenceError("prefix-cache artifact projection changed")
+    return projected
+
+
+def _project_prefix_cache_runtime(
+    value: Any,
+    *,
+    model: dict[str, Any],
+    source: bool,
+) -> dict[str, Any]:
+    """Keep a fixed runtime provenance subset and discard generic versions."""
+
+    allowed = (
+        _PREFIX_CACHE_RUNTIME_SOURCE_FIELDS
+        if source
+        else _PREFIX_CACHE_RUNTIME_FIELDS
+    )
+    if (
+        not isinstance(value, dict)
+        or set(value) - allowed
+        or not {"backend", "lifecycle"} <= set(value)
+    ):
+        raise EvidenceError("prefix-cache runtime does not match its exact schema")
+    projected = {
+        "backend": _safe_id(value.get("backend"), name="prefix-cache runtime.backend"),
+        "lifecycle": _safe_id(
+            value.get("lifecycle"), name="prefix-cache runtime.lifecycle"
+        ),
+    }
+    if (
+        projected["backend"] != "llamacpp"
+        or projected["backend"] != model["backend"]
+        or projected["lifecycle"] != model["lifecycle"]
+    ):
+        raise EvidenceError("prefix-cache runtime does not match the frozen model")
+    for key in ("image",):
+        if key in value:
+            projected[key] = _safe_id(value[key], name=f"prefix-cache runtime.{key}")
+    for key in ("image_sha256", "binary_sha256"):
+        if key in value:
+            projected[key] = _sha256(value[key], name=f"prefix-cache runtime.{key}")
+    for key in ("recipe_revision", "runtime_revision", "source_revision"):
+        if key in value:
+            projected[key] = _revision(value[key], name=f"prefix-cache runtime.{key}")
+    if source and "versions" in value:
+        versions = value["versions"]
+        if not isinstance(versions, dict):
+            raise EvidenceError("prefix-cache source runtime versions must be an object")
+        for key, item in versions.items():
+            _safe_id(key, name="prefix-cache source runtime version key")
+            if isinstance(item, bool) or isinstance(item, (int, float)):
+                _finite(item, name=f"prefix-cache source runtime version.{key}")
+            elif isinstance(item, str) and _VERSION_RE.fullmatch(item):
+                pass
+            else:
+                raise EvidenceError("prefix-cache source runtime version is invalid")
+    if not source and not _json_strict_equal(projected, value):
+        raise EvidenceError("prefix-cache runtime projection changed")
+    return projected
+
+
+def _project_prefix_cache_hardware(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or not value or set(value) - _PREFIX_CACHE_HARDWARE_FIELDS:
+        raise EvidenceError("prefix-cache hardware does not match its exact schema")
+    projected: dict[str, Any] = {}
+    gpu_fields = {"compute_capability", "driver_version", "gpu", "platform"}
+    if set(value) & gpu_fields:
+        if not gpu_fields <= set(value):
+            raise EvidenceError("prefix-cache GPU hardware metadata is incomplete")
+        projected["compute_capability"] = _safe_id(
+            value["compute_capability"], name="prefix-cache hardware.compute_capability"
+        )
+        projected["driver_version"] = _safe_id(
+            value["driver_version"], name="prefix-cache hardware.driver_version"
+        )
+        if value["gpu"] != "NVIDIA GB10" or value["platform"] != "NVIDIA DGX Spark":
+            raise EvidenceError("prefix-cache hardware identity changed")
+        projected["gpu"] = "NVIDIA GB10"
+        projected["platform"] = "NVIDIA DGX Spark"
+    if "unified_memory_bytes" in value:
+        projected["unified_memory_bytes"] = _prefix_cache_integer(
+            value["unified_memory_bytes"],
+            name="prefix-cache hardware.unified_memory_bytes",
+            positive=True,
+        )
+    if "harness_revision" in value:
+        projected["harness_revision"] = _revision(
+            value["harness_revision"], name="prefix-cache hardware.harness_revision"
+        )
+    if "harness_worktree_dirty" in value:
+        if not isinstance(value["harness_worktree_dirty"], bool):
+            raise EvidenceError("prefix-cache hardware worktree flag must be boolean")
+        projected["harness_worktree_dirty"] = value["harness_worktree_dirty"]
+    if not _json_strict_equal(projected, value):
+        raise EvidenceError("prefix-cache hardware projection changed")
+    return projected
+
+
+def _project_prefix_cache_lifecycle(value: Any) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or set(value) - _PREFIX_CACHE_LIFECYCLE_FIELDS
+        or not _PREFIX_CACHE_LIFECYCLE_REQUIRED_FIELDS <= set(value)
+    ):
+        raise EvidenceError("prefix-cache lifecycle does not match its exact schema")
+    event_count = _prefix_cache_integer(
+        value.get("event_count"), name="prefix-cache lifecycle.event_count", positive=True
+    )
+    event_counts = value.get("event_counts")
+    if not isinstance(event_counts, dict) or not event_counts:
+        raise EvidenceError("prefix-cache lifecycle event counts are invalid")
+    projected_counts: dict[str, int] = {}
+    for event, count in event_counts.items():
+        if event not in _KNOWN_EVENTS:
+            raise EvidenceError("prefix-cache lifecycle has an unknown event")
+        projected_counts[event] = _prefix_cache_integer(
+            count, name=f"prefix-cache lifecycle.{event}", positive=True
+        )
+    if (
+        sum(projected_counts.values()) != event_count
+        or projected_counts.get("run_start") != 1
+        or projected_counts.get("run_complete") != 1
+        or value.get("terminal") is not True
+        or value.get("terminal_event") != "run_complete"
+        or "failure" in value
+    ):
+        raise EvidenceError("prefix-cache lifecycle is not a completed protocol run")
+    projected: dict[str, Any] = {
+        "event_count": event_count,
+        "event_counts": dict(sorted(projected_counts.items())),
+        "terminal": True,
+        "terminal_event": "run_complete",
+    }
+    if "journal_elapsed_s" in value:
+        journal_elapsed_s = _finite(
+            value["journal_elapsed_s"], name="prefix-cache lifecycle.journal_elapsed_s"
+        )
+        if journal_elapsed_s is None or journal_elapsed_s < 0:
+            raise EvidenceError("prefix-cache lifecycle elapsed time is invalid")
+        projected["journal_elapsed_s"] = journal_elapsed_s
+    if not _json_strict_equal(projected, value):
+        raise EvidenceError("prefix-cache lifecycle projection changed")
+    return projected
+
+
+def _project_prefix_cache_manifest(
+    value: Any, *, source: bool = False
+) -> dict[str, Any]:
+    """Canonicalize the full outer cache manifest and reject every extra key.
+
+    ``source=True`` admits the generic runtime ``versions`` map only long
+    enough to validate and discard it.  The materialized bundle always uses
+    the exact output schema, and verification invokes this with ``False``.
+    """
+
+    allowed = _PREFIX_CACHE_MANIFEST_REQUIRED_FIELDS | _PREFIX_CACHE_MANIFEST_OPTIONAL_FIELDS
+    if not isinstance(value, dict) or set(value) - allowed or not _PREFIX_CACHE_MANIFEST_REQUIRED_FIELDS <= set(value):
+        raise EvidenceError("prefix-cache manifest does not match its exact schema")
+    schema_version = value.get("schema_version")
+    if schema_version != SCHEMA_VERSION or type(schema_version) is not str:
+        raise EvidenceError("prefix-cache manifest schema version changed")
+    if value.get("evidence_kind") != "serving" or value.get("status") != "complete":
+        raise EvidenceError("prefix-cache manifest is not a completed serving run")
+    source_run_id = _safe_id(
+        value.get("source_run_id"), name="prefix-cache manifest.source_run_id"
+    )
+    if value.get("run_date_utc") != _date_from_run_id(source_run_id):
+        raise EvidenceError("prefix-cache manifest run date does not match its run ID")
+    model = _project_prefix_cache_model(value.get("model"))
+    suite = _project_prefix_cache_suite(value.get("suite"))
+    runtime = _project_prefix_cache_runtime(
+        value.get("runtime"), model=model, source=source
+    )
+    projected: dict[str, Any] = {
+        "artifacts": _project_prefix_cache_artifacts(value.get("artifacts")),
+        "evidence_kind": "serving",
+        "lifecycle": _project_prefix_cache_lifecycle(value.get("lifecycle")),
+        "model": model,
+        "run_date_utc": _date_from_run_id(source_run_id),
+        "runtime": runtime,
+        "sanitization": dict(_PREFIX_CACHE_SANITIZATION),
+        "schema_version": SCHEMA_VERSION,
+        "source_run_id": source_run_id,
+        "status": "complete",
+        "suite": suite,
+    }
+    if not _json_strict_equal(value.get("sanitization"), _PREFIX_CACHE_SANITIZATION):
+        raise EvidenceError("prefix-cache manifest sanitization changed")
+    if "hardware" in value:
+        projected["hardware"] = _project_prefix_cache_hardware(value["hardware"])
+    if "matrix_id" in value:
+        projected["matrix_id"] = _safe_id(
+            value["matrix_id"], name="prefix-cache manifest.matrix_id"
+        )
+    if not source and not _json_strict_equal(projected, value):
+        raise EvidenceError("prefix-cache manifest projection changed")
+    return projected
+
+
+def _project_prefix_cache_case(case: Any) -> dict[str, Any]:
+    """Project only the cache protocol's case-level scalar report."""
+
+    if not isinstance(case, dict) or set(case) not in {
+        _PREFIX_CACHE_CASE_FIELDS,
+        _PREFIX_CACHE_RAW_CASE_FIELDS,
+    }:
+        raise EvidenceError("prefix-cache summary case does not match its exact schema")
+    source_is_canonical = set(case) == _PREFIX_CACHE_CASE_FIELDS
+    raw_annotations = case.get("measurement_annotations")
+    has_count = "measurement_annotation_count" in case
+    if raw_annotations is not None:
+        if not isinstance(raw_annotations, list) or raw_annotations:
+            raise EvidenceError("prefix-cache case must not contain measurement annotations")
+    if has_count and (
+        isinstance(case.get("measurement_annotation_count"), bool)
+        or not isinstance(case.get("measurement_annotation_count"), int)
+        or case.get("measurement_annotation_count") != 0
+    ):
+        raise EvidenceError("prefix-cache case annotation count is invalid")
+    if raw_annotations is None and not has_count:
+        raise EvidenceError("prefix-cache case annotation count is missing")
+    if "attempt_id" in case:
+        _safe_id(case.get("attempt_id"), name="prefix-cache case.attempt_id")
+    projected: dict[str, Any] = {
+        "case_id": _safe_id(case.get("case_id"), name="prefix-cache case.case_id"),
+        "kind": "cache",
+        "measurement_annotation_count": 0,
+        "measurement_valid": True,
+        "validation_passed": True,
+        "prefix_cache": _project_prefix_cache_metrics(case.get("prefix_cache")),
+    }
+    if case.get("kind") != "cache" or case.get("measurement_valid") is not True or case.get("validation_passed") is not True:
+        raise EvidenceError("prefix-cache summary case is not a valid completed cache case")
+    for key, positive in (
+        ("requests", True),
+        ("concurrency", True),
+        ("prompt_tokens", True),
+        ("completion_tokens", True),
+    ):
+        projected[key] = _prefix_cache_integer(
+            case.get(key), name=f"prefix-cache case.{key}", positive=positive
+        )
+    if projected["requests"] != 15 or projected["concurrency"] != 1:
+        raise EvidenceError("prefix-cache case request geometry is invalid")
+    elapsed_s = _finite(case.get("elapsed_s"), name="prefix-cache case.elapsed_s")
+    if elapsed_s is None or elapsed_s <= 0:
+        raise EvidenceError("prefix-cache case elapsed time is invalid")
+    projected["elapsed_s"] = elapsed_s
+    reasoning = case.get("reasoning_tokens")
+    projected["reasoning_tokens"] = (
+        None
+        if reasoning is None
+        else _prefix_cache_integer(
+            reasoning, name="prefix-cache case.reasoning_tokens"
+        )
+    )
+    if source_is_canonical and not _json_strict_equal(projected, case):
+        raise EvidenceError("prefix-cache summary case projection changed")
+    return projected
+
+
+def _project_prefix_cache_sample(sample: Any) -> dict[str, Any]:
+    """Re-project one published cache sample and reject every extra field."""
+
+    if not isinstance(sample, dict) or set(sample) != _PREFIX_CACHE_SAMPLE_FIELDS:
+        raise EvidenceError("prefix-cache evidence sample does not match its exact schema")
+    if sample.get("sample_type") != "measured_request" or sample.get("kind") != "cache":
+        raise EvidenceError("prefix-cache evidence sample has an invalid classification")
+    for key in ("case_attempt", "case_sample_index", "sample_index"):
+        _prefix_cache_integer(
+            sample.get(key), name=f"prefix-cache sample.{key}", positive=True
+        )
+    repetition = _prefix_cache_integer(
+        sample.get("repetition"), name="prefix-cache sample.repetition"
+    )
+    for key in ("selected_attempt", "validation_passed"):
+        if not isinstance(sample.get(key), bool):
+            raise EvidenceError(f"prefix-cache sample.{key} must be boolean")
+    _safe_id(sample.get("case_id"), name="prefix-cache sample.case_id")
+    raw_result = {
+        key: sample[key]
+        for key in _PREFIX_CACHE_RAW_RESULT_FIELDS
+        if key != "emission_events"
+    }
+    raw_result["emission_events"] = sample["emission_event_count"]
+    projected_result = _project_prefix_cache_request_result(raw_result)
+    projected_sample_result = {
+        "emission_event_count" if key == "emission_events" else key: value
+        for key, value in projected_result.items()
+    }
+    expected = {
+        "sample_index": sample["sample_index"],
+        "sample_type": "measured_request",
+        "case_attempt": sample["case_attempt"],
+        "case_id": sample["case_id"],
+        "case_sample_index": sample["case_sample_index"],
+        "kind": "cache",
+        "selected_attempt": sample["selected_attempt"],
+        "validation_passed": sample["validation_passed"],
+        "repetition": repetition,
+        "burst_elapsed_s": sample["burst_elapsed_s"],
+        **projected_sample_result,
+    }
+    burst = _finite(sample.get("burst_elapsed_s"), name="prefix-cache sample.burst_elapsed_s")
+    elapsed = _finite(sample.get("elapsed_s"), name="prefix-cache sample.elapsed_s")
+    if burst is None or elapsed is None or burst <= 0 or not math.isclose(
+        float(burst), float(elapsed), rel_tol=1e-9, abs_tol=1e-9
+    ):
+        raise EvidenceError("prefix-cache sample burst and request walls disagree")
+    if not _json_strict_equal(expected, sample):
+        raise EvidenceError("prefix-cache evidence sample projection changed")
+    return expected
+
+
+def _project_prefix_cache_summary(summary: Any) -> dict[str, Any]:
+    """Publish a minimal, protocol-only cache aggregate summary."""
+
+    if not isinstance(summary, dict):
+        raise EvidenceError("prefix-cache aggregate summary must be an object")
+    allowed_source = (
+        _PREFIX_CACHE_SUMMARY_FIELDS
+        | _PREFIX_CACHE_SUMMARY_SOURCE_EMPTY_LIST_FIELDS
+        | _PREFIX_CACHE_SUMMARY_SOURCE_ZERO_FIELDS
+        | _PREFIX_CACHE_SUMMARY_SOURCE_DROPPED_FIELDS
+        | _PREFIX_CACHE_SUMMARY_SOURCE_NULL_FIELDS
+    )
+    if set(summary) - allowed_source:
+        raise EvidenceError("prefix-cache aggregate summary contains nonprotocol fields")
+    for key in _PREFIX_CACHE_SUMMARY_SOURCE_EMPTY_LIST_FIELDS:
+        if key in summary and summary[key] != []:
+            raise EvidenceError(f"prefix-cache aggregate {key} must be empty")
+    for key in _PREFIX_CACHE_SUMMARY_SOURCE_ZERO_FIELDS:
+        if key in summary and _prefix_cache_integer(
+            summary[key], name=f"prefix-cache aggregate {key}"
+        ) != 0:
+            raise EvidenceError(f"prefix-cache aggregate {key} must be zero")
+    for key in _PREFIX_CACHE_SUMMARY_SOURCE_NULL_FIELDS:
+        if key in summary and summary[key] is not None:
+            raise EvidenceError(f"prefix-cache aggregate {key} is not protocol evidence")
+    if set(summary) == _PREFIX_CACHE_SUMMARY_FIELDS:
+        source_is_canonical = True
+    else:
+        source_is_canonical = False
+    cases = summary.get("cases")
+    if not isinstance(cases, list) or len(cases) != len(PREFIX_CACHE_PREFIX_TARGETS):
+        raise EvidenceError("prefix-cache aggregate summary must contain both cases")
+    projected = {
+        "cases": [_project_prefix_cache_case(case) for case in cases],
+        "completed_cases": _prefix_cache_integer(
+            summary.get("completed_cases"),
+            name="prefix-cache aggregate completed_cases",
+            positive=True,
+        ),
+        "run_completion_status": summary.get("run_completion_status"),
+        "startup_measurement_valid": summary.get("startup_measurement_valid"),
+        "status": summary.get("status"),
+        "suite": summary.get("suite"),
+    }
+    if (
+        projected["completed_cases"] != len(PREFIX_CACHE_PREFIX_TARGETS)
+        or projected["run_completion_status"] != "completed"
+        or projected["startup_measurement_valid"] is not True
+        or projected["status"] != "complete"
+        or projected["suite"] != PREFIX_CACHE_SUITE_ID
+    ):
+        raise EvidenceError("prefix-cache aggregate summary is not a completed protocol run")
+    if not _json_strict_equal(projected, summary) and source_is_canonical:
+        raise EvidenceError("prefix-cache aggregate summary projection changed")
+    return projected
+
+
 def _project_case(case: Any) -> dict[str, Any]:
     if not isinstance(case, dict):
         raise EvidenceError("summary case must be an object")
+    if case.get("kind") == "cache":
+        return _project_prefix_cache_case(case)
+    if "measurement_annotation_count" in case:
+        annotation_count = case["measurement_annotation_count"]
+        if (
+            "measurement_annotations" in case
+            or isinstance(annotation_count, bool)
+            or not isinstance(annotation_count, int)
+            or annotation_count < 0
+        ):
+            raise EvidenceError("case measurement annotation count is invalid")
     unknown = set(case) - _CASE_FIELDS - _CASE_DROPPED_FIELDS
     if unknown:
         raise EvidenceError(f"unknown summary case fields: {sorted(unknown)!r}")
@@ -2971,6 +4208,10 @@ def _project_case(case: Any) -> dict[str, Any]:
             if not isinstance(value, bool):
                 raise EvidenceError(f"case.{key} must be boolean")
             projected[key] = value
+        elif key == "measurement_annotation_count":
+            projected[key] = value
+        elif key == "prefix_cache":
+            projected[key] = _project_prefix_cache_metrics(value)
         elif key == "telemetry":
             projected[key] = _project_telemetry_summary(value, name="case.telemetry")
         elif key == "quality_accuracy_by_category":
@@ -2979,9 +4220,617 @@ def _project_case(case: Any) -> dict[str, Any]:
             projected[key] = _finite(value, name=f"case.{key}")
         else:
             raise EvidenceError(f"invalid summary case value for {key}")
+    if kind == "cache":
+        if (
+            "prefix_cache" not in projected
+            or projected.get("measurement_valid") is not True
+            or projected.get("validation_passed") is not True
+        ):
+            raise EvidenceError(
+                "cache evidence requires a valid completed prefix-cache summary"
+            )
+    elif "prefix_cache" in projected:
+        raise EvidenceError("non-cache case contains prefix-cache metrics")
     if kind == "agentic":
         _validate_agentic_case(projected)
     return projected
+
+
+def _prefix_cache_numbers_equal(left: Any, right: Any) -> bool:
+    if (
+        isinstance(left, bool)
+        or isinstance(right, bool)
+        or not isinstance(left, (int, float))
+        or not isinstance(right, (int, float))
+    ):
+        return False
+    return math.isclose(float(left), float(right), rel_tol=1e-9, abs_tol=1e-9)
+
+
+def _prefix_cache_values_equal(actual: Any, expected: Any) -> bool:
+    """Compare recomputed cache aggregates while preserving their exact shape."""
+
+    if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+        return _prefix_cache_numbers_equal(actual, expected)
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return set(actual) == set(expected) and all(
+            _prefix_cache_values_equal(actual[key], expected[key])
+            for key in expected
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _prefix_cache_values_equal(left, right)
+            for left, right in zip(actual, expected)
+        )
+    return actual == expected
+
+
+def _validate_prefix_cache_suite_and_model(
+    *, model: Any, suite: Any
+) -> tuple[str, dict[str, int]]:
+    if not isinstance(model, dict) or not isinstance(suite, dict):
+        raise EvidenceError("prefix-cache evidence requires model and suite metadata")
+    projected_model = _project_prefix_cache_model(model)
+    if not _json_strict_equal(projected_model, model):
+        raise EvidenceError("prefix-cache model projection changed")
+    projected_suite = _project_prefix_cache_suite(suite)
+    if not _json_strict_equal(projected_suite, suite):
+        raise EvidenceError("prefix-cache suite projection changed")
+    mode = projected_model["prefix_cache_mode"]
+    cases = projected_suite["cases"]
+    case_targets: dict[str, int] = {}
+    for case in cases:
+        case_targets[case["case_id"]] = case["prompt_repetitions"]
+    return mode, case_targets
+
+
+def _prefix_cache_sample_number(
+    sample: dict[str, Any], key: str, *, integer: bool = False, positive: bool = False
+) -> int | float:
+    if integer:
+        return _prefix_cache_integer(
+            sample.get(key),
+            name=f"prefix-cache sample.{key}",
+            positive=positive,
+        )
+    value = _finite(sample.get(key), name=f"prefix-cache sample.{key}")
+    if value is None or value < 0 or (positive and value <= 0):
+        raise EvidenceError(f"prefix-cache sample {key} is invalid")
+    return float(value)
+
+
+def _validate_prefix_cache_sample(
+    sample: dict[str, Any],
+    *,
+    mode: str,
+    prefix_target: int,
+) -> tuple[int, str]:
+    if (
+        sample.get("sample_type") != "measured_request"
+        or sample.get("kind") != "cache"
+        or sample.get("selected_attempt") is not True
+        or sample.get("validation_passed") is not True
+        or sample.get("cache_profile_mode") != mode
+        or sample.get("finish_reason") != "length"
+    ):
+        raise EvidenceError("prefix-cache sample classification is invalid")
+    pair_index = _prefix_cache_sample_number(
+        sample, "cache_pair_index", integer=True, positive=True
+    )
+    step_ordinal = _prefix_cache_sample_number(
+        sample, "cache_step_ordinal", integer=True, positive=True
+    )
+    if pair_index not in range(1, 6) or step_ordinal not in range(1, 4):
+        raise EvidenceError("prefix-cache sample protocol ordinal is invalid")
+    expected_case_sample_index = (pair_index - 1) * 3 + step_ordinal
+    if _prefix_cache_sample_number(
+        sample, "case_sample_index", integer=True, positive=True
+    ) != expected_case_sample_index:
+        raise EvidenceError("prefix-cache sample event order does not match its fixed schedule")
+    expected_condition, _, expected_control = prefix_cache_steps(mode)[step_ordinal - 1]
+    if (
+        sample.get("cache_condition") != expected_condition
+        or sample.get("cache_prompt_control") != expected_control
+        or _prefix_cache_sample_number(
+            sample, "cache_prefix_target_words", integer=True, positive=True
+        )
+        != prefix_target
+        or _prefix_cache_sample_number(sample, "repetition", integer=True)
+        != pair_index - 1
+    ):
+        raise EvidenceError("prefix-cache sample does not match its fixed schedule")
+    prompt_tokens = _prefix_cache_sample_number(
+        sample, "prompt_tokens", integer=True, positive=True
+    )
+    cached_tokens = _prefix_cache_sample_number(
+        sample, "cached_prompt_tokens", integer=True
+    )
+    completion_tokens = _prefix_cache_sample_number(
+        sample, "completion_tokens", integer=True, positive=True
+    )
+    if cached_tokens > prompt_tokens or completion_tokens != 128:
+        raise EvidenceError("prefix-cache sample token counts are invalid")
+    native_prompt_tokens = _prefix_cache_sample_number(
+        sample, "native_prompt_tokens", integer=True
+    )
+    native_cached_tokens = _prefix_cache_sample_number(
+        sample, "native_cached_prompt_tokens", integer=True
+    )
+    native_decode_tokens = _prefix_cache_sample_number(
+        sample, "native_decode_tokens", integer=True, positive=True
+    )
+    if (
+        native_prompt_tokens + native_cached_tokens != prompt_tokens
+        or native_cached_tokens != cached_tokens
+        or native_decode_tokens != completion_tokens
+    ):
+        raise EvidenceError("prefix-cache sample native counters do not reconcile")
+    for direct_key, native_value in (
+        ("server_prompt_tokens", native_prompt_tokens),
+        ("server_cached_prompt_tokens", native_cached_tokens),
+        ("server_decode_tokens", native_decode_tokens),
+    ):
+        if _prefix_cache_sample_number(sample, direct_key, integer=True) != native_value:
+            raise EvidenceError("prefix-cache direct and native counters disagree")
+    for key, positive in (
+        ("ttft_s", False),
+        ("elapsed_s", True),
+        ("decode_s", True),
+        ("decode_tps", False),
+        ("output_tps", False),
+        ("native_prompt_s", False),
+        ("native_decode_s", True),
+        ("server_prompt_s", False),
+        ("server_decode_s", True),
+    ):
+        _prefix_cache_sample_number(sample, key, positive=positive)
+    if sample.get("decode_metric_source") != "client_estimate":
+        raise EvidenceError("prefix-cache sample has an unsupported decode metric")
+    ttft_s = _prefix_cache_sample_number(sample, "ttft_s")
+    elapsed_s = _prefix_cache_sample_number(sample, "elapsed_s", positive=True)
+    decode_s = _prefix_cache_sample_number(sample, "decode_s", positive=True)
+    decode_tps = _prefix_cache_sample_number(sample, "decode_tps")
+    output_tps = _prefix_cache_sample_number(sample, "output_tps")
+    expected_decode_tps = max(completion_tokens - 1, 0) / decode_s
+    expected_output_tps = completion_tokens / elapsed_s
+    if (
+        ttft_s > elapsed_s
+        or not math.isclose(
+            decode_tps, expected_decode_tps, rel_tol=1e-9, abs_tol=1e-9
+        )
+        or not math.isclose(
+            output_tps, expected_output_tps, rel_tol=1e-9, abs_tol=1e-9
+        )
+    ):
+        raise EvidenceError("prefix-cache sample client timing metrics are inconsistent")
+    reasoning = sample.get("reasoning_tokens")
+    if reasoning is not None:
+        _prefix_cache_sample_number(
+            sample, "reasoning_tokens", integer=True
+        )
+    if expected_condition.startswith("forced-cold") and cached_tokens != 0:
+        raise EvidenceError("prefix-cache forced-cold sample reused tokens")
+    if expected_condition == "warm-prefix-hit" and cached_tokens / prompt_tokens < 0.90:
+        raise EvidenceError("prefix-cache warm sample did not prove substantial reuse")
+    return int(pair_index), expected_condition
+
+
+def _validate_prefix_cache_aggregates(
+    samples: list[dict[str, Any]],
+    summary: dict[str, Any],
+    *,
+    model: Any,
+    suite: Any,
+) -> None:
+    """Bind every cache aggregate to selected samples and frozen controls.
+
+    This runs identically during export and evidence verification.  It rejects
+    any unpaired profile/suite, stale summary, missing native counter, or
+    altered condition median rather than publishing a merely well-typed value.
+    """
+
+    raw_cases = summary.get("cases", [])
+    if raw_cases is not None and not isinstance(raw_cases, list):
+        raise EvidenceError("prefix-cache summary cases must be a list")
+    for case in raw_cases or []:
+        if not isinstance(case, dict) or not _json_strict_equal(
+            _project_case(case), case
+        ):
+            raise EvidenceError("summary case projection changed")
+    cache_cases = [
+        case
+        for case in raw_cases or []
+        if isinstance(case, dict) and case.get("kind") == "cache"
+    ]
+    cache_samples = [
+        sample for sample in samples if isinstance(sample, dict) and sample.get("kind") == "cache"
+    ]
+    has_cache_material = bool(cache_cases or cache_samples)
+    profile_mode = model.get("prefix_cache_mode") if isinstance(model, dict) else None
+    if not has_cache_material:
+        if profile_mode is not None or (
+            isinstance(suite, dict) and suite.get("id") == PREFIX_CACHE_SUITE_ID
+        ):
+            raise EvidenceError("prefix-cache profile or suite lacks valid cache evidence")
+        return
+    expected_sample_count = len(PREFIX_CACHE_PREFIX_TARGETS) * 15
+    if (
+        len(samples) != expected_sample_count
+        or len(cache_samples) != expected_sample_count
+        or len(cache_samples) != len(samples)
+    ):
+        raise EvidenceError(
+            "prefix-cache evidence must contain exactly its thirty protocol samples"
+        )
+    mode, planned_targets = _validate_prefix_cache_suite_and_model(
+        model=model, suite=suite
+    )
+    if not _json_strict_equal(_project_prefix_cache_summary(summary), summary):
+        raise EvidenceError("prefix-cache aggregate summary projection changed")
+    if mode != profile_mode:
+        raise EvidenceError("prefix-cache model mode is inconsistent")
+    if not cache_cases:
+        raise EvidenceError("prefix-cache samples lack a completed cache summary")
+    if len(cache_cases) != len(raw_cases or []):
+        raise EvidenceError("prefix-cache summary must contain only cache cases")
+    if len({case.get("case_id") for case in cache_cases}) != len(cache_cases):
+        raise EvidenceError("prefix-cache summary case IDs are duplicated")
+    expected_case_ids = list(planned_targets)
+    for sample_index, sample in enumerate(cache_samples, start=1):
+        _project_prefix_cache_sample(sample)
+        expected_case_id = expected_case_ids[(sample_index - 1) // 15]
+        if (
+            _prefix_cache_sample_number(
+                sample, "sample_index", integer=True, positive=True
+            )
+            != sample_index
+            or sample.get("case_id") != expected_case_id
+            or _prefix_cache_sample_number(
+                sample, "case_attempt", integer=True, positive=True
+            )
+            != 1
+        ):
+            raise EvidenceError(
+                "prefix-cache evidence samples do not match the fixed run order"
+            )
+    selected_samples = [
+        sample for sample in cache_samples if sample.get("selected_attempt") is True
+    ]
+    if len(selected_samples) != expected_sample_count:
+        raise EvidenceError("prefix-cache evidence retains an unselected attempt")
+    selected_by_case: dict[str, list[dict[str, Any]]] = {}
+    for sample in selected_samples:
+        case_id = sample.get("case_id")
+        if not isinstance(case_id, str):
+            raise EvidenceError("prefix-cache selected sample lacks a case ID")
+        selected_by_case.setdefault(case_id, []).append(sample)
+    summary_ids = {case.get("case_id") for case in cache_cases}
+    if (
+        summary_ids != set(planned_targets)
+        or set(selected_by_case) != summary_ids
+    ):
+        raise EvidenceError("prefix-cache selected samples and summary cases disagree")
+
+    for case in cache_cases:
+        case_id = case.get("case_id")
+        if not isinstance(case_id, str) or case_id not in planned_targets:
+            raise EvidenceError("prefix-cache summary case is not in frozen suite")
+        prefix_target = planned_targets[case_id]
+        records = selected_by_case[case_id]
+        if len(records) != 15:
+            raise EvidenceError("prefix-cache case must contain fifteen selected samples")
+        for expected_index, sample in enumerate(records, start=1):
+            if _prefix_cache_sample_number(
+                sample, "case_sample_index", integer=True, positive=True
+            ) != expected_index:
+                raise EvidenceError(
+                    "prefix-cache sample event order does not match its fixed schedule"
+                )
+        pairs: dict[int, set[str]] = {}
+        for sample in records:
+            pair_index, condition = _validate_prefix_cache_sample(
+                sample, mode=mode, prefix_target=prefix_target
+            )
+            pairs.setdefault(pair_index, set()).add(condition)
+        expected_conditions = set(prefix_cache_conditions(mode))
+        if set(pairs) != set(range(1, 6)) or any(
+            conditions != expected_conditions for conditions in pairs.values()
+        ):
+            raise EvidenceError("prefix-cache selected samples are not complete blocks")
+        if (
+            _prefix_cache_sample_number(case, "requests", integer=True, positive=True)
+            != len(records)
+            or _prefix_cache_sample_number(case, "concurrency", integer=True, positive=True)
+            != 1
+        ):
+            raise EvidenceError("prefix-cache generic case counts disagree")
+        prompt_total = sum(
+            _prefix_cache_sample_number(sample, "prompt_tokens", integer=True)
+            for sample in records
+        )
+        completion_total = sum(
+            _prefix_cache_sample_number(sample, "completion_tokens", integer=True)
+            for sample in records
+        )
+        if (
+            _prefix_cache_sample_number(case, "prompt_tokens", integer=True)
+            != prompt_total
+            or _prefix_cache_sample_number(case, "completion_tokens", integer=True)
+            != completion_total
+        ):
+            raise EvidenceError("prefix-cache generic token totals disagree")
+        reasoning = [sample.get("reasoning_tokens") for sample in records]
+        expected_reasoning = (
+            None
+            if any(value is None for value in reasoning)
+            else sum(int(value) for value in reasoning)
+        )
+        if case.get("reasoning_tokens") != expected_reasoning:
+            raise EvidenceError("prefix-cache generic reasoning total disagrees")
+        for field in (
+            "aggregate_output_tps",
+            "median_ttft_s",
+            "median_e2e_s",
+            "p95_e2e_s",
+            "p95_ttft_s",
+            "request_tps",
+        ):
+            if case.get(field) is not None:
+                raise EvidenceError("prefix-cache case exposes an ambiguous generic rate")
+        cache_metrics = case.get("prefix_cache")
+        if not isinstance(cache_metrics, dict) or cache_metrics.get("profile_mode") != mode:
+            raise EvidenceError("prefix-cache summary mode disagrees with model")
+        if cache_metrics.get("prefix_target_words") != prefix_target:
+            raise EvidenceError("prefix-cache summary target disagrees with frozen suite")
+        session_wall_s = _prefix_cache_sample_number(case, "elapsed_s", positive=True)
+        request_wall_s = sum(
+            _prefix_cache_sample_number(sample, "elapsed_s", positive=True)
+            for sample in records
+        )
+        if session_wall_s + 1e-9 < request_wall_s:
+            raise EvidenceError("prefix-cache session wall is shorter than request walls")
+        if not _prefix_cache_numbers_equal(
+            cache_metrics.get("case_session_wall_s"), session_wall_s
+        ):
+            raise EvidenceError("prefix-cache session wall disagrees with case wall")
+        expected_metrics = _summarize_prefix_cache_case(
+            [{"result": sample} for sample in records],
+            case_session_wall_s=session_wall_s,
+        )
+        if not _prefix_cache_values_equal(cache_metrics, expected_metrics):
+            raise EvidenceError("prefix-cache summary aggregates disagree with samples")
+
+
+def _prefix_cache_telemetry_float(
+    value: Any,
+    *,
+    name: str,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    """Accept only a JSON float in a cache telemetry floating-point column."""
+
+    if type(value) is not float or not math.isfinite(value):
+        raise EvidenceError(f"prefix-cache telemetry.{name} must be a finite JSON float")
+    if minimum is not None and value < minimum:
+        raise EvidenceError(f"prefix-cache telemetry.{name} is below its valid range")
+    if maximum is not None and value > maximum:
+        raise EvidenceError(f"prefix-cache telemetry.{name} is above its valid range")
+    return value
+
+
+def _validate_prefix_cache_telemetry_documents(
+    telemetry: Any,
+    chunks: list[Any],
+    *,
+    suite: Any,
+) -> None:
+    """Validate every cache telemetry scalar, phase, and row ordering.
+
+    Telemetry is observational, but it remains part of a scalar-only cache
+    evidence bundle.  A row-width check is insufficient: an arbitrary string
+    in an otherwise width-correct row would then survive refreshed checksums.
+    """
+
+    projected_suite = _project_prefix_cache_suite(suite)
+    case_ids = {case["case_id"] for case in projected_suite["cases"]}
+    telemetry = _expect_object_keys(
+        telemetry,
+        {
+            "chunk_count",
+            "chunks",
+            "columns",
+            "sample_count",
+            "schema_version",
+            "segment_count",
+        },
+        name="prefix-cache telemetry index",
+    )
+    for key in ("chunk_count", "sample_count", "segment_count"):
+        _prefix_cache_integer(
+            telemetry[key], name=f"prefix-cache telemetry.{key}"
+        )
+    if (
+        telemetry["schema_version"] != SCHEMA_VERSION
+        or type(telemetry["schema_version"]) is not str
+        or telemetry["columns"] != list(TELEMETRY_COLUMNS)
+        or not isinstance(telemetry["chunks"], list)
+        or telemetry["chunk_count"] != len(telemetry["chunks"])
+        or telemetry["chunk_count"] != len(chunks)
+        or telemetry["chunks"]
+        != [f"telemetry-{index:04d}.json" for index in range(1, len(chunks) + 1)]
+    ):
+        raise EvidenceError("prefix-cache telemetry index does not match its exact schema")
+
+    allowed_fixed_phases = {
+        "artifact_validation",
+        "between_cases",
+        "first_request_after_start",
+        "idle",
+        "server_shutdown",
+        "server_startup",
+    }
+    sample_count = 0
+    segment_count = 0
+    expected_sample_index = 1
+    previous_phase: str | None = None
+    previous_phase_segment: int | None = None
+    previous_phase_sample_index = 0
+    for chunk_index, chunk in enumerate(chunks, start=1):
+        chunk = _expect_object_keys(
+            chunk,
+            {"sample_count", "schema_version", "segments"},
+            name=f"prefix-cache telemetry chunk {chunk_index}",
+        )
+        if (
+            chunk["schema_version"] != SCHEMA_VERSION
+            or type(chunk["schema_version"]) is not str
+            or not isinstance(chunk["segments"], list)
+        ):
+            raise EvidenceError("prefix-cache telemetry chunk does not match its schema")
+        rows_in_chunk = 0
+        for segment in chunk["segments"]:
+            segment = _expect_object_keys(
+                segment,
+                {
+                    "first_phase_sample_index",
+                    "first_sample_index",
+                    "phase",
+                    "phase_segment",
+                    "rows",
+                },
+                name="prefix-cache telemetry segment",
+            )
+            phase = _normalize_phase(segment["phase"])
+            if phase != segment["phase"]:
+                raise EvidenceError("prefix-cache telemetry phase is not canonical")
+            if phase.startswith("case:"):
+                if phase.removeprefix("case:") not in case_ids:
+                    raise EvidenceError("prefix-cache telemetry phase has an unknown case")
+            elif phase not in allowed_fixed_phases:
+                raise EvidenceError("prefix-cache telemetry phase is not protocol allowlisted")
+            phase_segment = _prefix_cache_integer(
+                segment["phase_segment"],
+                name="prefix-cache telemetry.phase_segment",
+                positive=True,
+            )
+            first_phase_sample_index = _prefix_cache_integer(
+                segment["first_phase_sample_index"],
+                name="prefix-cache telemetry.first_phase_sample_index",
+                positive=True,
+            )
+            first_sample_index = _prefix_cache_integer(
+                segment["first_sample_index"],
+                name="prefix-cache telemetry.first_sample_index",
+                positive=True,
+            )
+            if first_sample_index != expected_sample_index:
+                raise EvidenceError("prefix-cache telemetry sample order is inconsistent")
+            if previous_phase_segment is None:
+                if phase_segment != 1 or first_phase_sample_index != 1:
+                    raise EvidenceError("prefix-cache telemetry first phase is inconsistent")
+            elif phase_segment == previous_phase_segment:
+                if (
+                    phase != previous_phase
+                    or first_phase_sample_index != previous_phase_sample_index + 1
+                ):
+                    raise EvidenceError("prefix-cache telemetry phase continuation is inconsistent")
+            elif (
+                phase_segment != previous_phase_segment + 1
+                or first_phase_sample_index != 1
+            ):
+                raise EvidenceError("prefix-cache telemetry phase sequence is inconsistent")
+            rows = segment["rows"]
+            if not isinstance(rows, list) or not rows:
+                raise EvidenceError("prefix-cache telemetry segment rows are invalid")
+            previous_elapsed_s: float | None = None
+            for row_index, row in enumerate(rows, start=1):
+                if not isinstance(row, list) or len(row) != len(TELEMETRY_COLUMNS):
+                    raise EvidenceError("prefix-cache telemetry row does not match its schema")
+                elapsed_s = _prefix_cache_telemetry_float(
+                    row[0], name="elapsed_s", minimum=0.0
+                )
+                if (
+                    (row_index == 1 and not math.isclose(elapsed_s, 0.0, abs_tol=1e-9))
+                    or (
+                        previous_elapsed_s is not None
+                        and elapsed_s + 1e-9 < previous_elapsed_s
+                    )
+                ):
+                    raise EvidenceError("prefix-cache telemetry elapsed times are inconsistent")
+                previous_elapsed_s = elapsed_s
+                if not isinstance(row[1], bool):
+                    raise EvidenceError("prefix-cache telemetry.gpu_error_present must be boolean")
+                _prefix_cache_telemetry_float(
+                    row[2], name="gpu_util_pct", minimum=0.0, maximum=100.0
+                ) if row[2] is not None else None
+                _prefix_cache_telemetry_float(
+                    row[3], name="memory_util_pct", minimum=0.0, maximum=100.0
+                ) if row[3] is not None else None
+                _prefix_cache_telemetry_float(
+                    row[4], name="power_w", minimum=0.0
+                ) if row[4] is not None else None
+                _prefix_cache_telemetry_float(
+                    row[5], name="sm_clock_mhz", minimum=0.0
+                ) if row[5] is not None else None
+                _prefix_cache_telemetry_float(
+                    row[6], name="temperature_c", minimum=-273.15, maximum=1_000.0
+                ) if row[6] is not None else None
+                for column, value in zip(TELEMETRY_COLUMNS[7:], row[7:], strict=True):
+                    if value is not None:
+                        _prefix_cache_integer(
+                            value, name=f"prefix-cache telemetry.{column}"
+                        )
+                expected_sample_index += 1
+                rows_in_chunk += 1
+                sample_count += 1
+            previous_phase = phase
+            previous_phase_segment = phase_segment
+            previous_phase_sample_index = first_phase_sample_index + len(rows) - 1
+            segment_count += 1
+        if _prefix_cache_integer(
+            chunk["sample_count"], name="prefix-cache telemetry chunk.sample_count"
+        ) != rows_in_chunk:
+            raise EvidenceError("prefix-cache telemetry chunk sample count disagrees")
+    if (
+        telemetry["sample_count"] != sample_count
+        or telemetry["segment_count"] != segment_count
+    ):
+        raise EvidenceError("prefix-cache telemetry totals disagree")
+
+
+def _validate_prefix_cache_bundle_file_set(
+    names: set[str], chunks: Any, *, include_checksums: bool
+) -> None:
+    """Require the complete cache bundle to use only protocol filenames.
+
+    Generic bundles intentionally permit new scalar documents when their
+    checksums are refreshed.  Cache evidence is a narrower protocol: accepting
+    an otherwise checksummed ``trace.json`` would reintroduce arbitrary text
+    into this scalar-only archive.  Telemetry chunk names are fixed too, rather
+    than inferred from a mutable index document.
+    """
+
+    if not isinstance(chunks, list) or any(type(name) is not str for name in chunks):
+        raise EvidenceError("prefix-cache bundle telemetry filenames are invalid")
+    expected_chunks = [
+        f"telemetry-{index:04d}.json" for index in range(1, len(chunks) + 1)
+    ]
+    if chunks != expected_chunks:
+        raise EvidenceError("prefix-cache bundle telemetry filenames changed")
+    expected = {
+        "manifest.json",
+        "samples.json",
+        "summary.json",
+        "telemetry.json",
+        *expected_chunks,
+    }
+    if include_checksums:
+        expected.add("checksums.json")
+    if names != expected:
+        raise EvidenceError("prefix-cache bundle file set does not match its protocol")
 
 
 def _validate_summary_field_type(
@@ -3232,6 +5081,11 @@ def _project_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
     for key, expected_types in dropped_types.items():
         if key in summary and not isinstance(summary[key], expected_types):
             raise EvidenceError(f"{key} has an unexpected type")
+    if any(
+        isinstance(case, dict) and case.get("kind") == "cache"
+        for case in result.get("cases", [])
+    ):
+        return _project_prefix_cache_summary(result)
     return result
 
 
@@ -3490,11 +5344,17 @@ def _export_run(
     kind = _run_kind(plan)
     status = _normalize_status(summary, events)
     lifecycle = _lifecycle(events)
+    projected_model = _project_model(plan, summary)
+    suite = _project_suite(plan)
+    cache_protocol = (
+        projected_model.get("prefix_cache_mode") is not None
+        or (isinstance(suite, dict) and suite.get("id") == PREFIX_CACHE_SUITE_ID)
+    )
     manifest: dict[str, Any] = {
         "artifacts": _collect_artifacts(plan, summary),
         "evidence_kind": kind,
         "lifecycle": lifecycle,
-        "model": _project_model(plan, summary),
+        "model": projected_model,
         "run_date_utc": run_date,
         "runtime": _project_runtime(plan, summary),
         "sanitization": {
@@ -3512,10 +5372,28 @@ def _export_run(
         manifest["hardware"] = hardware
     if matrix_id:
         manifest["matrix_id"] = _safe_id(matrix_id, name="matrix_id")
-    suite = _project_suite(plan)
     if suite:
         manifest["suite"] = suite
+    if cache_protocol:
+        # Materialize an exact protocol manifest rather than publishing the
+        # broader serving manifest.  This is also the export-side counterpart
+        # to the verifier's strict re-projection below.
+        manifest = _project_prefix_cache_manifest(manifest, source=True)
     requests = _project_requests(events, summary, evidence_kind=kind)
+    if cache_protocol:
+        unexpected = [
+            sample
+            for sample in requests
+            if sample.get("sample_type") == "measured_request"
+            and sample.get("kind") != "cache"
+        ]
+        if unexpected:
+            raise EvidenceError("prefix-cache run contains a nonprotocol measured sample")
+        requests = [sample for sample in requests if sample.get("kind") == "cache"]
+        requests = [
+            {**sample, "sample_index": index}
+            for index, sample in enumerate(requests, start=1)
+        ]
     if kind == "llamacpp_perplexity":
         requests.extend(
             {
@@ -3535,6 +5413,21 @@ def _export_run(
         suite=suite,
         terminal=lifecycle.get("terminal_event") == "run_complete",
     )
+    _validate_prefix_cache_aggregates(
+        requests,
+        projected_summary,
+        model=manifest["model"],
+        suite=suite,
+    )
+    telemetry_files = _telemetry_files(telemetry)
+    if cache_protocol:
+        telemetry_index = telemetry_files["telemetry.json"]
+        assert isinstance(telemetry_index, dict)
+        _validate_prefix_cache_telemetry_documents(
+            telemetry_index,
+            [telemetry_files[name] for name in telemetry_index["chunks"]],
+            suite=suite,
+        )
     relative = Path("runs") / run_id
     bundle_files: dict[str, Any] = {
         "manifest.json": manifest,
@@ -3547,8 +5440,16 @@ def _export_run(
             "aggregates": projected_summary,
             "schema_version": SCHEMA_VERSION,
         },
-        **_telemetry_files(telemetry),
+        **telemetry_files,
     }
+    if cache_protocol:
+        telemetry_index = bundle_files["telemetry.json"]
+        assert isinstance(telemetry_index, dict)
+        _validate_prefix_cache_bundle_file_set(
+            set(bundle_files),
+            telemetry_index["chunks"],
+            include_checksums=False,
+        )
     bundle_hash, _ = _write_bundle(
         output_root,
         relative,
@@ -4729,6 +6630,20 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     manifest = _load_json(directory / "manifest.json", root)
     if not isinstance(manifest, dict) or manifest.get("schema_version") != SCHEMA_VERSION:
         raise EvidenceError(f"run manifest schema mismatch: {run_id}")
+    manifest_model = manifest.get("model")
+    manifest_suite = manifest.get("suite")
+    is_prefix_cache_manifest = (
+        isinstance(manifest_model, dict)
+        and manifest_model.get("prefix_cache_mode") is not None
+    ) or (
+        isinstance(manifest_suite, dict)
+        and manifest_suite.get("id") == PREFIX_CACHE_SUITE_ID
+    )
+    if is_prefix_cache_manifest:
+        # Cache bundles are intentionally a complete, exact outer document.
+        # Do not rely on checksums alone: an attacker can refresh checksums
+        # after adding a generic manifest field such as trace text.
+        _project_prefix_cache_manifest(manifest)
     for manifest_key, index_key in (
         ("source_run_id", "run_id"),
         ("evidence_kind", "evidence_kind"),
@@ -4771,6 +6686,12 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
         or samples["sample_count"] != len(samples["samples"])
     ):
         raise EvidenceError(f"run sample count mismatch: {run_id}")
+    if is_prefix_cache_manifest and (
+        type(samples["sample_count"]) is not int
+        or samples["sample_count"] != len(PREFIX_CACHE_PREFIX_TARGETS) * 15
+        or type(samples["schema_version"]) is not str
+    ):
+        raise EvidenceError("prefix-cache samples document does not match its exact schema")
     summary = _load_json(directory / "summary.json", root)
     summary = _expect_object_keys(
         summary, {"aggregates", "schema_version"}, name="run summary"
@@ -4785,6 +6706,12 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
         aggregates,
         suite=agentic_suite,
         terminal=bool(entry["measurement_terminal"]),
+    )
+    _validate_prefix_cache_aggregates(
+        samples["samples"],
+        aggregates,
+        model=manifest.get("model"),
+        suite=suite,
     )
 
     telemetry = _load_json(directory / "telemetry.json", root)
@@ -4812,6 +6739,7 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     sample_count = 0
     segment_count = 0
     expected_sample_index = 1
+    telemetry_chunks: list[dict[str, Any]] = []
     for chunk_name in chunks:
         chunk = _load_json(directory / chunk_name, root)
         chunk = _expect_object_keys(
@@ -4823,6 +6751,7 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
             chunk["segments"], list
         ):
             raise EvidenceError(f"telemetry chunk schema mismatch: {run_id}")
+        telemetry_chunks.append(chunk)
         rows_in_chunk = 0
         for segment in chunk["segments"]:
             segment = _expect_object_keys(
@@ -4855,6 +6784,15 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
         or telemetry["segment_count"] != segment_count
     ):
         raise EvidenceError(f"telemetry total mismatch: {run_id}")
+    if is_prefix_cache_manifest:
+        _validate_prefix_cache_telemetry_documents(
+            telemetry, telemetry_chunks, suite=suite
+        )
+        _validate_prefix_cache_bundle_file_set(
+            {path.name for path in directory.iterdir()},
+            telemetry["chunks"],
+            include_checksums=True,
+        )
 
 
 def _verify_harbor_bundle(

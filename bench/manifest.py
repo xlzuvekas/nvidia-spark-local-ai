@@ -10,6 +10,11 @@ import tomllib
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit
 
+from .prefix_cache_protocol import (
+    PREFIX_CACHE_PREFIX_TARGETS,
+    PREFIX_CACHE_SUITE_ID,
+)
+
 
 SCHEMA_VERSION = 1
 KNOWN_TASKS = frozenset(
@@ -44,6 +49,7 @@ KNOWN_CASE_KINDS = frozenset(
     {
         "agentic",
         "capability",
+        "cache",
         "concurrency",
         "decode",
         "diffusion",
@@ -51,6 +57,7 @@ KNOWN_CASE_KINDS = frozenset(
         "quality",
     }
 )
+PREFIX_CACHE_MODES = frozenset({"off", "on"})
 KNOWN_AGENTIC_CASE_IDS = frozenset(
     {
         "agentic-no-tool",
@@ -229,6 +236,7 @@ _MODEL_KEYS = frozenset(
         "mmproj_file",
         "mmproj_digest",
         "mmproj_size_bytes",
+        "prefix_cache_mode",
         "support_status",
     }
 )
@@ -312,6 +320,7 @@ class ModelSpec:
     mmproj_file: str | None = None
     mmproj_digest: str | None = None
     mmproj_size_bytes: int | None = None
+    prefix_cache_mode: str | None = None
     support_status: str = "exploratory"
 
 
@@ -439,6 +448,9 @@ def load_models(path: str | Path) -> dict[str, ModelSpec]:
             mmproj_digest=_optional_string(row, "mmproj_digest", context),
             mmproj_size_bytes=_optional_int(
                 row, "mmproj_size_bytes", context, default=None
+            ),
+            prefix_cache_mode=_optional_string(
+                row, "prefix_cache_mode", context
             ),
             support_status=(
                 _optional_string(row, "support_status", context) or "exploratory"
@@ -953,6 +965,60 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
                 f"{context}.args contains unsafe llamacpp option(s): "
                 + ", ".join(forbidden)
             )
+    if model.prefix_cache_mode is not None:
+        if model.prefix_cache_mode not in PREFIX_CACHE_MODES:
+            raise ManifestError(
+                f"{context}.prefix_cache_mode must be one of "
+                f"{sorted(PREFIX_CACHE_MODES)}"
+            )
+        if model.backend != "llamacpp":
+            raise ManifestError(
+                f"{context}.prefix_cache_mode is supported only for llamacpp"
+            )
+        if model.runtime_parallel != 1:
+            raise ManifestError(
+                f"{context}.prefix_cache_mode requires runtime_parallel = 1"
+            )
+        if model.request_body_json is not None:
+            raise ManifestError(
+                f"{context}.prefix_cache_mode reserves request_body_json for "
+                "the native cache adapter"
+            )
+        argument_values = tuple(str(argument) for argument in model.args)
+        argument_names = [argument.split("=", 1)[0] for argument in argument_values]
+        cache_controls = [
+            argument
+            for argument in argument_values
+            if argument.split("=", 1)[0]
+            in {"--cache-prompt", "--no-cache-prompt"}
+        ]
+        if any(
+            argument not in {"--cache-prompt", "--no-cache-prompt"}
+            for argument in cache_controls
+        ):
+            raise ManifestError(
+                f"{context}.prefix_cache_mode requires a literal standalone "
+                "--cache-prompt or --no-cache-prompt control"
+            )
+        enabled = argument_values.count("--cache-prompt")
+        disabled = argument_values.count("--no-cache-prompt")
+        if enabled + disabled != 1:
+            raise ManifestError(
+                f"{context}.prefix_cache_mode requires exactly one explicit "
+                "--cache-prompt or --no-cache-prompt control"
+            )
+        if model.prefix_cache_mode == "on" and enabled != 1:
+            raise ManifestError(
+                f"{context}.prefix_cache_mode = 'on' requires --cache-prompt"
+            )
+        if model.prefix_cache_mode == "off" and disabled != 1:
+            raise ManifestError(
+                f"{context}.prefix_cache_mode = 'off' requires --no-cache-prompt"
+            )
+        if "--cache-reuse" in argument_names:
+            raise ManifestError(
+                f"{context}.prefix_cache_mode must not enable --cache-reuse"
+            )
     if model.backend == "sglang":
         reserved = sorted(
             argument.split("=", 1)[0]
@@ -1026,6 +1092,31 @@ def validate_case(case: CaseSpec, *, context: str = "case") -> None:
         raise ManifestError(
             f"{context}.prompt_repetitions must be positive for prefill cases"
         )
+    if case.kind == "cache":
+        if case.requires != ("chat",):
+            raise ManifestError(
+                f"{context}.requires must be ['chat'] for cache cases"
+            )
+        if case.warmups != 0:
+            raise ManifestError(f"{context}.warmups must be 0 for cache cases")
+        if case.repetitions != 5:
+            raise ManifestError(
+                f"{context}.repetitions must be 5 for cache paired blocks"
+            )
+        if case.max_output_tokens != 128:
+            raise ManifestError(
+                f"{context}.max_output_tokens must be 128 for cache cases"
+            )
+        if case.concurrency != 1:
+            raise ManifestError(
+                f"{context}.concurrency must be 1 for cache cases"
+            )
+        if case.prompt_repetitions <= 0:
+            raise ManifestError(
+                f"{context}.prompt_repetitions must be positive for cache cases"
+            )
+        if case.temperature != 0:
+            raise ManifestError(f"{context}.temperature must be 0 for cache cases")
     if case.kind == "quality":
         if case.requires != ("chat",):
             raise ManifestError(
@@ -1100,6 +1191,43 @@ def validate_suite(suite: SuiteSpec, *, context: str = "suite") -> None:
         if case.id in seen:
             raise ManifestError(f"{context}: duplicate case id {case.id!r}")
         seen.add(case.id)
+    cache_cases = [case for case in suite.cases if case.kind == "cache"]
+    cache_suite = suite.id == PREFIX_CACHE_SUITE_ID
+    if cache_suite or cache_cases:
+        if not cache_suite:
+            raise ManifestError(
+                f"{context}.id must be '{PREFIX_CACHE_SUITE_ID}' for cache cases"
+            )
+        expected = PREFIX_CACHE_PREFIX_TARGETS
+        observed = {case.id: case.prompt_repetitions for case in cache_cases}
+        if (
+            observed != expected
+            or len(cache_cases) != len(expected)
+            or len(suite.cases) != len(expected)
+        ):
+            raise ManifestError(
+                f"{context} cache cases must be the fixed 8192 and 32768 "
+                "prefix protocol"
+            )
+
+
+def validate_benchmark_selection(
+    model: ModelSpec, suite: SuiteSpec, *, context: str = "selection"
+) -> None:
+    """Require prefix-cache profiles and the dedicated suite to travel together."""
+
+    cache_profile = getattr(model, "prefix_cache_mode", None) is not None
+    cache_suite = suite.id == PREFIX_CACHE_SUITE_ID
+    if cache_profile and not cache_suite:
+        raise ManifestError(
+            f"{context}: prefix_cache_mode profiles require the "
+            f"{PREFIX_CACHE_SUITE_ID!r} suite"
+        )
+    if cache_suite and not cache_profile:
+        raise ManifestError(
+            f"{context}: the {PREFIX_CACHE_SUITE_ID!r} suite requires a "
+            "prefix_cache_mode profile"
+        )
 
 
 def validate_models(models: Mapping[str, ModelSpec] | Iterable[ModelSpec]) -> None:

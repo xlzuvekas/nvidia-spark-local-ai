@@ -206,6 +206,108 @@ identifiers, and per-request tags remain excluded. The first complete campaign
 and its comparison limits are recorded in
 [the 2026-08-17 agentic tool-use report](docs/agentic-tools-results-2026-08-17.md).
 
+### Multi-hop long-context needle protocol
+
+The [`llamacpp-multihop-long-context` suite](manifests/suites/llamacpp_multihop_long_context.toml)
+is a single-slot, synthetic two-hop retrieval protocol for profiles explicitly
+configured with a 262,144-token context. It is intended for the paired
+Qwen3.6 base/MTP2 and Qwen3.8 base/MTP5 long-context profiles, not their
+short-context or multi-slot throughput variants.
+
+Each nonce derives one fixed target chain, `source -> relay -> final`, and two
+independent two-link decoy chains. The six relation records are separated by
+distributed filler, then the query supplies the target source and asks for its
+final key. This requires selecting the target source-to-relay relation and
+then its relay-to-final relation; a decoy final key is not a valid answer.
+
+The suite has no warm-ups and runs one request at a time at temperature zero.
+Its filler targets are 32,768, 65,536, 131,072, and 245,760 repetitions, with
+three measured repetitions at each of the first three targets and one at the
+last. Each request has a 32-token output budget. These are controlled prompt
+construction targets rather than a claim of exact tokenizer token counts.
+
+The oracle accepts only the visible final response after surrounding whitespace
+is removed when it exactly equals the nonce-derived target final key. An
+explanation, an intermediate relay, a decoy key, or additional visible text
+fails. Generated prompts, nonce-derived relation values and identifiers,
+visible completions, reasoning, and tool payloads are excluded from the
+multi-hop journal payload; it retains only a fixed allowlist of scalar request
+measurements and validation state. Failures use a fixed public-safe message
+rather than exposing generated values or transport details.
+
+This is a bounded synthetic two-hop retrieval check. It does not establish
+general reasoning, long-document comprehension, multi-document question
+answering, or a broad long-context quality claim.
+
+### Native llama.cpp prefix-cache protocol
+
+The [`llamacpp-prefix-cache` suite](manifests/suites/llamacpp_prefix_cache.toml)
+is a dedicated, serial prompt-KV reuse experiment for native llama.cpp. It is
+not a replacement for the normal unique-prompt prefill protocol: the shared
+prefix is intentional here, and cache-specific profiles cannot be combined
+with a general benchmark suite or matrix selection. Conversely, this suite
+requires a dedicated cache profile. The admitted profiles are the single-slot,
+262,144-context Qwen3.6 and Qwen3.8 pairs:
+
+- `qwen36-35b-a3b-ud-q4-k-xl-llamacpp-prefix-cache-{off,on}`;
+- `qwen38-27b-ud-q4-k-xl-llamacpp-long-context-prefix-cache-{off,on}`.
+
+Each profile pair preserves the matching artifact, llama.cpp runtime pin,
+single-slot geometry, Q8 KV types, context allocation, generation controls,
+and all non-cache server arguments. Mode selection is the literal profile-level
+`--no-cache-prompt` or `--cache-prompt` flag; the cache-on schedule's documented
+forced-cold requests are the only per-request override. Plan creation and
+execution validate that profile/suite pairing and reject an altered cache flag,
+multiple slots, or a cache-profile run outside this suite.
+
+The suite contains exactly two synthetic cases: an 8,192-repetition shared-prefix
+target and a 32,768-repetition shared-prefix target. Both use temperature zero, one
+slot (`id_slot=0`), concurrency one, no warm-ups, five paired blocks, and a
+fixed 128-token output limit. A block begins with a deterministic pair key
+before the repeated synthetic filler, so it cannot reuse the preceding block's
+prefix. All three requests in that block send the same long prefix to the same
+slot; only a short request-specific suffix is appended after it. The suffix
+therefore cannot prevent the intended long-prefix reuse while keeping requests
+distinct.
+
+The frozen request order differs only by cache mode:
+
+- **off:** `forced-cold-a`, `forced-cold-b`, `forced-cold-c`, each using the
+  `--no-cache-prompt` profile default and required to report zero cached prompt
+  tokens;
+- **on:** `forced-cold-a` and `forced-cold-b` explicitly send
+  `cache_prompt: false`, then `warm-prefix-hit` uses the `--cache-prompt`
+  profile default. The first two are required to be cold; the third must report
+  at least 90% cached prompt tokens.
+
+Thus each case contains 15 measured requests (three per block times five), and
+each profile run contains 30. The matching pair key is based on stable suite
+case metadata rather than a profile-specific frozen case ID, so an off/on pair
+uses the same long prefixes without persisting prompt text.
+
+Every request reconciles logical prompt tokens, cached prompt tokens, and
+physical uncached prompt tokens against both the response and native llama.cpp
+counter deltas. It records native prompt-processing time, native decode tokens
+and time, client request wall time, and TTFT. Reports keep condition totals and
+medians, including cache-hit fraction, physical prompt rate, cache-assisted
+logical prompt rate, native decode rate, and output rate. A cache-assisted
+logical input rate is explicitly not a fresh-prefill rate.
+
+For each block, the report also retains `forced-cold-b` minus the third request
+for TTFT, end-to-end wall time, and native prompt-processing time. This is an
+observed within-run, order-position delta: in the off profile it is the cold
+order control, and in the on profile it is the cold-to-warm observation. It is
+not a causal difference-in-differences estimate, a cross-run causal claim, or
+evidence that prefix caching changes decode TPS. Any cross-run comparison must
+state its time/order controls and matching provenance separately.
+
+The cache journal and exported evidence are scalar-only. They exclude the
+synthetic prefix and suffix text, request identifiers, completions, reasoning,
+tool payloads, raw native metrics payloads, commands, paths, and credentials.
+Only allowlisted counts, durations, rates, fixed condition labels, validation
+state, and public pinned provenance are retained. A failed cache control uses a
+fixed safe failure message rather than publishing transport or content details.
+
 ### Harbor terminal coding-agent campaign
 
 The Qwen3-Coder-Next Harbor campaign defines a paired comparison of two

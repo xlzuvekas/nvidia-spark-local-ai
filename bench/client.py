@@ -37,6 +37,11 @@ class RequestResult:
     decode_metric_source: str | None = "client_estimate"
     load_s: float | None = None
     server_prompt_s: float | None = None
+    cached_prompt_tokens: int | None = None
+    server_prompt_tokens: int | None = None
+    server_cached_prompt_tokens: int | None = None
+    server_decode_tokens: int | None = None
+    server_decode_s: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -345,13 +350,14 @@ def multimodal_embedding_request(
         start_barrier.wait(timeout=30)
     started_wall_ns = time.time_ns()
     started = time.perf_counter()
+    header_argument = {"authorization": authorization}
     image = _chat_embedding_vector_request(
         base_url=base_url,
         model=model,
         messages=_chat_embedding_messages(image_data_url=image_data_url),
         request_id=f"{request_id}:image",
         timeout_s=timeout_s,
-        authorization=authorization,
+        **header_argument,
     )
     relevant = _chat_embedding_vector_request(
         base_url=base_url,
@@ -359,7 +365,7 @@ def multimodal_embedding_request(
         messages=_chat_embedding_messages(text=relevant_text),
         request_id=f"{request_id}:relevant-text",
         timeout_s=timeout_s,
-        authorization=authorization,
+        **header_argument,
     )
     unrelated = _chat_embedding_vector_request(
         base_url=base_url,
@@ -367,7 +373,7 @@ def multimodal_embedding_request(
         messages=_chat_embedding_messages(text=unrelated_text),
         request_id=f"{request_id}:unrelated-text",
         timeout_s=timeout_s,
-        authorization=authorization,
+        **header_argument,
     )
     elapsed_s = time.perf_counter() - started
     vectors = [image.embedding, relevant.embedding, unrelated.embedding]
@@ -575,6 +581,101 @@ def _reported_reasoning_tokens(usage: dict[str, Any]) -> int | None:
     return integer(details.get("reasoning_tokens"))
 
 
+def _reported_cached_prompt_tokens(
+    usage: dict[str, Any], *, exact_json_integer: bool = False
+) -> int | None:
+    """Return an exact llama.cpp/OpenAI-compatible cached-prompt count.
+
+    A missing or malformed counter stays unavailable rather than being treated
+    as zero.  The distinction matters for cache controls: zero proves a
+    reported miss only when the server actually supplied the counter.
+    """
+
+    details = usage.get("prompt_tokens_details")
+    if not isinstance(details, dict):
+        return None
+    value = details.get("cached_tokens")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if exact_json_integer:
+        return None
+    if not isinstance(value, float):
+        return None
+    if not math.isfinite(value) or value < 0 or not value.is_integer():
+        return None
+    return int(value)
+
+
+def _required_native_usage_token_count(usage: Any, key: str) -> int:
+    """Read an exact token count for the strict native cache protocol.
+
+    The ordinary compatibility client retains its historical coercion behavior,
+    but cache evidence must never silently turn a string, bool, or fractional
+    server value into an apparently exact counter.
+    """
+
+    if not isinstance(usage, dict):
+        raise BenchmarkRequestError("Streaming response usage must be an object")
+    value = usage.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise BenchmarkRequestError(
+            f"Streaming response did not include an exact {key} counter"
+        )
+    return value
+
+
+def _reported_llamacpp_timings(
+    value: Any, *, exact_json_counts: bool = False
+) -> dict[str, int | float] | None:
+    """Parse the final scalar timing object emitted by native llama.cpp.
+
+    The OpenAI-compatible streaming endpoint appends this object to its final
+    usage chunk.  We deliberately accept only the five counters needed for a
+    prompt-KV measurement and never retain arbitrary server payload fields.
+    """
+
+    if not isinstance(value, dict):
+        return None
+
+    def count(name: str) -> int | None:
+        item = value.get(name)
+        if isinstance(item, bool):
+            return None
+        if isinstance(item, int):
+            return item if item >= 0 else None
+        if exact_json_counts:
+            return None
+        if not isinstance(item, float):
+            return None
+        if not math.isfinite(item) or item < 0 or not item.is_integer():
+            return None
+        return int(item)
+
+    def milliseconds(name: str) -> float | None:
+        item = value.get(name)
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            return None
+        parsed = float(item)
+        return parsed if math.isfinite(parsed) and parsed >= 0 else None
+
+    cache_n = count("cache_n")
+    prompt_n = count("prompt_n")
+    predicted_n = count("predicted_n")
+    prompt_ms = milliseconds("prompt_ms")
+    predicted_ms = milliseconds("predicted_ms")
+    if None in (cache_n, prompt_n, predicted_n, prompt_ms, predicted_ms):
+        return None
+    return {
+        "cache_n": cache_n,
+        "prompt_n": prompt_n,
+        "predicted_n": predicted_n,
+        "prompt_ms": prompt_ms,
+        "predicted_ms": predicted_ms,
+    }
+
+
 def stream_chat_request(
     *,
     base_url: str,
@@ -587,6 +688,8 @@ def stream_chat_request(
     authorization: str | None = None,
     timeout_s: float = 900,
     start_barrier: threading.Barrier | None = None,
+    require_native_cache_metrics: bool = False,
+    require_native_timing: bool = False,
 ) -> RequestResult:
     payload: dict[str, Any] = {
         "model": model,
@@ -616,6 +719,7 @@ def stream_chat_request(
     started = time.perf_counter()
     first_output_at: float | None = None
     usage: dict[str, Any] | None = None
+    native_timing_payload: Any = None
     finish_reason: str | None = None
     response_model: str | None = None
     emission_events = 0
@@ -638,6 +742,8 @@ def stream_chat_request(
                 response_model = event.get("model", response_model)
                 if event.get("usage"):
                     usage = event["usage"]
+                if "timings" in event:
+                    native_timing_payload = event["timings"]
                 for choice in event.get("choices") or []:
                     if choice.get("finish_reason"):
                         finish_reason = choice["finish_reason"]
@@ -680,9 +786,54 @@ def stream_chat_request(
         raise BenchmarkRequestError("Streaming response did not include token usage")
     if first_output_at is None:
         raise BenchmarkRequestError("Streaming response did not emit content or reasoning")
-    prompt_tokens = int(usage.get("prompt_tokens", 0))
-    completion_tokens = int(usage.get("completion_tokens", 0))
+    strict_native_usage = require_native_cache_metrics or require_native_timing
+    if strict_native_usage:
+        prompt_tokens = _required_native_usage_token_count(usage, "prompt_tokens")
+        completion_tokens = _required_native_usage_token_count(
+            usage, "completion_tokens"
+        )
+    else:
+        if not isinstance(usage, dict):
+            raise BenchmarkRequestError("Streaming response usage must be an object")
+        prompt_tokens = int(usage.get("prompt_tokens", 0))
+        completion_tokens = int(usage.get("completion_tokens", 0))
     reasoning_tokens = _reported_reasoning_tokens(usage)
+    cached_prompt_tokens = _reported_cached_prompt_tokens(
+        usage, exact_json_integer=strict_native_usage
+    )
+    native_timings = _reported_llamacpp_timings(
+        native_timing_payload, exact_json_counts=strict_native_usage
+    )
+    if require_native_cache_metrics and cached_prompt_tokens is None:
+        raise BenchmarkRequestError(
+            "Streaming response did not include an exact cached prompt-token counter"
+        )
+    if require_native_timing and native_timings is None:
+        raise BenchmarkRequestError(
+            "Streaming response did not include valid native llama.cpp timing counters"
+        )
+    if require_native_timing and native_timings is not None:
+        if cached_prompt_tokens is None:
+            raise BenchmarkRequestError(
+                "Native llama.cpp timing requires an exact cached prompt-token counter"
+            )
+        if native_timings["cache_n"] != cached_prompt_tokens:
+            raise BenchmarkRequestError(
+                "Native llama.cpp cache counters disagreed between usage and timings"
+            )
+        if native_timings["prompt_n"] + cached_prompt_tokens != prompt_tokens:
+            raise BenchmarkRequestError(
+                "Native llama.cpp prompt counters did not reconcile"
+            )
+        if native_timings["predicted_n"] != completion_tokens:
+            raise BenchmarkRequestError(
+                "Native llama.cpp decode counters did not reconcile"
+            )
+    # Native llama.cpp timings are deliberately opt-in.  Existing benchmark
+    # cases continue to use their established client timing path; the prefix
+    # cache protocol is the only caller that requires and records these
+    # backend-specific counters.
+    native_metrics = native_timings if require_native_timing else None
     decode_s = max(finished - first_output_at, 1e-9)
     return RequestResult(
         request_id=request_id,
@@ -701,6 +852,26 @@ def stream_chat_request(
         content="".join(content_parts),
         reasoning="".join(reasoning_parts),
         tool_calls=[tool_calls[index] for index in sorted(tool_calls)],
+        cached_prompt_tokens=cached_prompt_tokens,
+        server_prompt_tokens=(
+            int(native_metrics["prompt_n"]) if native_metrics is not None else None
+        ),
+        server_cached_prompt_tokens=(
+            int(native_metrics["cache_n"]) if native_metrics is not None else None
+        ),
+        server_decode_tokens=(
+            int(native_metrics["predicted_n"]) if native_metrics is not None else None
+        ),
+        server_prompt_s=(
+            float(native_metrics["prompt_ms"]) / 1_000
+            if native_metrics is not None
+            else None
+        ),
+        server_decode_s=(
+            float(native_metrics["predicted_ms"]) / 1_000
+            if native_metrics is not None
+            else None
+        ),
     )
 
 
@@ -769,6 +940,7 @@ def stream_audio_chat_request(
             "lora_path": lora_path,
         }
     )
+    header_argument = {"authorization": authorization}
     try:
         return stream_chat_request(
             base_url=base_url,
@@ -778,7 +950,7 @@ def stream_audio_chat_request(
             temperature=temperature,
             request_id=request_id,
             extra_body=additions,
-            authorization=authorization,
+            **header_argument,
             timeout_s=timeout_s,
             start_barrier=start_barrier,
         )
