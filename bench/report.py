@@ -84,10 +84,13 @@ def _summarize_prefix_cache_case(
     """Aggregate the dedicated serial prompt-KV protocol without ambiguity.
 
     ``logical_prompt_tokens`` includes reused tokens, whereas
-    ``physical_uncached_prompt_tokens`` comes from llama.cpp's cumulative
-    native counters and excludes them.  Condition request wall is the sum of
-    end-to-end client request elapsed times; session wall also includes the
-    protocol's local before/after counter snapshots.
+    ``physical_uncached_prompt_tokens`` comes from the final request-scoped
+    llama.cpp SSE timing payload and excludes them.  The
+    ``prometheus_global_*`` raw fields are global Prometheus diagnostics and
+    are intentionally not used in any per-request aggregate or paired
+    comparison.  Condition request wall is the sum of end-to-end client
+    request elapsed times; session wall also includes the protocol's local
+    before/after counter snapshots.
     """
 
     if case_session_wall_s <= 0:
@@ -123,16 +126,17 @@ def _summarize_prefix_cache_case(
         cached_tokens = _prefix_cache_count(result, "cached_prompt_tokens")
         if cached_tokens > prompt_tokens:
             raise ValueError("prefix-cache cached tokens exceed logical prompt tokens")
-        if _prefix_cache_count(result, "native_prompt_tokens") != (
-            prompt_tokens - cached_tokens
+        server_prompt_tokens = _prefix_cache_count(result, "server_prompt_tokens")
+        server_cached_tokens = _prefix_cache_count(
+            result, "server_cached_prompt_tokens"
+        )
+        server_decode_tokens = _prefix_cache_count(result, "server_decode_tokens")
+        if (
+            server_prompt_tokens + server_cached_tokens != prompt_tokens
+            or server_cached_tokens != cached_tokens
+            or server_decode_tokens != _prefix_cache_count(result, "completion_tokens")
         ):
-            raise ValueError("prefix-cache native prompt tokens did not reconcile")
-        if _prefix_cache_count(result, "native_cached_prompt_tokens") != cached_tokens:
-            raise ValueError("prefix-cache native cached tokens did not reconcile")
-        if _prefix_cache_count(result, "native_decode_tokens") != _prefix_cache_count(
-            result, "completion_tokens"
-        ):
-            raise ValueError("prefix-cache native decode tokens did not reconcile")
+            raise ValueError("prefix-cache server counters did not reconcile")
         records.setdefault(condition, []).append(result)
         per_pair = pair_records.setdefault(pair_index, {})
         if condition in per_pair:
@@ -161,19 +165,20 @@ def _summarize_prefix_cache_case(
             raise ValueError("prefix-cache condition does not contain five requests")
         logical_tokens = sum(_prefix_cache_count(value, "prompt_tokens") for value in values)
         cached_tokens = sum(
-            _prefix_cache_count(value, "cached_prompt_tokens") for value in values
+            _prefix_cache_count(value, "server_cached_prompt_tokens")
+            for value in values
         )
         physical_tokens = sum(
-            _prefix_cache_count(value, "native_prompt_tokens") for value in values
+            _prefix_cache_count(value, "server_prompt_tokens") for value in values
         )
         completion_tokens = sum(
-            _prefix_cache_count(value, "completion_tokens") for value in values
+            _prefix_cache_count(value, "server_decode_tokens") for value in values
         )
-        native_prompt_s = sum(
-            _prefix_cache_number(value, "native_prompt_s") for value in values
+        server_prompt_s = sum(
+            _prefix_cache_number(value, "server_prompt_s") for value in values
         )
-        native_decode_s = sum(
-            _prefix_cache_number(value, "native_decode_s") for value in values
+        server_decode_s = sum(
+            _prefix_cache_number(value, "server_decode_s") for value in values
         )
         condition_request_wall_s = sum(
             _prefix_cache_number(value, "elapsed_s") for value in values
@@ -182,8 +187,8 @@ def _summarize_prefix_cache_case(
         client_decode_tps = [
             _prefix_cache_number(value, "decode_tps") for value in values
         ]
-        if condition_request_wall_s <= 0 or native_decode_s <= 0:
-            raise ValueError("prefix-cache request or native decode wall time was zero")
+        if condition_request_wall_s <= 0 or server_decode_s <= 0:
+            raise ValueError("prefix-cache request or server decode wall time was zero")
         conditions.append(
             {
                 "cache_condition": condition,
@@ -194,14 +199,14 @@ def _summarize_prefix_cache_case(
                 "physical_uncached_prompt_tokens": physical_tokens,
                 "cached_prompt_tokens": cached_tokens,
                 "cache_hit_fraction": cached_tokens / logical_tokens,
-                "native_prompt_processing_s": native_prompt_s,
-                "native_decode_s": native_decode_s,
-                "native_decode_tps": completion_tokens / native_decode_s,
-                "logical_prompt_tokens_per_native_prompt_s": (
-                    logical_tokens / native_prompt_s if native_prompt_s > 0 else None
+                "server_prompt_processing_s": server_prompt_s,
+                "server_decode_s": server_decode_s,
+                "server_decode_tps": completion_tokens / server_decode_s,
+                "logical_prompt_tokens_per_server_prompt_s": (
+                    logical_tokens / server_prompt_s if server_prompt_s > 0 else None
                 ),
-                "physical_uncached_prompt_tokens_per_native_prompt_s": (
-                    physical_tokens / native_prompt_s if native_prompt_s > 0 else None
+                "physical_uncached_prompt_tokens_per_server_prompt_s": (
+                    physical_tokens / server_prompt_s if server_prompt_s > 0 else None
                 ),
                 "condition_request_wall_s": condition_request_wall_s,
                 "end_to_end_output_tokens_per_condition_request_wall_s": (
@@ -238,9 +243,9 @@ def _summarize_prefix_cache_case(
                     _prefix_cache_number(second, "elapsed_s")
                     - _prefix_cache_number(third, "elapsed_s")
                 ),
-                "native_prompt_second_minus_third_s": (
-                    _prefix_cache_number(second, "native_prompt_s")
-                    - _prefix_cache_number(third, "native_prompt_s")
+                "server_prompt_second_minus_third_s": (
+                    _prefix_cache_number(second, "server_prompt_s")
+                    - _prefix_cache_number(third, "server_prompt_s")
                 ),
             }
         )
@@ -255,8 +260,8 @@ def _summarize_prefix_cache_case(
         "median_e2e_second_minus_third_s": statistics.median(
             item["e2e_second_minus_third_s"] for item in paired
         ),
-        "median_native_prompt_second_minus_third_s": statistics.median(
-            item["native_prompt_second_minus_third_s"] for item in paired
+        "median_server_prompt_second_minus_third_s": statistics.median(
+            item["server_prompt_second_minus_third_s"] for item in paired
         ),
     }
     return summary

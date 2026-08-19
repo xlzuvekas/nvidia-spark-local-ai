@@ -285,17 +285,26 @@ each profile run contains 30. The matching pair key is based on stable suite
 case metadata rather than a profile-specific frozen case ID, so an off/on pair
 uses the same long prefixes without persisting prompt text.
 
-Every request reconciles logical prompt tokens, cached prompt tokens, and
-physical uncached prompt tokens against both the response and native llama.cpp
-counter deltas. It records native prompt-processing time, native decode tokens
-and time, client request wall time, and TTFT. Reports keep condition totals and
-medians, including cache-hit fraction, physical prompt rate, cache-assisted
-logical prompt rate, native decode rate, and output rate. A cache-assisted
-logical input rate is explicitly not a fresh-prefill rate.
+Every request reconciles logical prompt tokens, cached prompt tokens, physical
+uncached prompt tokens, and server timings against the final llama.cpp SSE
+usage and timing payload. The before/after `/metrics` delta is retained only
+as a non-negative scalar Prometheus diagnostic: it is server-global and
+batch-scoped, so it is not required to match a request or used in per-request
+rates, aggregates, or paired timing claims. Reports keep condition totals and
+medians from the request-scoped server fields, including cache-hit fraction,
+physical prompt rate, cache-assisted logical prompt rate, server decode rate,
+and output rate. A cache-assisted logical input rate is explicitly not a
+fresh-prefill rate.
+
+The five retained diagnostic fields are explicitly named
+`prometheus_global_prompt_tokens`, `prometheus_global_cached_prompt_tokens`,
+`prometheus_global_decode_tokens`, `prometheus_global_prompt_s`, and
+`prometheus_global_decode_s`. They are never request-native measurements;
+the corresponding `server_*` fields are the final request-scoped SSE values.
 
 For each block, the report also retains `forced-cold-b` minus the third request
-for TTFT, end-to-end wall time, and native prompt-processing time. This is an
-observed within-run, order-position delta: in the off profile it is the cold
+for TTFT, end-to-end wall time, and server-reported prompt-processing time.
+This is an observed within-run, order-position delta: in the off profile it is the cold
 order control, and in the on profile it is the cold-to-warm observation. It is
 not a causal difference-in-differences estimate, a cross-run causal claim, or
 evidence that prefix caching changes decode TPS. Any cross-run comparison must
@@ -303,7 +312,7 @@ state its time/order controls and matching provenance separately.
 
 The cache journal and exported evidence are scalar-only. They exclude the
 synthetic prefix and suffix text, request identifiers, completions, reasoning,
-tool payloads, raw native metrics payloads, commands, paths, and credentials.
+tool payloads, raw Prometheus metrics payloads, commands, paths, and credentials.
 Only allowlisted counts, durations, rates, fixed condition labels, validation
 state, and public pinned provenance are retained. A failed cache control uses a
 fixed safe failure message rather than publishing transport or content details.

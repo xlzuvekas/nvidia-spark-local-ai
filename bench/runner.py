@@ -357,11 +357,11 @@ _PREFIX_CACHE_RESULT_SCALAR_FIELDS = (
     "elapsed_s",
     "emission_events",
     "finish_reason",
-    "native_cached_prompt_tokens",
-    "native_decode_s",
-    "native_decode_tokens",
-    "native_prompt_s",
-    "native_prompt_tokens",
+    "prometheus_global_cached_prompt_tokens",
+    "prometheus_global_decode_s",
+    "prometheus_global_decode_tokens",
+    "prometheus_global_prompt_s",
+    "prometheus_global_prompt_tokens",
     "output_tps",
     "prompt_tokens",
     "reasoning_tokens",
@@ -457,9 +457,15 @@ def _prefix_cache_result_payload(
     step_ordinal: int,
     cache_prompt_control: str,
     prefix_target_words: int,
-    native_metrics: dict[str, int | float],
+    prometheus_metrics: dict[str, int | float],
 ) -> dict[str, Any]:
-    """Serialize the cache protocol's fixed scalar-only measurement record."""
+    """Serialize one scalar-only cache record.
+
+    ``server_*`` values are request-scoped final SSE counters and timings.
+    ``prometheus_global_*`` values are only the corresponding global
+    Prometheus deltas; retain them as diagnostics without treating them as
+    request attribution.
+    """
 
     payload = {
         "cache_condition": condition,
@@ -476,11 +482,13 @@ def _prefix_cache_result_payload(
         "elapsed_s": result.elapsed_s,
         "emission_events": result.emission_events,
         "finish_reason": result.finish_reason,
-        "native_cached_prompt_tokens": native_metrics["cached_prompt_tokens"],
-        "native_decode_s": native_metrics["decode_s"],
-        "native_decode_tokens": native_metrics["decode_tokens"],
-        "native_prompt_s": native_metrics["prompt_s"],
-        "native_prompt_tokens": native_metrics["prompt_tokens"],
+        "prometheus_global_cached_prompt_tokens": prometheus_metrics[
+            "cached_prompt_tokens"
+        ],
+        "prometheus_global_decode_s": prometheus_metrics["decode_s"],
+        "prometheus_global_decode_tokens": prometheus_metrics["decode_tokens"],
+        "prometheus_global_prompt_s": prometheus_metrics["prompt_s"],
+        "prometheus_global_prompt_tokens": prometheus_metrics["prompt_tokens"],
         "output_tps": result.output_tps,
         "prompt_tokens": result.prompt_tokens,
         "reasoning_tokens": result.reasoning_tokens,
@@ -500,9 +508,9 @@ def _prefix_cache_result_payload(
         "cached_prompt_tokens",
         "completion_tokens",
         "emission_events",
-        "native_cached_prompt_tokens",
-        "native_decode_tokens",
-        "native_prompt_tokens",
+        "prometheus_global_cached_prompt_tokens",
+        "prometheus_global_decode_tokens",
+        "prometheus_global_prompt_tokens",
         "prompt_tokens",
         "server_cached_prompt_tokens",
         "server_decode_tokens",
@@ -513,8 +521,8 @@ def _prefix_cache_result_payload(
         "decode_s",
         "decode_tps",
         "elapsed_s",
-        "native_decode_s",
-        "native_prompt_s",
+        "prometheus_global_decode_s",
+        "prometheus_global_prompt_s",
         "output_tps",
         "server_decode_s",
         "server_prompt_s",
@@ -523,7 +531,7 @@ def _prefix_cache_result_payload(
         _prefix_cache_scalar(
             payload[field],
             name=field,
-            positive=field in {"decode_s", "elapsed_s", "native_decode_s", "server_decode_s"},
+            positive=field in {"decode_s", "elapsed_s", "server_decode_s"},
         )
     _prefix_cache_scalar(
         payload["reasoning_tokens"],
@@ -616,11 +624,16 @@ def _prefix_cache_request_arguments(
 def _validate_prefix_cache_result(
     *,
     result: Any,
-    native_metrics: dict[str, int | float],
+    prometheus_metrics: dict[str, int | float],
     case: Any,
     condition: str,
 ) -> dict[str, Any]:
-    """Prove one request is a real cache control or a substantial prefix hit."""
+    """Prove one request is a real cache control or a substantial prefix hit.
+
+    The final SSE fields are request-scoped and therefore authoritative for
+    token identity and server timing.  Prometheus snapshots are validated only
+    as non-negative, server-global diagnostics.
+    """
 
     cached = getattr(result, "cached_prompt_tokens", None)
     prompt_tokens = getattr(result, "prompt_tokens", None)
@@ -638,6 +651,9 @@ def _validate_prefix_cache_result(
     output_tps = _prefix_cache_scalar(
         getattr(result, "output_tps", None), name="output_tps"
     )
+    server_prompt_tokens = getattr(result, "server_prompt_tokens", None)
+    server_cached_prompt_tokens = getattr(result, "server_cached_prompt_tokens", None)
+    server_decode_tokens = getattr(result, "server_decode_tokens", None)
     valid = (
         isinstance(cached, int)
         and not isinstance(cached, bool)
@@ -649,6 +665,18 @@ def _validate_prefix_cache_result(
         and isinstance(completion_tokens, int)
         and not isinstance(completion_tokens, bool)
         and completion_tokens == int(case.max_output_tokens)
+        and all(
+            type(value) is int and value >= 0
+            for value in (
+                server_prompt_tokens,
+                server_cached_prompt_tokens,
+                server_decode_tokens,
+            )
+        )
+        and int(server_prompt_tokens) + int(server_cached_prompt_tokens)
+        == int(prompt_tokens)
+        and int(server_cached_prompt_tokens) == int(cached)
+        and int(server_decode_tokens) == int(completion_tokens)
         and getattr(result, "finish_reason", None) == "length"
         and _prefix_cache_scalar(
             getattr(result, "server_prompt_s", None), name="server_prompt_s"
@@ -680,32 +708,16 @@ def _validate_prefix_cache_result(
     )
     if valid:
         try:
-            require_llamacpp_cache_delta(
-                native_metrics,
-                prompt_tokens=prompt_tokens,
-                cached_prompt_tokens=cached,
-                completion_tokens=completion_tokens,
-            )
+            require_llamacpp_cache_delta(prometheus_metrics)
         except LlamaCppCacheMetricsError:
             valid = False
-    if valid:
-        server_counts = (
-            getattr(result, "server_prompt_tokens", None),
-            getattr(result, "server_cached_prompt_tokens", None),
-            getattr(result, "server_decode_tokens", None),
-        )
-        valid = server_counts == (
-            int(native_metrics["prompt_tokens"]),
-            int(native_metrics["cached_prompt_tokens"]),
-            int(native_metrics["decode_tokens"]),
-        )
     if valid and condition.startswith("forced-cold"):
         valid = cached == 0
     if valid and condition == "warm-prefix-hit":
         valid = cached / prompt_tokens >= 0.90
     return {
         "passed": valid,
-        "reason": None if valid else "native prefix-cache control did not validate",
+        "reason": None if valid else "prefix-cache control did not validate",
     }
 
 
@@ -1776,10 +1788,10 @@ def _execute_prefix_cache_case(
                     )
                 )
                 after = snapshot_llamacpp_cache_metrics(server.base_url)
-                native_metrics = delta_llamacpp_cache_metrics(before, after)
+                prometheus_metrics = delta_llamacpp_cache_metrics(before, after)
                 validation = _validate_prefix_cache_result(
                     result=result,
-                    native_metrics=native_metrics,
+                    prometheus_metrics=prometheus_metrics,
                     case=case,
                     condition=condition,
                 )
@@ -1800,7 +1812,7 @@ def _execute_prefix_cache_case(
                             step_ordinal=step_ordinal,
                             cache_prompt_control=cache_prompt_control,
                             prefix_target_words=int(case.prompt_repetitions),
-                            native_metrics=native_metrics,
+                            prometheus_metrics=prometheus_metrics,
                         ),
                         "validation": validation,
                     }

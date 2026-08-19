@@ -254,11 +254,6 @@ _REQUEST_NUMERIC_FIELDS = {
     "nfe_per_block",
     "nfe_per_output_token",
     "nfe_per_s",
-    "native_cached_prompt_tokens",
-    "native_decode_s",
-    "native_decode_tokens",
-    "native_prompt_s",
-    "native_prompt_tokens",
     "normalized_output_length",
     "output_blocks",
     "output_tokens",
@@ -310,10 +305,12 @@ _REQUEST_DROPPED_FIELDS = {
     "tool_calls",
 }
 
-# The native llama.cpp prefix-KV experiment is intentionally narrower than a
-# generic serving result.  Keeping this contract separate prevents an
-# otherwise allowlisted metric (for example an audio score) from quietly
-# becoming part of the cache evidence corpus.
+# The llama.cpp prefix-KV experiment is intentionally narrower than a generic
+# serving result.  Keeping this contract separate prevents an otherwise
+# allowlisted metric (for example an audio score) from quietly becoming part of
+# the cache evidence corpus.  ``server_*`` fields are request-scoped final SSE
+# measurements; ``prometheus_global_*`` fields are only global Prometheus
+# diagnostics.
 _PREFIX_CACHE_RAW_RESULT_FIELDS = frozenset(
     {
         "cache_condition",
@@ -330,11 +327,11 @@ _PREFIX_CACHE_RAW_RESULT_FIELDS = frozenset(
         "elapsed_s",
         "emission_events",
         "finish_reason",
-        "native_cached_prompt_tokens",
-        "native_decode_s",
-        "native_decode_tokens",
-        "native_prompt_s",
-        "native_prompt_tokens",
+        "prometheus_global_cached_prompt_tokens",
+        "prometheus_global_decode_s",
+        "prometheus_global_decode_tokens",
+        "prometheus_global_prompt_s",
+        "prometheus_global_prompt_tokens",
         "output_tps",
         "prompt_tokens",
         "reasoning_tokens",
@@ -354,9 +351,9 @@ _PREFIX_CACHE_RAW_RESULT_INTEGER_FIELDS = frozenset(
         "cached_prompt_tokens",
         "completion_tokens",
         "emission_events",
-        "native_cached_prompt_tokens",
-        "native_decode_tokens",
-        "native_prompt_tokens",
+        "prometheus_global_cached_prompt_tokens",
+        "prometheus_global_decode_tokens",
+        "prometheus_global_prompt_tokens",
         "prompt_tokens",
         "server_cached_prompt_tokens",
         "server_decode_tokens",
@@ -370,7 +367,6 @@ _PREFIX_CACHE_RAW_RESULT_POSITIVE_INTEGER_FIELDS = frozenset(
         "cache_step_ordinal",
         "completion_tokens",
         "emission_events",
-        "native_decode_tokens",
         "prompt_tokens",
         "server_decode_tokens",
     }
@@ -2391,7 +2387,7 @@ def _validate_projected_agentic_sample(sample: Any) -> None:
 
 
 def _project_prefix_cache_request_result(result: Any) -> dict[str, Any]:
-    """Project the fixed, scalar-only native cache measurement record.
+    """Project the fixed, scalar-only cache measurement record.
 
     This is deliberately not a specialization of the broad serving-result
     allowlist.  A cache result is protocol evidence, so every retained field
@@ -2413,8 +2409,8 @@ def _project_prefix_cache_request_result(result: Any) -> dict[str, Any]:
         "decode_s",
         "decode_tps",
         "elapsed_s",
-        "native_decode_s",
-        "native_prompt_s",
+        "prometheus_global_decode_s",
+        "prometheus_global_prompt_s",
         "output_tps",
         "server_decode_s",
         "server_prompt_s",
@@ -2422,7 +2418,7 @@ def _project_prefix_cache_request_result(result: Any) -> dict[str, Any]:
     ):
         value = _finite(result.get(key), name=f"prefix-cache request.{key}")
         if value is None or value < 0 or (
-            key in {"decode_s", "elapsed_s", "native_decode_s", "server_decode_s"}
+            key in {"decode_s", "elapsed_s", "server_decode_s"}
             and value <= 0
         ):
             raise EvidenceError(f"prefix-cache request.{key} is invalid")
@@ -3134,7 +3130,7 @@ def _prefix_cache_integer(value: Any, *, name: str, positive: bool = False) -> i
 
 
 def _project_prefix_cache_metrics(value: Any) -> dict[str, Any]:
-    """Project the exact scalar report for the native same-slot KV protocol."""
+    """Project the exact scalar report for the same-slot KV protocol."""
 
     if not isinstance(value, dict):
         raise EvidenceError("prefix-cache summary must be an object")
@@ -3177,11 +3173,11 @@ def _project_prefix_cache_metrics(value: Any) -> dict[str, Any]:
         "physical_uncached_prompt_tokens",
         "cached_prompt_tokens",
         "cache_hit_fraction",
-        "native_prompt_processing_s",
-        "native_decode_s",
-        "native_decode_tps",
-        "logical_prompt_tokens_per_native_prompt_s",
-        "physical_uncached_prompt_tokens_per_native_prompt_s",
+        "server_prompt_processing_s",
+        "server_decode_s",
+        "server_decode_tps",
+        "logical_prompt_tokens_per_server_prompt_s",
+        "physical_uncached_prompt_tokens_per_server_prompt_s",
         "condition_request_wall_s",
         "end_to_end_output_tokens_per_condition_request_wall_s",
         "median_ttft_s",
@@ -3242,11 +3238,11 @@ def _project_prefix_cache_metrics(value: Any) -> dict[str, Any]:
         ):
             raise EvidenceError("prefix-cache hit fraction is inconsistent")
         prompt_s = _finite(
-            condition.get("native_prompt_processing_s"),
-            name="prefix_cache.native_prompt_processing_s",
+            condition.get("server_prompt_processing_s"),
+            name="prefix_cache.server_prompt_processing_s",
         )
         decode_s = _finite(
-            condition.get("native_decode_s"), name="prefix_cache.native_decode_s"
+            condition.get("server_decode_s"), name="prefix_cache.server_decode_s"
         )
         condition_wall_s = _finite(
             condition.get("condition_request_wall_s"),
@@ -3260,7 +3256,7 @@ def _project_prefix_cache_metrics(value: Any) -> dict[str, Any]:
             or condition_wall_s is None
             or condition_wall_s <= 0
         ):
-            raise EvidenceError("prefix-cache native timing or request wall is invalid")
+            raise EvidenceError("prefix-cache server timing or request wall is invalid")
         projected: dict[str, Any] = {
             "cache_condition": expected_condition,
             "cache_prompt_control": expected_control,
@@ -3270,12 +3266,12 @@ def _project_prefix_cache_metrics(value: Any) -> dict[str, Any]:
             "physical_uncached_prompt_tokens": physical_tokens,
             "cached_prompt_tokens": cached_tokens,
             "cache_hit_fraction": cache_fraction,
-            "native_prompt_processing_s": prompt_s,
-            "native_decode_s": decode_s,
+            "server_prompt_processing_s": prompt_s,
+            "server_decode_s": decode_s,
             "condition_request_wall_s": condition_wall_s,
         }
         for field in (
-            "native_decode_tps",
+            "server_decode_tps",
             "end_to_end_output_tokens_per_condition_request_wall_s",
             "median_ttft_s",
             "median_e2e_s",
@@ -3286,15 +3282,15 @@ def _project_prefix_cache_metrics(value: Any) -> dict[str, Any]:
                 raise EvidenceError(f"prefix-cache {field} must be non-negative")
             projected[field] = item
         for field in (
-            "logical_prompt_tokens_per_native_prompt_s",
-            "physical_uncached_prompt_tokens_per_native_prompt_s",
+            "logical_prompt_tokens_per_server_prompt_s",
+            "physical_uncached_prompt_tokens_per_server_prompt_s",
         ):
             item = _finite(condition.get(field), name=f"prefix_cache.{field}")
             if prompt_s == 0:
                 if item is not None:
-                    raise EvidenceError("prefix-cache zero native prompt time needs null rates")
+                    raise EvidenceError("prefix-cache zero server prompt time needs null rates")
             elif item is None or item < 0:
-                raise EvidenceError("prefix-cache native prompt rate is invalid")
+                raise EvidenceError("prefix-cache server prompt rate is invalid")
             projected[field] = item
         if expected_condition.startswith("forced-cold") and cached_tokens != 0:
             raise EvidenceError("prefix-cache forced-cold condition reused tokens")
@@ -3310,7 +3306,7 @@ def _project_prefix_cache_metrics(value: Any) -> dict[str, Any]:
         "per_pair",
         "median_ttft_second_minus_third_s",
         "median_e2e_second_minus_third_s",
-        "median_native_prompt_second_minus_third_s",
+        "median_server_prompt_second_minus_third_s",
     }
     if not isinstance(paired, dict) or set(paired) != paired_fields:
         raise EvidenceError("prefix-cache paired summary does not match its schema")
@@ -3331,7 +3327,7 @@ def _project_prefix_cache_metrics(value: Any) -> dict[str, Any]:
         "cache_pair_index",
         "ttft_second_minus_third_s",
         "e2e_second_minus_third_s",
-        "native_prompt_second_minus_third_s",
+        "server_prompt_second_minus_third_s",
     }
     projected_pairs: list[dict[str, Any]] = []
     for expected_index, item in enumerate(paired["per_pair"], start=1):
@@ -3473,11 +3469,11 @@ _PREFIX_CACHE_SAMPLE_FIELDS = frozenset(
         "emission_event_count",
         "finish_reason",
         "kind",
-        "native_cached_prompt_tokens",
-        "native_decode_s",
-        "native_decode_tokens",
-        "native_prompt_s",
-        "native_prompt_tokens",
+        "prometheus_global_cached_prompt_tokens",
+        "prometheus_global_decode_s",
+        "prometheus_global_decode_tokens",
+        "prometheus_global_prompt_s",
+        "prometheus_global_prompt_tokens",
         "output_tps",
         "prompt_tokens",
         "reasoning_tokens",
@@ -4352,36 +4348,38 @@ def _validate_prefix_cache_sample(
     )
     if cached_tokens > prompt_tokens or completion_tokens != 128:
         raise EvidenceError("prefix-cache sample token counts are invalid")
-    native_prompt_tokens = _prefix_cache_sample_number(
-        sample, "native_prompt_tokens", integer=True
+    # ``prometheus_global_*`` fields are global Prometheus deltas.  They must
+    # remain scalar diagnostics, but cannot be assigned to one request or used
+    # to reconcile the exact request-scoped final SSE counters below.
+    for key in (
+        "prometheus_global_prompt_tokens",
+        "prometheus_global_cached_prompt_tokens",
+        "prometheus_global_decode_tokens",
+    ):
+        _prefix_cache_sample_number(sample, key, integer=True)
+    server_prompt_tokens = _prefix_cache_sample_number(
+        sample, "server_prompt_tokens", integer=True
     )
-    native_cached_tokens = _prefix_cache_sample_number(
-        sample, "native_cached_prompt_tokens", integer=True
+    server_cached_tokens = _prefix_cache_sample_number(
+        sample, "server_cached_prompt_tokens", integer=True
     )
-    native_decode_tokens = _prefix_cache_sample_number(
-        sample, "native_decode_tokens", integer=True, positive=True
+    server_decode_tokens = _prefix_cache_sample_number(
+        sample, "server_decode_tokens", integer=True, positive=True
     )
     if (
-        native_prompt_tokens + native_cached_tokens != prompt_tokens
-        or native_cached_tokens != cached_tokens
-        or native_decode_tokens != completion_tokens
+        server_prompt_tokens + server_cached_tokens != prompt_tokens
+        or server_cached_tokens != cached_tokens
+        or server_decode_tokens != completion_tokens
     ):
-        raise EvidenceError("prefix-cache sample native counters do not reconcile")
-    for direct_key, native_value in (
-        ("server_prompt_tokens", native_prompt_tokens),
-        ("server_cached_prompt_tokens", native_cached_tokens),
-        ("server_decode_tokens", native_decode_tokens),
-    ):
-        if _prefix_cache_sample_number(sample, direct_key, integer=True) != native_value:
-            raise EvidenceError("prefix-cache direct and native counters disagree")
+        raise EvidenceError("prefix-cache sample server counters do not reconcile")
     for key, positive in (
         ("ttft_s", False),
         ("elapsed_s", True),
         ("decode_s", True),
         ("decode_tps", False),
         ("output_tps", False),
-        ("native_prompt_s", False),
-        ("native_decode_s", True),
+        ("prometheus_global_prompt_s", False),
+        ("prometheus_global_decode_s", False),
         ("server_prompt_s", False),
         ("server_decode_s", True),
     ):
@@ -4427,7 +4425,7 @@ def _validate_prefix_cache_aggregates(
     """Bind every cache aggregate to selected samples and frozen controls.
 
     This runs identically during export and evidence verification.  It rejects
-    any unpaired profile/suite, stale summary, missing native counter, or
+    any unpaired profile/suite, stale summary, missing cache measurement, or
     altered condition median rather than publishing a merely well-typed value.
     """
 

@@ -1,4 +1,4 @@
-"""Strict scalar parsing for native llama.cpp prompt-KV cache counters."""
+"""Strict scalar parsing for llama.cpp global Prometheus cache counters."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ _SAMPLE = re.compile(
 
 
 class LlamaCppCacheMetricsError(RuntimeError):
-    """Raised when a cache benchmark cannot prove its native counter delta."""
+    """Raised when a cache benchmark cannot retain a valid metrics delta."""
 
 
 def _scalar(value: float) -> int | float:
@@ -90,7 +90,13 @@ def delta_llamacpp_cache_metrics(
     before: dict[str, int | float] | None,
     after: dict[str, int | float] | None,
 ) -> dict[str, int | float]:
-    """Return one non-negative per-request delta or fail closed."""
+    """Return one non-negative global Prometheus delta or fail closed.
+
+    llama.cpp exposes these counters across server batches and slots.  They are
+    useful scalar diagnostics for a serial cache run, but are not attributed to
+    a single request.  Per-request cache accounting comes from the final SSE
+    usage and timings payload instead.
+    """
 
     if before is None or after is None:
         raise LlamaCppCacheMetricsError(
@@ -122,30 +128,22 @@ def delta_llamacpp_cache_metrics(
 
 def require_llamacpp_cache_delta(
     delta: dict[str, int | float],
-    *,
-    prompt_tokens: int,
-    cached_prompt_tokens: int,
-    completion_tokens: int,
 ) -> None:
-    """Prove one serial request reconciles with its native metrics delta."""
+    """Validate a non-negative global Prometheus diagnostic delta.
 
-    expected = {
-        "prompt_tokens": prompt_tokens - cached_prompt_tokens,
-        "cached_prompt_tokens": cached_prompt_tokens,
-        "decode_tokens": completion_tokens,
-    }
-    for key, target in expected.items():
-        value = delta.get(key)
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(float(value))
-            or not math.isclose(float(value), float(target), rel_tol=0.0, abs_tol=1e-9)
-        ):
-            raise LlamaCppCacheMetricsError(
-                "native llama.cpp prompt-cache delta did not reconcile"
-            )
-    for key in ("prompt_s", "decode_s"):
+    These metrics intentionally do *not* reconcile with a single request:
+    llama.cpp accumulates them at server/batch scope.  Exact per-request token
+    and timing identities are enforced from the final SSE payload by the cache
+    runner and evidence validator.
+    """
+
+    for key in (
+        "prompt_tokens",
+        "cached_prompt_tokens",
+        "decode_tokens",
+        "prompt_s",
+        "decode_s",
+    ):
         value = delta.get(key)
         if (
             isinstance(value, bool)
@@ -154,5 +152,5 @@ def require_llamacpp_cache_delta(
             or float(value) < 0
         ):
             raise LlamaCppCacheMetricsError(
-                "native llama.cpp prompt-cache timing delta was invalid"
+                "native llama.cpp prompt-cache metrics delta was invalid"
             )

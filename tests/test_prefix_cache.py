@@ -138,7 +138,10 @@ def _cache_scalar_result(
 ) -> dict[str, object]:
     condition, _, control = prefix_cache_steps(mode)[step_ordinal - 1]
     cached_tokens = 90 if condition == "warm-prefix-hit" else 0
-    native_prompt_tokens = 100 - cached_tokens
+    server_prompt_tokens = 100 - cached_tokens
+    # Prometheus prompt counters are server-global.  This deliberate +2
+    # diagnostic offset must not weaken final SSE request reconciliation.
+    prometheus_global_prompt_tokens = server_prompt_tokens + 2
     prompt_s = 0.1 if cached_tokens else 1.0
     elapsed_s = 0.25 if cached_tokens else 2.0
     return {
@@ -156,11 +159,11 @@ def _cache_scalar_result(
         "elapsed_s": elapsed_s,
         "emission_events": 128,
         "finish_reason": "length",
-        "native_cached_prompt_tokens": cached_tokens,
-        "native_decode_s": 1.0,
-        "native_decode_tokens": 128,
-        "native_prompt_s": prompt_s,
-        "native_prompt_tokens": native_prompt_tokens,
+        "prometheus_global_cached_prompt_tokens": cached_tokens,
+        "prometheus_global_decode_s": 1.0,
+        "prometheus_global_decode_tokens": 128,
+        "prometheus_global_prompt_s": prompt_s,
+        "prometheus_global_prompt_tokens": prometheus_global_prompt_tokens,
         "output_tps": 128.0 / elapsed_s,
         "prompt_tokens": 100,
         "reasoning_tokens": None,
@@ -168,7 +171,7 @@ def _cache_scalar_result(
         "server_decode_s": 1.0,
         "server_decode_tokens": 128,
         "server_prompt_s": prompt_s,
-        "server_prompt_tokens": native_prompt_tokens,
+        "server_prompt_tokens": server_prompt_tokens,
         "ttft_s": 0.1 if cached_tokens else 1.0,
     }
 
@@ -309,7 +312,7 @@ def _refresh_run_and_root_checksums(output_root: Path, run_id: str) -> None:
 
 
 class LlamaCppPrefixCacheMetricsTests(unittest.TestCase):
-    def test_parser_and_delta_reconcile_exact_native_counters(self) -> None:
+    def test_parser_and_delta_accept_global_prometheus_offset(self) -> None:
         before = parse_llamacpp_cache_metrics(
             """
 llamacpp:prompt_tokens_total 100
@@ -321,7 +324,7 @@ llamacpp:tokens_predicted_seconds_total 2.5
         )
         after = parse_llamacpp_cache_metrics(
             """
-llamacpp:prompt_tokens_total 110
+llamacpp:prompt_tokens_total 112
 llamacpp:prompt_tokens_cached_total 90
 llamacpp:prompt_seconds_total 1.35
 llamacpp:tokens_predicted_total 256
@@ -329,17 +332,12 @@ llamacpp:tokens_predicted_seconds_total 3.5
 """
         )
         delta = delta_llamacpp_cache_metrics(before, after)
-        self.assertEqual(delta["prompt_tokens"], 10)
+        self.assertEqual(delta["prompt_tokens"], 12)
         self.assertEqual(delta["cached_prompt_tokens"], 90)
         self.assertAlmostEqual(float(delta["prompt_s"]), 0.1)
         self.assertEqual(delta["decode_tokens"], 128)
         self.assertEqual(delta["decode_s"], 1)
-        require_llamacpp_cache_delta(
-            delta,
-            prompt_tokens=100,
-            cached_prompt_tokens=90,
-            completion_tokens=128,
-        )
+        require_llamacpp_cache_delta(delta)
 
     def test_parser_and_delta_fail_closed(self) -> None:
         self.assertIsNone(
@@ -695,7 +693,7 @@ class PrefixCacheProtocolTests(unittest.TestCase):
         self.assertEqual(estimated, 8192 * 6 + 128 + 1024)
         self.assertGreater(estimated, self._case().prompt_repetitions)
 
-    def test_runner_rejects_boolean_native_timing_scalars(self) -> None:
+    def test_runner_rejects_boolean_server_timing_scalars(self) -> None:
         result = RequestResult(
             request_id="synthetic-request-id",
             started_at_ns=1,
@@ -723,7 +721,7 @@ class PrefixCacheProtocolTests(unittest.TestCase):
         with self.assertRaises(PrefixCacheError):
             _validate_prefix_cache_result(
                 result=result,
-                native_metrics={
+                prometheus_metrics={
                     "prompt_tokens": 100,
                     "cached_prompt_tokens": 0,
                     "prompt_s": 1.0,
@@ -733,6 +731,58 @@ class PrefixCacheProtocolTests(unittest.TestCase):
                 case=self._case(),
                 condition="forced-cold-a",
             )
+
+    def test_runner_uses_reconciled_sse_counters_not_global_prometheus_tokens(
+        self,
+    ) -> None:
+        result = RequestResult(
+            request_id="synthetic-request-id",
+            started_at_ns=1,
+            prompt_tokens=100,
+            completion_tokens=128,
+            reasoning_tokens=None,
+            ttft_s=0.1,
+            elapsed_s=1.0,
+            decode_s=0.9,
+            decode_tps=127 / 0.9,
+            output_tps=128.0,
+            emission_events=128,
+            finish_reason="length",
+            response_model="synthetic",
+            content="",
+            reasoning="",
+            tool_calls=[],
+            cached_prompt_tokens=0,
+            server_prompt_tokens=100,
+            server_cached_prompt_tokens=0,
+            server_decode_tokens=128,
+            server_prompt_s=1.0,
+            server_decode_s=1.0,
+        )
+        prometheus_metrics = {
+            # A global/batch counter can differ from the per-request final SSE
+            # prompt counter even while the exact SSE identities hold.
+            "prompt_tokens": 102,
+            "cached_prompt_tokens": 0,
+            "prompt_s": 1.0,
+            "decode_tokens": 128,
+            "decode_s": 1.0,
+        }
+        validation = _validate_prefix_cache_result(
+            result=result,
+            prometheus_metrics=prometheus_metrics,
+            case=self._case(),
+            condition="forced-cold-a",
+        )
+        self.assertTrue(validation["passed"])
+        self.assertFalse(
+            _validate_prefix_cache_result(
+                result=replace(result, server_prompt_tokens=102),
+                prometheus_metrics=prometheus_metrics,
+                case=self._case(),
+                condition="forced-cold-a",
+            )["passed"]
+        )
 
     def test_runner_journals_scalar_only_cache_measurements_and_reports_pair_metrics(self) -> None:
         case = self._case()
@@ -772,7 +822,9 @@ class PrefixCacheProtocolTests(unittest.TestCase):
                 physical = 100 - cached
                 prompt_s = 0.1 if cache_prompt else 1.0
                 elapsed_s = 0.3 if cache_prompt else 2.2
-                counters["prompt_tokens"] += physical
+                # Prometheus counters are global batch diagnostics, not
+                # request-scoped accounting.  Model a realistic +2 drift.
+                counters["prompt_tokens"] += physical + 2
                 counters["cached_prompt_tokens"] += cached
                 counters["prompt_s"] += prompt_s
                 counters["decode_tokens"] += 128
@@ -845,6 +897,10 @@ class PrefixCacheProtocolTests(unittest.TestCase):
                     self.assertNotIn("reasoning", result)
                     self.assertNotIn("tool_calls", result)
                     self.assertNotIn("response_model", result)
+                    self.assertEqual(
+                        result["prometheus_global_prompt_tokens"],
+                        result["server_prompt_tokens"] + 2,
+                    )
                     _project_request_result(result, kind="cache")
                 if mode == "off":
                     self.assertTrue(
@@ -962,6 +1018,22 @@ class PrefixCacheEvidenceTests(unittest.TestCase):
         ):
             _project_request_result(raw_result, kind="cache")
 
+        legacy_result = _cache_scalar_result(
+            mode="on", pair_index=1, step_ordinal=1, prefix_target=8192
+        )
+        for old_key, new_key in (
+            ("native_cached_prompt_tokens", "prometheus_global_cached_prompt_tokens"),
+            ("native_decode_s", "prometheus_global_decode_s"),
+            ("native_decode_tokens", "prometheus_global_decode_tokens"),
+            ("native_prompt_s", "prometheus_global_prompt_s"),
+            ("native_prompt_tokens", "prometheus_global_prompt_tokens"),
+        ):
+            legacy_result[old_key] = legacy_result.pop(new_key)
+        with self.assertRaisesRegex(
+            EvidenceError, "prefix-cache request result does not match its exact schema"
+        ):
+            _project_request_result(legacy_result, kind="cache")
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for mode in ("off", "on"):
@@ -1036,7 +1108,7 @@ class PrefixCacheEvidenceTests(unittest.TestCase):
                 if sample.get("cache_condition") == "warm-prefix-hit"
             )
             warm["cached_prompt_tokens"] = 91
-            with self.assertRaisesRegex(EvidenceError, "native counters do not reconcile"):
+            with self.assertRaisesRegex(EvidenceError, "server counters do not reconcile"):
                 _validate_prefix_cache_aggregates(
                     altered_samples,
                     summary,
