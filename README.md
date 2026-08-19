@@ -11,6 +11,7 @@ quality checks, and the provenance needed to interpret each number.
 | Which MoE models are useful on Spark now? | [MoE landscape, including Laguna XS/S, G9v3, NInfer, and the dense Muse control](docs/moe-landscape-2026-08-17.md) |
 | Which models complete deterministic multi-turn tool tasks? | [Agentic tool-use results: strict success, trace correctness, MTP, and Laguna](docs/agentic-tools-results-2026-08-17.md) |
 | How does Qwen3.6 perform on a strict two-hop long-context needle? | [Two-hop retrieval: Qwen3.6 baseline versus MTP2 through the 245,760-target tier](docs/multihop-long-context-results-2026-08-18.md) |
+| What does native llama.cpp prompt-KV reuse change for Qwen3.6? | [Prefix-cache controls: 8K and 32K shared-prefix cold/warm observations](docs/qwen36-prefix-cache-results-2026-08-18.md) |
 | How did Qwen3-Coder-Next fare on terminal coding tasks? | [Harbor/Terminal-Bench-derived results: Qwen Code versus OpenCode](docs/harbor-terminal-results-2026-08-18.md) |
 | How are offline coding-agent harnesses compared? | [Qwen3-Coder-Next Harbor campaign protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign) |
 | What ran in the 2026-08-17 overnight campaign? | [Unsloth Qwen3.6/Qwen3.8, DSpark, perplexity, long context, and Muse DFlash](docs/benchmark-results-2026-08-17.md) |
@@ -61,6 +62,11 @@ explains how to create and verify both files.
   Qwen3.8 MTP, Nemotron MTP, and Muse DFlash all exercised their draft paths.
   They do not improve every prefill workload, and accelerated invalid output
   is not counted as usable throughput.
+- In native llama.cpp's serial Qwen3.6 prompt-KV controls, a warm shared prefix
+  reported 98.4--99.6% cached prompt tokens and an observed 13.7--71.9-second
+  within-run median first-token-time difference versus the preceding forced
+  cold request. Decode rate remained effectively unchanged; the result is not
+  a fresh-prefill or cross-run causal comparison.
 - NInfer reached Qwen3.6 and Qwen3.8 GPU execution only through the repository's
   bounded [experimental SM121a patch](patches/ninfer/README.md). These eager
   engine measurements are not evidence of upstream support or production
@@ -78,6 +84,10 @@ geometries, slot counts, or validation states.
 
 ### Measured results
 
+- [Qwen3.6 native llama.cpp prefix-cache controls — 2026-08-18](docs/qwen36-prefix-cache-results-2026-08-18.md):
+  serial 8K and 32K shared-prefix cold/warm controls with request-scoped cache,
+  first-token, wall-time, prompt-work, and decode-rate measurements kept
+  distinct.
 - [Qwen3.6 two-hop long-context retrieval — 2026-08-18](docs/multihop-long-context-results-2026-08-18.md):
   matched baseline and MTP2 measurements through the 245,760-target tier,
   with exact final-key validation, timing, and lifetime draft-token counters.

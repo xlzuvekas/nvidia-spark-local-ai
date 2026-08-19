@@ -317,6 +317,11 @@ Only allowlisted counts, durations, rates, fixed condition labels, validation
 state, and public pinned provenance are retained. A failed cache control uses a
 fixed safe failure message rather than publishing transport or content details.
 
+The completed Qwen3.6 cache-off/cache-on controls are summarized in the
+[2026-08-18 prefix-cache result note](docs/qwen36-prefix-cache-results-2026-08-18.md).
+It reports only request-scoped scalar outcomes and keeps prompt-cache effects,
+fresh-prefill rates, and decode TPS as separate concepts.
+
 ### Harbor terminal coding-agent campaign
 
 The Qwen3-Coder-Next Harbor campaign defines a paired comparison of two

@@ -133,6 +133,26 @@ def _cache_model_document(mode: str) -> dict[str, object]:
     }
 
 
+def _disabled_llamacpp_speculative_summary() -> dict[str, object]:
+    """The only generic draft rollup a cache source may discard."""
+
+    return {
+        "accepted_tokens_per_position": {},
+        "configured_max_draft_tokens": None,
+        "draft_acceptance_rate": None,
+        "mean_accepted_length": None,
+        "method": None,
+        "num_accepted_tokens": 0,
+        "num_draft_tokens": 0,
+        "num_drafts": 0,
+        "proposal_depth": None,
+        "requested": False,
+        "scope": "all_persisted_llamacpp_server_lifetimes",
+        "snapshot_count": 1,
+        "source": "llamacpp_prometheus_cumulative_counters",
+    }
+
+
 def _cache_scalar_result(
     *, mode: str, pair_index: int, step_ordinal: int, prefix_target: int
 ) -> dict[str, object]:
@@ -1007,6 +1027,139 @@ class PrefixCacheEvidenceTests(unittest.TestCase):
         if telemetry_path.exists():
             telemetry_path.unlink()
         return suite, model, events, summarize_run(run_dir)
+
+    def test_source_cache_case_telemetry_and_energy_metric_are_discarded(self) -> None:
+        telemetry = {
+            "sampled_energy_j": 4.0,
+            "samples": 5,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = EvidenceFixture(Path(directory))
+            _, _, _, source_summary = self._write_cache_run(
+                fixture.run_dir, mode="on", with_startup_provenance=True
+            )
+            source_summary["cases"][0]["telemetry"] = telemetry
+            source_summary["cases"][0]["output_tokens_per_sampled_joule"] = 480.0
+            _write_test_json(fixture.run_dir / "summary.json", source_summary)
+
+            projected = _project_summary(source_summary)
+            self.assertNotIn("telemetry", projected["cases"][0])
+            self.assertNotIn(
+                "output_tokens_per_sampled_joule", projected["cases"][0]
+            )
+
+            with patch(
+                "bench.evidence._export_campaign", side_effect=_fake_campaign_export
+            ):
+                export_evidence(
+                    results_root=fixture.results,
+                    output_root=fixture.output,
+                )
+            self.assertEqual("verified", verify_evidence(fixture.output)["status"])
+            exported_summary = json.loads(
+                (
+                    fixture.output / "runs" / fixture.run_id / "summary.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertNotIn(
+                "telemetry", exported_summary["aggregates"]["cases"][0]
+            )
+            self.assertNotIn(
+                "output_tokens_per_sampled_joule",
+                exported_summary["aggregates"]["cases"][0],
+            )
+
+            malformed = copy.deepcopy(source_summary)
+            malformed["cases"][0]["telemetry"] = "synthetic-cache-telemetry"
+            with self.assertRaisesRegex(
+                EvidenceError, "prefix-cache case.telemetry must be an object"
+            ):
+                _project_summary(malformed)
+
+            unknown = copy.deepcopy(source_summary)
+            unknown["cases"][0]["telemetry"] = {"synthetic_trace": 1}
+            with self.assertRaisesRegex(
+                EvidenceError, "unknown prefix-cache case.telemetry fields"
+            ):
+                _project_summary(unknown)
+
+            negative_energy_metric = copy.deepcopy(source_summary)
+            negative_energy_metric["cases"][0]["output_tokens_per_sampled_joule"] = -1.0
+            with self.assertRaisesRegex(
+                EvidenceError,
+                "prefix-cache case.output_tokens_per_sampled_joule must be finite and nonnegative",
+            ):
+                _project_summary(negative_energy_metric)
+
+    def test_source_disabled_speculative_summary_is_discarded(self) -> None:
+        """Cache export accepts only the known no-draft llama.cpp rollup."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = EvidenceFixture(Path(directory))
+            _, _, _, source_summary = self._write_cache_run(
+                fixture.run_dir, mode="on", with_startup_provenance=True
+            )
+            source_summary["speculative_decoding"] = (
+                _disabled_llamacpp_speculative_summary()
+            )
+            _write_test_json(fixture.run_dir / "summary.json", source_summary)
+
+            projected = _project_summary(source_summary)
+            self.assertNotIn("speculative_decoding", projected)
+
+            with patch(
+                "bench.evidence._export_campaign", side_effect=_fake_campaign_export
+            ):
+                export_evidence(
+                    results_root=fixture.results,
+                    output_root=fixture.output,
+                )
+            self.assertEqual("verified", verify_evidence(fixture.output)["status"])
+            exported_summary = json.loads(
+                (
+                    fixture.output / "runs" / fixture.run_id / "summary.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertNotIn(
+                "speculative_decoding", exported_summary["aggregates"]
+            )
+
+            retained = copy.deepcopy(exported_summary)
+            retained["aggregates"]["speculative_decoding"] = (
+                _disabled_llamacpp_speculative_summary()
+            )
+            exported_summary_path = (
+                fixture.output / "runs" / fixture.run_id / "summary.json"
+            )
+            _write_test_json(exported_summary_path, retained)
+            _refresh_run_and_root_checksums(fixture.output, fixture.run_id)
+            with self.assertRaisesRegex(
+                EvidenceError, "prefix-cache aggregate summary projection changed"
+            ):
+                verify_evidence(fixture.output)
+
+            mutations = (
+                ("requested", {"requested": True}),
+                ("nonzero-drafts", {"num_draft_tokens": 1}),
+                (
+                    "accepted-position",
+                    {"accepted_tokens_per_position": {"1": 1}},
+                ),
+                ("scope", {"scope": "other_scope"}),
+                ("integer-type", {"num_drafts": 0.0}),
+                ("unknown", {"unexpected": 0}),
+            )
+            for name, changed_values in mutations:
+                with self.subTest(mutation=name):
+                    malformed = copy.deepcopy(source_summary)
+                    speculative = malformed["speculative_decoding"]
+                    self.assertIsInstance(speculative, dict)
+                    speculative.update(changed_values)
+                    with self.assertRaisesRegex(
+                        EvidenceError,
+                        "speculative_decoding|unknown aggregate field",
+                    ):
+                        _project_summary(malformed)
 
     def test_exact_cache_validator_binds_model_suite_samples_and_summary(self) -> None:
         raw_result = _cache_scalar_result(

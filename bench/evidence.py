@@ -3448,6 +3448,13 @@ _PREFIX_CACHE_CASE_FIELDS = frozenset(
 _PREFIX_CACHE_RAW_CASE_FIELDS = (
     _PREFIX_CACHE_CASE_FIELDS - {"measurement_annotation_count"}
 ) | frozenset({"attempt_id", "measurement_annotations"})
+_PREFIX_CACHE_RAW_CASE_TELEMETRY_FIELDS = _PREFIX_CACHE_RAW_CASE_FIELDS | frozenset(
+    {"telemetry"}
+)
+_PREFIX_CACHE_RAW_CASE_TELEMETRY_ENERGY_FIELDS = (
+    _PREFIX_CACHE_RAW_CASE_TELEMETRY_FIELDS
+    | frozenset({"output_tokens_per_sampled_joule"})
+)
 _PREFIX_CACHE_SAMPLE_FIELDS = frozenset(
     {
         "burst_elapsed_s",
@@ -3529,6 +3536,27 @@ _PREFIX_CACHE_SUMMARY_SOURCE_DROPPED_FIELDS = frozenset(
 _PREFIX_CACHE_SUMMARY_SOURCE_NULL_FIELDS = frozenset(
     {"llamacpp_dflash_evidence", "llamacpp_mtp_evidence", "speculative_decoding"}
 )
+
+# A non-MTP llama.cpp server still emits the generic speculative-decoding
+# rollup.  It is not cache-protocol evidence, but a fully disabled counter
+# snapshot is expected source metadata and is safe to discard after exact
+# validation.  Keep its scope/source constants fixed so this exception cannot
+# silently admit a draft-enabled or differently scoped report.
+_PREFIX_CACHE_DISABLED_SPECULATIVE_DECODING = {
+    "accepted_tokens_per_position": {},
+    "configured_max_draft_tokens": None,
+    "draft_acceptance_rate": None,
+    "mean_accepted_length": None,
+    "method": None,
+    "num_accepted_tokens": 0,
+    "num_draft_tokens": 0,
+    "num_drafts": 0,
+    "proposal_depth": None,
+    "requested": False,
+    "scope": "all_persisted_llamacpp_server_lifetimes",
+    "snapshot_count": 1,
+    "source": "llamacpp_prometheus_cumulative_counters",
+}
 
 # A cache result is a tightly scoped protocol bundle rather than a generic
 # serving report.  In particular, do not let the broad generic manifest grow
@@ -4001,6 +4029,8 @@ def _project_prefix_cache_case(case: Any) -> dict[str, Any]:
     if not isinstance(case, dict) or set(case) not in {
         _PREFIX_CACHE_CASE_FIELDS,
         _PREFIX_CACHE_RAW_CASE_FIELDS,
+        _PREFIX_CACHE_RAW_CASE_TELEMETRY_FIELDS,
+        _PREFIX_CACHE_RAW_CASE_TELEMETRY_ENERGY_FIELDS,
     }:
         raise EvidenceError("prefix-cache summary case does not match its exact schema")
     source_is_canonical = set(case) == _PREFIX_CACHE_CASE_FIELDS
@@ -4019,6 +4049,26 @@ def _project_prefix_cache_case(case: Any) -> dict[str, Any]:
         raise EvidenceError("prefix-cache case annotation count is missing")
     if "attempt_id" in case:
         _safe_id(case.get("attempt_id"), name="prefix-cache case.attempt_id")
+    if "telemetry" in case:
+        # Source summaries may include the generic scalar telemetry rollup.
+        # Validate it before discarding it: the cache evidence schema remains
+        # minimal and protocol-only, so case telemetry is never materialized.
+        _project_telemetry_summary(
+            case.get("telemetry"), name="prefix-cache case.telemetry"
+        )
+    if "output_tokens_per_sampled_joule" in case:
+        output_tokens_per_sampled_joule = _finite(
+            case.get("output_tokens_per_sampled_joule"),
+            name="prefix-cache case.output_tokens_per_sampled_joule",
+        )
+        if (
+            output_tokens_per_sampled_joule is None
+            or output_tokens_per_sampled_joule < 0
+        ):
+            raise EvidenceError(
+                "prefix-cache case.output_tokens_per_sampled_joule must be finite "
+                "and nonnegative"
+            )
     projected: dict[str, Any] = {
         "case_id": _safe_id(case.get("case_id"), name="prefix-cache case.case_id"),
         "kind": "cache",
@@ -4110,6 +4160,25 @@ def _project_prefix_cache_sample(sample: Any) -> dict[str, Any]:
     return expected
 
 
+def _validate_prefix_cache_disabled_speculative_decoding(value: Any) -> None:
+    """Admit only llama.cpp's exact, disabled no-draft source rollup.
+
+    The generic aggregate projector owns the field/type allowlist.  Reuse it
+    here before comparing the fully projected value, so malformed nested
+    objects and unsafe text still fail at the same source boundary.  Cache
+    bundles deliberately do not retain this generic serving metric.
+    """
+
+    projected = _safe_summary_tree(value, name="speculative_decoding")
+    if not _json_strict_equal(
+        projected, _PREFIX_CACHE_DISABLED_SPECULATIVE_DECODING
+    ):
+        raise EvidenceError(
+            "prefix-cache aggregate speculative_decoding must be the exact "
+            "disabled no-draft llama.cpp summary"
+        )
+
+
 def _project_prefix_cache_summary(summary: Any) -> dict[str, Any]:
     """Publish a minimal, protocol-only cache aggregate summary."""
 
@@ -4133,8 +4202,12 @@ def _project_prefix_cache_summary(summary: Any) -> dict[str, Any]:
         ) != 0:
             raise EvidenceError(f"prefix-cache aggregate {key} must be zero")
     for key in _PREFIX_CACHE_SUMMARY_SOURCE_NULL_FIELDS:
-        if key in summary and summary[key] is not None:
-            raise EvidenceError(f"prefix-cache aggregate {key} is not protocol evidence")
+        if key not in summary or summary[key] is None:
+            continue
+        if key == "speculative_decoding":
+            _validate_prefix_cache_disabled_speculative_decoding(summary[key])
+            continue
+        raise EvidenceError(f"prefix-cache aggregate {key} is not protocol evidence")
     if set(summary) == _PREFIX_CACHE_SUMMARY_FIELDS:
         source_is_canonical = True
     else:
