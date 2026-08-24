@@ -20,6 +20,8 @@ quality checks, and the provenance needed to interpret each number.
 | How should results be compared or published? | [Benchmark protocol and evidence policy](BENCHMARK.md#sparkbench-protocol-and-evidence-publication) |
 | Where are the machine-readable measurements? | [Sanitized evidence guide](evidence/README.md) and [complete evidence index](evidence/index.json) |
 | Which profiles and cached artifacts exist? | [Local model inventory](docs/local-model-inventory.md) and [candidate survey](docs/model-candidates-2026-08-15.md) |
+| How did local models handle bounded memory decisions? | [Graphiti-style resolver and synthetic transaction component results](docs/memory-operations-results-2026-08-24.md) |
+| How should Laguna, Graphiti, and MemFS-style reflection be tested locally? | [Article audit and bounded memory benchmark plan](docs/laguna-graphiti-memory-plan-2026-08-24.md) |
 
 The generated public evidence archive is intentionally separate from raw run
 data. Its [human-readable map](evidence/README.md) and
@@ -30,6 +32,15 @@ explains how to create and verify both files.
 
 ## What the results say
 
+- In the first memory-operation component panel, all four no-thinking profiles
+  tied at 33/33 exact operations: 9/9 Graphiti-style resolver decisions and
+  24/24 explicitly synthetic transaction decisions. Laguna XS had the smallest
+  descriptive summed request wall time at 42.05625 seconds. The matched Ornith
+  reasoning-on run was exploratory and fell to 27/33, failing all six bounded
+  refusal variants while the narrow canary recorded six protected-value
+  emissions. This single-run, mixed-quantization component panel is not an
+  end-to-end Graphiti, MemFS, safety, or statistically significant result; see
+  the [memory-operation report](docs/memory-operations-results-2026-08-24.md).
 - In the two-replicate Harbor/Terminal-Bench-derived coding-agent panel,
   Qwen3-Coder-Next produced **1/24 strict passes overall**: Qwen Code passed
   1/12 and OpenCode passed 0/12. The one `fix-git` pass did not repeat. All 24
@@ -84,6 +95,10 @@ geometries, slot counts, or validation states.
 
 ### Measured results
 
+- [Memory-operation component results — 2026-08-24](docs/memory-operations-results-2026-08-24.md):
+  exact Graphiti-style resolver and synthetic transaction decisions across
+  Laguna XS/S, Ornith, and Qwen3.6, with the Ornith thinking run kept
+  exploratory and scalar-only limits stated explicitly.
 - [Qwen3.6 native llama.cpp prefix-cache controls — 2026-08-18](docs/qwen36-prefix-cache-results-2026-08-18.md):
   serial 8K and 32K shared-prefix cold/warm controls with request-scoped cache,
   first-token, wall-time, prompt-work, and decode-rate measurements kept
@@ -122,6 +137,7 @@ geometries, slot counts, or validation states.
 - [Model candidate survey](docs/model-candidates-2026-08-15.md)
 - [Cached media capabilities](docs/cached-media-capabilities-2026-08-15.md)
 - [Cached training capability](docs/cached-training-capability-2026-08-15.md)
+- [Laguna, Graphiti, and memory-reflection benchmark plan](docs/laguna-graphiti-memory-plan-2026-08-24.md)
 - [Nemotron diffusion direct-run guide](docs/nemotron-diffusion-direct.md)
 - [Experimental NInfer SM121a patch and reproduction notes](patches/ninfer/README.md)
 

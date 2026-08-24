@@ -3,18 +3,23 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
+import bench.memory_ops as memory_ops
 from bench.evidence import (
     EvidenceError,
     HARBOR_CAMPAIGN_ID,
     HARBOR_EXPECTED_DERIVATION_DIGEST,
     HARBOR_EXPECTED_GIT_REVISION,
     HARBOR_SCHEMA_VERSION,
+    _MEMORY_PANEL_MODEL_ARTIFACTS,
+    _MEMORY_PANEL_MODELS,
     _NINFER_TOP_FIELDS,
     SCHEMA_VERSION,
     _assert_source_tree,
@@ -32,6 +37,17 @@ from bench.evidence import (
     verify_evidence,
     verify_staged_evidence,
 )
+from bench.memory_ops import (
+    MEMORY_OPERATION_CONTEXT_TOKENS,
+    MEMORY_OPERATION_LLAMACPP_DIGEST,
+    MEMORY_OPERATION_LLAMACPP_REVISION,
+    MEMORY_OPERATION_OUTPUT_TOKENS,
+    MEMORY_OPERATION_PROTOCOL_DIGEST,
+    MEMORY_OPERATION_SCENARIO_IDS,
+    MEMORY_OPERATION_SERVER_TIMING_TOLERANCE_S,
+    memory_operation_llamacpp_args,
+)
+from bench.report import summarize_run
 from bench.harbor_campaign_lifecycle import (
     CleanupStatus,
     ModelAdmission,
@@ -321,6 +337,146 @@ def _agentic_suite() -> dict[str, object]:
     }
 
 
+def _memory_model() -> dict[str, object]:
+    return {
+        "id": "laguna-xs21-33b-a3b-q4-k-m-llamacpp",
+        "backend": "llamacpp",
+        "architecture": "laguna",
+        "quantization": "q4_k_m",
+        "source": "poolside/Laguna-XS-2.1-GGUF",
+        "revision": "1a37c0a5fb8c7a18e6106decb6be6327d1b63fa6",
+        "support_status": "spark_other_backend",
+        "tasks": ["chat", "json", "tools"],
+        "lifecycle": "subprocess",
+        "model_file": "Laguna-XS-2.1-Q4_K_M.gguf",
+        "model_digest": "sha256:1ac7079101fca5a6df8c5a7523a3c30ea7d1c0e4b1258090e7d6d4039287f6cb",
+        "model_size_bytes": 20274300032,
+        "runtime_binary": "/synthetic/llama.cpp-b10453/bin/llama-server",
+        "runtime_digest": MEMORY_OPERATION_LLAMACPP_DIGEST,
+        "runtime_revision": MEMORY_OPERATION_LLAMACPP_REVISION,
+        "runtime_parallel": 1,
+        "max_context": MEMORY_OPERATION_CONTEXT_TOKENS,
+        "native_context": MEMORY_OPERATION_CONTEXT_TOKENS,
+        "startup_timeout_s": 600,
+        "estimated_ram_gib": 48.0,
+        "request_body_json": '{"chat_template_kwargs":{"enable_thinking":false}}',
+        "args": list(memory_operation_llamacpp_args(enable_thinking=False)),
+    }
+
+
+def _memory_suite(model: dict[str, object]) -> dict[str, object]:
+    cases: list[dict[str, object]] = []
+    for scenario_id in MEMORY_OPERATION_SCENARIO_IDS:
+        case: dict[str, object] = {
+            "concurrency": 1,
+            "id": scenario_id,
+            "kind": "memory",
+            "max_output_tokens": MEMORY_OPERATION_OUTPUT_TOKENS,
+            "max_turns": 1,
+            "prompt_repetitions": 0,
+            "repetitions": 3,
+            "requires": ["chat", "json"],
+            "temperature": 0.0,
+            "warmups": 0,
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "model": model,
+                    "case": case,
+                    "protocol_digest": MEMORY_OPERATION_PROTOCOL_DIGEST,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:12]
+        cases.append({**case, "case_id": f"{scenario_id}--{digest}"})
+    return {
+        "id": "memory-operations",
+        "description": (
+            "Graphiti-style edge resolution followed by explicitly synthetic "
+            "MemFS/transaction extension cases; exact JSON grading and "
+            "scalar-only results."
+        ),
+        "protocol_digest": MEMORY_OPERATION_PROTOCOL_DIGEST,
+        "schema_version": 1,
+        "cases": cases,
+    }
+
+
+def _memory_result(scenario_id: str, variant: int) -> dict[str, object]:
+    graphiti = scenario_id.startswith("graphiti-")
+    expected_resolver = {
+        "graphiti-reuse-fact": "REUSE_FACT",
+        "graphiti-invalidate-fact": "CREATE_AND_INVALIDATE",
+        "graphiti-create-fact": "CREATE_FACT",
+    }.get(scenario_id)
+    mutation_expected = scenario_id in {
+        "memory-add",
+        "memory-delete",
+        "memory-supersede",
+        "memory-temporal-invalidate",
+        "memory-tier-placement",
+    }
+    completion_tokens = 20 + variant
+    ttft_s = 0.4
+    decode_s = 1.6 + variant / 10
+    elapsed_s = ttft_s + decode_s
+    return {
+        "schema_version": 1,
+        "scenario_id": scenario_id,
+        "variant": variant,
+        "passed": True,
+        "failure_code": None,
+        "json_object_emitted": True,
+        "schema_valid": True,
+        "action_correct": True,
+        "target_correct": None if graphiti else True,
+        "path_correct": None if graphiti else True,
+        "tier_correct": None if graphiti else True,
+        "value_correct": None if graphiti else True,
+        "valid_from_correct": None if graphiti else True,
+        "valid_to_correct": None if graphiti else True,
+        "evidence_correct": None if graphiti else True,
+        "reason_correct": None if graphiti else True,
+        "duplicate_facts_correct": True if graphiti else None,
+        "contradicted_facts_correct": True if graphiti else None,
+        "protected_value_emitted": False,
+        "mutation_expected": mutation_expected,
+        "mutation_selected": mutation_expected,
+        "secret_refusal_required": scenario_id == "memory-secret-refusal",
+        "secret_refusal_succeeded": scenario_id == "memory-secret-refusal",
+        "injection_refusal_required": scenario_id == "memory-injection-refusal",
+        "injection_refusal_succeeded": scenario_id == "memory-injection-refusal",
+        "graphiti_resolver_case": graphiti,
+        "synthetic_extension_case": not graphiti,
+        "resolver_decision_correct": True if graphiti else None,
+        "expected_resolver_action": expected_resolver,
+        "selected_resolver_action": expected_resolver,
+        "unexpected_field_count": 0,
+        "unexpected_tool_call_count": 0,
+        "max_output_tokens": MEMORY_OPERATION_OUTPUT_TOKENS,
+        "prompt_cache_disabled": True,
+        "prompt_tokens": 100 + variant,
+        "cached_prompt_tokens": 0,
+        "completion_tokens": completion_tokens,
+        "reasoning_tokens": None,
+        "emission_events": completion_tokens,
+        "ttft_s": ttft_s,
+        "elapsed_s": elapsed_s,
+        "decode_s": decode_s,
+        "decode_tps": (completion_tokens - 1) / decode_s,
+        "output_tps": completion_tokens / elapsed_s,
+        "server_prompt_tokens": 100 + variant,
+        "server_cached_prompt_tokens": 0,
+        "server_decode_tokens": completion_tokens,
+        "server_prompt_s": 0.2,
+        "server_decode_s": 1.0,
+        "finish_reason": "stop",
+        "decode_metric_source": "client_estimate",
+    }
+
+
 class EvidenceFixture:
     def __init__(self, root: Path) -> None:
         self.results = root / "results"
@@ -486,13 +642,16 @@ class EvidenceFixture:
         return {
             "prompt_tokens": 10,
             "completion_tokens": completion_tokens,
+            "reasoning_tokens": None,
             "elapsed_s": 1.25,
             "ttft_s": 0.2,
             "decode_tps": 20.0,
+            "emission_events": completion_tokens,
+            "finish_reason": "stop",
             "content": f"{RAW_COMPLETION} {RAW_SECRET}",
             "reasoning": f"{RAW_REASONING} {RAW_HOST_PATH}",
             "request_id": RAW_REQUEST_ID,
-            "tool_calls": [{"arguments": RAW_SECRET}],
+            "tool_calls": [],
             "output_sha256": "a" * 64,
         }
 
@@ -656,6 +815,129 @@ class EvidenceFixture:
                 },
             ],
         )
+
+    def write_memory_run(self, *, imperfect: bool = False) -> tuple[str, Path]:
+        run_id = "20260824T010000Z-memory-evidence"
+        run_dir = self.results / run_id
+        run_dir.mkdir()
+        model = _memory_model()
+        suite = _memory_suite(model)
+        self.write_json(
+            run_dir / "plan.json",
+            {
+                "schema_version": 1,
+                "model": model,
+                "host_at_plan": {
+                    "git_commit": "d" * 40,
+                    "git_status": "",
+                    "memtotal_kib": 128 * 1024 * 1024,
+                    "nvidia_smi": "NVIDIA GB10, 580.82.09, 12.1",
+                },
+                "resolved": {
+                    "llamacpp": {
+                        "runtime_binary_sha256": MEMORY_OPERATION_LLAMACPP_DIGEST,
+                        "runtime_source_revision": MEMORY_OPERATION_LLAMACPP_REVISION,
+                    }
+                },
+                "suite": suite,
+            },
+        )
+        events: list[dict[str, object]] = []
+
+        def append(event: dict[str, object]) -> None:
+            ordinal = len(events)
+            events.append(
+                {
+                    "timestamp": (
+                        f"2026-08-24T01:{ordinal // 60:02d}:{ordinal % 60:02d}Z"
+                    ),
+                    **event,
+                }
+            )
+
+        append({"event": "run_start", "completed_cases_at_resume": []})
+        append(
+            {
+                "event": "artifact_validation_complete",
+                "backend": "llamacpp",
+                "elapsed_s": 0.25,
+                "model_sha256": model["model_digest"],
+                "runtime_binary_sha256": model["runtime_digest"],
+            }
+        )
+        append(
+            {
+                "event": "server_ready",
+                "backend": "llamacpp",
+                "keep_server_requested": False,
+            }
+        )
+        append(
+            {
+                "event": "first_request_complete",
+                "backend": "llamacpp",
+                "result": self._request_result(completion_tokens=1),
+            }
+        )
+        for case_index, case in enumerate(suite["cases"]):
+            assert isinstance(case, dict)
+            scenario_id = str(case["id"])
+            case_id = str(case["case_id"])
+            attempt_id = f"private-memory-attempt-{case_index}"
+            append(
+                {
+                    "event": "case_start",
+                    "case_id": case_id,
+                    "attempt_id": attempt_id,
+                    "kind": "memory",
+                    "concurrency": 1,
+                }
+            )
+            results = []
+            for variant in range(3):
+                result = _memory_result(scenario_id, variant)
+                if imperfect and scenario_id == "memory-tier-placement" and variant == 1:
+                    result["tier_correct"] = False
+                    result["passed"] = False
+                    result["failure_code"] = "operation_mismatch"
+                results.append(result)
+                append(
+                    {
+                        "event": "request_complete",
+                        "case_id": case_id,
+                        "attempt_id": attempt_id,
+                        "kind": "memory",
+                        "repetition": variant,
+                        "burst_elapsed_s": result["elapsed_s"],
+                        "request_tag": f"{RAW_REQUEST_ID}-{case_index}-{variant}",
+                        "result": result,
+                        "validation": {
+                            "passed": result["passed"],
+                            "reason": result["failure_code"],
+                        },
+                    }
+                )
+            append(
+                {
+                    "event": "case_complete",
+                    "case_id": case_id,
+                    "attempt_id": attempt_id,
+                    "kind": "memory",
+                    "concurrency": 1,
+                    "elapsed_s": sum(
+                        float(result["elapsed_s"]) for result in results
+                    )
+                    + 0.1,
+                    "validation_passed": all(
+                        result["passed"] is True for result in results
+                    ),
+                }
+            )
+        append({"event": "server_stopped", "backend": "llamacpp"})
+        append({"event": "run_complete", "status": "completed"})
+        self.write_jsonl(run_dir / "events.jsonl", events)
+        summarize_run(run_dir)
+        return run_id, run_dir
 
     def change_aggregate(self, value: float) -> None:
         self._write_standalone_results(aggregate_tps=value)
@@ -833,6 +1115,40 @@ class EvidenceExportTests(unittest.TestCase):
             {"files": root_checksums, "schema_version": SCHEMA_VERSION},
         )
 
+    def refresh_run_checksums(
+        self, run_id: str, *, evidence_root: Path | None = None
+    ) -> None:
+        root = evidence_root or self.fixture.output
+        bundle = root / "runs" / run_id
+        bundle_checksums = {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(bundle.iterdir())
+            if path.name != "checksums.json"
+        }
+        EvidenceFixture.write_json(
+            bundle / "checksums.json",
+            {"files": bundle_checksums, "schema_version": SCHEMA_VERSION},
+        )
+        index_path = root / "index.json"
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        run_entry = next(
+            entry for entry in index["runs"] if entry["run_id"] == run_id
+        )
+        run_entry["bundle_sha256"] = hashlib.sha256(
+            (bundle / "checksums.json").read_bytes()
+        ).hexdigest()
+        EvidenceFixture.write_json(index_path, index)
+        root_checksums_path = root / "checksums.json"
+        root_checksums = {
+            str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(root.rglob("*"))
+            if path.is_file() and path != root_checksums_path
+        }
+        EvidenceFixture.write_json(
+            root_checksums_path,
+            {"files": root_checksums, "schema_version": SCHEMA_VERSION},
+        )
+
     def test_export_is_deterministic_and_excludes_raw_values(self) -> None:
         first = self.export()
         self.assertTrue(first["changed"])
@@ -877,6 +1193,335 @@ class EvidenceExportTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, all_keys)
         self.assertFalse(any(key.endswith("_path") for key in all_keys))
+
+    def test_memory_protocol_exports_exact_scalar_evidence_deterministically(
+        self,
+    ) -> None:
+        run_id, _ = self.fixture.write_memory_run()
+        self.export()
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+
+        bundle = self.fixture.output / "runs" / run_id
+        samples_document = json.loads(
+            (bundle / "samples.json").read_text(encoding="utf-8")
+        )
+        samples = samples_document["samples"]
+        self.assertEqual(33, samples_document["sample_count"])
+        self.assertEqual(list(range(1, 34)), [sample["sample_index"] for sample in samples])
+        self.assertTrue(all(sample["case_attempt"] == 1 for sample in samples))
+        self.assertTrue(all(sample["selected_attempt"] is True for sample in samples))
+        self.assertTrue(all(sample["reasoning_tokens"] is None for sample in samples))
+        self.assertEqual(
+            [
+                (scenario_id, variant)
+                for scenario_id in MEMORY_OPERATION_SCENARIO_IDS
+                for variant in range(3)
+            ],
+            [(sample["scenario_id"], sample["variant"]) for sample in samples],
+        )
+        summary = json.loads(
+            (bundle / "summary.json").read_text(encoding="utf-8")
+        )["aggregates"]
+        self.assertEqual(11, len(summary["cases"]))
+        self.assertEqual(33, summary["memory_operation_summary"]["operations"])
+        self.assertIsNone(
+            summary["memory_operation_summary"]["total_reasoning_tokens"]
+        )
+        self.assertEqual(
+            9,
+            summary["memory_operation_summary"]["graphiti_resolver"][
+                "operations"
+            ],
+        )
+        self.assertEqual(
+            24,
+            summary["memory_operation_summary"]["synthetic_extension"][
+                "operations"
+            ],
+        )
+        manifest = json.loads(
+            (bundle / "manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertFalse(manifest["model"]["memory_thinking_enabled"])
+        self.assertEqual("memory-operations", manifest["suite"]["id"])
+        self.assertEqual(
+            MEMORY_OPERATION_PROTOCOL_DIGEST,
+            manifest["suite"]["protocol_digest"],
+        )
+
+        serialized = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(bundle.glob("*.json"))
+        )
+        for forbidden_value in (
+            RAW_COMPLETION,
+            RAW_REASONING,
+            RAW_REQUEST_ID,
+            RAW_HOST_PATH,
+            RAW_SECRET,
+            "private-memory-attempt",
+        ):
+            self.assertNotIn(forbidden_value, serialized)
+        keys = set()
+        for path in bundle.glob("*.json"):
+            keys.update(json_keys(json.loads(path.read_text(encoding="utf-8"))))
+        for forbidden_key in (
+            "content",
+            "nonce",
+            "path",
+            "reasoning",
+            "request_id",
+            "request_tag",
+            "tool_calls",
+            "value",
+        ):
+            self.assertNotIn(forbidden_key, keys)
+
+        second_output = Path(self.temporary.name) / "evidence-memory-second"
+        self.export(output=second_output)
+        first_files = {
+            str(path.relative_to(self.fixture.output)): path.read_bytes()
+            for path in self.fixture.output.rglob("*")
+            if path.is_file()
+        }
+        second_files = {
+            str(path.relative_to(second_output)): path.read_bytes()
+            for path in second_output.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(first_files, second_files)
+        self.assertEqual("verified", verify_evidence(second_output)["status"])
+
+    def test_memory_semantic_tampering_fails_after_checksum_refresh(self) -> None:
+        run_id, _ = self.fixture.write_memory_run()
+        self.export()
+        samples_path = self.fixture.output / "runs" / run_id / "samples.json"
+        document = json.loads(samples_path.read_text(encoding="utf-8"))
+        document["samples"][0]["prompt_tokens"] += 1
+        document["samples"][0]["server_prompt_tokens"] += 1
+        EvidenceFixture.write_json(samples_path, document)
+        self.refresh_run_checksums(run_id)
+
+        with self.assertRaisesRegex(EvidenceError, "aggregate disagrees"):
+            verify_evidence(self.fixture.output)
+
+    def test_imperfect_complete_memory_run_exports_and_failure_list_is_bound(
+        self,
+    ) -> None:
+        run_id, _ = self.fixture.write_memory_run(imperfect=True)
+        self.export()
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+        bundle = self.fixture.output / "runs" / run_id
+        summary_path = bundle / "summary.json"
+        summary_document = json.loads(summary_path.read_text(encoding="utf-8"))
+        aggregates = summary_document["aggregates"]
+        failed_case_id = next(
+            case["case_id"]
+            for case in aggregates["cases"]
+            if case["validation_passed"] is False
+        )
+        self.assertEqual("partial", aggregates["status"])
+        self.assertEqual([failed_case_id], aggregates["validation_failed_cases"])
+        self.assertEqual(
+            32,
+            aggregates["memory_operation_summary"]["operations_correct"],
+        )
+        manifest = json.loads(
+            (bundle / "manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual("partial", manifest["status"])
+
+        aggregates["validation_failed_cases"] = []
+        EvidenceFixture.write_json(summary_path, summary_document)
+        self.refresh_run_checksums(run_id)
+        with self.assertRaisesRegex(EvidenceError, "validation failures disagree"):
+            verify_evidence(self.fixture.output)
+
+    def test_memory_exact_bundle_rejects_refreshed_checksum_tampering(self) -> None:
+        run_id, _ = self.fixture.write_memory_run()
+
+        def exported(label: str) -> tuple[Path, Path]:
+            root = Path(self.temporary.name) / f"memory-tamper-{label}"
+            self.export(output=root)
+            return root, root / "runs" / run_id
+
+        mutations = {
+            "extra-manifest-key": lambda bundle: self._mutate_json(
+                bundle / "manifest.json",
+                lambda value: value.__setitem__("attacker_note", 1),
+            ),
+            "lifecycle-count": lambda bundle: self._mutate_json(
+                bundle / "manifest.json",
+                lambda value: value["lifecycle"]["event_counts"].__setitem__(
+                    "first_request_complete", 999
+                ),
+            ),
+            "quantization": lambda bundle: self._mutate_json(
+                bundle / "manifest.json",
+                lambda value: value["model"].__setitem__("quantization", "fp8"),
+            ),
+            "thinking-policy": lambda bundle: self._mutate_json(
+                bundle / "manifest.json",
+                lambda value: (
+                    value["model"].__setitem__("memory_thinking_enabled", True),
+                    value["model"]["tasks"].append("thinking"),
+                ),
+            ),
+            "protocol-digest": lambda bundle: self._mutate_json(
+                bundle / "manifest.json",
+                lambda value: value["suite"].__setitem__(
+                    "protocol_digest", "sha256:" + "0" * 64
+                ),
+            ),
+            "extra-summary-key": lambda bundle: self._mutate_json(
+                bundle / "summary.json",
+                lambda value: value["aggregates"].__setitem__("attacker_note", 1),
+            ),
+            "first-request-summary": lambda bundle: self._mutate_json(
+                bundle / "summary.json",
+                lambda value: value["aggregates"].__setitem__(
+                    "first_request", {"completion_tokens": 777}
+                ),
+            ),
+            "reasoning-availability": lambda bundle: self._mutate_json(
+                bundle / "samples.json",
+                lambda value: value["samples"][0].__setitem__("reasoning_tokens", 0),
+            ),
+            "telemetry": lambda bundle: self._mutate_json(
+                bundle / "telemetry.json",
+                lambda value: value.__setitem__("sample_count", 1),
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                root, bundle = exported(label)
+                mutate(bundle)
+                self.refresh_run_checksums(run_id, evidence_root=root)
+                with self.assertRaises(EvidenceError):
+                    verify_evidence(root)
+
+        root, bundle = exported("extra-file")
+        EvidenceFixture.write_json(bundle / "appendix.json", {"safe": 1})
+        self.refresh_run_checksums(run_id, evidence_root=root)
+        with self.assertRaisesRegex(EvidenceError, "file set"):
+            verify_evidence(root)
+
+    def test_imperfect_memory_status_cannot_be_relabelled_complete(self) -> None:
+        run_id, _ = self.fixture.write_memory_run(imperfect=True)
+        self.export()
+        bundle = self.fixture.output / "runs" / run_id
+        self._mutate_json(
+            bundle / "manifest.json",
+            lambda value: value.__setitem__("status", "complete"),
+        )
+        self._mutate_json(
+            bundle / "summary.json",
+            lambda value: value["aggregates"].__setitem__("status", "complete"),
+        )
+        index_path = self.fixture.output / "index.json"
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        next(entry for entry in index["runs"] if entry["run_id"] == run_id)[
+            "status"
+        ] = "complete"
+        EvidenceFixture.write_json(index_path, index)
+        self.refresh_run_checksums(run_id)
+        with self.assertRaisesRegex(EvidenceError, "status changed"):
+            verify_evidence(self.fixture.output)
+
+    def test_memory_source_journal_and_summary_topology_are_exact(self) -> None:
+        _run_id, run_dir = self.fixture.write_memory_run()
+        events_path = run_dir / "events.jsonl"
+        events = [json.loads(line) for line in events_path.read_text().splitlines()]
+        prime = next(
+            event for event in events if event["event"] == "first_request_complete"
+        )
+        events.insert(events.index(prime) + 1, dict(prime))
+        EvidenceFixture.write_jsonl(events_path, events)
+        with self.assertRaisesRegex(EvidenceError, "protocol"):
+            self.export()
+
+    def test_memory_source_rejects_requestless_retry_and_missing_model(self) -> None:
+        _run_id, run_dir = self.fixture.write_memory_run()
+        events_path = run_dir / "events.jsonl"
+        events = [json.loads(line) for line in events_path.read_text().splitlines()]
+        first_start = next(event for event in events if event["event"] == "case_start")
+        retry = {**first_start, "attempt_id": "private-empty-retry"}
+        events.insert(events.index(first_start) + 1, retry)
+        EvidenceFixture.write_jsonl(events_path, events)
+        with self.assertRaisesRegex(EvidenceError, "protocol"):
+            self.export()
+
+        EvidenceFixture.write_jsonl(
+            events_path, [event for event in events if event is not retry]
+        )
+        summary_path = run_dir / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary.pop("model")
+        EvidenceFixture.write_json(summary_path, summary)
+        with self.assertRaisesRegex(EvidenceError, "frozen model identity"):
+            self.export()
+
+    def test_memory_source_rejects_resumed_journal(self) -> None:
+        _run_id, run_dir = self.fixture.write_memory_run()
+        events_path = run_dir / "events.jsonl"
+        events = [json.loads(line) for line in events_path.read_text().splitlines()]
+        run_start = next(event for event in events if event["event"] == "run_start")
+        run_start["completed_cases_at_resume"] = ["prior-case--000000000000"]
+        EvidenceFixture.write_jsonl(events_path, events)
+        with self.assertRaisesRegex(EvidenceError, "resumed run"):
+            self.export()
+
+    def test_memory_source_binds_artifact_admission_event(self) -> None:
+        _run_id, run_dir = self.fixture.write_memory_run()
+        events_path = run_dir / "events.jsonl"
+        events = [json.loads(line) for line in events_path.read_text().splitlines()]
+        admission = next(
+            event
+            for event in events
+            if event["event"] == "artifact_validation_complete"
+        )
+        admission["model_sha256"] = "sha256:" + "e" * 64
+        EvidenceFixture.write_jsonl(events_path, events)
+        with self.assertRaisesRegex(EvidenceError, "frozen pins"):
+            self.export()
+
+    def test_memory_source_binds_prime_result(self) -> None:
+        _run_id, run_dir = self.fixture.write_memory_run()
+        events_path = run_dir / "events.jsonl"
+        events = [json.loads(line) for line in events_path.read_text().splitlines()]
+        prime = next(
+            event for event in events if event["event"] == "first_request_complete"
+        )
+        prime["result"]["completion_tokens"] = 777
+        EvidenceFixture.write_jsonl(events_path, events)
+        with self.assertRaisesRegex(EvidenceError, "prime counters"):
+            self.export()
+
+    def test_memory_source_binds_case_complete_outcome_and_elapsed(self) -> None:
+        _run_id, run_dir = self.fixture.write_memory_run()
+        events_path = run_dir / "events.jsonl"
+        original = [json.loads(line) for line in events_path.read_text().splitlines()]
+        complete = next(
+            event for event in original if event["event"] == "case_complete"
+        )
+        complete["validation_passed"] = False
+        EvidenceFixture.write_jsonl(events_path, original)
+        with self.assertRaisesRegex(EvidenceError, "outcome changed"):
+            self.export()
+
+        complete["validation_passed"] = True
+        complete["elapsed_s"] = 999.0
+        EvidenceFixture.write_jsonl(events_path, original)
+        with self.assertRaisesRegex(EvidenceError, "outcome changed"):
+            self.export()
+
+    @staticmethod
+    def _mutate_json(
+        path: Path, mutate: Callable[[dict[str, object]], object]
+    ) -> None:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        mutate(value)
+        EvidenceFixture.write_json(path, value)
 
     def test_allowlisted_grouped_run_roots_are_deterministic_and_verifiable(self) -> None:
         grouped_roots = (
@@ -1545,6 +2190,176 @@ class EvidenceValidationTests(unittest.TestCase):
                 {"cases": [projected_case]},
                 suite=_project_suite({"suite": _agentic_suite()}),
             )
+
+    def test_memory_request_and_suite_projection_are_exact_and_model_bound(
+        self,
+    ) -> None:
+        model = _memory_model()
+        suite = _memory_suite(model)
+        projected_suite = _project_suite({"model": model, "suite": suite})
+        self.assertEqual("memory-operations", projected_suite["id"])
+        self.assertEqual(
+            MEMORY_OPERATION_PROTOCOL_DIGEST,
+            projected_suite["protocol_digest"],
+        )
+        self.assertEqual(
+            list(MEMORY_OPERATION_SCENARIO_IDS),
+            [case["id"] for case in projected_suite["cases"]],
+        )
+        self.assertNotIn("description", projected_suite)
+
+        result = _memory_result("memory-add", 1)
+        projected = _project_request_result(result, kind="memory")
+        self.assertIsNone(projected["reasoning_tokens"])
+        self.assertNotIn("emission_events", projected)
+        self.assertNotIn("emission_event_count", projected)
+        self.assertNotIn("output_tps", projected)
+
+        malformed_results = []
+        malformed_results.append({**result, "content": RAW_COMPLETION})
+        malformed_results.append({**result, "reasoning_tokens": 3})
+        malformed_results.append({**result, "reasoning_tokens": True})
+        malformed_results.append(
+            {
+                **result,
+                "emission_events": int(result["completion_tokens"]) + 1,
+            }
+        )
+        malformed_results.append({**result, "cached_prompt_tokens": 1})
+        malformed_results.append(
+            {**result, "server_prompt_tokens": int(result["prompt_tokens"]) + 1}
+        )
+        malformed_results.append(
+            {
+                **result,
+                "completion_tokens": MEMORY_OPERATION_OUTPUT_TOKENS + 1,
+                "server_decode_tokens": MEMORY_OPERATION_OUTPUT_TOKENS + 1,
+            }
+        )
+        malformed_results.append(
+            {
+                **result,
+                "server_prompt_s": float(result["elapsed_s"])
+                + MEMORY_OPERATION_SERVER_TIMING_TOLERANCE_S,
+            }
+        )
+        graphiti_invalid = _memory_result("graphiti-reuse-fact", 0)
+        graphiti_invalid.update(
+            {
+                "schema_valid": False,
+                "passed": False,
+                "failure_code": "schema_mismatch",
+            }
+        )
+        malformed_results.append(graphiti_invalid)
+        for malformed in malformed_results:
+            with self.subTest(malformed=malformed), self.assertRaises(EvidenceError):
+                _project_request_result(malformed, kind="memory")
+
+        reordered = json.loads(json.dumps(suite))
+        reordered["cases"][0], reordered["cases"][1] = (
+            reordered["cases"][1],
+            reordered["cases"][0],
+        )
+        with self.assertRaises(EvidenceError):
+            _project_suite({"model": model, "suite": reordered})
+        changed_protocol = json.loads(json.dumps(suite))
+        changed_protocol["protocol_digest"] = "sha256:" + "0" * 64
+        for case in changed_protocol["cases"]:
+            case_without_id = {
+                key: value for key, value in case.items() if key != "case_id"
+            }
+            digest = hashlib.sha256(
+                json.dumps(
+                    {
+                        "model": model,
+                        "case": case_without_id,
+                        "protocol_digest": changed_protocol["protocol_digest"],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()[:12]
+            case["case_id"] = f"{case['id']}--{digest}"
+        with self.assertRaisesRegex(EvidenceError, "protocol digest"):
+            _project_suite({"model": model, "suite": changed_protocol})
+        with patch.object(
+            memory_ops,
+            "_EXTENSION_SYSTEM_PROMPT",
+            memory_ops._EXTENSION_SYSTEM_PROMPT + "\nUndeclared drift.",
+        ):
+            with self.assertRaisesRegex(EvidenceError, "protocol digest"):
+                _project_suite({"model": model, "suite": suite})
+        changed_model = json.loads(json.dumps(model))
+        changed_model["args"][-1] = "on"
+        with self.assertRaisesRegex(EvidenceError, "frozen model"):
+            _project_suite({"model": changed_model, "suite": suite})
+
+    def test_memory_evidence_panel_pins_match_runnable_profiles(self) -> None:
+        manifest = tomllib.loads(
+            (REPOSITORY / "manifests" / "models.toml").read_text(encoding="utf-8")
+        )
+        profiles = {model["id"]: model for model in manifest["models"]}
+        self.assertEqual(set(_MEMORY_PANEL_MODELS), set(_MEMORY_PANEL_MODEL_ARTIFACTS))
+        for profile_id, expected_model in _MEMORY_PANEL_MODELS.items():
+            with self.subTest(profile=profile_id):
+                profile = profiles[profile_id]
+                thinking = json.loads(profile["request_body_json"])[
+                    "chat_template_kwargs"
+                ]["enable_thinking"]
+                derived_model = {
+                    key: (
+                        thinking
+                        if key == "memory_thinking_enabled"
+                        else profile[key]
+                    )
+                    for key in expected_model
+                }
+                self.assertEqual(expected_model, derived_model)
+                self.assertEqual(
+                    MEMORY_OPERATION_LLAMACPP_REVISION,
+                    profile["runtime_revision"],
+                )
+                self.assertEqual(
+                    MEMORY_OPERATION_LLAMACPP_DIGEST,
+                    profile["runtime_digest"],
+                )
+                self.assertEqual(
+                    list(memory_operation_llamacpp_args(enable_thinking=thinking)),
+                    profile["args"],
+                )
+                artifacts = []
+                if "model_shards" in profile:
+                    for index, shard in enumerate(profile["model_shards"], start=1):
+                        artifacts.append(
+                            {
+                                "role": f"model_shard_{index}",
+                                "sha256": shard["digest"].removeprefix("sha256:"),
+                                "size_bytes": shard["size_bytes"],
+                                "source": profile["source"],
+                                "revision": profile["revision"],
+                                "target": Path(shard["path"]).name,
+                            }
+                        )
+                    self.assertEqual(profile["weight_file_count"], len(artifacts))
+                    self.assertEqual(
+                        profile["weight_size_bytes"],
+                        sum(item["size_bytes"] for item in artifacts),
+                    )
+                else:
+                    artifacts.append(
+                        {
+                            "role": "model",
+                            "sha256": profile["model_digest"].removeprefix("sha256:"),
+                            "size_bytes": profile["model_size_bytes"],
+                            "source": profile["source"],
+                            "revision": profile["revision"],
+                            "target": Path(profile["model_file"]).name,
+                        }
+                    )
+                self.assertEqual(
+                    list(_MEMORY_PANEL_MODEL_ARTIFACTS[profile_id]), artifacts
+                )
 
     def test_source_tree_rejects_symlinks_hardlinks_and_fifos(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

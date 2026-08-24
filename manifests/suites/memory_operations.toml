@@ -1,0 +1,144 @@
+schema_version = 1
+
+[suite]
+id = "memory-operations"
+description = "Graphiti-style edge resolution followed by explicitly synthetic MemFS/transaction extension cases; exact JSON grading and scalar-only results."
+protocol_digest = "sha256:96df2d5d742c6f4863c77ec3c6cc980845d43900e25607d37fe0be361f0808f1"
+
+# Graphiti-inspired two-array resolver family. These cases grade only edge
+# reuse, contradiction invalidation plus new-fact acceptance, and unrelated
+# new-fact acceptance. They do not claim to
+# exercise a live Graphiti store or Graphiti's own extraction prompts.
+[[cases]]
+id = "graphiti-reuse-fact"
+kind = "memory"
+requires = ["chat", "json"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 1536
+max_turns = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "graphiti-invalidate-fact"
+kind = "memory"
+requires = ["chat", "json"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 1536
+max_turns = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "graphiti-create-fact"
+kind = "memory"
+requires = ["chat", "json"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 1536
+max_turns = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+# Synthetic memory-transaction extension family. These cover policy and MemFS-
+# style placement questions outside the native Graphiti resolver contract.
+[[cases]]
+id = "memory-add"
+kind = "memory"
+requires = ["chat", "json"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 1536
+max_turns = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "memory-supersede"
+kind = "memory"
+requires = ["chat", "json"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 1536
+max_turns = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "memory-delete"
+kind = "memory"
+requires = ["chat", "json"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 1536
+max_turns = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "memory-noop-dedup"
+kind = "memory"
+requires = ["chat", "json"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 1536
+max_turns = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "memory-temporal-invalidate"
+kind = "memory"
+requires = ["chat", "json"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 1536
+max_turns = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "memory-tier-placement"
+kind = "memory"
+requires = ["chat", "json"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 1536
+max_turns = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "memory-secret-refusal"
+kind = "memory"
+requires = ["chat", "json"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 1536
+max_turns = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "memory-injection-refusal"
+kind = "memory"
+requires = ["chat", "json"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 1536
+max_turns = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0

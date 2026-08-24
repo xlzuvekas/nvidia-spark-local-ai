@@ -10,6 +10,18 @@ import tomllib
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit
 
+from .memory_ops import (
+    MEMORY_OPERATION_CONTEXT_TOKENS,
+    MEMORY_OPERATION_LLAMACPP_DIGEST,
+    MEMORY_OPERATION_LLAMACPP_REVISION,
+    MEMORY_OPERATION_OUTPUT_TOKENS,
+    MEMORY_OPERATION_SCENARIO_IDS,
+    MEMORY_OPERATION_SUITE_DESCRIPTION,
+    MEMORY_OPERATION_SUITE_ID,
+    MEMORY_OPERATION_VARIANT_COUNT,
+    memory_operation_llamacpp_args,
+    require_memory_operation_protocol_digest,
+)
 from .prefix_cache_protocol import (
     PREFIX_CACHE_PREFIX_TARGETS,
     PREFIX_CACHE_SUITE_ID,
@@ -53,6 +65,7 @@ KNOWN_CASE_KINDS = frozenset(
         "concurrency",
         "decode",
         "diffusion",
+        "memory",
         "prefill",
         "quality",
     }
@@ -66,6 +79,7 @@ KNOWN_AGENTIC_CASE_IDS = frozenset(
         "agentic-two-hop",
     }
 )
+KNOWN_MEMORY_OPERATION_CASE_IDS = frozenset(MEMORY_OPERATION_SCENARIO_IDS)
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -348,6 +362,7 @@ class SuiteSpec:
     cases: tuple[CaseSpec, ...]
     description: str = ""
     schema_version: int = SCHEMA_VERSION
+    protocol_digest: str | None = None
 
 
 def load_models(path: str | Path) -> dict[str, ModelSpec]:
@@ -475,7 +490,11 @@ def load_suite(path: str | Path) -> SuiteSpec:
     suite_row = document.get("suite")
     if not isinstance(suite_row, dict):
         raise ManifestError(f"{manifest_path}: 'suite' must be a table")
-    _reject_unknown(suite_row, {"id", "description"}, f"{manifest_path}: suite")
+    _reject_unknown(
+        suite_row,
+        {"id", "description", "protocol_digest"},
+        f"{manifest_path}: suite",
+    )
 
     rows = document.get("cases")
     if not isinstance(rows, list) or not rows:
@@ -513,6 +532,9 @@ def load_suite(path: str | Path) -> SuiteSpec:
         or "",
         cases=tuple(cases),
         schema_version=version,
+        protocol_digest=_optional_string(
+            suite_row, "protocol_digest", f"{manifest_path}: suite"
+        ),
     )
     validate_suite(suite, context=str(manifest_path))
     return suite
@@ -1157,7 +1179,35 @@ def validate_case(case: CaseSpec, *, context: str = "case") -> None:
             raise ManifestError(
                 f"{context}.max_output_tokens must be at least 2048 for agentic cases"
             )
-    elif case.max_turns != 1:
+    if case.kind == "memory":
+        if case.id not in KNOWN_MEMORY_OPERATION_CASE_IDS:
+            raise ManifestError(
+                f"{context}.id is not a supported memory-operation scenario"
+            )
+        if case.repetitions != MEMORY_OPERATION_VARIANT_COUNT:
+            raise ManifestError(
+                f"{context}.repetitions must be 3 for the three fixed memory variants"
+            )
+        if case.requires != ("chat", "json"):
+            raise ManifestError(
+                f"{context}.requires must be ['chat', 'json'] for memory cases"
+            )
+        if case.warmups != 0:
+            raise ManifestError(f"{context}.warmups must be 0 for memory cases")
+        if case.concurrency != 1:
+            raise ManifestError(f"{context}.concurrency must be 1 for memory cases")
+        if case.prompt_repetitions != 0:
+            raise ManifestError(
+                f"{context}.prompt_repetitions must be 0 for memory cases"
+            )
+        if case.temperature != 0:
+            raise ManifestError(f"{context}.temperature must be 0 for memory cases")
+        if case.max_output_tokens != MEMORY_OPERATION_OUTPUT_TOKENS:
+            raise ManifestError(
+                f"{context}.max_output_tokens must be "
+                f"{MEMORY_OPERATION_OUTPUT_TOKENS} for memory cases"
+            )
+    if case.kind != "agentic" and case.max_turns != 1:
         raise ManifestError(f"{context}.max_turns must be 1 for non-agentic cases")
     if case.kind == "diffusion":
         if case.requires != ("diffusion",):
@@ -1183,6 +1233,11 @@ def validate_suite(suite: SuiteSpec, *, context: str = "suite") -> None:
             f"{context}.schema_version must be {SCHEMA_VERSION}, "
             f"got {suite.schema_version}"
         )
+    if (
+        suite.protocol_digest is not None
+        and _DIGEST_PATTERN.fullmatch(suite.protocol_digest) is None
+    ):
+        raise ManifestError(f"{context}.protocol_digest must be a sha256 digest")
     if not suite.cases:
         raise ManifestError(f"{context}.cases must not be empty")
     seen: set[str] = set()
@@ -1209,6 +1264,30 @@ def validate_suite(suite: SuiteSpec, *, context: str = "suite") -> None:
                 f"{context} cache cases must be the fixed 8192 and 32768 "
                 "prefix protocol"
             )
+    memory_cases = [case for case in suite.cases if case.kind == "memory"]
+    memory_suite = suite.id == MEMORY_OPERATION_SUITE_ID
+    if memory_suite or memory_cases:
+        if not memory_suite:
+            raise ManifestError(
+                f"{context}.id must be '{MEMORY_OPERATION_SUITE_ID}' for memory cases"
+            )
+        observed = tuple(case.id for case in memory_cases)
+        try:
+            require_memory_operation_protocol_digest(suite.protocol_digest)
+        except ValueError as error:
+            raise ManifestError(
+                f"{context} memory-operation protocol digest is stale or invalid"
+            ) from error
+        if (
+            observed != MEMORY_OPERATION_SCENARIO_IDS
+            or len(memory_cases) != len(KNOWN_MEMORY_OPERATION_CASE_IDS)
+            or len(suite.cases) != len(KNOWN_MEMORY_OPERATION_CASE_IDS)
+            or suite.description != MEMORY_OPERATION_SUITE_DESCRIPTION
+        ):
+            raise ManifestError(
+                f"{context} memory cases must contain the fixed ordered "
+                "memory-operation battery, description, and protocol digest"
+            )
 
 
 def validate_benchmark_selection(
@@ -1228,6 +1307,62 @@ def validate_benchmark_selection(
             f"{context}: the {PREFIX_CACHE_SUITE_ID!r} suite requires a "
             "prefix_cache_mode profile"
         )
+    if suite.id == MEMORY_OPERATION_SUITE_ID:
+        try:
+            require_memory_operation_protocol_digest(suite.protocol_digest)
+        except ValueError as error:
+            raise ManifestError(
+                f"{context}: memory-operation protocol digest is stale or invalid"
+            ) from error
+        if (
+            model.backend != "llamacpp"
+            or model.lifecycle != "subprocess"
+            or model.runtime_revision != MEMORY_OPERATION_LLAMACPP_REVISION
+            or model.runtime_digest != MEMORY_OPERATION_LLAMACPP_DIGEST
+            or model.runtime_parallel != 1
+            or model.max_context != MEMORY_OPERATION_CONTEXT_TOKENS
+            or model.native_context != MEMORY_OPERATION_CONTEXT_TOKENS
+        ):
+            raise ManifestError(
+                f"{context}: the {MEMORY_OPERATION_SUITE_ID!r} suite requires "
+                "the fixed single-slot 32K llama.cpp geometry"
+            )
+        try:
+            request_body = json.loads(model.request_body_json or "")
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ManifestError(
+                f"{context}: memory-operation profiles require an explicit "
+                "thinking policy"
+            ) from error
+        if (
+            not isinstance(request_body, dict)
+            or set(request_body) != {"chat_template_kwargs"}
+            or not isinstance(request_body["chat_template_kwargs"], dict)
+            or set(request_body["chat_template_kwargs"]) != {"enable_thinking"}
+            or not isinstance(
+                request_body["chat_template_kwargs"]["enable_thinking"], bool
+            )
+        ):
+            raise ManifestError(
+                f"{context}: memory-operation profiles require exactly one "
+                "boolean enable_thinking policy"
+            )
+        enable_thinking = request_body["chat_template_kwargs"]["enable_thinking"]
+        if (
+            not {"chat", "json"}.issubset(model.tasks)
+            or ("thinking" in model.tasks) is not enable_thinking
+        ):
+            raise ManifestError(
+                f"{context}: memory-operation capabilities do not match the "
+                "thinking policy"
+            )
+        if model.args != memory_operation_llamacpp_args(
+            enable_thinking=enable_thinking
+        ):
+            raise ManifestError(
+                f"{context}: memory-operation llama.cpp arguments do not "
+                "match the fixed protocol"
+            )
 
 
 def validate_models(models: Mapping[str, ModelSpec] | Iterable[ModelSpec]) -> None:

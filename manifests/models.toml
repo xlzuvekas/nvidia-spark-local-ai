@@ -493,6 +493,88 @@ args = [
 ]
 
 [[models]]
+id = "ornith15-35b-a3b-q4-k-m-llamacpp"
+description = "Ornith AI-hosted Ornith 1.5 35B-A3B Q4_K_M GGUF baseline on pinned llama.cpp, single-slot allocated at 32K from the GGUF's declared 262K capability, with reasoning disabled and without speculation."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "ornith-ai/Ornith-1.5-35B-A3B-GGUF"
+revision = "12393612fd4f730ff5aadc23e9b8f9648aa49ceb"
+served_name = "ornith-ai/Ornith-1.5-35B-A3B"
+tasks = ["chat", "json", "tools"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "qwen35moe"
+quantization = "q4_k_m"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Ornith-1.5-35B-Q4_K_M.gguf"]
+model_file = "Ornith-1.5-35B-Q4_K_M.gguf"
+model_digest = "sha256:42739874cc2ccfdb8523b23fbe52e29b2a7555c8176737ca9ca0b5d59859d41f"
+model_size_bytes = 21713463040
+runtime_binary = "~/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 1
+runtime_source_dir = "~/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 32768
+startup_timeout_s = 600
+estimated_ram_gib = 56.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+]
+
+[[models]]
+id = "ornith15-35b-a3b-q4-k-m-llamacpp-thinking"
+description = "Matched Ornith 1.5 Q4_K_M profile, single-slot allocated at 32K from the GGUF's declared 262K capability, with reasoning enabled under b10453's 1,024-token reasoning-budget setting; b10453 reports total completion tokens but not a separate reasoning-token count."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "ornith-ai/Ornith-1.5-35B-A3B-GGUF"
+revision = "12393612fd4f730ff5aadc23e9b8f9648aa49ceb"
+served_name = "ornith-ai/Ornith-1.5-35B-A3B"
+tasks = ["chat", "json", "tools", "thinking"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":true}}'
+architecture = "qwen35moe"
+quantization = "q4_k_m"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Ornith-1.5-35B-Q4_K_M.gguf"]
+model_file = "Ornith-1.5-35B-Q4_K_M.gguf"
+model_digest = "sha256:42739874cc2ccfdb8523b23fbe52e29b2a7555c8176737ca9ca0b5d59859d41f"
+model_size_bytes = 21713463040
+runtime_binary = "~/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 1
+runtime_source_dir = "~/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 32768
+startup_timeout_s = 600
+estimated_ram_gib = 56.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "on",
+  "--reasoning-format", "deepseek",
+  "--reasoning-budget", "1024",
+]
+
+[[models]]
 id = "qwen3-coder-next-80b-a3b-ud-q4-k-xl-llamacpp"
 description = "Pinned Unsloth Qwen3-Coder-Next 80B-A3B Dynamic 2.0 UD-Q4_K_XL GGUF agent-serving baseline, single-slot at 64K and without speculation."
 support_status = "spark_other_backend"
@@ -564,6 +646,46 @@ max_context = 262144
 native_context = 262144
 startup_timeout_s = 600
 estimated_ram_gib = 100.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+]
+
+[[models]]
+id = "qwen36-35b-a3b-ud-q4-k-xl-llamacpp-32k"
+description = "Matched single-slot 32K-context Qwen3.6 MoE Q4_K_XL GGUF control without reasoning or speculation."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+revision = "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d"
+served_name = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+tasks = ["chat", "json", "tools"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "qwen35moe"
+quantization = "ud-q4_k_xl"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = ["Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"]
+model_file = "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+model_digest = "sha256:55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1"
+model_size_bytes = 22853663008
+runtime_binary = "~/.cache/sparkbench/llama.cpp-b10453/build/bin/llama-server"
+runtime_digest = "sha256:ae1bd49f869ff3397b2a5d757fcf010c6eaaf16c4e3071a15861312defcd4e40"
+runtime_parallel = 1
+runtime_source_dir = "~/.cache/sparkbench/llama.cpp-b10453"
+runtime_revision = "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+max_context = 32768
+native_context = 32768
+startup_timeout_s = 600
+estimated_ram_gib = 56.0
 endpoint = "http://127.0.0.1:8000/v1"
 args = [
   "--n-gpu-layers", "all",

@@ -51,6 +51,22 @@ from .llamacpp_metrics import (
     snapshot_llamacpp_spec_decode_metrics,
 )
 from .manifest import validate_benchmark_selection
+from .memory_ops import (
+    MEMORY_OPERATION_CONTEXT_TOKENS,
+    MEMORY_OPERATION_LLAMACPP_DIGEST,
+    MEMORY_OPERATION_LLAMACPP_REVISION,
+    MEMORY_OPERATION_OUTPUT_TOKENS,
+    MEMORY_OPERATION_PROTOCOL_DIGEST,
+    MEMORY_OPERATION_SCENARIO_IDS,
+    MEMORY_OPERATION_SUITE_DESCRIPTION,
+    MEMORY_OPERATION_SUITE_ID,
+    MEMORY_OPERATION_VARIANT_COUNT,
+    MemoryOperationError,
+    estimate_memory_operation_context_tokens,
+    memory_operation_llamacpp_args,
+    require_memory_operation_protocol_digest,
+    run_memory_operation_scenario,
+)
 from .prefix_cache_protocol import (
     PREFIX_CACHE_CONTEXT_TOKENS,
     PREFIX_CACHE_PREFIX_TARGETS,
@@ -140,8 +156,15 @@ def _host_snapshot() -> dict[str, Any]:
     }
 
 
-def _canonical_case(model: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
+def _canonical_case(
+    model: dict[str, Any],
+    case: dict[str, Any],
+    *,
+    protocol_digest: str | None = None,
+) -> dict[str, Any]:
     payload = {"model": model, "case": case}
+    if protocol_digest is not None:
+        payload["protocol_digest"] = protocol_digest
     return {**case, "case_id": f"{case['id']}--{content_hash(payload, 12)}"}
 
 
@@ -162,7 +185,19 @@ def create_plan(
     validate_benchmark_selection(model, suite, context="plan")
     model_data = asdict(model)
     suite_data = asdict(suite)
-    cases = [_canonical_case(model_data, case) for case in suite_data["cases"]]
+    protocol_digest = suite_data.get("protocol_digest")
+    if protocol_digest is None:
+        # Preserve the frozen fingerprints and case identifiers of unrelated
+        # suites that predate protocol-level provenance binding.
+        suite_data.pop("protocol_digest", None)
+    cases = [
+        _canonical_case(
+            model_data,
+            case,
+            protocol_digest=protocol_digest,
+        )
+        for case in suite_data["cases"]
+    ]
     resolved_image = _image_digest(model.image)
     if model.image_digest and (
         not resolved_image or not resolved_image.endswith("@" + model.image_digest)
@@ -1233,6 +1268,13 @@ def _estimated_context_tokens(case: SimpleNamespace) -> tuple[int, str]:
             ),
             "agentic_episode_max_turns_times_output_plus_tool_history_margin",
         )
+    if str(case.kind) == "memory":
+        return (
+            estimate_memory_operation_context_tokens(
+                max_output_tokens=output_tokens
+            ),
+            "memory_operation_fixed_prompt_plus_json_output_margin",
+        )
     if str(case.kind) == "quality":
         prompt_words = max(
             len(_quality_prompt(item, "context-estimate").split())
@@ -1905,6 +1947,31 @@ def _execute_case(
                 )
                 results = [result]
                 burst_s = float(result.wall_s)
+            elif str(case.kind) == "memory":
+                request_id_prefix = (
+                    f"{case.case_id}-r{repetition}-w0-{time.time_ns()}"
+                )
+                request_body_json = getattr(model, "request_body_json", None)
+                extra_body = json.loads(request_body_json) if request_body_json else {}
+                request_kwargs: dict[str, Any] = {
+                    "base_url": server.base_url,
+                    "model": str(model.served_name),
+                    "require_native_timing": True,
+                    **_authorization_argument(server),
+                }
+                extra_body["cache_prompt"] = False
+                result = run_memory_operation_scenario(
+                    scenario_id=str(case.id),
+                    variant=repetition,
+                    request_function=_chat_request_function(server, case),
+                    request_kwargs=request_kwargs,
+                    request_id_prefix=request_id_prefix,
+                    max_output_tokens=int(case.max_output_tokens),
+                    temperature=float(case.temperature),
+                    extra_body=extra_body,
+                )
+                results = [result]
+                burst_s = float(result.elapsed_s)
             elif str(case.kind) == "quality":
                 results = []
                 configured_concurrency = int(case.concurrency)
@@ -2009,7 +2076,7 @@ def _execute_case(
                     request_function=_chat_request_function(server, case),
                 )
             for result in results:
-                if str(case.kind) == "agentic":
+                if str(case.kind) in {"agentic", "memory"}:
                     validation = {
                         "passed": bool(result.passed),
                         "reason": (
@@ -2047,6 +2114,21 @@ def _execute_case(
     except Exception as error:
         if _is_multi_hop_needle(case):
             safe_error = MultiHopNeedleError()
+            journal.append(
+                {
+                    "event": "case_failed",
+                    "case_id": case.case_id,
+                    "attempt_id": attempt_id,
+                    "error_type": type(safe_error).__name__,
+                    "error": str(safe_error),
+                    "elapsed_s": time.perf_counter() - started,
+                }
+            )
+            raise safe_error from error
+        if str(case.kind) == "memory":
+            safe_error = MemoryOperationError(
+                "memory-operation case failed; details omitted"
+            )
             journal.append(
                 {
                     "event": "case_failed",
@@ -2377,6 +2459,184 @@ def _validate_prefix_cache_plan_selection(model: Any, suite: Any) -> None:
         )
 
 
+def _validate_memory_operation_plan_selection(model: Any, suite: Any) -> None:
+    """Reject altered memory-operation plans before any server is started."""
+
+    raw_suite_id = getattr(suite, "id", None)
+    suite_id = raw_suite_id if isinstance(raw_suite_id, str) else ""
+    raw_cases = getattr(suite, "cases", ())
+    cases = list(raw_cases) if isinstance(raw_cases, (list, tuple)) else []
+    memory_cases = [case for case in cases if getattr(case, "kind", None) == "memory"]
+    memory_suite = suite_id == MEMORY_OPERATION_SUITE_ID
+    if bool(memory_cases) != memory_suite or (
+        memory_suite and len(memory_cases) != len(cases)
+    ):
+        raise PreflightError("Frozen memory-operation suite does not match protocol")
+    if not memory_suite:
+        return
+    if not isinstance(raw_cases, list):
+        raise PreflightError("Frozen memory-operation cases must be a JSON list")
+    try:
+        require_memory_operation_protocol_digest(
+            getattr(suite, "protocol_digest", None)
+        )
+    except ValueError as error:
+        raise PreflightError(
+            "Frozen memory-operation protocol digest is stale or invalid"
+        ) from error
+    try:
+        suite_fields = vars(suite)
+    except TypeError as error:
+        raise PreflightError(
+            "Frozen memory-operation suite is not a typed plan object"
+        ) from error
+    if (
+        set(suite_fields)
+        != {
+            "id",
+            "cases",
+            "description",
+            "protocol_digest",
+            "schema_version",
+        }
+        or type(suite_fields.get("schema_version")) is not int
+        or suite_fields.get("schema_version") != 1
+        or suite_fields.get("description") != MEMORY_OPERATION_SUITE_DESCRIPTION
+        or suite_fields.get("protocol_digest")
+        != MEMORY_OPERATION_PROTOCOL_DIGEST
+    ):
+        raise PreflightError(
+            "Frozen memory-operation suite schema does not match protocol"
+        )
+    if (
+        getattr(model, "backend", None) != "llamacpp"
+        or getattr(model, "lifecycle", None) != "subprocess"
+        or getattr(model, "runtime_revision", None)
+        != MEMORY_OPERATION_LLAMACPP_REVISION
+        or getattr(model, "runtime_digest", None)
+        != MEMORY_OPERATION_LLAMACPP_DIGEST
+        or type(getattr(model, "runtime_parallel", None)) is not int
+        or getattr(model, "runtime_parallel", None) != 1
+        or type(getattr(model, "max_context", None)) is not int
+        or getattr(model, "max_context", None) != MEMORY_OPERATION_CONTEXT_TOKENS
+        or type(getattr(model, "native_context", None)) is not int
+        or getattr(model, "native_context", None) != MEMORY_OPERATION_CONTEXT_TOKENS
+    ):
+        raise PreflightError(
+            "Frozen memory-operation model does not match fixed llama.cpp geometry"
+        )
+    raw_tasks = getattr(model, "tasks", None)
+    if not isinstance(raw_tasks, list) or not all(
+        isinstance(task, str) for task in raw_tasks
+    ):
+        raise PreflightError("Frozen memory-operation tasks must be a JSON string list")
+    raw_request_body = getattr(model, "request_body_json", None)
+    if not isinstance(raw_request_body, str):
+        raise PreflightError(
+            "Frozen memory-operation profile lacks an explicit thinking policy"
+        )
+    try:
+        request_body = json.loads(raw_request_body)
+    except json.JSONDecodeError as error:
+        raise PreflightError(
+            "Frozen memory-operation thinking policy is invalid"
+        ) from error
+    if (
+        not isinstance(request_body, dict)
+        or set(request_body) != {"chat_template_kwargs"}
+        or not isinstance(request_body["chat_template_kwargs"], dict)
+        or set(request_body["chat_template_kwargs"]) != {"enable_thinking"}
+        or not isinstance(
+            request_body["chat_template_kwargs"]["enable_thinking"], bool
+        )
+    ):
+        raise PreflightError(
+            "Frozen memory-operation thinking policy does not match protocol"
+        )
+    enable_thinking = request_body["chat_template_kwargs"]["enable_thinking"]
+    task_set = set(raw_tasks)
+    if (
+        len(task_set) != len(raw_tasks)
+        or not {"chat", "json"}.issubset(task_set)
+        or ("thinking" in task_set) is not enable_thinking
+    ):
+        raise PreflightError(
+            "Frozen memory-operation task capabilities do not match protocol"
+        )
+    raw_arguments = getattr(model, "args", None)
+    if not isinstance(raw_arguments, list) or not all(
+        isinstance(argument, str) for argument in raw_arguments
+    ):
+        raise PreflightError(
+            "Frozen memory-operation arguments must be a JSON string list"
+        )
+    if tuple(raw_arguments) != memory_operation_llamacpp_args(
+        enable_thinking=enable_thinking
+    ):
+        raise PreflightError(
+            "Frozen memory-operation arguments do not match protocol"
+        )
+    expected_case_fields = {
+        "case_id",
+        "concurrency",
+        "id",
+        "kind",
+        "max_output_tokens",
+        "max_turns",
+        "prompt_repetitions",
+        "repetitions",
+        "requires",
+        "temperature",
+        "warmups",
+    }
+    if len(cases) != len(MEMORY_OPERATION_SCENARIO_IDS):
+        raise PreflightError("Frozen memory-operation case count is invalid")
+    for case, expected_id in zip(
+        cases, MEMORY_OPERATION_SCENARIO_IDS, strict=True
+    ):
+        try:
+            fields = vars(case)
+        except TypeError as error:
+            raise PreflightError(
+                "Frozen memory-operation case is not a typed plan object"
+            ) from error
+        case_id = fields.get("case_id")
+        if (
+            set(fields) != expected_case_fields
+            or fields.get("id") != expected_id
+            or fields.get("kind") != "memory"
+            or type(fields.get("requires")) is not list
+            or fields.get("requires") != ["chat", "json"]
+            or type(fields.get("warmups")) is not int
+            or fields.get("warmups") != 0
+            or type(fields.get("repetitions")) is not int
+            or fields.get("repetitions") != MEMORY_OPERATION_VARIANT_COUNT
+            or type(fields.get("max_output_tokens")) is not int
+            or fields.get("max_output_tokens") != MEMORY_OPERATION_OUTPUT_TOKENS
+            or type(fields.get("max_turns")) is not int
+            or fields.get("max_turns") != 1
+            or type(fields.get("temperature")) is not float
+            or fields.get("temperature") != 0.0
+            or type(fields.get("concurrency")) is not int
+            or fields.get("concurrency") != 1
+            or type(fields.get("prompt_repetitions")) is not int
+            or fields.get("prompt_repetitions") != 0
+            or not isinstance(case_id, str)
+            or re.fullmatch(rf"{re.escape(expected_id)}--[0-9a-f]{{12}}", case_id)
+            is None
+        ):
+            raise PreflightError(
+                "Frozen memory-operation case does not match protocol"
+            )
+    required_context = estimate_memory_operation_context_tokens(
+        max_output_tokens=MEMORY_OPERATION_OUTPUT_TOKENS
+    )
+    if required_context > model.max_context or required_context > model.native_context:
+        raise PreflightError(
+            "Frozen memory-operation context admission is insufficient"
+        )
+
+
 def execute_plan(
     run_dir: Path,
     *,
@@ -2427,7 +2687,11 @@ def execute_plan(
         raise RuntimeError("Frozen plan fingerprint does not match its contents")
     for case in plan["suite"]["cases"]:
         case_without_id = {key: value for key, value in case.items() if key != "case_id"}
-        expected_case_id = _canonical_case(plan["model"], case_without_id)["case_id"]
+        expected_case_id = _canonical_case(
+            plan["model"],
+            case_without_id,
+            protocol_digest=plan["suite"].get("protocol_digest"),
+        )["case_id"]
         if case.get("case_id") != expected_case_id:
             raise RuntimeError("Frozen plan case identity does not match its contents")
     model = _namespace(plan["model"])
@@ -2449,6 +2713,7 @@ def execute_plan(
     suite = _namespace(plan["suite"])
     cases = list(suite.cases)
     _validate_prefix_cache_plan_selection(model, suite)
+    _validate_memory_operation_plan_selection(model, suite)
     journal = Journal(run_dir / "events.jsonl")
     completed = journal.completed_cases()
     terminal = journal.terminal_cases()

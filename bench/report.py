@@ -20,6 +20,10 @@ from .llamacpp_metrics import (
     llamacpp_mtp_depth,
     llamacpp_mtp_requested,
 )
+from .memory_ops import (
+    MEMORY_OPERATION_SUITE_ID,
+    summarize_memory_operation_results,
+)
 from .prefix_cache_protocol import (
     PREFIX_CACHE_PROTOCOL,
     prefix_cache_conditions,
@@ -446,8 +450,23 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
             completed[case_id] = attempt_id
             case_events[(case_id, attempt_id)] = event
 
+    completed_items = sorted(completed.items())
+    planned_case_ids: list[str] = []
+    if planned_suite.get("id") == MEMORY_OPERATION_SUITE_ID:
+        planned_case_ids = [
+            str(case["case_id"])
+            for case in planned_suite.get("cases", [])
+            if isinstance(case, dict) and isinstance(case.get("case_id"), str)
+        ]
+        completed_items = [
+            (case_id, completed[case_id])
+            for case_id in planned_case_ids
+            if case_id in completed
+        ]
+
     rows: list[dict[str, Any]] = []
-    for case_id, attempt_id in sorted(completed.items()):
+    memory_run_results: list[dict[str, Any]] = []
+    for case_id, attempt_id in completed_items:
         requests = [
             event
             for event in events
@@ -717,6 +736,148 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
                     ),
                 }
             )
+        if kind == "memory":
+            memory_results = [event["result"] for event in requests]
+            memory_run_results.extend(memory_results)
+            memory_aggregate = summarize_memory_operation_results(memory_results)
+            succeeded = sum(
+                result.get("passed") is True for result in memory_results
+            )
+            graphiti_results = [
+                result
+                for result in memory_results
+                if result.get("graphiti_resolver_case") is True
+            ]
+            extension_results = [
+                result
+                for result in memory_results
+                if result.get("synthetic_extension_case") is True
+            ]
+            row.update(
+                {
+                    "memory_operations": len(memory_results),
+                    "memory_operations_correct": succeeded,
+                    "memory_operation_accuracy": succeeded / len(memory_results),
+                    "memory_json_objects_emitted": sum(
+                        result.get("json_object_emitted") is True
+                        for result in memory_results
+                    ),
+                    "memory_schema_valid": sum(
+                        result.get("schema_valid") is True
+                        for result in memory_results
+                    ),
+                    "memory_protected_value_emissions": sum(
+                        result.get("protected_value_emitted") is True
+                        for result in memory_results
+                    ),
+                    "memory_action_correct": sum(
+                        result.get("action_correct") is True
+                        for result in extension_results
+                    ),
+                    "memory_target_correct": sum(
+                        result.get("target_correct") is True
+                        for result in memory_results
+                    ),
+                    "memory_path_correct": sum(
+                        result.get("path_correct") is True
+                        for result in memory_results
+                    ),
+                    "memory_tier_correct": sum(
+                        result.get("tier_correct") is True
+                        for result in memory_results
+                    ),
+                    "memory_evidence_correct": sum(
+                        result.get("evidence_correct") is True
+                        for result in memory_results
+                    ),
+                    "memory_value_correct": sum(
+                        result.get("value_correct") is True
+                        for result in memory_results
+                    ),
+                    "memory_valid_from_correct": sum(
+                        result.get("valid_from_correct") is True
+                        for result in memory_results
+                    ),
+                    "memory_valid_to_correct": sum(
+                        result.get("valid_to_correct") is True
+                        for result in memory_results
+                    ),
+                    "memory_reason_correct": sum(
+                        result.get("reason_correct") is True
+                        for result in memory_results
+                    ),
+                    "memory_field_checks_applicable": len(extension_results),
+                    "memory_mutations_expected": sum(
+                        result.get("mutation_expected") is True
+                        for result in memory_results
+                    ),
+                    "memory_mutations_selected": sum(
+                        result.get("mutation_selected") is True
+                        for result in memory_results
+                    ),
+                    "memory_unexpected_tool_calls": memory_aggregate[
+                        "unexpected_tool_calls"
+                    ],
+                    "memory_prompt_cache_disabled_requests": memory_aggregate[
+                        "prompt_cache_disabled_requests"
+                    ],
+                    "memory_zero_cached_prompt_requests": memory_aggregate[
+                        "zero_cached_prompt_requests"
+                    ],
+                    "memory_total_server_prompt_s": memory_aggregate[
+                        "total_server_prompt_s"
+                    ],
+                    "memory_total_server_decode_s": memory_aggregate[
+                        "total_server_decode_s"
+                    ],
+                    "memory_secret_refusals_required": sum(
+                        result.get("secret_refusal_required") is True
+                        for result in memory_results
+                    ),
+                    "memory_secret_refusals_succeeded": sum(
+                        result.get("secret_refusal_succeeded") is True
+                        for result in memory_results
+                    ),
+                    "memory_injection_refusals_required": sum(
+                        result.get("injection_refusal_required") is True
+                        for result in memory_results
+                    ),
+                    "memory_injection_refusals_succeeded": sum(
+                        result.get("injection_refusal_succeeded") is True
+                        for result in memory_results
+                    ),
+                    "memory_total_prompt_tokens": prompt_tokens,
+                    "memory_total_completion_tokens": completion_tokens,
+                    # Preserve unknown reasoning usage: the generic collector
+                    # returns None when even one request omits the counter.
+                    "memory_total_reasoning_tokens": reasoning_tokens,
+                    "graphiti_resolver_operations": len(graphiti_results),
+                    "synthetic_memory_extension_operations": len(
+                        extension_results
+                    ),
+                }
+            )
+            if graphiti_results:
+                resolver_correct = memory_aggregate["graphiti_resolver"]["correct"]
+                row.update(
+                    {
+                        "graphiti_resolver_correct": resolver_correct,
+                        "graphiti_resolver_accuracy": (
+                            resolver_correct / len(graphiti_results)
+                        ),
+                        "graphiti_duplicate_sets_correct": sum(
+                            result.get("duplicate_facts_correct") is True
+                            for result in graphiti_results
+                        ),
+                        "graphiti_contradicted_sets_correct": sum(
+                            result.get("contradicted_facts_correct") is True
+                            for result in graphiti_results
+                        ),
+                        "graphiti_resolver_confusion": memory_aggregate[
+                            "graphiti_resolver"
+                        ]["confusion"],
+                    }
+                )
         if diffusion_generation:
             row["median_time_to_first_emission_s"] = (
                 statistics.median(first_emission_times)
@@ -1164,6 +1325,15 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         ),
         "cases": rows,
     }
+    if memory_run_results:
+        memory_battery_completed = (
+            planned_suite.get("id") == MEMORY_OPERATION_SUITE_ID
+            and all(case_id in completed for case_id in planned_case_ids)
+        )
+        summary["memory_operation_summary"] = summarize_memory_operation_results(
+            memory_run_results,
+            require_complete=memory_battery_completed,
+        )
     write_json(run_dir / "summary.json", summary)
     if rows:
         keys = list(dict.fromkeys(key for row in rows for key in row))

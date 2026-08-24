@@ -206,6 +206,94 @@ identifiers, and per-request tags remain excluded. The first complete campaign
 and its comparison limits are recorded in
 [the 2026-08-17 agentic tool-use report](docs/agentic-tools-results-2026-08-17.md).
 
+### Memory-operation component protocol
+
+The [`memory-operations` suite](manifests/suites/memory_operations.toml) is a
+bounded component test for models proposed as offline memory reflectors. It
+does not launch Graphiti, mutate a MemFS tree, retrieve memories, or measure
+downstream question answering. Instead, it isolates the model decision that a
+deterministic memory service could validate and apply.
+
+The first family contains three Graphiti-inspired edge-resolution cases:
+semantic reuse, accepting a new fact while invalidating a contradiction, and
+accepting an unrelated new fact. Their output
+contract matches Graphiti's two-array resolver shape: `duplicate_facts` and
+`contradicted_facts` contain zero-based integer indexes into continuously
+numbered candidate lists. Duplicate indexes are limited to existing facts;
+contradiction indexes may refer to existing facts or the subsequent
+invalidation-candidate range. The prompts and graph state are synthetic and
+smaller than Graphiti's
+production extraction and candidate-resolution pipeline, so these results must
+not be called a Graphiti end-to-end score.
+
+The second family is explicitly a synthetic memory-transaction extension. Its
+eight cases cover add, supersede, explicit forget/delete, duplicate no-op,
+temporal invalidation, profile/project/session placement, secret refusal, and
+untrusted-transcript instruction refusal. The response is one exact
+eleven-field JSON object with a fixed action vocabulary and evidence indexes.
+It is intended to test a future design in which the model proposes a bounded
+transaction while deterministic code validates paths, applies edits, commits,
+and advances the reflection cursor. It is not the current Letta Code MemFS
+tool-and-git contract.
+
+Version 1 admits only the frozen single-slot llama.cpp geometry with 32,768
+allocated context tokens, Q8 key/value cache types, and prompt-cache reuse
+forced off for every measured request. Every case has three fixed,
+byte-replayable nonce-derived variants, no per-case warm-up, one serial request
+per variant, temperature zero, and a 1,536-token completion cap. The ordinary
+one-request server-startup probe remains outside the measured memory battery.
+The cap is intended to leave visible-JSON headroom after the matched Ornith
+profile's 1,024-token
+reasoning-budget setting, but the sampler may also generate delimiters or
+additional reasoning blocks; neither 512 visible tokens nor an observed
+reasoning count is implied. Both families request strict JSON Schema with
+unknown properties rejected, and the
+harness independently parses duplicate keys, non-standard constants, types,
+sets, dates, paths, evidence indexes, and the exact oracle.
+
+The version 1 suite content is bound to protocol digest
+`sha256:96df2d5d742c6f4863c77ec3c6cc980845d43900e25607d37fe0be361f0808f1`.
+The digest covers the response schemas, prompts, deterministic variant
+construction, limits, oracles, protected-value set, and grading contract. It
+is incorporated into the suite, plan fingerprint, model-bound case IDs, and
+published evidence. A semantic change to any covered input requires a new
+digest and new plans; matching case names or a plan created under an earlier
+digest is not equivalent provenance.
+
+Report exact operation accuracy, schema-valid emission rate, protected-value
+emissions, refusal success, field-level transaction accuracy, and the
+Graphiti resolver confusion matrix. Compare models only with the same suite,
+variant count, context/slot geometry, runtime controls, and thinking policy.
+Pin and report each exact quantization; because the initial panel mixes Q4_K_M
+and UD-Q4_K_XL artifacts, its cross-model differences cannot be attributed to
+architecture alone. Protected-value detection is deliberately narrow: it
+catches contiguous verbatim synthetic values after NFKC normalization and
+case folding across visible output, reasoning, and tool payloads. It is not a
+general claim of resistance to split, encoded, or confusable-transformed
+exfiltration.
+llama.cpp b10453 reports all decoded tokens in
+`completion_tokens` but does not report an exact reasoning-token partition;
+therefore its `reasoning_tokens` value remains null. A thinking run may compare
+total completion and wall-time overhead, but it is not evidence of observed
+reasoning usage until a pinned runtime supplies that counter. Its client TTFT
+is time to the first emitted reasoning-or-visible delta, not time to the first
+visible JSON token.
+
+Prompts, generated nonces, expected transactions, model output, reasoning
+text, paths, values, identifiers, and transport errors remain raw local data.
+Only the fixed scalar result schema and recomputed aggregates may enter tracked
+evidence. Publication additionally requires an offline exporter fixture,
+deterministic re-export, semantic tamper tests, and staged verification.
+
+The first five-profile component campaign and its exact scalar results are
+recorded in the
+[2026-08-24 memory-operation report](docs/memory-operations-results-2026-08-24.md).
+Its four no-thinking profiles tied at 33/33 operations; the matched Ornith
+reasoning-on profile is separately labeled exploratory and passed 27/33. Each
+profile was executed once over three deterministic variants per case, so these
+bounded outcomes are not estimates of statistical significance. Diagnostic
+runs made before the protocol digest bound all semantic inputs were excluded.
+
 ### Multi-hop long-context needle protocol
 
 The [`llamacpp-multihop-long-context` suite](manifests/suites/llamacpp_multihop_long_context.toml)

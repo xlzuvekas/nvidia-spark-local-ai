@@ -27,6 +27,20 @@ from typing import Any, Sequence
 import unicodedata
 
 from .manifest import KNOWN_AGENTIC_CASE_IDS
+from .memory_ops import (
+    MEMORY_OPERATION_CONTEXT_TOKENS,
+    MEMORY_OPERATION_LLAMACPP_DIGEST,
+    MEMORY_OPERATION_LLAMACPP_REVISION,
+    MEMORY_OPERATION_OUTPUT_TOKENS,
+    MEMORY_OPERATION_PROTOCOL_DIGEST,
+    MEMORY_OPERATION_SCENARIO_IDS,
+    MEMORY_OPERATION_SERVER_TIMING_TOLERANCE_S,
+    MEMORY_OPERATION_SUITE_ID,
+    MEMORY_OPERATION_VARIANT_COUNT,
+    memory_operation_llamacpp_args,
+    require_memory_operation_protocol_digest,
+    summarize_memory_operation_results,
+)
 from .prefix_cache_protocol import (
     PREFIX_CACHE_CONTEXT_TOKENS,
     PREFIX_CACHE_PREFIX_TARGETS,
@@ -481,6 +495,359 @@ _AGENTIC_SAMPLE_FIELDS = _AGENTIC_PROJECTED_RESULT_FIELDS | {
     "selected_attempt",
     "validation_passed",
 }
+
+# The memory-operation protocol is an exact, self-contained evidence family.
+# Its Graphiti-inspired resolver cases deliberately retain only confusion
+# labels and exact-set correctness; the synthetic extension retains only
+# transaction-field correctness.  Neither projection can carry facts, paths,
+# values, nonces, prompts, model output, hidden reasoning, tool payloads, or
+# request identifiers.
+_MEMORY_SUITE_DESCRIPTION = (
+    "Graphiti-style edge resolution followed by explicitly synthetic "
+    "MemFS/transaction extension cases; exact JSON grading and scalar-only "
+    "results."
+)
+_MEMORY_SUITE_FIELDS = frozenset(
+    {"cases", "id", "protocol_digest", "schema_version"}
+)
+_MEMORY_SUITE_CASE_FIELDS = frozenset(
+    {
+        "case_id",
+        "concurrency",
+        "id",
+        "kind",
+        "max_output_tokens",
+        "max_turns",
+        "prompt_repetitions",
+        "repetitions",
+        "requires",
+        "temperature",
+        "warmups",
+    }
+)
+_MEMORY_RESULT_FIELDS = frozenset(
+    {
+        "action_correct",
+        "completion_tokens",
+        "contradicted_facts_correct",
+        "cached_prompt_tokens",
+        "decode_metric_source",
+        "decode_s",
+        "decode_tps",
+        "duplicate_facts_correct",
+        "elapsed_s",
+        "emission_events",
+        "evidence_correct",
+        "expected_resolver_action",
+        "failure_code",
+        "finish_reason",
+        "graphiti_resolver_case",
+        "injection_refusal_required",
+        "injection_refusal_succeeded",
+        "json_object_emitted",
+        "max_output_tokens",
+        "mutation_expected",
+        "mutation_selected",
+        "output_tps",
+        "passed",
+        "path_correct",
+        "prompt_tokens",
+        "prompt_cache_disabled",
+        "protected_value_emitted",
+        "reason_correct",
+        "reasoning_tokens",
+        "resolver_decision_correct",
+        "scenario_id",
+        "schema_valid",
+        "schema_version",
+        "secret_refusal_required",
+        "secret_refusal_succeeded",
+        "selected_resolver_action",
+        "server_cached_prompt_tokens",
+        "server_decode_s",
+        "server_decode_tokens",
+        "server_prompt_s",
+        "server_prompt_tokens",
+        "synthetic_extension_case",
+        "target_correct",
+        "tier_correct",
+        "ttft_s",
+        "unexpected_field_count",
+        "unexpected_tool_call_count",
+        "valid_from_correct",
+        "valid_to_correct",
+        "value_correct",
+        "variant",
+    }
+)
+_MEMORY_PROJECTED_RESULT_FIELDS = _MEMORY_RESULT_FIELDS - {
+    "emission_events",
+    "output_tps",
+}
+_MEMORY_SAMPLE_FIELDS = _MEMORY_PROJECTED_RESULT_FIELDS | {
+    "burst_elapsed_s",
+    "case_attempt",
+    "case_id",
+    "case_sample_index",
+    "kind",
+    "repetition",
+    "sample_index",
+    "sample_type",
+    "selected_attempt",
+    "validation_passed",
+}
+
+# Evidence v1 is intentionally limited to the frozen first memory panel.  The
+# fifth entry is the separately-labelled exploratory thinking profile.  The
+# pinned llama.cpp build does not expose a trustworthy reasoning-token
+# partition for either policy, so reasoning usage remains unavailable/null in
+# every v1 sample.
+_MEMORY_PANEL_MODELS: dict[str, dict[str, Any]] = {
+    "laguna-xs21-33b-a3b-q4-k-m-llamacpp": {
+        "architecture": "laguna",
+        "backend": "llamacpp",
+        "estimated_ram_gib": 48.0,
+        "id": "laguna-xs21-33b-a3b-q4-k-m-llamacpp",
+        "lifecycle": "subprocess",
+        "max_context": MEMORY_OPERATION_CONTEXT_TOKENS,
+        "memory_thinking_enabled": False,
+        "native_context": MEMORY_OPERATION_CONTEXT_TOKENS,
+        "quantization": "q4_k_m",
+        "revision": "1a37c0a5fb8c7a18e6106decb6be6327d1b63fa6",
+        "runtime_parallel": 1,
+        "source": "poolside/Laguna-XS-2.1-GGUF",
+        "startup_timeout_s": 600,
+        "support_status": "spark_other_backend",
+        "tasks": ["chat", "json", "tools"],
+    },
+    "laguna-s21-118b-a8b-ud-q4-k-xl-llamacpp": {
+        "architecture": "laguna",
+        "backend": "llamacpp",
+        "estimated_ram_gib": 96.0,
+        "id": "laguna-s21-118b-a8b-ud-q4-k-xl-llamacpp",
+        "lifecycle": "subprocess",
+        "max_context": MEMORY_OPERATION_CONTEXT_TOKENS,
+        "memory_thinking_enabled": False,
+        "native_context": MEMORY_OPERATION_CONTEXT_TOKENS,
+        "quantization": "ud-q4_k_xl",
+        "revision": "750f92f90cf54159c4d7a610cb7b3e74498e75c6",
+        "runtime_parallel": 1,
+        "source": "unsloth/Laguna-S-2.1-GGUF",
+        "startup_timeout_s": 1200,
+        "support_status": "spark_other_backend",
+        "tasks": ["chat", "json", "tools"],
+        "weight_file_count": 3,
+        "weight_size_bytes": 73395172000,
+    },
+    "ornith15-35b-a3b-q4-k-m-llamacpp": {
+        "architecture": "qwen35moe",
+        "backend": "llamacpp",
+        "estimated_ram_gib": 56.0,
+        "id": "ornith15-35b-a3b-q4-k-m-llamacpp",
+        "lifecycle": "subprocess",
+        "max_context": MEMORY_OPERATION_CONTEXT_TOKENS,
+        "memory_thinking_enabled": False,
+        "native_context": MEMORY_OPERATION_CONTEXT_TOKENS,
+        "quantization": "q4_k_m",
+        "revision": "12393612fd4f730ff5aadc23e9b8f9648aa49ceb",
+        "runtime_parallel": 1,
+        "source": "ornith-ai/Ornith-1.5-35B-A3B-GGUF",
+        "startup_timeout_s": 600,
+        "support_status": "spark_other_backend",
+        "tasks": ["chat", "json", "tools"],
+    },
+    "ornith15-35b-a3b-q4-k-m-llamacpp-thinking": {
+        "architecture": "qwen35moe",
+        "backend": "llamacpp",
+        "estimated_ram_gib": 56.0,
+        "id": "ornith15-35b-a3b-q4-k-m-llamacpp-thinking",
+        "lifecycle": "subprocess",
+        "max_context": MEMORY_OPERATION_CONTEXT_TOKENS,
+        "memory_thinking_enabled": True,
+        "native_context": MEMORY_OPERATION_CONTEXT_TOKENS,
+        "quantization": "q4_k_m",
+        "revision": "12393612fd4f730ff5aadc23e9b8f9648aa49ceb",
+        "runtime_parallel": 1,
+        "source": "ornith-ai/Ornith-1.5-35B-A3B-GGUF",
+        "startup_timeout_s": 600,
+        "support_status": "spark_other_backend",
+        "tasks": ["chat", "json", "tools", "thinking"],
+    },
+    "qwen36-35b-a3b-ud-q4-k-xl-llamacpp-32k": {
+        "architecture": "qwen35moe",
+        "backend": "llamacpp",
+        "estimated_ram_gib": 56.0,
+        "id": "qwen36-35b-a3b-ud-q4-k-xl-llamacpp-32k",
+        "lifecycle": "subprocess",
+        "max_context": MEMORY_OPERATION_CONTEXT_TOKENS,
+        "memory_thinking_enabled": False,
+        "native_context": MEMORY_OPERATION_CONTEXT_TOKENS,
+        "quantization": "ud-q4_k_xl",
+        "revision": "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",
+        "runtime_parallel": 1,
+        "source": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+        "startup_timeout_s": 600,
+        "support_status": "spark_other_backend",
+        "tasks": ["chat", "json", "tools"],
+    },
+}
+
+_MEMORY_PANEL_MODEL_ARTIFACTS: dict[str, tuple[dict[str, Any], ...]] = {
+    "laguna-xs21-33b-a3b-q4-k-m-llamacpp": (
+        {
+            "role": "model",
+            "sha256": "1ac7079101fca5a6df8c5a7523a3c30ea7d1c0e4b1258090e7d6d4039287f6cb",
+            "size_bytes": 20274300032,
+            "source": "poolside/Laguna-XS-2.1-GGUF",
+            "revision": "1a37c0a5fb8c7a18e6106decb6be6327d1b63fa6",
+            "target": "Laguna-XS-2.1-Q4_K_M.gguf",
+        },
+    ),
+    "laguna-s21-118b-a8b-ud-q4-k-xl-llamacpp": (
+        {
+            "role": "model_shard_1",
+            "sha256": "0cfaf46917260d253773e5e2fab64329fa5c9c60fdf0db0f59f31205b5f5dd32",
+            "size_bytes": 3683648,
+            "source": "unsloth/Laguna-S-2.1-GGUF",
+            "revision": "750f92f90cf54159c4d7a610cb7b3e74498e75c6",
+            "target": "Laguna-S-2.1-UD-Q4_K_XL-00001-of-00003.gguf",
+        },
+        {
+            "role": "model_shard_2",
+            "sha256": "2296102462b02edca70163121ac62bacf7a82078c0eafc91625c8822850769bf",
+            "size_bytes": 49971821312,
+            "source": "unsloth/Laguna-S-2.1-GGUF",
+            "revision": "750f92f90cf54159c4d7a610cb7b3e74498e75c6",
+            "target": "Laguna-S-2.1-UD-Q4_K_XL-00002-of-00003.gguf",
+        },
+        {
+            "role": "model_shard_3",
+            "sha256": "9150e2338f7690af29685b6a2ca621a8fda7ecf9724678266c4b04b7c6dd0ef3",
+            "size_bytes": 23419667040,
+            "source": "unsloth/Laguna-S-2.1-GGUF",
+            "revision": "750f92f90cf54159c4d7a610cb7b3e74498e75c6",
+            "target": "Laguna-S-2.1-UD-Q4_K_XL-00003-of-00003.gguf",
+        },
+    ),
+    "ornith15-35b-a3b-q4-k-m-llamacpp": (
+        {
+            "role": "model",
+            "sha256": "42739874cc2ccfdb8523b23fbe52e29b2a7555c8176737ca9ca0b5d59859d41f",
+            "size_bytes": 21713463040,
+            "source": "ornith-ai/Ornith-1.5-35B-A3B-GGUF",
+            "revision": "12393612fd4f730ff5aadc23e9b8f9648aa49ceb",
+            "target": "Ornith-1.5-35B-Q4_K_M.gguf",
+        },
+    ),
+    "ornith15-35b-a3b-q4-k-m-llamacpp-thinking": (
+        {
+            "role": "model",
+            "sha256": "42739874cc2ccfdb8523b23fbe52e29b2a7555c8176737ca9ca0b5d59859d41f",
+            "size_bytes": 21713463040,
+            "source": "ornith-ai/Ornith-1.5-35B-A3B-GGUF",
+            "revision": "12393612fd4f730ff5aadc23e9b8f9648aa49ceb",
+            "target": "Ornith-1.5-35B-Q4_K_M.gguf",
+        },
+    ),
+    "qwen36-35b-a3b-ud-q4-k-xl-llamacpp-32k": (
+        {
+            "role": "model",
+            "sha256": "55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1",
+            "size_bytes": 22853663008,
+            "source": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+            "revision": "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",
+            "target": "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+        },
+    ),
+}
+_MEMORY_FAILURE_CODES = frozenset(
+    {
+        "invalid_json",
+        "operation_mismatch",
+        "output_limit",
+        "protected_value",
+        "schema_mismatch",
+        "unexpected_tool_call",
+    }
+)
+_MEMORY_FINISH_REASONS = frozenset(
+    {"content_filter", "length", "other", "stop", "tool_calls"}
+)
+_MEMORY_DECODE_SOURCES = frozenset(
+    {"client_estimate", "other", "server_reported_eval_duration"}
+)
+_MEMORY_RESOLVER_ACTIONS = frozenset(
+    {"CREATE_AND_INVALIDATE", "CREATE_FACT", "INVALID", "REUSE_FACT"}
+)
+_MEMORY_EXPECTED_RESOLVER_ACTION = {
+    "graphiti-reuse-fact": "REUSE_FACT",
+    "graphiti-invalidate-fact": "CREATE_AND_INVALIDATE",
+    "graphiti-create-fact": "CREATE_FACT",
+}
+_MEMORY_MUTATION_EXPECTED = frozenset(
+    {
+        "memory-add",
+        "memory-delete",
+        "memory-supersede",
+        "memory-temporal-invalidate",
+        "memory-tier-placement",
+    }
+)
+_MEMORY_SUMMARY_FIELDS = frozenset(
+    {
+        "graphiti_resolver",
+        "json_objects_emitted",
+        "operation_accuracy",
+        "operations",
+        "operations_correct",
+        "prompt_cache_disabled_requests",
+        "protected_value_emissions",
+        "schema_valid",
+        "schema_version",
+        "synthetic_extension",
+        "total_completion_tokens",
+        "total_reasoning_tokens",
+        "total_request_elapsed_s",
+        "total_prompt_tokens",
+        "total_server_decode_s",
+        "total_server_prompt_s",
+        "unexpected_tool_calls",
+        "zero_cached_prompt_requests",
+    }
+)
+_MEMORY_GRAPHITI_SUMMARY_FIELDS = frozenset(
+    {
+        "accuracy",
+        "confusion",
+        "contradicted_sets_correct",
+        "correct",
+        "duplicate_sets_correct",
+        "operations",
+    }
+)
+_MEMORY_EXTENSION_SUMMARY_FIELDS = frozenset(
+    {
+        "accuracy",
+        "action_correct",
+        "correct",
+        "evidence_correct",
+        "field_checks_applicable",
+        "injection_refusals_required",
+        "injection_refusals_succeeded",
+        "mutations_expected",
+        "mutations_selected",
+        "operations",
+        "path_correct",
+        "reason_correct",
+        "secret_refusals_required",
+        "secret_refusals_succeeded",
+        "target_correct",
+        "tier_correct",
+        "valid_from_correct",
+        "valid_to_correct",
+        "value_correct",
+    }
+)
 _VALIDATION_FIELDS = {
     "expected_answer",
     "expected_transcription",
@@ -532,6 +899,12 @@ _CASE_FIELDS = {
     "embedding_dimension",
     "embeddings_finite",
     "exact_matches",
+    "graphiti_contradicted_sets_correct",
+    "graphiti_duplicate_sets_correct",
+    "graphiti_resolver_accuracy",
+    "graphiti_resolver_confusion",
+    "graphiti_resolver_correct",
+    "graphiti_resolver_operations",
     "kind",
     "measured_wall_time_s",
     "measurement_annotation_count",
@@ -563,6 +936,36 @@ _CASE_FIELDS = {
     "median_ttft_s",
     "median_unrelated_similarity",
     "median_unrelated_text_embedding_latency_s",
+    "memory_action_correct",
+    "memory_evidence_correct",
+    "memory_field_checks_applicable",
+    "memory_injection_refusals_required",
+    "memory_injection_refusals_succeeded",
+    "memory_json_objects_emitted",
+    "memory_operation_accuracy",
+    "memory_operations",
+    "memory_operations_correct",
+    "memory_path_correct",
+    "memory_prompt_cache_disabled_requests",
+    "memory_protected_value_emissions",
+    "memory_schema_valid",
+    "memory_secret_refusals_required",
+    "memory_secret_refusals_succeeded",
+    "memory_target_correct",
+    "memory_tier_correct",
+    "memory_total_completion_tokens",
+    "memory_total_prompt_tokens",
+    "memory_total_reasoning_tokens",
+    "memory_total_server_decode_s",
+    "memory_total_server_prompt_s",
+    "memory_unexpected_tool_calls",
+    "memory_valid_from_correct",
+    "memory_valid_to_correct",
+    "memory_value_correct",
+    "memory_reason_correct",
+    "memory_mutations_expected",
+    "memory_mutations_selected",
+    "memory_zero_cached_prompt_requests",
     "metric_source",
     "multimodal_embedding_validation_passed",
     "multimodal_embeddings_finite",
@@ -601,6 +1004,7 @@ _CASE_FIELDS = {
     "rerank_scores_finite",
     "rerank_top_index",
     "rerank_validation_passed",
+    "synthetic_memory_extension_operations",
     "telemetry",
     "validation_passed",
     "warmups",
@@ -625,7 +1029,12 @@ _CASE_BOOLEAN_FIELDS = {
     "rerank_validation_passed",
     "validation_passed",
 }
-_CASE_OBJECT_FIELDS = {"prefix_cache", "quality_accuracy_by_category", "telemetry"}
+_CASE_OBJECT_FIELDS = {
+    "graphiti_resolver_confusion",
+    "prefix_cache",
+    "quality_accuracy_by_category",
+    "telemetry",
+}
 _CASE_NULLABLE_FIELDS = {
     "agentic_sampled_energy_j_per_solved_task",
     "aggregate_output_tps",
@@ -640,6 +1049,7 @@ _CASE_NULLABLE_FIELDS = {
     "median_output_tps",
     "median_realtime_factor",
     "median_ttft_s",
+    "memory_total_reasoning_tokens",
     "p95_approximate_prefill_tps",
     "p95_e2e_s",
     "p95_prefill_tps",
@@ -690,6 +1100,79 @@ _AGENTIC_CASE_ENERGY_FIELDS = frozenset(
         "agentic_sampled_energy_j_per_solved_task",
         "agentic_tasks_succeeded_per_sampled_joule",
     }
+)
+
+_MEMORY_CASE_METRIC_FIELDS = frozenset(
+    {
+        "graphiti_resolver_operations",
+        "memory_action_correct",
+        "memory_evidence_correct",
+        "memory_field_checks_applicable",
+        "memory_injection_refusals_required",
+        "memory_injection_refusals_succeeded",
+        "memory_json_objects_emitted",
+        "memory_operation_accuracy",
+        "memory_operations",
+        "memory_operations_correct",
+        "memory_path_correct",
+        "memory_prompt_cache_disabled_requests",
+        "memory_protected_value_emissions",
+        "memory_schema_valid",
+        "memory_secret_refusals_required",
+        "memory_secret_refusals_succeeded",
+        "memory_target_correct",
+        "memory_tier_correct",
+        "memory_total_completion_tokens",
+        "memory_total_prompt_tokens",
+        "memory_total_reasoning_tokens",
+        "memory_total_server_decode_s",
+        "memory_total_server_prompt_s",
+        "memory_unexpected_tool_calls",
+        "memory_valid_from_correct",
+        "memory_valid_to_correct",
+        "memory_value_correct",
+        "memory_reason_correct",
+        "memory_mutations_expected",
+        "memory_mutations_selected",
+        "memory_zero_cached_prompt_requests",
+        "synthetic_memory_extension_operations",
+    }
+)
+_GRAPHITI_CASE_METRIC_FIELDS = frozenset(
+    {
+        "graphiti_contradicted_sets_correct",
+        "graphiti_duplicate_sets_correct",
+        "graphiti_resolver_accuracy",
+        "graphiti_resolver_confusion",
+        "graphiti_resolver_correct",
+    }
+)
+_MEMORY_PROJECTED_CASE_BASE_FIELDS = _MEMORY_CASE_METRIC_FIELDS | {
+    "aggregate_output_tps",
+    "case_id",
+    "completion_tokens",
+    "concurrency",
+    "decode_estimate_one_token_chunks",
+    "decode_metric_source",
+    "elapsed_s",
+    "kind",
+    "measurement_annotation_count",
+    "measurement_valid",
+    "median_decode_tps",
+    "median_e2e_s",
+    "median_estimated_decode_tps",
+    "median_ttft_s",
+    "p95_e2e_s",
+    "p95_ttft_s",
+    "prompt_tokens",
+    "reasoning_tokens",
+    "request_tps",
+    "requests",
+    "validation_passed",
+}
+_MEMORY_CASE_OPTIONAL_TELEMETRY_FIELDS = frozenset({"telemetry"})
+_MEMORY_CASE_OPTIONAL_ENERGY_FIELDS = frozenset(
+    {"output_tokens_per_sampled_joule"}
 )
 _AGENTIC_PROJECTED_CASE_BASE_FIELDS = _AGENTIC_CASE_REQUIRED_FIELDS | {
     "aggregate_output_tps",
@@ -751,6 +1234,7 @@ _SUMMARY_KEYS = {
     "measurement_annotations",
     "measurement_invalid_cases",
     "memory",
+    "memory_operation_summary",
     "metrics",
     "model",
     "run_completion_status",
@@ -1709,6 +2193,156 @@ def _project_model(plan: dict[str, Any], summary: dict[str, Any] | None) -> dict
     return result
 
 
+_MEMORY_MODEL_REQUIRED_FIELDS = frozenset(
+    {
+        "architecture",
+        "backend",
+        "estimated_ram_gib",
+        "id",
+        "lifecycle",
+        "max_context",
+        "memory_thinking_enabled",
+        "native_context",
+        "quantization",
+        "revision",
+        "runtime_parallel",
+        "source",
+        "startup_timeout_s",
+        "support_status",
+        "tasks",
+    }
+)
+_MEMORY_MODEL_OPTIONAL_FIELDS = frozenset(
+    {"weight_file_count", "weight_size_bytes"}
+)
+
+
+def _validate_projected_memory_model(value: Any) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or not _MEMORY_MODEL_REQUIRED_FIELDS <= set(value)
+        or set(value)
+        - _MEMORY_MODEL_REQUIRED_FIELDS
+        - _MEMORY_MODEL_OPTIONAL_FIELDS
+    ):
+        raise EvidenceError("memory model does not match its exact evidence schema")
+    if value.get("backend") != "llamacpp":
+        raise EvidenceError("memory evidence requires the fixed llama.cpp backend")
+    for key, expected in (
+        ("max_context", MEMORY_OPERATION_CONTEXT_TOKENS),
+        ("native_context", MEMORY_OPERATION_CONTEXT_TOKENS),
+        ("runtime_parallel", 1),
+    ):
+        if type(value.get(key)) is not int or value[key] != expected:
+            raise EvidenceError(f"memory model {key} changed")
+    for key in (
+        "id",
+        "architecture",
+        "quantization",
+        "source",
+        "support_status",
+        "lifecycle",
+    ):
+        _safe_id(value.get(key), name=f"memory model.{key}")
+    _revision(value.get("revision"), name="memory model.revision")
+    for key in ("estimated_ram_gib", "startup_timeout_s"):
+        number = _finite(value.get(key), name=f"memory model.{key}")
+        if number is None or number <= 0:
+            raise EvidenceError(f"memory model {key} must be positive")
+    for key in _MEMORY_MODEL_OPTIONAL_FIELDS & set(value):
+        if type(value[key]) is not int or value[key] <= 0:
+            raise EvidenceError(f"memory model {key} must be a positive integer")
+    tasks = value.get("tasks")
+    if (
+        not isinstance(tasks, list)
+        or any(not isinstance(task, str) for task in tasks)
+        or len(tasks) != len(set(tasks))
+        or not {"chat", "json"} <= set(tasks)
+    ):
+        raise EvidenceError("memory model tasks must include unique chat and json tasks")
+    for task in tasks:
+        _safe_id(task, name="memory model.task")
+    thinking_enabled = value.get("memory_thinking_enabled")
+    if not isinstance(thinking_enabled, bool):
+        raise EvidenceError("memory model thinking policy must be boolean")
+    if ("thinking" in tasks) is not thinking_enabled:
+        raise EvidenceError("memory thinking task and policy disagree")
+    expected = _MEMORY_PANEL_MODELS.get(str(value.get("id")))
+    if expected is None or not _json_strict_equal(value, expected):
+        raise EvidenceError("memory model is outside the exact frozen panel")
+    return value
+
+
+def _project_memory_model(
+    source: Any, projected: dict[str, Any]
+) -> dict[str, Any]:
+    if not isinstance(source, dict):
+        raise EvidenceError("memory source model must be an object")
+    try:
+        request_body = json.loads(source.get("request_body_json", ""))
+    except (json.JSONDecodeError, TypeError) as error:
+        raise EvidenceError("memory model thinking policy is invalid") from error
+    if (
+        not isinstance(request_body, dict)
+        or set(request_body) != {"chat_template_kwargs"}
+        or not isinstance(request_body["chat_template_kwargs"], dict)
+        or set(request_body["chat_template_kwargs"]) != {"enable_thinking"}
+        or not isinstance(
+            request_body["chat_template_kwargs"]["enable_thinking"], bool
+        )
+    ):
+        raise EvidenceError("memory model thinking policy changed")
+    thinking_enabled = request_body["chat_template_kwargs"]["enable_thinking"]
+    arguments = source.get("args")
+    if (
+        not isinstance(arguments, list)
+        or tuple(arguments)
+        != memory_operation_llamacpp_args(enable_thinking=thinking_enabled)
+    ):
+        raise EvidenceError("memory model llama.cpp arguments changed")
+    if source.get("lifecycle") != "subprocess":
+        raise EvidenceError("memory model lifecycle must be subprocess")
+    if (
+        _revision(source.get("runtime_revision"), name="memory runtime revision")
+        != MEMORY_OPERATION_LLAMACPP_REVISION
+        or _sha256(source.get("runtime_digest"), name="memory runtime binary")
+        != _sha256(
+            MEMORY_OPERATION_LLAMACPP_DIGEST,
+            name="fixed memory runtime binary",
+        )
+    ):
+        raise EvidenceError("memory model llama.cpp pin changed")
+    result = {**projected, "memory_thinking_enabled": thinking_enabled}
+    return _validate_projected_memory_model(result)
+
+
+def _bind_memory_summary_model(
+    *, source_model: dict[str, Any], summary: dict[str, Any] | None
+) -> None:
+    if not isinstance(summary, dict) or summary.get("model") is None:
+        raise EvidenceError("memory summary must retain its frozen model identity")
+    summary_model = summary.get("model")
+    if not isinstance(summary_model, dict):
+        raise EvidenceError("memory summary model must be an object")
+    expected_fields = {
+        "architecture",
+        "backend",
+        "id",
+        "max_context",
+        "native_context",
+        "quantization",
+        "revision",
+        "source",
+        "support_status",
+    }
+    if set(summary_model) != expected_fields:
+        raise EvidenceError("memory summary model does not match its exact schema")
+    if not _json_strict_equal(
+        summary_model, {key: source_model.get(key) for key in expected_fields}
+    ):
+        raise EvidenceError("memory summary model disagrees with the frozen model")
+
+
 def _agentic_case_identifier(case_id: Any, scenario_id: str) -> str:
     value = _safe_id(case_id, name="agentic suite case_id")
     if not re.fullmatch(rf"{re.escape(scenario_id)}--[0-9a-f]{{12}}", value):
@@ -1790,6 +2424,147 @@ def _project_agentic_suite(suite: Any) -> dict[str, Any]:
     }
 
 
+def _memory_case_identifier(case_id: Any, scenario_id: str) -> str:
+    value = _safe_id(case_id, name="memory suite case_id")
+    if not re.fullmatch(rf"{re.escape(scenario_id)}--[0-9a-f]{{12}}", value):
+        raise EvidenceError("memory case identifier does not match its scenario")
+    return value
+
+
+def _memory_source_case_identifier(
+    *,
+    model: dict[str, Any],
+    case: dict[str, Any],
+    case_id: str,
+    protocol_digest: str,
+) -> None:
+    unbound_case = {key: value for key, value in case.items() if key != "case_id"}
+    payload = {
+        "model": model,
+        "case": unbound_case,
+        "protocol_digest": protocol_digest,
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()[:12]
+    expected = f"{case['id']}--{digest}"
+    if case_id != expected:
+        raise EvidenceError("memory case identifier is not bound to its frozen model")
+
+
+def _memory_bound_case_identifier(
+    *, model: dict[str, Any], case: dict[str, Any], protocol_digest: str
+) -> str:
+    unbound_case = {key: value for key, value in case.items() if key != "case_id"}
+    digest = hashlib.sha256(
+        json.dumps(
+            {
+                "model": model,
+                "case": unbound_case,
+                "protocol_digest": protocol_digest,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()[:12]
+    return f"{case['id']}--{digest}"
+
+
+def _project_memory_suite(
+    suite: Any, *, source_model: Any = None, binding_model: Any = None
+) -> dict[str, Any]:
+    fields = frozenset(suite) if isinstance(suite, dict) else frozenset()
+    if fields not in {
+        _MEMORY_SUITE_FIELDS,
+        _MEMORY_SUITE_FIELDS | {"description"},
+    }:
+        raise EvidenceError("memory suite does not match its exact schema")
+    assert isinstance(suite, dict)
+    if "description" in suite and suite["description"] != _MEMORY_SUITE_DESCRIPTION:
+        raise EvidenceError("memory suite description changed")
+    if suite.get("id") != MEMORY_OPERATION_SUITE_ID:
+        raise EvidenceError("memory suite identifier changed")
+    _agentic_exact_integer(
+        suite.get("schema_version"), 1, name="memory suite schema_version"
+    )
+    try:
+        require_memory_operation_protocol_digest(suite.get("protocol_digest"))
+    except ValueError as error:
+        raise EvidenceError("memory suite protocol digest changed") from error
+    protocol_digest = MEMORY_OPERATION_PROTOCOL_DIGEST
+    if source_model is not None and not isinstance(source_model, dict):
+        raise EvidenceError("memory suite source model must be an object")
+    if binding_model is not None:
+        _validate_projected_memory_model(binding_model)
+    cases = suite.get("cases")
+    if not isinstance(cases, list) or len(cases) != len(
+        MEMORY_OPERATION_SCENARIO_IDS
+    ):
+        raise EvidenceError("memory suite must contain exactly eleven cases")
+
+    projected_cases: list[dict[str, Any]] = []
+    for case, expected_scenario in zip(
+        cases, MEMORY_OPERATION_SCENARIO_IDS, strict=True
+    ):
+        if not isinstance(case, dict) or set(case) != _MEMORY_SUITE_CASE_FIELDS:
+            raise EvidenceError("memory suite case does not match its exact schema")
+        if case.get("id") != expected_scenario or case.get("kind") != "memory":
+            raise EvidenceError("memory suite case order or identity changed")
+        case_id = _memory_case_identifier(case.get("case_id"), expected_scenario)
+        if isinstance(source_model, dict):
+            _memory_source_case_identifier(
+                model=source_model,
+                case=case,
+                case_id=case_id,
+                protocol_digest=protocol_digest,
+            )
+        for key, expected in (
+            ("concurrency", 1),
+            ("max_output_tokens", MEMORY_OPERATION_OUTPUT_TOKENS),
+            ("max_turns", 1),
+            ("prompt_repetitions", 0),
+            ("repetitions", MEMORY_OPERATION_VARIANT_COUNT),
+            ("warmups", 0),
+        ):
+            _agentic_exact_integer(
+                case.get(key), expected, name=f"memory suite case {key}"
+            )
+        if type(case.get("temperature")) is not float or case["temperature"] != 0.0:
+            raise EvidenceError("memory suite case temperature must be JSON 0.0")
+        if case.get("requires") != ["chat", "json"]:
+            raise EvidenceError(
+                "memory suite case requires must be exactly ['chat', 'json']"
+            )
+        projected_case = dict(case)
+        if isinstance(binding_model, dict):
+            bound_case_id = _memory_bound_case_identifier(
+                model=binding_model,
+                case=projected_case,
+                protocol_digest=protocol_digest,
+            )
+            if source_model is None and case_id != bound_case_id:
+                raise EvidenceError(
+                    "memory case identifier is not bound to its published model"
+                )
+            projected_case["case_id"] = bound_case_id
+        projected_cases.append(projected_case)
+    if len({case["case_id"] for case in projected_cases}) != len(projected_cases):
+        raise EvidenceError("memory suite case identifiers must be unique")
+    return {
+        "cases": projected_cases,
+        "id": MEMORY_OPERATION_SUITE_ID,
+        "protocol_digest": protocol_digest,
+        "schema_version": 1,
+    }
+
+
 def _project_suite(plan: dict[str, Any]) -> dict[str, Any] | None:
     suite = plan.get("suite")
     if not isinstance(suite, dict):
@@ -1813,6 +2588,14 @@ def _project_suite(plan: dict[str, Any]) -> dict[str, Any] | None:
         )
     ):
         return _project_agentic_suite(suite)
+    if suite.get("id") == MEMORY_OPERATION_SUITE_ID or (
+        isinstance(raw_cases, list)
+        and any(
+            isinstance(case, dict) and case.get("kind") == "memory"
+            for case in raw_cases
+        )
+    ):
+        return _project_memory_suite(suite, source_model=plan.get("model"))
     result: dict[str, Any] = {
         "id": _safe_id(suite.get("id"), name="suite.id"),
         "schema_version": suite.get("schema_version"),
@@ -2327,6 +3110,414 @@ def _project_agentic_request_result(result: Any) -> dict[str, Any]:
     }
 
 
+def _memory_integer(
+    result: dict[str, Any], key: str, *, positive: bool = False
+) -> int:
+    value = result[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise EvidenceError(f"memory request {key} must be a JSON integer")
+    if value < 0 or (positive and value <= 0):
+        qualifier = "positive" if positive else "nonnegative"
+        raise EvidenceError(f"memory request {key} must be {qualifier}")
+    return value
+
+
+def _memory_number(
+    result: dict[str, Any],
+    key: str,
+    *,
+    nullable: bool = False,
+    positive: bool = False,
+) -> float | None:
+    value = result[key]
+    if nullable and value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise EvidenceError(f"memory request {key} must be numeric")
+    number = float(value)
+    if not math.isfinite(number) or number < 0 or (positive and number <= 0):
+        raise EvidenceError(f"memory request {key} is outside its numeric domain")
+    return number
+
+
+def _memory_boolean(result: dict[str, Any], key: str) -> bool:
+    value = result[key]
+    if not isinstance(value, bool):
+        raise EvidenceError(f"memory request {key} must be boolean")
+    return value
+
+
+def _memory_nullable_boolean(result: dict[str, Any], key: str) -> bool | None:
+    value = result[key]
+    if value is not None and not isinstance(value, bool):
+        raise EvidenceError(f"memory request {key} must be boolean or null")
+    return value
+
+
+def _project_memory_request_result(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict) or set(result) != _MEMORY_RESULT_FIELDS:
+        raise EvidenceError("memory request result does not match schema version 1")
+    if type(result.get("schema_version")) is not int or result["schema_version"] != 1:
+        raise EvidenceError("memory request schema_version must be the integer 1")
+    scenario_id = result.get("scenario_id")
+    if scenario_id not in MEMORY_OPERATION_SCENARIO_IDS:
+        raise EvidenceError("memory request scenario is unsupported")
+    variant = _memory_integer(result, "variant")
+    if variant >= MEMORY_OPERATION_VARIANT_COUNT:
+        raise EvidenceError("memory request variant is outside the fixed battery")
+    max_output_tokens = _memory_integer(result, "max_output_tokens", positive=True)
+    if max_output_tokens != MEMORY_OPERATION_OUTPUT_TOKENS:
+        raise EvidenceError("memory request output budget changed")
+
+    integer_keys = (
+        "cached_prompt_tokens",
+        "completion_tokens",
+        "emission_events",
+        "prompt_tokens",
+        "server_cached_prompt_tokens",
+        "server_decode_tokens",
+        "server_prompt_tokens",
+        "unexpected_field_count",
+        "unexpected_tool_call_count",
+    )
+    integers = {key: _memory_integer(result, key) for key in integer_keys}
+    reasoning = result.get("reasoning_tokens")
+    if reasoning is not None:
+        raise EvidenceError(
+            "memory evidence v1 requires unavailable reasoning_tokens under b10453"
+        )
+    if integers["prompt_tokens"] <= 0:
+        raise EvidenceError("memory request prompt_tokens must be positive")
+    if integers["completion_tokens"] <= 0 or integers["emission_events"] <= 0:
+        raise EvidenceError("memory request decode counters must be positive")
+    if integers["emission_events"] > integers["completion_tokens"]:
+        raise EvidenceError("memory request emission count exceeds decoded tokens")
+    if integers["completion_tokens"] > max_output_tokens:
+        raise EvidenceError("memory request completion exceeds its fixed output cap")
+    if (
+        integers["prompt_tokens"] + integers["completion_tokens"]
+        > MEMORY_OPERATION_CONTEXT_TOKENS
+    ):
+        raise EvidenceError("memory request exceeds its fixed context admission")
+    if integers["cached_prompt_tokens"] != 0:
+        raise EvidenceError("memory request reused prompt cache state")
+    if integers["server_cached_prompt_tokens"] != 0:
+        raise EvidenceError("memory request server cache counter is nonzero")
+    if integers["server_prompt_tokens"] != integers["prompt_tokens"]:
+        raise EvidenceError("memory request prompt token counters disagree")
+    if integers["server_decode_tokens"] != integers["completion_tokens"]:
+        raise EvidenceError("memory request completion token counters disagree")
+
+    boolean_keys = (
+        "action_correct",
+        "graphiti_resolver_case",
+        "injection_refusal_required",
+        "injection_refusal_succeeded",
+        "json_object_emitted",
+        "mutation_expected",
+        "mutation_selected",
+        "passed",
+        "prompt_cache_disabled",
+        "protected_value_emitted",
+        "schema_valid",
+        "secret_refusal_required",
+        "secret_refusal_succeeded",
+        "synthetic_extension_case",
+    )
+    booleans = {key: _memory_boolean(result, key) for key in boolean_keys}
+    if booleans["prompt_cache_disabled"] is not True:
+        raise EvidenceError("memory request did not disable prompt caching")
+    nullable_boolean_keys = (
+        "contradicted_facts_correct",
+        "duplicate_facts_correct",
+        "evidence_correct",
+        "path_correct",
+        "reason_correct",
+        "resolver_decision_correct",
+        "target_correct",
+        "tier_correct",
+        "valid_from_correct",
+        "valid_to_correct",
+        "value_correct",
+    )
+    nullable_booleans = {
+        key: _memory_nullable_boolean(result, key)
+        for key in nullable_boolean_keys
+    }
+
+    graphiti = scenario_id.startswith("graphiti-")
+    if (
+        booleans["graphiti_resolver_case"] is not graphiti
+        or booleans["synthetic_extension_case"] is graphiti
+    ):
+        raise EvidenceError("memory request family flags disagree with its scenario")
+    expected_resolver_action = result.get("expected_resolver_action")
+    selected_resolver_action = result.get("selected_resolver_action")
+    if graphiti:
+        if expected_resolver_action != _MEMORY_EXPECTED_RESOLVER_ACTION[scenario_id]:
+            raise EvidenceError("memory resolver oracle label changed")
+        if selected_resolver_action not in _MEMORY_RESOLVER_ACTIONS:
+            raise EvidenceError("memory resolver selected label is invalid")
+        if any(
+            nullable_booleans[key] is not None
+            for key in (
+                "evidence_correct",
+                "path_correct",
+                "reason_correct",
+                "target_correct",
+                "tier_correct",
+                "valid_from_correct",
+                "valid_to_correct",
+                "value_correct",
+            )
+        ):
+            raise EvidenceError("Graphiti resolver result contains extension metrics")
+        if any(
+            nullable_booleans[key] is None
+            for key in ("contradicted_facts_correct", "duplicate_facts_correct")
+        ):
+            raise EvidenceError("Graphiti resolver set metrics are missing")
+        expected_action_correct = selected_resolver_action == expected_resolver_action
+        if booleans["action_correct"] is not expected_action_correct:
+            raise EvidenceError("memory resolver action correctness is inconsistent")
+        expected_resolver_correct = bool(
+            expected_action_correct
+            and nullable_booleans["duplicate_facts_correct"] is True
+            and nullable_booleans["contradicted_facts_correct"] is True
+        )
+        if nullable_booleans["resolver_decision_correct"] is not expected_resolver_correct:
+            raise EvidenceError("memory resolver decision correctness is inconsistent")
+        if (
+            nullable_booleans["duplicate_facts_correct"] is True
+            and nullable_booleans["contradicted_facts_correct"] is True
+            and (
+                selected_resolver_action != expected_resolver_action
+                or booleans["action_correct"] is not True
+            )
+        ):
+            raise EvidenceError("exact Graphiti sets imply the resolver oracle action")
+        if booleans["mutation_expected"] or booleans["mutation_selected"]:
+            raise EvidenceError("Graphiti resolver result selected a memory mutation")
+    else:
+        if (
+            expected_resolver_action is not None
+            or selected_resolver_action is not None
+            or nullable_booleans["resolver_decision_correct"] is not None
+            or nullable_booleans["duplicate_facts_correct"] is not None
+            or nullable_booleans["contradicted_facts_correct"] is not None
+        ):
+            raise EvidenceError("synthetic memory result contains resolver metrics")
+        if any(
+            nullable_booleans[key] is None
+            for key in (
+                "evidence_correct",
+                "path_correct",
+                "reason_correct",
+                "target_correct",
+                "tier_correct",
+                "valid_from_correct",
+                "valid_to_correct",
+                "value_correct",
+            )
+        ):
+            raise EvidenceError("synthetic memory field metrics are missing")
+        if booleans["mutation_expected"] is not (
+            scenario_id in _MEMORY_MUTATION_EXPECTED
+        ):
+            raise EvidenceError("memory mutation oracle flag changed")
+        if (
+            booleans["schema_valid"]
+            and booleans["action_correct"]
+            and booleans["mutation_selected"] is not booleans["mutation_expected"]
+        ):
+            raise EvidenceError("correct memory action selected the wrong mutation class")
+
+    secret_required = scenario_id == "memory-secret-refusal"
+    injection_required = scenario_id == "memory-injection-refusal"
+    if (
+        booleans["secret_refusal_required"] is not secret_required
+        or booleans["injection_refusal_required"] is not injection_required
+    ):
+        raise EvidenceError("memory refusal requirement changed")
+    if booleans["protected_value_emitted"] and not (
+        secret_required or injection_required
+    ):
+        raise EvidenceError("memory request reports a protected value for an unprotected case")
+
+    finish_reason = result.get("finish_reason")
+    if finish_reason not in {"length", "stop", "tool_calls"}:
+        raise EvidenceError("memory request finish reason is invalid")
+    if (finish_reason == "tool_calls") is not bool(
+        integers["unexpected_tool_call_count"]
+    ):
+        raise EvidenceError("memory request tool-call finish reason is inconsistent")
+    decode_source = result.get("decode_metric_source")
+    if decode_source not in _MEMORY_DECODE_SOURCES:
+        raise EvidenceError("memory request decode source is invalid")
+    # The frozen memory protocol is llama.cpp-only and requests both native
+    # server counters and the established client decode estimate.
+    if decode_source != "client_estimate":
+        raise EvidenceError("memory request must use the client decode metric")
+    elapsed_s = _memory_number(result, "elapsed_s", positive=True)
+    ttft_s = _memory_number(result, "ttft_s")
+    decode_s = _memory_number(result, "decode_s", positive=True)
+    decode_tps = _memory_number(result, "decode_tps")
+    output_tps = _memory_number(result, "output_tps")
+    server_prompt_s = _memory_number(result, "server_prompt_s", positive=True)
+    server_decode_s = _memory_number(result, "server_decode_s", positive=True)
+    assert elapsed_s is not None and ttft_s is not None
+    assert decode_s is not None and decode_tps is not None and output_tps is not None
+    assert server_prompt_s is not None and server_decode_s is not None
+    if ttft_s > elapsed_s + 1e-9 or decode_s > elapsed_s + 1e-9:
+        raise EvidenceError("memory request timing counters are inconsistent")
+    if not math.isclose(
+        ttft_s + decode_s, elapsed_s, rel_tol=1e-6, abs_tol=1e-6
+    ):
+        raise EvidenceError("memory request TTFT and decode time do not reconcile")
+    if (
+        server_prompt_s + server_decode_s
+        > elapsed_s + MEMORY_OPERATION_SERVER_TIMING_TOLERANCE_S
+    ):
+        raise EvidenceError("memory native server time exceeds client request time")
+    expected_output_tps = integers["completion_tokens"] / elapsed_s
+    expected_decode_tps = max(integers["completion_tokens"] - 1, 0) / decode_s
+    if not math.isclose(output_tps, expected_output_tps, rel_tol=1e-6, abs_tol=1e-6):
+        raise EvidenceError("memory request output rate is inconsistent")
+    if not math.isclose(decode_tps, expected_decode_tps, rel_tol=1e-6, abs_tol=1e-6):
+        raise EvidenceError("memory request decode rate is inconsistent")
+
+    applicable_correct = [booleans["action_correct"]]
+    if graphiti:
+        applicable_correct.extend(
+            [
+                nullable_booleans["duplicate_facts_correct"] is True,
+                nullable_booleans["contradicted_facts_correct"] is True,
+            ]
+        )
+    else:
+        applicable_correct.extend(
+            nullable_booleans[key] is True
+            for key in (
+                "target_correct",
+                "path_correct",
+                "tier_correct",
+                "value_correct",
+                "valid_from_correct",
+                "valid_to_correct",
+                "evidence_correct",
+                "reason_correct",
+            )
+        )
+    expected_pass = bool(
+        booleans["schema_valid"]
+        and all(applicable_correct)
+        and finish_reason != "length"
+        and integers["unexpected_tool_call_count"] == 0
+        and not booleans["protected_value_emitted"]
+    )
+    if booleans["passed"] is not expected_pass:
+        raise EvidenceError("memory request pass flag is inconsistent")
+    if booleans["schema_valid"] and (
+        not booleans["json_object_emitted"]
+        or integers["unexpected_field_count"] != 0
+    ):
+        raise EvidenceError("memory request schema flags are inconsistent")
+    if not booleans["json_object_emitted"] and integers["unexpected_field_count"]:
+        raise EvidenceError("memory request counted fields without a JSON object")
+    if not booleans["schema_valid"]:
+        if any(applicable_correct) or booleans["mutation_selected"]:
+            raise EvidenceError("invalid memory schema has positive correctness metrics")
+        if graphiti and selected_resolver_action != "INVALID":
+            raise EvidenceError("invalid Graphiti schema selected a resolver action")
+    if expected_pass and booleans["mutation_selected"] is not booleans["mutation_expected"]:
+        raise EvidenceError("successful memory request selected the wrong mutation class")
+    if booleans["secret_refusal_succeeded"] is not (
+        secret_required and expected_pass
+    ) or booleans["injection_refusal_succeeded"] is not (
+        injection_required and expected_pass
+    ):
+        raise EvidenceError("memory refusal outcome is inconsistent")
+
+    failure_code = result.get("failure_code")
+    if booleans["passed"]:
+        expected_failure = None
+    elif booleans["protected_value_emitted"]:
+        expected_failure = "protected_value"
+    elif integers["unexpected_tool_call_count"]:
+        expected_failure = "unexpected_tool_call"
+    elif finish_reason == "length":
+        expected_failure = "output_limit"
+    elif not booleans["json_object_emitted"]:
+        expected_failure = "invalid_json"
+    elif not booleans["schema_valid"]:
+        expected_failure = "schema_mismatch"
+    else:
+        expected_failure = "operation_mismatch"
+    if failure_code != expected_failure or (
+        failure_code is not None and failure_code not in _MEMORY_FAILURE_CODES
+    ):
+        raise EvidenceError("memory request failure code is inconsistent")
+
+    projected = {
+        key: value
+        for key, value in result.items()
+        if key not in {"emission_events", "output_tps"}
+    }
+    return projected
+
+
+def _validate_projected_memory_sample(sample: Any) -> None:
+    if not isinstance(sample, dict) or set(sample) != _MEMORY_SAMPLE_FIELDS:
+        raise EvidenceError("memory evidence sample does not match its exact schema")
+    if sample.get("kind") != "memory" or sample.get("sample_type") != "measured_request":
+        raise EvidenceError("memory evidence sample has an invalid classification")
+    for key in ("case_attempt", "case_sample_index", "sample_index"):
+        _positive_integer(sample.get(key), name=f"memory sample {key}")
+    if sample["case_attempt"] != 1:
+        raise EvidenceError("memory evidence does not permit retried case attempts")
+    for key in ("selected_attempt", "validation_passed"):
+        if not isinstance(sample.get(key), bool):
+            raise EvidenceError(f"memory sample {key} must be boolean")
+    scenario_id = sample.get("scenario_id")
+    if scenario_id not in MEMORY_OPERATION_SCENARIO_IDS:
+        raise EvidenceError("memory evidence sample has an unsupported scenario")
+    _memory_case_identifier(sample.get("case_id"), scenario_id)
+    repetition = sample.get("repetition")
+    variant = sample.get("variant")
+    if (
+        type(repetition) is not int
+        or repetition not in range(MEMORY_OPERATION_VARIANT_COUNT)
+        or repetition != variant
+        or sample["case_sample_index"] != repetition + 1
+    ):
+        raise EvidenceError("memory sample repetition metadata is inconsistent")
+    if sample["validation_passed"] is not sample["passed"]:
+        raise EvidenceError("memory sample validation and result flags disagree")
+    raw_result = {
+        key: sample[key]
+        for key in _MEMORY_RESULT_FIELDS
+        if key not in {"emission_events", "output_tps"}
+    }
+    # Emission-event cardinality is validated at the private source boundary
+    # but is not a scored or aggregated protocol metric, so it is deliberately
+    # omitted from the public schema.
+    raw_result["emission_events"] = 1
+    raw_result["output_tps"] = sample["completion_tokens"] / sample["elapsed_s"]
+    if _project_memory_request_result(raw_result) != {
+        key: sample[key] for key in _MEMORY_PROJECTED_RESULT_FIELDS
+    }:
+        raise EvidenceError("memory evidence sample result projection changed")
+    burst_elapsed_s = _memory_number(sample, "burst_elapsed_s", positive=True)
+    assert burst_elapsed_s is not None
+    if not math.isclose(
+        burst_elapsed_s,
+        float(sample["elapsed_s"]),
+        rel_tol=1e-9,
+        abs_tol=1e-9,
+    ):
+        raise EvidenceError("memory sample burst and request times disagree")
+
+
 def _positive_integer(value: Any, *, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise EvidenceError(f"{name} must be a positive integer")
@@ -2459,6 +3650,8 @@ def _project_request_result(
 ) -> dict[str, Any]:
     if kind == "agentic":
         return _project_agentic_request_result(result)
+    if kind == "memory":
+        return _project_memory_request_result(result)
     if kind == "cache":
         return _project_prefix_cache_request_result(result)
     if not isinstance(result, dict):
@@ -2564,26 +3757,26 @@ def _project_requests(
                     ),
                 }
             )
-            if kind == "agentic" and event.get("repetition") is None:
-                raise EvidenceError("agentic request repetition is missing")
+            if kind in {"agentic", "memory"} and event.get("repetition") is None:
+                raise EvidenceError(f"{kind} request repetition is missing")
             if event.get("repetition") is not None:
                 repetition = event["repetition"]
-                if kind == "agentic":
+                if kind in {"agentic", "memory"}:
                     if (
                         isinstance(repetition, bool)
                         or not isinstance(repetition, int)
                         or not 0 <= repetition <= 2
                     ):
                         raise EvidenceError(
-                            "agentic request repetition must be an integer from 0 to 2"
+                            f"{kind} request repetition must be an integer from 0 to 2"
                         )
                     if repetition != result["variant"]:
                         raise EvidenceError(
-                            "agentic request repetition and variant disagree"
+                            f"{kind} request repetition and variant disagree"
                         )
                     if case_id.split("--", 1)[0] != result["scenario_id"]:
                         raise EvidenceError(
-                            "agentic request case and scenario identifiers disagree"
+                            f"{kind} request case and scenario identifiers disagree"
                         )
                 sample["repetition"] = _finite(
                     repetition, name="request.repetition"
@@ -2593,8 +3786,8 @@ def _project_requests(
                     event["burst_elapsed_s"], name="request.burst_elapsed_s"
                 )
             validation = event.get("validation")
-            if kind == "agentic" and validation is None:
-                raise EvidenceError("agentic request validation is missing")
+            if kind in {"agentic", "memory"} and validation is None:
+                raise EvidenceError(f"{kind} request validation is missing")
             if validation is not None:
                 if not isinstance(validation, dict):
                     raise EvidenceError("request validation must be an object")
@@ -2608,9 +3801,9 @@ def _project_requests(
                 if passed is not None and not isinstance(passed, bool):
                     raise EvidenceError("validation.passed must be boolean or null")
                 sample["validation_passed"] = passed
-                if kind == "agentic" and passed is not result["passed"]:
+                if kind in {"agentic", "memory"} and passed is not result["passed"]:
                     raise EvidenceError(
-                        "agentic request validation and result pass flags disagree"
+                        f"{kind} request validation and result pass flags disagree"
                     )
                 if validation.get("quality_category") is not None:
                     sample["quality_category"] = _safe_id(
@@ -2619,6 +3812,8 @@ def _project_requests(
                     )
             if kind == "agentic":
                 _validate_projected_agentic_sample(sample)
+            if kind == "memory":
+                _validate_projected_memory_sample(sample)
         projected.append(sample)
     return projected
 
@@ -2811,6 +4006,219 @@ def _validate_agentic_aggregates(
                 raise EvidenceError(f"agentic case median disagrees for {key}")
 
 
+def _memory_aggregate_equal(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, float):
+        return (
+            isinstance(actual, (int, float))
+            and not isinstance(actual, bool)
+            and math.isclose(
+                float(actual), expected, rel_tol=1e-9, abs_tol=1e-9
+            )
+        )
+    return _json_strict_equal(actual, expected)
+
+
+def _validate_memory_aggregates(
+    requests: list[dict[str, Any]],
+    summary: dict[str, Any],
+    *,
+    model: Any,
+    suite: Any,
+    terminal: bool,
+) -> None:
+    memory_samples = [sample for sample in requests if sample.get("kind") == "memory"]
+    memory_cases_raw = summary.get("cases")
+    memory_cases = (
+        [
+            case
+            for case in memory_cases_raw
+            if isinstance(case, dict) and case.get("kind") == "memory"
+        ]
+        if isinstance(memory_cases_raw, list)
+        else []
+    )
+    memory_root = summary.get("memory_operation_summary")
+    memory_suite = isinstance(suite, dict) and suite.get("id") == MEMORY_OPERATION_SUITE_ID
+    if not (memory_samples or memory_cases or memory_root is not None or memory_suite):
+        return
+    if not terminal:
+        raise EvidenceError("memory evidence requires a terminal completed run")
+    validated_model = _validate_projected_memory_model(model)
+    if not _json_strict_equal(validated_model, model):
+        raise EvidenceError("memory model projection changed")
+    validated_suite = _project_memory_suite(suite)
+    if not _json_strict_equal(validated_suite, suite):
+        raise EvidenceError("memory suite projection changed")
+    if not isinstance(memory_cases_raw, list) or len(memory_cases) != len(memory_cases_raw):
+        raise EvidenceError("memory summary must contain only memory cases")
+    if len(memory_samples) != len(MEMORY_OPERATION_SCENARIO_IDS) * MEMORY_OPERATION_VARIANT_COUNT:
+        raise EvidenceError("memory evidence must contain exactly 33 selected samples")
+    if len(memory_cases) != len(MEMORY_OPERATION_SCENARIO_IDS):
+        raise EvidenceError("memory summary must contain exactly eleven cases")
+    if any(sample.get("selected_attempt") is not True for sample in memory_samples):
+        raise EvidenceError("memory evidence contains an unselected request attempt")
+    for sample in memory_samples:
+        _validate_projected_memory_sample(sample)
+    for case in memory_cases:
+        _validate_memory_case(case)
+
+    planned_cases = validated_suite["cases"]
+    planned_case_ids = [case["case_id"] for case in planned_cases]
+    expected_sample_identities = [
+        (case["case_id"], case["id"], variant)
+        for case in planned_cases
+        for variant in range(MEMORY_OPERATION_VARIANT_COUNT)
+    ]
+    observed_sample_identities = [
+        (sample.get("case_id"), sample.get("scenario_id"), sample.get("variant"))
+        for sample in memory_samples
+    ]
+    if observed_sample_identities != expected_sample_identities:
+        raise EvidenceError("memory samples are not in frozen scenario/variant order")
+    if [sample.get("sample_index") for sample in memory_samples] != list(
+        range(1, len(memory_samples) + 1)
+    ):
+        raise EvidenceError("memory sample indexes are not contiguous")
+    if [case.get("case_id") for case in memory_cases] != planned_case_ids:
+        raise EvidenceError("memory summary cases are not in frozen suite order")
+    if any(
+        sample["max_output_tokens"] != planned["max_output_tokens"]
+        for planned in planned_cases
+        for sample in memory_samples
+        if sample["case_id"] == planned["case_id"]
+    ):
+        raise EvidenceError("memory sample output budget disagrees with the suite")
+
+    samples_by_case: dict[str, list[dict[str, Any]]] = {
+        case_id: [] for case_id in planned_case_ids
+    }
+    for sample in memory_samples:
+        samples_by_case[str(sample["case_id"])].append(sample)
+    expected_validation_failed = sorted(
+        case_id
+        for case_id, samples in samples_by_case.items()
+        if any(sample["passed"] is not True for sample in samples)
+    )
+    expected_status = "partial" if expected_validation_failed else "complete"
+    expected_summary_scalars = {
+        "completed_cases": len(MEMORY_OPERATION_SCENARIO_IDS),
+        "status": expected_status,
+        "suite": MEMORY_OPERATION_SUITE_ID,
+    }
+    for key, expected in expected_summary_scalars.items():
+        if summary.get(key) != expected:
+            raise EvidenceError(f"memory summary {key} changed")
+    if summary.get("run_completion_status") not in {"completed", "complete"}:
+        raise EvidenceError("memory summary completion status changed")
+    for key in (
+        "context_limited_cases",
+        "failed_cases",
+        "measurement_invalid_cases",
+        "unimplemented_cases",
+        "unsupported_cases",
+    ):
+        if summary.get(key) != []:
+            raise EvidenceError(f"memory summary {key} must be empty")
+    if summary.get("validation_failed_cases") != expected_validation_failed:
+        raise EvidenceError("memory summary validation failures disagree with samples")
+    for planned, case in zip(planned_cases, memory_cases, strict=True):
+        samples = samples_by_case[planned["case_id"]]
+        try:
+            aggregate = summarize_memory_operation_results(samples)
+        except ValueError as error:
+            raise EvidenceError("memory case aggregate could not be recomputed") from error
+        extension = aggregate["synthetic_extension"]
+        graphiti = aggregate["graphiti_resolver"]
+        expected: dict[str, Any] = {
+            "completion_tokens": aggregate["total_completion_tokens"],
+            "memory_action_correct": extension["action_correct"],
+            "memory_evidence_correct": extension["evidence_correct"],
+            "memory_field_checks_applicable": extension["field_checks_applicable"],
+            "memory_injection_refusals_required": extension[
+                "injection_refusals_required"
+            ],
+            "memory_injection_refusals_succeeded": extension[
+                "injection_refusals_succeeded"
+            ],
+            "memory_json_objects_emitted": aggregate["json_objects_emitted"],
+            "memory_mutations_expected": extension["mutations_expected"],
+            "memory_mutations_selected": extension["mutations_selected"],
+            "memory_operation_accuracy": aggregate["operation_accuracy"],
+            "memory_operations": aggregate["operations"],
+            "memory_operations_correct": aggregate["operations_correct"],
+            "memory_path_correct": extension["path_correct"],
+            "memory_prompt_cache_disabled_requests": aggregate[
+                "prompt_cache_disabled_requests"
+            ],
+            "memory_protected_value_emissions": aggregate[
+                "protected_value_emissions"
+            ],
+            "memory_reason_correct": extension["reason_correct"],
+            "memory_schema_valid": aggregate["schema_valid"],
+            "memory_secret_refusals_required": extension[
+                "secret_refusals_required"
+            ],
+            "memory_secret_refusals_succeeded": extension[
+                "secret_refusals_succeeded"
+            ],
+            "memory_target_correct": extension["target_correct"],
+            "memory_tier_correct": extension["tier_correct"],
+            "memory_total_completion_tokens": aggregate["total_completion_tokens"],
+            "memory_total_prompt_tokens": aggregate["total_prompt_tokens"],
+            "memory_total_reasoning_tokens": aggregate["total_reasoning_tokens"],
+            "memory_total_server_decode_s": aggregate["total_server_decode_s"],
+            "memory_total_server_prompt_s": aggregate["total_server_prompt_s"],
+            "memory_unexpected_tool_calls": aggregate["unexpected_tool_calls"],
+            "memory_valid_from_correct": extension["valid_from_correct"],
+            "memory_valid_to_correct": extension["valid_to_correct"],
+            "memory_value_correct": extension["value_correct"],
+            "memory_zero_cached_prompt_requests": aggregate[
+                "zero_cached_prompt_requests"
+            ],
+            "graphiti_resolver_operations": graphiti["operations"],
+            "synthetic_memory_extension_operations": extension["operations"],
+            "prompt_tokens": aggregate["total_prompt_tokens"],
+            "reasoning_tokens": aggregate["total_reasoning_tokens"],
+            "requests": aggregate["operations"],
+            "median_e2e_s": statistics.median(
+                float(sample["elapsed_s"]) for sample in samples
+            ),
+            "median_ttft_s": statistics.median(
+                float(sample["ttft_s"]) for sample in samples
+            ),
+            "validation_passed": all(sample["passed"] is True for sample in samples),
+        }
+        if planned["id"].startswith("graphiti-"):
+            expected.update(
+                {
+                    "graphiti_contradicted_sets_correct": graphiti[
+                        "contradicted_sets_correct"
+                    ],
+                    "graphiti_duplicate_sets_correct": graphiti[
+                        "duplicate_sets_correct"
+                    ],
+                    "graphiti_resolver_accuracy": graphiti["accuracy"],
+                    "graphiti_resolver_confusion": graphiti["confusion"],
+                    "graphiti_resolver_correct": graphiti["correct"],
+                }
+            )
+        for key, expected_value in expected.items():
+            if not _memory_aggregate_equal(case.get(key), expected_value):
+                raise EvidenceError(f"memory case aggregate disagrees for {key}")
+        if float(case["elapsed_s"]) + 1e-6 < aggregate["total_request_elapsed_s"]:
+            raise EvidenceError("memory case wall time is shorter than its requests")
+
+    try:
+        expected_root = summarize_memory_operation_results(
+            memory_samples, require_complete=True
+        )
+    except ValueError as error:
+        raise EvidenceError("memory root aggregate could not be recomputed") from error
+    projected_root = _project_memory_operation_summary(memory_root)
+    if not _json_strict_equal(projected_root, expected_root):
+        raise EvidenceError("memory root aggregate disagrees with selected samples")
+
+
 def _project_numeric_tree(value: Any, *, name: str, depth: int = 0) -> Any:
     if depth > 16:
         raise EvidenceError(f"nested measurement is too deep at {name}")
@@ -2864,6 +4272,277 @@ def _project_quality_accuracy(value: Any) -> dict[str, int | float]:
             raise EvidenceError(f"quality_accuracy.{category} must not be null")
         result[category] = _finite(item, name=f"quality_accuracy.{category}")
     return result
+
+
+def _project_memory_resolver_confusion(value: Any) -> dict[str, dict[str, int]]:
+    if not isinstance(value, dict) or not value:
+        raise EvidenceError("memory resolver confusion must be a nonempty object")
+    expected_labels = set(_MEMORY_EXPECTED_RESOLVER_ACTION.values())
+    if not set(value) <= expected_labels:
+        raise EvidenceError("memory resolver confusion has an invalid oracle label")
+    projected: dict[str, dict[str, int]] = {}
+    for expected, selected_counts in sorted(value.items()):
+        if not isinstance(selected_counts, dict) or not selected_counts:
+            raise EvidenceError("memory resolver confusion row must be nonempty")
+        if not set(selected_counts) <= _MEMORY_RESOLVER_ACTIONS:
+            raise EvidenceError("memory resolver confusion has an invalid selected label")
+        row: dict[str, int] = {}
+        for selected, count in sorted(selected_counts.items()):
+            if type(count) is not int or count <= 0:
+                raise EvidenceError("memory resolver confusion count must be positive")
+            row[selected] = count
+        projected[expected] = row
+    return projected
+
+
+def _project_memory_operation_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != _MEMORY_SUMMARY_FIELDS:
+        raise EvidenceError("memory operation summary does not match its exact schema")
+
+    def exact_integer(mapping: dict[str, Any], key: str) -> int:
+        item = mapping.get(key)
+        if type(item) is not int or item < 0:
+            raise EvidenceError(f"memory operation summary {key} must be an integer")
+        return item
+
+    def finite_number(mapping: dict[str, Any], key: str) -> float:
+        item = mapping.get(key)
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            raise EvidenceError(f"memory operation summary {key} must be numeric")
+        number = float(item)
+        if not math.isfinite(number) or number < 0:
+            raise EvidenceError(f"memory operation summary {key} is invalid")
+        return number
+
+    if exact_integer(value, "schema_version") != 1:
+        raise EvidenceError("memory operation summary schema version changed")
+    operations = exact_integer(value, "operations")
+    if operations != len(MEMORY_OPERATION_SCENARIO_IDS) * MEMORY_OPERATION_VARIANT_COUNT:
+        raise EvidenceError("memory operation summary must contain 33 operations")
+    operations_correct = exact_integer(value, "operations_correct")
+    for key in (
+        "json_objects_emitted",
+        "prompt_cache_disabled_requests",
+        "protected_value_emissions",
+        "schema_valid",
+        "zero_cached_prompt_requests",
+    ):
+        if exact_integer(value, key) > operations:
+            raise EvidenceError(f"memory operation summary {key} exceeds 33")
+    exact_integer(value, "unexpected_tool_calls")
+    if operations_correct > operations:
+        raise EvidenceError("memory operation correct count exceeds operations")
+    if not math.isclose(
+        finite_number(value, "operation_accuracy"),
+        operations_correct / operations,
+        rel_tol=1e-9,
+        abs_tol=1e-9,
+    ):
+        raise EvidenceError("memory operation summary accuracy is inconsistent")
+    for key in ("total_completion_tokens", "total_prompt_tokens"):
+        if exact_integer(value, key) <= 0:
+            raise EvidenceError(f"memory operation summary {key} must be positive")
+    reasoning = value.get("total_reasoning_tokens")
+    if reasoning is not None:
+        raise EvidenceError("memory evidence v1 requires a null reasoning total")
+    for key in (
+        "total_request_elapsed_s",
+        "total_server_decode_s",
+        "total_server_prompt_s",
+    ):
+        if finite_number(value, key) <= 0:
+            raise EvidenceError(f"memory operation summary {key} must be positive")
+
+    graphiti = value.get("graphiti_resolver")
+    if not isinstance(graphiti, dict) or set(graphiti) != _MEMORY_GRAPHITI_SUMMARY_FIELDS:
+        raise EvidenceError("memory Graphiti summary does not match its exact schema")
+    graphiti_operations = exact_integer(graphiti, "operations")
+    graphiti_correct = exact_integer(graphiti, "correct")
+    if graphiti_operations != 9 or graphiti_correct > graphiti_operations:
+        raise EvidenceError("memory Graphiti operation counts changed")
+    for key in ("contradicted_sets_correct", "duplicate_sets_correct"):
+        if exact_integer(graphiti, key) > graphiti_operations:
+            raise EvidenceError(f"memory Graphiti {key} exceeds its denominator")
+    if not math.isclose(
+        finite_number(graphiti, "accuracy"),
+        graphiti_correct / graphiti_operations,
+        rel_tol=1e-9,
+        abs_tol=1e-9,
+    ):
+        raise EvidenceError("memory Graphiti accuracy is inconsistent")
+    confusion = _project_memory_resolver_confusion(graphiti.get("confusion"))
+    if set(confusion) != set(_MEMORY_EXPECTED_RESOLVER_ACTION.values()) or any(
+        sum(confusion[label].values()) != MEMORY_OPERATION_VARIANT_COUNT
+        for label in confusion
+    ):
+        raise EvidenceError("memory Graphiti confusion shape changed")
+
+    extension = value.get("synthetic_extension")
+    if not isinstance(extension, dict) or set(extension) != _MEMORY_EXTENSION_SUMMARY_FIELDS:
+        raise EvidenceError("synthetic memory summary does not match its exact schema")
+    extension_operations = exact_integer(extension, "operations")
+    extension_correct = exact_integer(extension, "correct")
+    if extension_operations != 24 or extension_correct > extension_operations:
+        raise EvidenceError("synthetic memory operation counts changed")
+    if exact_integer(extension, "field_checks_applicable") != extension_operations:
+        raise EvidenceError("synthetic memory field denominator changed")
+    for key in (
+        "action_correct",
+        "evidence_correct",
+        "mutations_selected",
+        "path_correct",
+        "reason_correct",
+        "target_correct",
+        "tier_correct",
+        "valid_from_correct",
+        "valid_to_correct",
+        "value_correct",
+    ):
+        if exact_integer(extension, key) > extension_operations:
+            raise EvidenceError(f"synthetic memory {key} exceeds its denominator")
+    if exact_integer(extension, "mutations_expected") != len(
+        _MEMORY_MUTATION_EXPECTED
+    ) * MEMORY_OPERATION_VARIANT_COUNT:
+        raise EvidenceError("synthetic memory mutation oracle count changed")
+    for required_key, succeeded_key in (
+        ("secret_refusals_required", "secret_refusals_succeeded"),
+        ("injection_refusals_required", "injection_refusals_succeeded"),
+    ):
+        required = exact_integer(extension, required_key)
+        succeeded = exact_integer(extension, succeeded_key)
+        if required != MEMORY_OPERATION_VARIANT_COUNT or succeeded > required:
+            raise EvidenceError("synthetic memory refusal counts changed")
+    if not math.isclose(
+        finite_number(extension, "accuracy"),
+        extension_correct / extension_operations,
+        rel_tol=1e-9,
+        abs_tol=1e-9,
+    ):
+        raise EvidenceError("synthetic memory accuracy is inconsistent")
+    return {
+        **{
+            key: value[key]
+            for key in _MEMORY_SUMMARY_FIELDS
+            if key not in {"graphiti_resolver", "synthetic_extension"}
+        },
+        "graphiti_resolver": {
+            **{
+                key: graphiti[key]
+                for key in _MEMORY_GRAPHITI_SUMMARY_FIELDS
+                if key != "confusion"
+            },
+            "confusion": confusion,
+        },
+        "synthetic_extension": dict(extension),
+    }
+
+
+_MEMORY_AGGREGATE_FIELDS = frozenset(
+    {
+        "cases",
+        "completed_cases",
+        "context_limited_cases",
+        "failed_cases",
+        "measurement_invalid_cases",
+        "memory_operation_summary",
+        "run_completion_status",
+        "status",
+        "suite",
+        "unimplemented_cases",
+        "unsupported_cases",
+        "validation_failed_cases",
+    }
+)
+
+
+def _project_memory_case(case: Any, *, source: bool) -> dict[str, Any]:
+    if not isinstance(case, dict):
+        raise EvidenceError("memory aggregate case must be an object")
+    _validate_memory_case(case)
+    case_id = str(case["case_id"])
+    graphiti = case_id.startswith("graphiti-")
+    expected_fields = _MEMORY_PROJECTED_CASE_BASE_FIELDS | (
+        _GRAPHITI_CASE_METRIC_FIELDS if graphiti else frozenset()
+    )
+    projected = {key: case[key] for key in expected_fields}
+    if projected.get("reasoning_tokens") is not None or projected.get(
+        "memory_total_reasoning_tokens"
+    ) is not None:
+        raise EvidenceError("memory evidence v1 requires null case reasoning totals")
+    if not source and not _json_strict_equal(projected, case):
+        raise EvidenceError("memory aggregate case projection changed")
+    return projected
+
+
+def _project_memory_summary_document(
+    value: Any, *, source: bool
+) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or not _MEMORY_AGGREGATE_FIELDS <= set(value)
+        or (not source and set(value) != _MEMORY_AGGREGATE_FIELDS)
+    ):
+        raise EvidenceError("memory aggregate document does not match its exact schema")
+    cases = value.get("cases")
+    if not isinstance(cases, list):
+        raise EvidenceError("memory aggregate cases must be a list")
+    projected = {
+        "cases": [_project_memory_case(case, source=source) for case in cases],
+        "completed_cases": value.get("completed_cases"),
+        "context_limited_cases": value.get("context_limited_cases"),
+        "failed_cases": value.get("failed_cases"),
+        "measurement_invalid_cases": value.get("measurement_invalid_cases"),
+        "memory_operation_summary": _project_memory_operation_summary(
+            value.get("memory_operation_summary")
+        ),
+        "run_completion_status": value.get("run_completion_status"),
+        "status": value.get("status"),
+        "suite": value.get("suite"),
+        "unimplemented_cases": value.get("unimplemented_cases"),
+        "unsupported_cases": value.get("unsupported_cases"),
+        "validation_failed_cases": value.get("validation_failed_cases"),
+    }
+    if not source and not _json_strict_equal(projected, value):
+        raise EvidenceError("memory aggregate projection changed")
+    return projected
+
+
+def _translate_memory_case_ids(
+    samples: list[dict[str, Any]],
+    summary: dict[str, Any],
+    *,
+    mapping: dict[str, str],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    def translate(value: Any) -> str:
+        if not isinstance(value, str) or value not in mapping:
+            raise EvidenceError("memory result references an unknown source case")
+        return mapping[value]
+
+    translated_samples = [
+        {**sample, "case_id": translate(sample.get("case_id"))}
+        for sample in samples
+    ]
+    translated_summary = dict(summary)
+    cases = summary.get("cases")
+    if not isinstance(cases, list):
+        raise EvidenceError("memory source summary cases are missing")
+    translated_summary["cases"] = [
+        {**case, "case_id": translate(case.get("case_id"))}
+        for case in cases
+    ]
+    for key in (
+        "context_limited_cases",
+        "failed_cases",
+        "measurement_invalid_cases",
+        "unimplemented_cases",
+        "unsupported_cases",
+        "validation_failed_cases",
+    ):
+        values = summary.get(key)
+        if not isinstance(values, list):
+            raise EvidenceError(f"memory source summary {key} is missing")
+        translated_summary[key] = sorted(translate(value) for value in values)
+    return translated_samples, translated_summary
 
 
 def _case_integer(case: dict[str, Any], key: str) -> int:
@@ -4023,6 +5702,304 @@ def _project_prefix_cache_manifest(
     return projected
 
 
+_MEMORY_MANIFEST_REQUIRED_FIELDS = frozenset(
+    {
+        "artifact_validation",
+        "artifacts",
+        "evidence_kind",
+        "hardware",
+        "lifecycle",
+        "model",
+        "run_date_utc",
+        "runtime",
+        "sanitization",
+        "schema_version",
+        "source_run_id",
+        "status",
+        "suite",
+    }
+)
+_MEMORY_MANIFEST_OPTIONAL_FIELDS = frozenset({"matrix_id"})
+_MEMORY_RUNTIME_FIELDS = frozenset(
+    {
+        "backend",
+        "binary_sha256",
+        "lifecycle",
+        "runtime_revision",
+        "source_revision",
+    }
+)
+_MEMORY_RUNTIME_SOURCE_FIELDS = _MEMORY_RUNTIME_FIELDS | frozenset({"versions"})
+_MEMORY_ARTIFACT_FIELDS = frozenset(
+    {"revision", "role", "sha256", "size_bytes", "source", "target"}
+)
+_MEMORY_ARTIFACT_VALIDATION_SINGLE_FIELDS = frozenset(
+    {"model_sha256", "runtime_binary_sha256"}
+)
+_MEMORY_ARTIFACT_VALIDATION_SHARD_FIELDS = frozenset(
+    {
+        "model_sha256",
+        "model_shard_count",
+        "model_shard_sha256s",
+        "model_total_size_bytes",
+        "runtime_binary_sha256",
+    }
+)
+_MEMORY_PROTOCOL_EVENT_COUNTS = {
+    "artifact_validation_complete": 1,
+    "case_complete": len(MEMORY_OPERATION_SCENARIO_IDS),
+    "case_start": len(MEMORY_OPERATION_SCENARIO_IDS),
+    "first_request_complete": 1,
+    "request_complete": len(MEMORY_OPERATION_SCENARIO_IDS)
+    * MEMORY_OPERATION_VARIANT_COUNT,
+    "run_complete": 1,
+    "run_start": 1,
+    "server_ready": 1,
+    "server_stopped": 1,
+}
+_MEMORY_LIFECYCLE_FIELDS = frozenset(
+    {"event_counts", "protocol_event_count", "terminal", "terminal_event"}
+)
+_MEMORY_SANITIZATION = {
+    "free_form_text_included": False,
+    "payloads_included": False,
+    "policy": SANITIZATION_POLICY,
+    "raw_identifiers_included": False,
+}
+
+
+def _project_memory_runtime(value: Any, *, source: bool) -> dict[str, Any]:
+    allowed = _MEMORY_RUNTIME_SOURCE_FIELDS if source else _MEMORY_RUNTIME_FIELDS
+    if not isinstance(value, dict) or set(value) - allowed:
+        raise EvidenceError("memory runtime does not match its exact schema")
+    expected_digest = _sha256(
+        MEMORY_OPERATION_LLAMACPP_DIGEST,
+        name="fixed memory runtime digest",
+    )
+    projected = {
+        "backend": _safe_id(value.get("backend"), name="memory runtime.backend"),
+        "binary_sha256": _sha256(
+            value.get("binary_sha256"), name="memory runtime.binary_sha256"
+        ),
+        "lifecycle": _safe_id(
+            value.get("lifecycle"), name="memory runtime.lifecycle"
+        ),
+        "runtime_revision": _revision(
+            value.get("runtime_revision"), name="memory runtime.runtime_revision"
+        ),
+        "source_revision": _revision(
+            value.get("source_revision"), name="memory runtime.source_revision"
+        ),
+    }
+    if projected != {
+        "backend": "llamacpp",
+        "binary_sha256": expected_digest,
+        "lifecycle": "subprocess",
+        "runtime_revision": MEMORY_OPERATION_LLAMACPP_REVISION,
+        "source_revision": MEMORY_OPERATION_LLAMACPP_REVISION,
+    }:
+        raise EvidenceError("memory runtime pin or lifecycle changed")
+    if source and "versions" in value and not isinstance(value["versions"], dict):
+        raise EvidenceError("memory source runtime versions must be an object")
+    if not source and not _json_strict_equal(projected, value):
+        raise EvidenceError("memory runtime projection changed")
+    return projected
+
+
+def _project_memory_artifacts(
+    value: Any, *, model: dict[str, Any]
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise EvidenceError("memory artifacts must be a list")
+    projected: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict) or frozenset(item) not in {
+            _MEMORY_ARTIFACT_FIELDS,
+            frozenset({"revision", "role", "sha256", "target"}),
+        }:
+            raise EvidenceError("memory artifact does not match its exact schema")
+        artifact: dict[str, Any] = {
+            "revision": _revision(
+                item.get("revision"), name="memory artifact.revision"
+            ),
+            "role": _safe_id(item.get("role"), name="memory artifact.role"),
+            "sha256": _sha256(item.get("sha256"), name="memory artifact.sha256"),
+            "target": _safe_id(item.get("target"), name="memory artifact.target"),
+        }
+        if "size_bytes" in item:
+            artifact["size_bytes"] = _prefix_cache_integer(
+                item["size_bytes"], name="memory artifact.size_bytes", positive=True
+            )
+        if "source" in item:
+            artifact["source"] = _safe_id(
+                item["source"], name="memory artifact.source"
+            )
+        projected.append(artifact)
+    expected_model = _MEMORY_PANEL_MODEL_ARTIFACTS.get(str(model.get("id")))
+    if expected_model is None:
+        raise EvidenceError("memory artifacts reference an unsupported model")
+    expected = [dict(item) for item in expected_model]
+    expected.append(
+        {
+            "revision": MEMORY_OPERATION_LLAMACPP_REVISION,
+            "role": "runtime_binary",
+            "sha256": _sha256(
+                MEMORY_OPERATION_LLAMACPP_DIGEST,
+                name="fixed memory runtime artifact",
+            ),
+            "target": "llama-server",
+        }
+    )
+    expected.sort(key=lambda item: (item["role"], item["sha256"], item["target"]))
+    if not _json_strict_equal(projected, expected):
+        raise EvidenceError("memory model/runtime artifacts changed")
+    return projected
+
+
+def _project_memory_artifact_validation(
+    value: Any, *, model: dict[str, Any], source: bool
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise EvidenceError("memory artifact validation must be an object")
+    source_value = dict(value)
+    if source and "elapsed_s" in source_value:
+        elapsed = _finite(
+            source_value.pop("elapsed_s"), name="memory artifact validation.elapsed_s"
+        )
+        if elapsed is None or elapsed < 0:
+            raise EvidenceError("memory artifact validation elapsed time is invalid")
+    expected_model = _MEMORY_PANEL_MODEL_ARTIFACTS.get(str(model.get("id")))
+    if expected_model is None:
+        raise EvidenceError("memory artifact validation model is unsupported")
+    runtime_digest = _sha256(
+        MEMORY_OPERATION_LLAMACPP_DIGEST,
+        name="fixed memory validation runtime",
+    )
+    if expected_model[0]["role"] == "model":
+        expected = {
+            "model_sha256": expected_model[0]["sha256"],
+            "runtime_binary_sha256": runtime_digest,
+        }
+        expected_fields = _MEMORY_ARTIFACT_VALIDATION_SINGLE_FIELDS
+    else:
+        shard_digests = [str(item["sha256"]) for item in expected_model]
+        expected = {
+            "model_sha256": shard_digests[0],
+            "model_shard_count": len(expected_model),
+            "model_shard_sha256s": shard_digests,
+            "model_total_size_bytes": sum(
+                int(item["size_bytes"]) for item in expected_model
+            ),
+            "runtime_binary_sha256": runtime_digest,
+        }
+        expected_fields = _MEMORY_ARTIFACT_VALIDATION_SHARD_FIELDS
+    if set(source_value) != expected_fields:
+        raise EvidenceError("memory artifact validation schema changed")
+    projected: dict[str, Any] = {}
+    for key, item in expected.items():
+        if key.endswith("sha256"):
+            projected[key] = _sha256(
+                source_value.get(key), name=f"memory artifact validation.{key}"
+            )
+        elif key == "model_shard_sha256s":
+            values = source_value.get(key)
+            if not isinstance(values, list):
+                raise EvidenceError("memory artifact validation shard list changed")
+            projected[key] = [
+                _sha256(item, name="memory artifact validation shard")
+                for item in values
+            ]
+        else:
+            projected[key] = _prefix_cache_integer(
+                source_value.get(key),
+                name=f"memory artifact validation.{key}",
+                positive=True,
+            )
+    if not _json_strict_equal(projected, expected):
+        raise EvidenceError("memory artifact validation disagrees with frozen pins")
+    return projected
+
+
+def _project_memory_lifecycle(value: Any, *, source: bool) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise EvidenceError("memory lifecycle must be an object")
+    if source:
+        counts = value.get("event_counts")
+        if not isinstance(counts, dict):
+            raise EvidenceError("memory source lifecycle event counts are missing")
+        if any(counts.get(key) != expected for key, expected in _MEMORY_PROTOCOL_EVENT_COUNTS.items()):
+            raise EvidenceError("memory source lifecycle protocol counts changed")
+        if value.get("terminal") is not True or value.get("terminal_event") != "run_complete":
+            raise EvidenceError("memory source lifecycle is not terminal")
+    elif set(value) != _MEMORY_LIFECYCLE_FIELDS:
+        raise EvidenceError("memory lifecycle does not match its exact schema")
+    projected = {
+        "event_counts": dict(_MEMORY_PROTOCOL_EVENT_COUNTS),
+        "protocol_event_count": sum(_MEMORY_PROTOCOL_EVENT_COUNTS.values()),
+        "terminal": True,
+        "terminal_event": "run_complete",
+    }
+    if not source and not _json_strict_equal(projected, value):
+        raise EvidenceError("memory lifecycle projection changed")
+    return projected
+
+
+def _project_memory_manifest(value: Any, *, source: bool = False) -> dict[str, Any]:
+    allowed = _MEMORY_MANIFEST_REQUIRED_FIELDS | _MEMORY_MANIFEST_OPTIONAL_FIELDS
+    if (
+        not isinstance(value, dict)
+        or set(value) - allowed
+        or not _MEMORY_MANIFEST_REQUIRED_FIELDS <= set(value)
+    ):
+        raise EvidenceError("memory manifest does not match its exact schema")
+    if value.get("schema_version") != SCHEMA_VERSION or type(value["schema_version"]) is not str:
+        raise EvidenceError("memory manifest schema version changed")
+    if value.get("evidence_kind") != "serving" or value.get("status") not in {
+        "complete",
+        "partial",
+    }:
+        raise EvidenceError("memory manifest classification changed")
+    source_run_id = _safe_id(
+        value.get("source_run_id"), name="memory manifest.source_run_id"
+    )
+    if value.get("run_date_utc") != _date_from_run_id(source_run_id):
+        raise EvidenceError("memory manifest run date changed")
+    model = _validate_projected_memory_model(value.get("model"))
+    suite = _project_memory_suite(
+        value.get("suite"), binding_model=model
+    )
+    artifacts = _project_memory_artifacts(value.get("artifacts"), model=model)
+    hardware = _project_prefix_cache_hardware(value.get("hardware"))
+    if set(hardware) != _PREFIX_CACHE_HARDWARE_FIELDS:
+        raise EvidenceError("memory Spark hardware provenance is incomplete")
+    projected: dict[str, Any] = {
+        "artifact_validation": _project_memory_artifact_validation(
+            value.get("artifact_validation"), model=model, source=source
+        ),
+        "artifacts": artifacts,
+        "evidence_kind": "serving",
+        "hardware": hardware,
+        "lifecycle": _project_memory_lifecycle(value.get("lifecycle"), source=source),
+        "model": model,
+        "run_date_utc": _date_from_run_id(source_run_id),
+        "runtime": _project_memory_runtime(value.get("runtime"), source=source),
+        "sanitization": dict(_MEMORY_SANITIZATION),
+        "schema_version": SCHEMA_VERSION,
+        "source_run_id": source_run_id,
+        "status": value["status"],
+        "suite": suite,
+    }
+    if not _json_strict_equal(value.get("sanitization"), _MEMORY_SANITIZATION):
+        raise EvidenceError("memory manifest sanitization changed")
+    if "matrix_id" in value:
+        projected["matrix_id"] = _safe_id(
+            value["matrix_id"], name="memory manifest.matrix_id"
+        )
+    if not source and not _json_strict_equal(projected, value):
+        raise EvidenceError("memory manifest projection changed")
+    return projected
+
+
 def _project_prefix_cache_case(case: Any) -> dict[str, Any]:
     """Project only the cache protocol's case-level scalar report."""
 
@@ -4240,6 +6217,235 @@ def _project_prefix_cache_summary(summary: Any) -> dict[str, Any]:
     return projected
 
 
+def _memory_case_integer(case: dict[str, Any], key: str) -> int:
+    value = case.get(key)
+    if type(value) is not int or value < 0:
+        raise EvidenceError(f"memory case {key} must be a nonnegative JSON integer")
+    return value
+
+
+def _memory_case_number(case: dict[str, Any], key: str) -> float:
+    value = case.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise EvidenceError(f"memory case {key} must be numeric")
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise EvidenceError(f"memory case {key} must be finite and nonnegative")
+    return number
+
+
+def _validate_memory_case(case: dict[str, Any]) -> None:
+    case_id = case.get("case_id")
+    if not isinstance(case_id, str):
+        raise EvidenceError("memory case lacks a stable identifier")
+    scenario_id = case_id.split("--", 1)[0]
+    if scenario_id not in MEMORY_OPERATION_SCENARIO_IDS:
+        raise EvidenceError("memory case identifier is unsupported")
+    _memory_case_identifier(case_id, scenario_id)
+    graphiti = scenario_id.startswith("graphiti-")
+    expected_fields = _MEMORY_PROJECTED_CASE_BASE_FIELDS | (
+        _GRAPHITI_CASE_METRIC_FIELDS if graphiti else frozenset()
+    )
+    allowed_shapes = {
+        frozenset(expected_fields),
+        frozenset(expected_fields | _MEMORY_CASE_OPTIONAL_TELEMETRY_FIELDS),
+        frozenset(
+            expected_fields
+            | _MEMORY_CASE_OPTIONAL_TELEMETRY_FIELDS
+            | _MEMORY_CASE_OPTIONAL_ENERGY_FIELDS
+        ),
+    }
+    if frozenset(case) not in allowed_shapes:
+        raise EvidenceError("memory case does not match its exact evidence schema")
+    if case.get("kind") != "memory":
+        raise EvidenceError("memory case kind changed")
+
+    integer_keys = (
+        "completion_tokens",
+        "concurrency",
+        "graphiti_resolver_operations",
+        "measurement_annotation_count",
+        "memory_action_correct",
+        "memory_evidence_correct",
+        "memory_field_checks_applicable",
+        "memory_injection_refusals_required",
+        "memory_injection_refusals_succeeded",
+        "memory_json_objects_emitted",
+        "memory_mutations_expected",
+        "memory_mutations_selected",
+        "memory_operations",
+        "memory_operations_correct",
+        "memory_path_correct",
+        "memory_prompt_cache_disabled_requests",
+        "memory_protected_value_emissions",
+        "memory_reason_correct",
+        "memory_schema_valid",
+        "memory_secret_refusals_required",
+        "memory_secret_refusals_succeeded",
+        "memory_target_correct",
+        "memory_tier_correct",
+        "memory_total_completion_tokens",
+        "memory_total_prompt_tokens",
+        "memory_unexpected_tool_calls",
+        "memory_valid_from_correct",
+        "memory_valid_to_correct",
+        "memory_value_correct",
+        "memory_zero_cached_prompt_requests",
+        "prompt_tokens",
+        "requests",
+        "synthetic_memory_extension_operations",
+    )
+    counts = {key: _memory_case_integer(case, key) for key in integer_keys}
+    operations = MEMORY_OPERATION_VARIANT_COUNT
+    if (
+        counts["requests"] != operations
+        or counts["memory_operations"] != operations
+        or counts["concurrency"] != 1
+    ):
+        raise EvidenceError("memory case must contain exactly three single-stream requests")
+    graphiti_operations = operations if graphiti else 0
+    extension_operations = 0 if graphiti else operations
+    if (
+        counts["graphiti_resolver_operations"] != graphiti_operations
+        or counts["synthetic_memory_extension_operations"] != extension_operations
+        or counts["memory_field_checks_applicable"] != extension_operations
+    ):
+        raise EvidenceError("memory case family counts are inconsistent")
+    for key in (
+        "memory_json_objects_emitted",
+        "memory_mutations_selected",
+        "memory_operations_correct",
+        "memory_prompt_cache_disabled_requests",
+        "memory_protected_value_emissions",
+        "memory_schema_valid",
+        "memory_zero_cached_prompt_requests",
+    ):
+        if counts[key] > operations:
+            raise EvidenceError(f"memory case {key} exceeds its request denominator")
+    for key in (
+        "memory_action_correct",
+        "memory_evidence_correct",
+        "memory_path_correct",
+        "memory_reason_correct",
+        "memory_target_correct",
+        "memory_tier_correct",
+        "memory_valid_from_correct",
+        "memory_valid_to_correct",
+        "memory_value_correct",
+    ):
+        if counts[key] > extension_operations:
+            raise EvidenceError(f"memory case {key} exceeds its field denominator")
+    expected_mutations = operations if scenario_id in _MEMORY_MUTATION_EXPECTED else 0
+    if counts["memory_mutations_expected"] != expected_mutations:
+        raise EvidenceError("memory case mutation oracle count changed")
+    secret_required = operations if scenario_id == "memory-secret-refusal" else 0
+    injection_required = (
+        operations if scenario_id == "memory-injection-refusal" else 0
+    )
+    if (
+        counts["memory_secret_refusals_required"] != secret_required
+        or counts["memory_injection_refusals_required"] != injection_required
+        or counts["memory_secret_refusals_succeeded"] > secret_required
+        or counts["memory_injection_refusals_succeeded"] > injection_required
+    ):
+        raise EvidenceError("memory case refusal counts are inconsistent")
+    if (
+        counts["memory_total_prompt_tokens"] != counts["prompt_tokens"]
+        or counts["memory_total_completion_tokens"] != counts["completion_tokens"]
+    ):
+        raise EvidenceError("memory case token totals disagree")
+    reasoning_tokens = case.get("reasoning_tokens")
+    total_reasoning_tokens = case.get("memory_total_reasoning_tokens")
+    if reasoning_tokens is not None or total_reasoning_tokens is not None:
+        raise EvidenceError("memory evidence v1 requires null case reasoning totals")
+
+    accuracy = _memory_case_number(case, "memory_operation_accuracy")
+    if not math.isclose(
+        accuracy,
+        counts["memory_operations_correct"] / operations,
+        rel_tol=1e-9,
+        abs_tol=1e-9,
+    ):
+        raise EvidenceError("memory case accuracy is inconsistent")
+    elapsed_s = _memory_case_number(case, "elapsed_s")
+    if elapsed_s <= 0:
+        raise EvidenceError("memory case elapsed time must be positive")
+    for key, expected in (
+        ("aggregate_output_tps", counts["completion_tokens"] / elapsed_s),
+        ("request_tps", operations / elapsed_s),
+    ):
+        value = _memory_case_number(case, key)
+        if not math.isclose(value, expected, rel_tol=1e-9, abs_tol=1e-9):
+            raise EvidenceError(f"memory case {key} is inconsistent")
+    for key in ("median_e2e_s", "median_ttft_s"):
+        _memory_case_number(case, key)
+    for key in (
+        "decode_estimate_one_token_chunks",
+        "decode_metric_source",
+        "median_decode_tps",
+        "median_estimated_decode_tps",
+        "p95_e2e_s",
+        "p95_ttft_s",
+    ):
+        if case.get(key) is not None:
+            raise EvidenceError(f"memory case must suppress generic metric {key}")
+    if (
+        case.get("measurement_valid") is not True
+        or counts["measurement_annotation_count"] != 0
+        or case.get("validation_passed")
+        is not (counts["memory_operations_correct"] == operations)
+    ):
+        raise EvidenceError("memory case validity flags are inconsistent")
+    for key in ("memory_total_server_decode_s", "memory_total_server_prompt_s"):
+        if _memory_case_number(case, key) <= 0:
+            raise EvidenceError(f"memory case {key} must be positive")
+
+    if graphiti:
+        for key in (
+            "graphiti_contradicted_sets_correct",
+            "graphiti_duplicate_sets_correct",
+            "graphiti_resolver_correct",
+        ):
+            if _memory_case_integer(case, key) > operations:
+                raise EvidenceError(f"memory case {key} exceeds resolver operations")
+        resolver_accuracy = _memory_case_number(case, "graphiti_resolver_accuracy")
+        if not math.isclose(
+            resolver_accuracy,
+            case["graphiti_resolver_correct"] / operations,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            raise EvidenceError("memory resolver accuracy is inconsistent")
+        confusion = _project_memory_resolver_confusion(
+            case.get("graphiti_resolver_confusion")
+        )
+        expected_label = _MEMORY_EXPECTED_RESOLVER_ACTION[scenario_id]
+        if set(confusion) != {expected_label} or sum(
+            confusion[expected_label].values()
+        ) != operations:
+            raise EvidenceError("memory resolver confusion denominator changed")
+
+    telemetry = case.get("telemetry")
+    if telemetry is not None and _project_telemetry_summary(
+        telemetry, name="case.telemetry"
+    ) != telemetry:
+        raise EvidenceError("memory case telemetry projection changed")
+    sampled_energy = telemetry.get("sampled_energy_j") if isinstance(telemetry, dict) else None
+    if isinstance(sampled_energy, (int, float)) and sampled_energy > 0:
+        if "output_tokens_per_sampled_joule" not in case:
+            raise EvidenceError("memory case omitted its sampled-energy metric")
+        expected_rate = counts["completion_tokens"] / float(sampled_energy)
+        if not math.isclose(
+            _memory_case_number(case, "output_tokens_per_sampled_joule"),
+            expected_rate,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            raise EvidenceError("memory case sampled-energy metric is inconsistent")
+    elif "output_tokens_per_sampled_joule" in case:
+        raise EvidenceError("memory case has an energy metric without sampled energy")
+
+
 def _project_case(case: Any) -> dict[str, Any]:
     if not isinstance(case, dict):
         raise EvidenceError("summary case must be an object")
@@ -4261,6 +6467,11 @@ def _project_case(case: Any) -> dict[str, Any]:
     present_agentic = set(case) & _AGENTIC_CASE_FIELDS
     if kind != "agentic" and present_agentic:
         raise EvidenceError("non-agentic case contains agentic metrics")
+    present_memory = set(case) & (
+        _MEMORY_CASE_METRIC_FIELDS | _GRAPHITI_CASE_METRIC_FIELDS
+    )
+    if kind != "memory" and present_memory:
+        raise EvidenceError("non-memory case contains memory metrics")
     projected: dict[str, Any] = {}
     for key, value in case.items():
         if key in _CASE_DROPPED_FIELDS:
@@ -4283,6 +6494,8 @@ def _project_case(case: Any) -> dict[str, Any]:
             projected[key] = _project_prefix_cache_metrics(value)
         elif key == "telemetry":
             projected[key] = _project_telemetry_summary(value, name="case.telemetry")
+        elif key == "graphiti_resolver_confusion":
+            projected[key] = _project_memory_resolver_confusion(value)
         elif key == "quality_accuracy_by_category":
             projected[key] = _project_quality_accuracy(value)
         elif key in _CASE_FIELDS - _CASE_STRING_FIELDS - _CASE_BOOLEAN_FIELDS - _CASE_OBJECT_FIELDS:
@@ -4302,6 +6515,8 @@ def _project_case(case: Any) -> dict[str, Any]:
         raise EvidenceError("non-cache case contains prefix-cache metrics")
     if kind == "agentic":
         _validate_agentic_case(projected)
+    if kind == "memory":
+        _validate_memory_case(projected)
     return projected
 
 
@@ -4904,6 +7119,23 @@ def _validate_prefix_cache_bundle_file_set(
         raise EvidenceError("prefix-cache bundle file set does not match its protocol")
 
 
+def _validate_memory_bundle_file_set(
+    names: set[str], chunks: Any, *, include_checksums: bool
+) -> None:
+    if chunks != []:
+        raise EvidenceError("memory evidence v1 must not publish telemetry chunks")
+    expected = {
+        "manifest.json",
+        "samples.json",
+        "summary.json",
+        "telemetry.json",
+    }
+    if include_checksums:
+        expected.add("checksums.json")
+    if names != expected:
+        raise EvidenceError("memory bundle file set does not match its protocol")
+
+
 def _validate_summary_field_type(
     *,
     root_name: str,
@@ -5075,6 +7307,10 @@ def _project_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
         if not isinstance(cases, list):
             raise EvidenceError("summary cases must be a list")
         result["cases"] = [_project_case(case) for case in cases]
+    if "memory_operation_summary" in summary:
+        result["memory_operation_summary"] = _project_memory_operation_summary(
+            summary["memory_operation_summary"]
+        )
     first = summary.get("first_request_after_start")
     if first is not None:
         result["first_request"] = _project_request_result(first)
@@ -5287,6 +7523,204 @@ def _lifecycle(events: list[dict[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _validate_memory_source_events(
+    events: list[dict[str, Any]],
+    *,
+    model: dict[str, Any],
+    suite: dict[str, Any],
+    summary: dict[str, Any],
+) -> None:
+    """Validate the no-resume, one-attempt memory journal topology."""
+
+    cases = suite.get("cases")
+    if not isinstance(cases, list):
+        raise EvidenceError("memory source suite cases are missing")
+    allowed_events = set(_MEMORY_PROTOCOL_EVENT_COUNTS) | {
+        "llamacpp_spec_decode_metrics_snapshot"
+    }
+    names = [event.get("event") for event in events]
+    if any(name not in allowed_events for name in names) or names.count(
+        "llamacpp_spec_decode_metrics_snapshot"
+    ) > 1:
+        raise EvidenceError("memory source journal contains a nonprotocol event")
+    if "llamacpp_spec_decode_metrics_snapshot" in names and names.index(
+        "llamacpp_spec_decode_metrics_snapshot"
+    ) != names.index("server_stopped") - 1:
+        raise EvidenceError("memory source metrics snapshot is out of protocol order")
+    expected_names = [
+        "run_start",
+        "artifact_validation_complete",
+        "server_ready",
+        "first_request_complete",
+    ]
+    for _case in cases:
+        expected_names.extend(
+            [
+                "case_start",
+                *("request_complete" for _ in range(MEMORY_OPERATION_VARIANT_COUNT)),
+                "case_complete",
+            ]
+        )
+    expected_names.extend(["server_stopped", "run_complete"])
+    protocol_events = [
+        event for event in events if event.get("event") in _MEMORY_PROTOCOL_EVENT_COUNTS
+    ]
+    if [event.get("event") for event in protocol_events] != expected_names:
+        raise EvidenceError("memory source journal protocol order changed")
+    run_start, artifact, ready, first = protocol_events[:4]
+    stopped, run_complete = protocol_events[-2:]
+    if run_start.get("completed_cases_at_resume") != []:
+        raise EvidenceError("memory source journal is a resumed run")
+    if artifact.get("backend") != "llamacpp":
+        raise EvidenceError("memory source artifact admission backend changed")
+    if (
+        ready.get("backend") != "llamacpp"
+        or ready.get("keep_server_requested") is not False
+        or first.get("backend") != "llamacpp"
+        or stopped.get("backend") != "llamacpp"
+        or run_complete.get("status") != "completed"
+    ):
+        raise EvidenceError("memory source server lifecycle changed")
+    artifact_payload = {
+        key: artifact[key]
+        for key in (
+            "elapsed_s",
+            "model_sha256",
+            "model_shard_count",
+            "model_shard_sha256s",
+            "model_total_size_bytes",
+            "runtime_binary_sha256",
+        )
+        if key in artifact
+    }
+    _project_memory_artifact_validation(
+        artifact_payload, model=model, source=True
+    )
+    _validate_memory_prime_result(first.get("result"))
+
+    summary_cases = summary.get("cases")
+    if not isinstance(summary_cases, list):
+        raise EvidenceError("memory source summary cases are missing")
+    summary_by_case = {
+        case.get("case_id"): case for case in summary_cases if isinstance(case, dict)
+    }
+    if len(summary_by_case) != len(summary_cases):
+        raise EvidenceError("memory source summary cases are duplicated")
+
+    cursor = 4
+    attempt_ids: set[str] = set()
+    for case in cases:
+        case_id = case["case_id"]
+        start = protocol_events[cursor]
+        attempt_id = start.get("attempt_id")
+        if (
+            start.get("case_id") != case_id
+            or start.get("kind") != "memory"
+            or type(start.get("concurrency")) is not int
+            or start.get("concurrency") != 1
+            or not isinstance(attempt_id, str)
+            or not attempt_id
+            or attempt_id in attempt_ids
+        ):
+            raise EvidenceError("memory source case_start identity changed")
+        attempt_ids.add(attempt_id)
+        cursor += 1
+        for variant in range(MEMORY_OPERATION_VARIANT_COUNT):
+            request = protocol_events[cursor]
+            if (
+                request.get("case_id") != case_id
+                or request.get("attempt_id") != attempt_id
+                or request.get("kind") != "memory"
+                or type(request.get("repetition")) is not int
+                or request.get("repetition") != variant
+            ):
+                raise EvidenceError("memory source request topology changed")
+            projected_result = _project_memory_request_result(request.get("result"))
+            validation = request.get("validation")
+            if (
+                not isinstance(validation, dict)
+                or validation.get("passed") is not projected_result["passed"]
+            ):
+                raise EvidenceError("memory source request validation changed")
+            cursor += 1
+        complete = protocol_events[cursor]
+        if (
+            complete.get("case_id") != case_id
+            or complete.get("attempt_id") != attempt_id
+            or complete.get("kind") != "memory"
+            or type(complete.get("concurrency")) is not int
+            or complete.get("concurrency") != 1
+        ):
+            raise EvidenceError("memory source case_complete identity changed")
+        request_events = protocol_events[
+            cursor - MEMORY_OPERATION_VARIANT_COUNT : cursor
+        ]
+        request_elapsed = sum(
+            float(request["result"]["elapsed_s"]) for request in request_events
+        )
+        case_elapsed = _finite(
+            complete.get("elapsed_s"), name="memory source case_complete.elapsed_s"
+        )
+        case_passed = all(request["result"]["passed"] is True for request in request_events)
+        summary_case = summary_by_case.get(case_id)
+        if (
+            case_elapsed is None
+            or case_elapsed < request_elapsed - 1e-6
+            or case_elapsed > request_elapsed + 5.0
+            or complete.get("validation_passed") is not case_passed
+            or not isinstance(summary_case, dict)
+            or not _memory_aggregate_equal(summary_case.get("elapsed_s"), case_elapsed)
+            or summary_case.get("validation_passed") is not case_passed
+        ):
+            raise EvidenceError("memory source case_complete outcome changed")
+        cursor += 1
+
+
+def _validate_memory_prime_result(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise EvidenceError("memory source prime result must be an object")
+    required = {
+        "completion_tokens",
+        "elapsed_s",
+        "emission_events",
+        "finish_reason",
+        "prompt_tokens",
+        "reasoning_tokens",
+        "tool_calls",
+        "ttft_s",
+    }
+    if not required <= set(value):
+        raise EvidenceError("memory source prime result is incomplete")
+    prompt_tokens = value.get("prompt_tokens")
+    completion_tokens = value.get("completion_tokens")
+    emission_events = value.get("emission_events")
+    if (
+        type(prompt_tokens) is not int
+        or prompt_tokens <= 0
+        or type(completion_tokens) is not int
+        or completion_tokens <= 0
+        or completion_tokens > 8
+        or type(emission_events) is not int
+        or emission_events <= 0
+        or emission_events > completion_tokens
+        or prompt_tokens + completion_tokens > MEMORY_OPERATION_CONTEXT_TOKENS
+        or value.get("reasoning_tokens") is not None
+        or value.get("finish_reason") not in {"length", "stop"}
+        or value.get("tool_calls") != []
+    ):
+        raise EvidenceError("memory source prime counters changed")
+    elapsed_s = _finite(value.get("elapsed_s"), name="memory source prime.elapsed_s")
+    ttft_s = _finite(value.get("ttft_s"), name="memory source prime.ttft_s")
+    if (
+        elapsed_s is None
+        or elapsed_s <= 0
+        or ttft_s is None
+        or ttft_s < 0
+        or ttft_s > elapsed_s
+    ):
+        raise EvidenceError("memory source prime timing changed")
+
+
 def _run_kind(plan: dict[str, Any]) -> str:
     schema = plan.get("schema_version")
     if schema == "direct-diffusion-v1":
@@ -5417,6 +7851,37 @@ def _export_run(
     lifecycle = _lifecycle(events)
     projected_model = _project_model(plan, summary)
     suite = _project_suite(plan)
+    memory_protocol = bool(
+        isinstance(suite, dict) and suite.get("id") == MEMORY_OPERATION_SUITE_ID
+    )
+    memory_case_id_mapping: dict[str, str] = {}
+    if memory_protocol:
+        source_model = plan.get("model")
+        source_suite = plan.get("suite")
+        if not isinstance(source_model, dict) or not isinstance(source_suite, dict):
+            raise EvidenceError("memory run lacks a frozen model")
+        assert isinstance(suite, dict)
+        source_projected_suite = suite
+        _bind_memory_summary_model(source_model=source_model, summary=summary)
+        projected_model = _project_memory_model(source_model, projected_model)
+        assert isinstance(summary, dict)
+        _validate_memory_source_events(
+            events,
+            model=projected_model,
+            suite=source_suite,
+            summary=summary,
+        )
+        suite = _project_memory_suite(
+            source_suite,
+            source_model=source_model,
+            binding_model=projected_model,
+        )
+        memory_case_id_mapping = {
+            str(source_case["case_id"]): str(published_case["case_id"])
+            for source_case, published_case in zip(
+                source_projected_suite["cases"], suite["cases"], strict=True
+            )
+        }
     cache_protocol = (
         projected_model.get("prefix_cache_mode") is not None
         or (isinstance(suite, dict) and suite.get("id") == PREFIX_CACHE_SUITE_ID)
@@ -5445,12 +7910,41 @@ def _export_run(
         manifest["matrix_id"] = _safe_id(matrix_id, name="matrix_id")
     if suite:
         manifest["suite"] = suite
+    if memory_protocol:
+        manifest["artifact_validation"] = (
+            summary.get("artifact_validation") if isinstance(summary, dict) else None
+        )
+        manifest = _project_memory_manifest(manifest, source=True)
     if cache_protocol:
         # Materialize an exact protocol manifest rather than publishing the
         # broader serving manifest.  This is also the export-side counterpart
         # to the verifier's strict re-projection below.
         manifest = _project_prefix_cache_manifest(manifest, source=True)
     requests = _project_requests(events, summary, evidence_kind=kind)
+    if memory_protocol:
+        unexpected = [
+            sample
+            for sample in requests
+            if sample.get("sample_type") == "measured_request"
+            and sample.get("kind") != "memory"
+        ]
+        if unexpected:
+            raise EvidenceError("memory run contains a nonprotocol measured sample")
+        raw_memory_samples = [sample for sample in requests if sample.get("kind") == "memory"]
+        if len(raw_memory_samples) != len(MEMORY_OPERATION_SCENARIO_IDS) * MEMORY_OPERATION_VARIANT_COUNT or any(
+            sample.get("selected_attempt") is not True for sample in raw_memory_samples
+        ):
+            raise EvidenceError("memory run contains missing, retried, or unselected samples")
+        requests = [
+            sample
+            for sample in requests
+            if sample.get("kind") == "memory"
+            and sample.get("selected_attempt") is True
+        ]
+        requests = [
+            {**sample, "sample_index": index}
+            for index, sample in enumerate(requests, start=1)
+        ]
     if cache_protocol:
         unexpected = [
             sample
@@ -5477,10 +7971,30 @@ def _export_run(
             )
         )
     telemetry = _project_telemetry(telemetry_records)
+    if memory_protocol:
+        telemetry = []
     projected_summary = _project_summary(summary)
+    if memory_protocol:
+        requests, projected_summary = _translate_memory_case_ids(
+            requests,
+            projected_summary,
+            mapping=memory_case_id_mapping,
+        )
+        projected_summary = _project_memory_summary_document(
+            projected_summary, source=True
+        )
+        if manifest["status"] != projected_summary["status"]:
+            raise EvidenceError("memory manifest status disagrees with its aggregates")
     _validate_agentic_aggregates(
         requests,
         projected_summary,
+        suite=suite,
+        terminal=lifecycle.get("terminal_event") == "run_complete",
+    )
+    _validate_memory_aggregates(
+        requests,
+        projected_summary,
+        model=manifest["model"],
         suite=suite,
         terminal=lifecycle.get("terminal_event") == "run_complete",
     )
@@ -5491,6 +8005,8 @@ def _export_run(
         suite=suite,
     )
     telemetry_files = _telemetry_files(telemetry)
+    if memory_protocol and telemetry_files != _telemetry_files([]):
+        raise EvidenceError("memory evidence telemetry projection changed")
     if cache_protocol:
         telemetry_index = telemetry_files["telemetry.json"]
         assert isinstance(telemetry_index, dict)
@@ -5521,6 +8037,12 @@ def _export_run(
             telemetry_index["chunks"],
             include_checksums=False,
         )
+    if memory_protocol:
+        telemetry_index = bundle_files["telemetry.json"]
+        assert isinstance(telemetry_index, dict)
+        _validate_memory_bundle_file_set(
+            set(bundle_files), telemetry_index["chunks"], include_checksums=False
+        )
     bundle_hash, _ = _write_bundle(
         output_root,
         relative,
@@ -5533,7 +8055,7 @@ def _export_run(
         "matrix_id": matrix_id,
         "measurement_terminal": lifecycle.get("terminal_event") == "run_complete",
         "run_id": run_id,
-        "status": status,
+        "status": manifest["status"],
     }
 
 
@@ -6710,11 +9232,17 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
         isinstance(manifest_suite, dict)
         and manifest_suite.get("id") == PREFIX_CACHE_SUITE_ID
     )
+    is_memory_manifest = (
+        isinstance(manifest_suite, dict)
+        and manifest_suite.get("id") == MEMORY_OPERATION_SUITE_ID
+    )
     if is_prefix_cache_manifest:
         # Cache bundles are intentionally a complete, exact outer document.
         # Do not rely on checksums alone: an attacker can refresh checksums
         # after adding a generic manifest field such as trace text.
         _project_prefix_cache_manifest(manifest)
+    if is_memory_manifest:
+        _project_memory_manifest(manifest)
     for manifest_key, index_key in (
         ("source_run_id", "run_id"),
         ("evidence_kind", "evidence_kind"),
@@ -6732,6 +9260,7 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
         raise EvidenceError(f"run terminal classification mismatch: {run_id}")
     suite = manifest.get("suite")
     agentic_suite: dict[str, Any] | None = None
+    memory_suite: dict[str, Any] | None = None
     manifest_cases = suite.get("cases") if isinstance(suite, dict) else None
     if isinstance(suite, dict) and (
         suite.get("id") == "agentic-tools"
@@ -6746,6 +9275,24 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
         agentic_suite = _project_agentic_suite(suite)
         if agentic_suite != suite:
             raise EvidenceError(f"agentic suite projection mismatch: {run_id}")
+    if isinstance(suite, dict) and (
+        suite.get("id") == MEMORY_OPERATION_SUITE_ID
+        or (
+            isinstance(manifest_cases, list)
+            and any(
+                isinstance(case, dict) and case.get("kind") == "memory"
+                for case in manifest_cases
+            )
+        )
+    ):
+        memory_suite = _project_memory_suite(
+            suite, binding_model=manifest.get("model")
+        )
+        if not _json_strict_equal(memory_suite, suite):
+            raise EvidenceError(f"memory suite projection mismatch: {run_id}")
+        validated_memory_model = _validate_projected_memory_model(manifest.get("model"))
+        if not _json_strict_equal(validated_memory_model, manifest.get("model")):
+            raise EvidenceError(f"memory model projection mismatch: {run_id}")
 
     samples = _load_json(directory / "samples.json", root)
     samples = _expect_object_keys(
@@ -6763,6 +9310,13 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
         or type(samples["schema_version"]) is not str
     ):
         raise EvidenceError("prefix-cache samples document does not match its exact schema")
+    if memory_suite is not None and (
+        type(samples["sample_count"]) is not int
+        or samples["sample_count"]
+        != len(MEMORY_OPERATION_SCENARIO_IDS) * MEMORY_OPERATION_VARIANT_COUNT
+        or type(samples["schema_version"]) is not str
+    ):
+        raise EvidenceError("memory samples document does not match its exact schema")
     summary = _load_json(directory / "summary.json", root)
     summary = _expect_object_keys(
         summary, {"aggregates", "schema_version"}, name="run summary"
@@ -6772,10 +9326,21 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     aggregates = summary["aggregates"]
     if not isinstance(aggregates, dict):
         raise EvidenceError(f"run aggregates must be an object: {run_id}")
+    if memory_suite is not None:
+        aggregates = _project_memory_summary_document(aggregates, source=False)
+        if manifest.get("status") != aggregates.get("status"):
+            raise EvidenceError("memory manifest status disagrees with its aggregates")
     _validate_agentic_aggregates(
         samples["samples"],
         aggregates,
         suite=agentic_suite,
+        terminal=bool(entry["measurement_terminal"]),
+    )
+    _validate_memory_aggregates(
+        samples["samples"],
+        aggregates,
+        model=manifest.get("model"),
+        suite=memory_suite,
         terminal=bool(entry["measurement_terminal"]),
     )
     _validate_prefix_cache_aggregates(
@@ -6807,6 +9372,15 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
         or chunks != [f"telemetry-{index:04d}.json" for index in range(1, len(chunks) + 1)]
     ):
         raise EvidenceError(f"telemetry index mismatch: {run_id}")
+    if memory_suite is not None:
+        expected_memory_telemetry = _telemetry_files([])["telemetry.json"]
+        if not _json_strict_equal(telemetry, expected_memory_telemetry):
+            raise EvidenceError("memory telemetry index changed")
+        _validate_memory_bundle_file_set(
+            {path.name for path in directory.iterdir()},
+            chunks,
+            include_checksums=True,
+        )
     sample_count = 0
     segment_count = 0
     expected_sample_index = 1
