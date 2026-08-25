@@ -327,6 +327,79 @@ This is a bounded synthetic two-hop retrieval check. It does not establish
 general reasoning, long-document comprehension, multi-document question
 answering, or a broad long-context quality claim.
 
+### Concurrent long-context throughput protocol
+
+The [`throughput-saturation` suite](manifests/suites/throughput_saturation.toml)
+and [`long-context-tps` suite](manifests/suites/long_context_tps.toml) compare
+the pinned Qwen3.6 35B-A3B and Qwen3.8 27B NVFP4+MTP3 vLLM recipes without
+changing their historical profiles. Separate suites keep 32K offered-load
+saturation distinct from conservative native-context C1/C2 measurements.
+
+The dedicated `*-tps64` profiles serve a 32,768-token maximum context and send
+barrier-synchronized client bursts through offered C64. The Qwen3.6/Qwen3.8
+profiles use 50%/80% GPU-memory utilization respectively, FP8 KV, an
+8,192-token batch ceiling, chunked prefill and MTP depth three. The suite
+measures 256-token short-prompt generation at C1, C8, C16, C32 and C64, then fresh
+8,192- and 30,720-word synthetic inputs through C64 and C32 respectively.
+Configured C is offered load, not proof that every request is simultaneously
+resident. Sampled server running/waiting logs may describe observed occupancy,
+but the generic summary does not parse them into an exact concurrency metric.
+The tokenizer-free planning estimate places the 30,720-word/C32 cells below a
+previously observed Qwen3.8 KV capacity; actual tokenization and server
+admission remain authoritative.
+
+The conservative `*-long-tps` profiles serve 262,144 tokens and set
+`--max-num-seqs 2`. Qwen3.6 uses 40% memory and an 8,192-token batch ceiling;
+Qwen3.8 uses 52% memory and a 4,096-token batch ceiling. The long suite sends
+C1 and C2 fixed-output generation at 61,440, 122,880 and 245,760 repeated-word
+targets. Pre-run KV-capacity arithmetic is an admission estimate, not proof
+that two requests execute concurrently or that their tokenized contexts have
+those exact lengths.
+
+Both suites include key-presence retrieval probes; the saturation suite also
+checks 30,720 words at offered C32, while the native-context suite checks
+245,760 words at offered C2. Each request has a unique nonce, but chat-template
+tokens may precede it and the validator requires key presence rather than
+exact-response equality. Every dedicated profile explicitly passes
+`--no-enable-prefix-caching`, and selection validation restricts each suite to
+its exact profile family. The generic TPS path does not parse the startup
+log, require request-scoped cache counters, or emit a cache-verification label.
+A run may therefore be described as profile-and-startup-log cache-off only
+after separate log inspection; it must not be called counter-verified when
+request counters are unavailable. Context rejections, request errors and
+failed retrieval remain failures.
+
+The five short-prompt cells have one excluded serial warmup request. Long-input
+generation and retrieval cells have no case warmup, so first-use effects are
+inside their measurements. Generation validation is strict: every response
+must finish by length with exactly 256 completion tokens. One short response
+invalidates the whole cell, and the summary suppresses its aggregate and median
+decode rates. A completed validation-failed cell is terminal and is not retried
+by resume; resume only retries cases recorded as failed.
+
+Report total prompt and completion tokens, case wall time, aggregate output
+tokens per measured case wall second, median TTFT, the median client-estimated
+post-first-emission decode rate, validation state, configured offered
+concurrency, any separately sampled running/waiting occupancy, run-level MTP
+metrics when available, telemetry and cleanup state. Case wall excludes warmup
+but includes prefill, queueing, client setup and between-burst journal overhead.
+Long-prompt aggregate output TPS is therefore not pure decode TPS. SSE events
+may bundle tokens, making the client decode estimate secondary; report its
+chunking indicator. MTP metrics are cumulative server-lifetime counters that
+also cover priming and warmup and may combine resumed lifetimes, not per-case
+acceptance measurements.
+
+Three repetitions are three synchronized bursts in one server lifecycle. They
+support descriptive medians and explicit burst ranges only, not p95 or
+significance claims; pooled request p95 fields emitted by the generic reporter
+are not used for this protocol. Disclose every failed attempt and restart even
+when a later completed attempt makes the final summary look clean. The frozen
+schema-2 plan fingerprint binds the model, full suite geometry and resolved
+image, and profile/suite selection is paired fail-closed. It does not bind the
+dirty working-tree patch; a dirty-worktree run without a patch digest remains
+exploratory. The workload is a synthetic capacity and serving-throughput
+surface, not a general long-context quality evaluation.
+
 ### Native llama.cpp prefix-cache protocol
 
 The [`llamacpp-prefix-cache` suite](manifests/suites/llamacpp_prefix_cache.toml)

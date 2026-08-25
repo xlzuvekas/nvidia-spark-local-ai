@@ -80,6 +80,25 @@ KNOWN_AGENTIC_CASE_IDS = frozenset(
     }
 )
 KNOWN_MEMORY_OPERATION_CASE_IDS = frozenset(MEMORY_OPERATION_SCENARIO_IDS)
+_TPS_PROFILE_IDS_BY_SUITE = {
+    "long-context-tps": frozenset(
+        {
+            "qwen36-35b-a3b-nvfp4-mtp3-long-tps",
+            "qwen38-27b-nvfp4-mtp3-long-tps",
+        }
+    ),
+    "throughput-saturation": frozenset(
+        {
+            "qwen36-35b-a3b-nvfp4-mtp3-tps64",
+            "qwen38-27b-nvfp4-mtp3-tps64",
+        }
+    ),
+}
+_TPS_SUITE_BY_PROFILE_ID = {
+    profile_id: suite_id
+    for suite_id, profile_ids in _TPS_PROFILE_IDS_BY_SUITE.items()
+    for profile_id in profile_ids
+}
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -1293,7 +1312,7 @@ def validate_suite(suite: SuiteSpec, *, context: str = "suite") -> None:
 def validate_benchmark_selection(
     model: ModelSpec, suite: SuiteSpec, *, context: str = "selection"
 ) -> None:
-    """Require prefix-cache profiles and the dedicated suite to travel together."""
+    """Require protocol-specific profiles and suites to travel together."""
 
     cache_profile = getattr(model, "prefix_cache_mode", None) is not None
     cache_suite = suite.id == PREFIX_CACHE_SUITE_ID
@@ -1306,6 +1325,19 @@ def validate_benchmark_selection(
         raise ManifestError(
             f"{context}: the {PREFIX_CACHE_SUITE_ID!r} suite requires a "
             "prefix_cache_mode profile"
+        )
+    model_id = getattr(model, "id", None)
+    tps_suite_profiles = _TPS_PROFILE_IDS_BY_SUITE.get(suite.id)
+    tps_profile_suite = _TPS_SUITE_BY_PROFILE_ID.get(model_id)
+    if tps_suite_profiles is not None and model_id not in tps_suite_profiles:
+        raise ManifestError(
+            f"{context}: the {suite.id!r} suite requires one of its exact "
+            "dedicated cache-off profiles"
+        )
+    if tps_profile_suite is not None and suite.id != tps_profile_suite:
+        raise ManifestError(
+            f"{context}: the {model.id!r} profile requires the "
+            f"{tps_profile_suite!r} suite"
         )
     if suite.id == MEMORY_OPERATION_SUITE_ID:
         try:

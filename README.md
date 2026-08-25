@@ -11,6 +11,7 @@ quality checks, and the provenance needed to interpret each number.
 | Which MoE models are useful on Spark now? | [MoE landscape, including Laguna XS/S, G9v3, NInfer, and the dense Muse control](docs/moe-landscape-2026-08-17.md) |
 | Which models complete deterministic multi-turn tool tasks? | [Agentic tool-use results: strict success, trace correctness, MTP, and Laguna](docs/agentic-tools-results-2026-08-17.md) |
 | How does Qwen3.6 perform on a strict two-hop long-context needle? | [Two-hop retrieval: Qwen3.6 baseline versus MTP2 through the 245,760-target tier](docs/multihop-long-context-results-2026-08-18.md) |
+| How fast are Qwen3.6 and Qwen3.8 under concurrency and 61K–246K inputs? | [Cache-off NVFP4+MTP3 throughput, wall time, TTFT, retries, and validation](docs/qwen36-qwen38-long-context-tps-2026-08-25.md) |
 | What does native llama.cpp prompt-KV reuse change for Qwen3.6? | [Prefix-cache controls: 8K and 32K shared-prefix cold/warm observations](docs/qwen36-prefix-cache-results-2026-08-18.md) |
 | How did Qwen3-Coder-Next fare on terminal coding tasks? | [Harbor/Terminal-Bench-derived results: Qwen Code versus OpenCode](docs/harbor-terminal-results-2026-08-18.md) |
 | How are offline coding-agent harnesses compared? | [Qwen3-Coder-Next Harbor campaign protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign) |
@@ -32,6 +33,16 @@ explains how to create and verify both files.
 
 ## What the results say
 
+- In the exploratory cache-off NVFP4+MTP3 panel, Qwen3.6 35B-A3B reached
+  893.674 aggregate output tok/s at short-prompt offered C64 versus 359.081 for
+  dense Qwen3.8 27B. At the approximately 246K/C2 target, the matched valid
+  rates were 1.951 versus 0.728 tok/s and median TTFT was 195.222 versus
+  517.665 seconds. Qwen3.8 finalized and validated all 25 planned cases;
+  Qwen3.6 finalized all 25 and validated 22. Both passed 39/39 retrieval
+  requests. Both saturation plans encountered a CUDA failure in their first
+  server lifetime and completed the remaining cases after resume, so this
+  uncached baseline is neither a cache-savings nor production-stability claim.
+  See the [long-context throughput report](docs/qwen36-qwen38-long-context-tps-2026-08-25.md).
 - In the first memory-operation component panel, all four no-thinking profiles
   tied at 33/33 exact operations: 9/9 Graphiti-style resolver decisions and
   24/24 explicitly synthetic transaction decisions. Laguna XS had the smallest
@@ -95,6 +106,10 @@ geometries, slot counts, or validation states.
 
 ### Measured results
 
+- [Qwen3.6 versus Qwen3.8 cache-off long-context throughput — 2026-08-25](docs/qwen36-qwen38-long-context-tps-2026-08-25.md):
+  short saturation, 8K/30K concurrency and native 61K–246K generation and
+  retrieval, with wall time, validation failures and retry instability kept
+  explicit.
 - [Memory-operation component results — 2026-08-24](docs/memory-operations-results-2026-08-24.md):
   exact Graphiti-style resolver and synthetic transaction decisions across
   Laguna XS/S, Ornith, and Qwen3.6, with the Ornith thinking run kept

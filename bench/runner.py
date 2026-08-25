@@ -1241,6 +1241,14 @@ def _prompt(case: SimpleNamespace, nonce: str) -> str:
             + filler[midpoint:]
             + " What is the unique benchmark key? Reply with only the key."
         )
+    if kind == "concurrency" and prompt_repetitions > 0:
+        return (
+            prefix
+            + "Read all of the synthetic context before answering. "
+            + ("measurement " * prompt_repetitions)
+            + "Now write an unbroken numbered list of distinct two-word phrases. "
+            "Continue until the output limit; do not conclude or summarize."
+        )
     return (
         prefix
         + "Write an unbroken numbered list of distinct two-word phrases. "

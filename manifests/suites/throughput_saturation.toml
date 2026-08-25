@@ -1,0 +1,170 @@
+schema_version = 1
+
+[suite]
+id = "throughput-saturation"
+description = "Fresh cache-off short and 8K/30K serving saturation through offered C64."
+
+[[cases]]
+id = "decode-saturation-c1"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "decode-saturation-c8"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 8
+prompt_repetitions = 0
+
+[[cases]]
+id = "decode-saturation-c16"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 16
+prompt_repetitions = 0
+
+[[cases]]
+id = "decode-saturation-c32"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 32
+prompt_repetitions = 0
+
+[[cases]]
+id = "decode-saturation-c64"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 64
+prompt_repetitions = 0
+
+[[cases]]
+id = "long-context-needle-8192-c1"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 8192
+
+[[cases]]
+id = "long-decode-8192-c1"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 8192
+
+[[cases]]
+id = "long-decode-8192-c8"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 8
+prompt_repetitions = 8192
+
+[[cases]]
+id = "long-decode-8192-c32"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 32
+prompt_repetitions = 8192
+
+[[cases]]
+id = "long-decode-8192-c64"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 64
+prompt_repetitions = 8192
+
+[[cases]]
+id = "long-context-needle-30720-c1"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 30720
+
+[[cases]]
+id = "long-decode-30720-c1"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 30720
+
+[[cases]]
+id = "long-decode-30720-c8"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 8
+prompt_repetitions = 30720
+
+[[cases]]
+id = "long-decode-30720-c32"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 32
+prompt_repetitions = 30720
+
+[[cases]]
+id = "long-context-needle-30720-c32"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 32
+prompt_repetitions = 30720

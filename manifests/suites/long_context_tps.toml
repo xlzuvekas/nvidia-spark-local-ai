@@ -1,0 +1,115 @@
+schema_version = 1
+
+[suite]
+id = "long-context-tps"
+description = "Fresh cache-off C1/C2 generation and key-presence retrieval at 61K, 123K, and 246K repeated-word targets."
+
+[[cases]]
+id = "long-context-needle-61440-c1"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 61440
+
+[[cases]]
+id = "long-decode-61440-c1"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 61440
+
+[[cases]]
+id = "long-decode-61440-c2"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 2
+prompt_repetitions = 61440
+
+[[cases]]
+id = "long-context-needle-122880-c1"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 122880
+
+[[cases]]
+id = "long-decode-122880-c1"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 122880
+
+[[cases]]
+id = "long-decode-122880-c2"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 2
+prompt_repetitions = 122880
+
+[[cases]]
+id = "long-context-needle-245760-c1"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 245760
+
+[[cases]]
+id = "long-decode-245760-c1"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 245760
+
+[[cases]]
+id = "long-decode-245760-c2"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 2
+prompt_repetitions = 245760
+
+[[cases]]
+id = "long-context-needle-245760-c2"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 2
+prompt_repetitions = 245760
