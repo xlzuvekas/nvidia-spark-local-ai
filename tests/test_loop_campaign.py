@@ -15,6 +15,7 @@ from bench.loop_campaign import (
     BABILONG_SOURCE,
     HALO_REVISION,
     HALO_SOURCE,
+    HALO_SUBAGENT_ARGUMENT_ERROR,
     HALO_VERSION,
     OPENAI_AGENTS_VERSION,
     OPENAI_VERSION,
@@ -30,6 +31,7 @@ from bench.loop_campaign import (
     _content_hash,
     _docker_worker_command,
     _halo_profile_candidates,
+    _halo_subagent_builder_with_validation_recovery,
     _needs_server_restart,
     _safe_error_result,
     _scalar_result,
@@ -509,6 +511,16 @@ class ScalarResultTests(unittest.TestCase):
         self.assertEqual(token_result["error_tokens_used"], 140_027)
         self.assertEqual(token_result["error_token_limit"], 131_072)
 
+        response_error = RuntimeError("private response error")
+        response_error.response = SimpleNamespace(  # type: ignore[attr-defined]
+            status_code=503,
+            text="private provider response",
+        )
+        response_result = _safe_error_result(response_error)
+        self.assertEqual(response_result["error_http_status"], 503)
+        self.assertNotIn("response", json.dumps(response_result))
+        self.assertNotIn("private", json.dumps(response_result))
+
     def test_accepts_only_allowlisted_scalar_shapes(self) -> None:
         self.assertEqual(
             _scalar_result(
@@ -586,6 +598,80 @@ class ScalarResultTests(unittest.TestCase):
         self.assertEqual(clamped["temperature"], 0.0)
         self.assertEqual(clamped["max_completion_tokens"], 1024)
         self.assertNotIn("max_tokens", clamped)
+
+
+class HaloSubagentValidationRecoveryTests(unittest.TestCase):
+    class SyntheticValidationError(Exception):
+        pass
+
+    class SyntheticInfrastructureError(Exception):
+        pass
+
+    @classmethod
+    def _tool(cls) -> SimpleNamespace:
+        async def invoke(_context: object, raw_arguments: str) -> str:
+            try:
+                arguments = json.loads(raw_arguments)
+            except json.JSONDecodeError as error:
+                raise cls.SyntheticValidationError from error
+            if not isinstance(arguments, dict) or not isinstance(
+                arguments.get("input"), str
+            ):
+                raise cls.SyntheticValidationError
+            return "valid-child-result"
+
+        def build() -> SimpleNamespace:
+            return SimpleNamespace(on_invoke_tool=invoke)
+
+        guarded_build = _halo_subagent_builder_with_validation_recovery(
+            build,
+            cls.SyntheticValidationError,
+        )
+        return guarded_build()
+
+    def test_valid_call_preserves_normal_result(self) -> None:
+        result = asyncio.run(
+            self._tool().on_invoke_tool(object(), '{"input":"question"}')
+        )
+        self.assertEqual(result, "valid-child-result")
+
+    def test_malformed_json_returns_constant_retry_error(self) -> None:
+        result = asyncio.run(self._tool().on_invoke_tool(object(), "{"))
+        self.assertEqual(result, HALO_SUBAGENT_ARGUMENT_ERROR)
+
+    def test_missing_input_returns_constant_retry_error(self) -> None:
+        result = asyncio.run(self._tool().on_invoke_tool(object(), "{}"))
+        self.assertEqual(result, HALO_SUBAGENT_ARGUMENT_ERROR)
+
+    def test_wrong_type_input_returns_constant_retry_error(self) -> None:
+        result = asyncio.run(
+            self._tool().on_invoke_tool(object(), '{"input":123}')
+        )
+        self.assertEqual(result, HALO_SUBAGENT_ARGUMENT_ERROR)
+
+    def test_validation_error_does_not_echo_input(self) -> None:
+        private_marker = "synthetic-private-tool-input"
+        raw_arguments = json.dumps({"input": {"value": private_marker}})
+        result = asyncio.run(
+            self._tool().on_invoke_tool(object(), raw_arguments)
+        )
+        self.assertEqual(result, HALO_SUBAGENT_ARGUMENT_ERROR)
+        self.assertNotIn(private_marker, result)
+
+    def test_non_validation_error_propagates(self) -> None:
+        async def invoke(_context: object, _raw_arguments: str) -> str:
+            raise self.SyntheticInfrastructureError
+
+        def build() -> SimpleNamespace:
+            return SimpleNamespace(on_invoke_tool=invoke)
+
+        guarded_build = _halo_subagent_builder_with_validation_recovery(
+            build,
+            self.SyntheticValidationError,
+        )
+        tool = guarded_build()
+        with self.assertRaises(self.SyntheticInfrastructureError):
+            asyncio.run(tool.on_invoke_tool(object(), '{"input":"question"}'))
 
 
 class FrozenPlanTests(unittest.TestCase):

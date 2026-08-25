@@ -93,14 +93,21 @@ episode. Its scalar outcomes were:
 | 128K depth-1 RLM, 24,576-token guard, 300-second timeout | Reached `TokenLimitExceededError` after 178.865 seconds. |
 | 128K depth-1 RLM, 131,072-token guard, 300-second timeout | Reached the 300-second episode timeout before producing an answer. |
 | 128K depth-1 RLM, 131,072-token guard, 600-second timeout | Reached `TokenLimitExceededError` after 458.422 seconds. |
-| 256-trace depth-1 HALO on Qwen3.8 | Reached seven successful model requests, then failed after 110.132 seconds with a scalar-only `UserError`; the prior protocol intentionally retained no exception prose, so the exact SDK layer is not yet identified. |
-| Same HALO probe on the Qwen3.6 fallback | Failed after 85.184 seconds with `EngineAgentExhaustedError`; no quality or throughput result was recorded. |
+| 256-trace depth-1 HALO on Qwen3.8 | Server startup took 261.759 seconds. All 8 model requests returned HTTP 200, then the episode failed after 111.263 seconds with `UserError` caused by `ValidationError`. Source isolation identified the pinned HALO `call_subagent` `AgentAsToolInput` parse, which overwrites the SDK error handler. |
+| Same HALO diagnostic probe on Qwen3.6 | Server startup took 118.787 seconds. All 30 chat requests returned HTTP 500 because xgrammar could not import `normalize_tool_choice`; HALO exhausted the agent after 67.113 seconds with `EngineAgentExhaustedError`. |
 
 The RLM failures show that upstream `max_tokens` counts cumulative input and
 output usage as repeated root history grows; it is not merely a per-response
 output allowance. The new 262,144-token and 900-second limits add bounded
 headroom above both observed failure boundaries. They are corrected admission
 bounds, not evidence that a 128K episode now completes.
+
+Both HALO attempts used the `none` reasoning controls. Their failures are
+integration defects, not model-quality or throughput measurements, so neither
+produced a quality or TPS result. The diagnostic campaign exhausted cleanly,
+performed no third server restart, and verified cleanup. The full HALO campaign
+remains gated until the Qwen3.8 validation-recovery workaround and matched
+MTP-disabled fallback pass exact canaries.
 
 ### BABILong comparison boundary
 
@@ -135,8 +142,9 @@ The ordered serving profiles are:
 
 1. primary: `qwen38-27b-nvfp4-mtp3-halo`, derived from the eight-sequence
    Qwen3.8 NVFP4+MTP3 throughput profile; and
-2. fallback: `qwen36-35b-a3b-nvfp4-mtp3-halo`, derived from the conservative
-   Qwen3.6 35B-A3B NVFP4+MTP3 profile.
+2. fallback: `qwen38-27b-nvfp4-halo`, using the same Qwen3.8 artifact,
+   revision, NVFP4 quantization, and eight-sequence serving geometry with MTP
+   disabled.
 
 Both profiles make `{"enable_thinking":false}` a server-side chat-template
 default as well as a request-body default. This matters because HALO's root and
@@ -147,21 +155,25 @@ plan records `reasoning_effort = "none"`; the pinned HALO model config omits the
 top-level API field, while both serving profiles enforce the equivalent Qwen
 control with the server-side `enable_thinking=false` default.
 
-For Qwen3.8, the supported graded effort values are `low`, `medium`, and
-`xhigh`; `high` is not supported. Qwen3.6 exposes only binary thinking control,
-not the same graded effort interface. Any later matched effort supplement must
-therefore be Qwen3.8-only. It is not admissible until the selected effort is
-verified on root, subagent, synthesis, and compaction requests; in particular,
-the direct compaction path must no longer be an open propagation gap. The
-current overnight matrix remains a thinking-off HALO control and does not mix
-effort levels.
+Both selected Qwen3.8 profiles support the same graded effort values: `low`,
+`medium`, and `xhigh`; `high` is not supported. The current control remains
+`none`. Any later matched effort supplement is not admissible until the
+selected effort is verified on root, subagent, synthesis, and compaction
+requests; in particular, the direct compaction path must no longer be an open
+propagation gap. The current overnight matrix remains a thinking-off HALO
+control and does not mix effort levels.
 
-The profiles are failover choices, not a matched model panel. The runner tries
-Qwen3.8 first. If it cannot admit, or its first HALO case fails before any HALO
-case completes, it locks the campaign to Qwen3.6 and retries that case. After
-the first successful HALO case, the selected profile is fixed across failures
-and resumes. Every event retains its actual `profile_id`, and summaries group
-by both treatment and profile rather than combining mixed-profile observations.
+The profiles are failover choices over one model artifact, not an independent
+model panel. The runner tries Qwen3.8 with MTP3 first. If it cannot admit, or
+its first HALO case fails before any HALO case completes, it locks the campaign
+to the MTP-disabled Qwen3.8 profile and retries that case. This isolates
+serving-path and MTP sensitivity while holding model revision, quantization,
+and concurrency geometry fixed. After the first successful HALO case, the
+selected profile is fixed across failures and resumes. Every event retains its
+actual `profile_id`, and summaries group by both treatment and profile rather
+than combining mixed-profile observations. Qwen3.6 remains diagnostic-only:
+its pinned xgrammar stack cannot serve tool requests, so it is neither an
+overnight fallback nor an independent comparison model.
 
 ### Synthetic Graphiti-like traces
 
@@ -198,10 +210,7 @@ exact cached artifacts and fail closed when any pin is absent:
 - Qwen3.8 NVFP4 revision
   `6128240ebaf4eaa7bad2b3d1c72c37d677c5f462` and image digest
   `sha256:4a2f33a884222f7049b983263ad9976f89452bb81affecf5b67d89ad35c1bc31`;
-- Qwen3.6 NVFP4 revision
-  `491c2f1ea524c639598bf8fa787a93fed5a6fbce` and image digest
-  `sha256:95c498a475142c20c989c65e5d223348c09fed83ba17ddf44f117610c0bd3268`;
-  and
+- both HALO profiles reuse that exact Qwen3.8 artifact and image; and
 - the exact cached BABILong Arrow files described above.
 
 SparkBench's repository-wide lock and unrelated-workload preflight still

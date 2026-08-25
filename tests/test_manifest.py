@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import textwrap
+import tomllib
 import unittest
 
 from bench.manifest import (
@@ -221,8 +222,17 @@ class ManifestLoaderTests(unittest.TestCase):
 
         qwen36 = models["qwen36-35b-a3b-nvfp4-mtp3"]
         self.assertEqual(
-            set(qwen36.tasks), {"chat", "json", "vision", "tools", "thinking"}
+            set(qwen36.tasks), {"chat", "json", "vision", "thinking"}
         )
+        qwen36_profile_ids = (
+            "qwen36-35b-a3b-nvfp4-mtp3",
+            "qwen36-35b-a3b-nvfp4-mtp3-halo",
+            "qwen36-35b-a3b-nvfp4-mtp3-long-tps",
+            "qwen36-35b-a3b-nvfp4-mtp3-tps64",
+        )
+        for model_id in qwen36_profile_ids:
+            with self.subTest(model=model_id):
+                self.assertNotIn("tools", models[model_id].tasks)
         self.assertIn("--trust-remote-code", qwen36.args)
         self.assertEqual(qwen36.args[qwen36.args.index("--moe-backend") + 1], "marlin")
         self.assertEqual(
@@ -238,6 +248,41 @@ class ManifestLoaderTests(unittest.TestCase):
         for model_id in ("qwen3-8b-nvfp4", "qwen3-8b-fp8"):
             model = models[model_id]
             self.assertEqual(model.args[model.args.index("--kv-cache-dtype") + 1], "fp8")
+
+    def test_qwen38_halo_fallback_is_exact_thinking_off_no_mtp_clone(self) -> None:
+        models = load_models(ROOT / "manifests" / "models.toml")
+        control = models["qwen38-27b-nvfp4-throughput"]
+        fallback = models["qwen38-27b-nvfp4-halo"]
+
+        fallback_args = list(fallback.args)
+        default_index = fallback_args.index("--default-chat-template-kwargs")
+        default_json = fallback_args[default_index + 1]
+        del fallback_args[default_index : default_index + 2]
+        self.assertEqual(
+            replace(
+                fallback,
+                id=control.id,
+                description=control.description,
+                args=tuple(fallback_args),
+            ),
+            control,
+        )
+        self.assertEqual(
+            json.loads(fallback.request_body_json or "{}"),
+            {"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        self.assertEqual(json.loads(default_json), {"enable_thinking": False})
+        self.assertNotIn("--speculative-config", fallback.args)
+        self.assertEqual(fallback.tasks, ("chat", "json", "tools"))
+
+        with (ROOT / "manifests" / "campaigns" / "rlm_halo_overnight.toml").open(
+            "rb"
+        ) as campaign_file:
+            campaign = tomllib.load(campaign_file)
+        self.assertEqual(
+            campaign["halo"]["model_profiles"],
+            ["qwen38-27b-nvfp4-mtp3-halo", "qwen38-27b-nvfp4-halo"],
+        )
 
     def test_phi4_multimodal_profile_is_pinned_and_does_not_overclaim(self) -> None:
         models = load_models(ROOT / "manifests" / "models.toml")

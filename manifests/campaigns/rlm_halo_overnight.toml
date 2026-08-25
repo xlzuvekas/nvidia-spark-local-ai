@@ -43,7 +43,7 @@ worker_isolation = "docker"
 reasoning_effort = "none"
 model_profiles = [
   "qwen38-27b-nvfp4-mtp3-halo",
-  "qwen36-35b-a3b-nvfp4-mtp3-halo",
+  "qwen38-27b-nvfp4-halo",
 ]
 trace_counts = [256, 2048, 8192]
 seeds = [0, 1, 2]

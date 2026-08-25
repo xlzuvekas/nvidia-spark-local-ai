@@ -150,6 +150,44 @@ args = [
 ]
 
 [[models]]
+id = "qwen38-27b-nvfp4-halo"
+description = "Thinking-off HALO fallback using the matched eight-sequence Qwen3.8 NVFP4 geometry without MTP."
+support_status = "exploratory"
+backend = "vllm"
+source = "Inferact/Qwen3.8-27B-NVFP4"
+revision = "6128240ebaf4eaa7bad2b3d1c72c37d677c5f462"
+served_name = "Qwen/Qwen3.8-27B"
+tasks = ["chat", "json", "tools"]
+architecture = "dense"
+quantization = "nvfp4"
+lifecycle = "docker"
+image = "vllm/vllm-openai:qwen38"
+image_digest = "sha256:4a2f33a884222f7049b983263ad9976f89452bb81affecf5b67d89ad35c1bc31"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 100.0
+endpoint = "http://127.0.0.1:8000/v1"
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+args = [
+  "--served-model-name", "Qwen/Qwen3.8-27B",
+  "--host", "0.0.0.0",
+  "--port", "8000",
+  "--tensor-parallel-size", "1",
+  "--max-model-len", "32768",
+  "--gpu-memory-utilization", "0.80",
+  "--kv-cache-dtype", "fp8",
+  "--max-num-seqs", "8",
+  "--max-num-batched-tokens", "8192",
+  "--enable-chunked-prefill",
+  "--enable-prefix-caching",
+  "--default-chat-template-kwargs", '{"enable_thinking":false}',
+  "--reasoning-parser", "qwen3",
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "qwen3_coder",
+]
+
+[[models]]
 id = "qwen38-27b-nvfp4-mtp3"
 description = "Validated NVFP4 configuration with the best tested MTP depth."
 support_status = "exploratory"
@@ -1603,7 +1641,8 @@ args = [
 
 # Pinned official/current downloads. These conservative profiles reuse the
 # cached NVIDIA vLLM 26.07 image and remain unavailable until the exact revision
-# is present in the user Hugging Face cache.
+# is present in the user Hugging Face cache. Tool tasks are omitted because the
+# pinned image's xgrammar integration is incompatible with this model family.
 [[models]]
 id = "qwen36-35b-a3b-nvfp4-mtp3"
 description = "Spark-recipe Qwen3.6 multimodal MoE adapted to a conservative 32K MTP3 profile."
@@ -1612,7 +1651,7 @@ backend = "vllm"
 source = "nvidia/Qwen3.6-35B-A3B-NVFP4"
 revision = "491c2f1ea524c639598bf8fa787a93fed5a6fbce"
 served_name = "nvidia/Qwen3.6-35B-A3B-NVFP4"
-tasks = ["chat", "json", "vision", "tools", "thinking"]
+tasks = ["chat", "json", "vision", "thinking"]
 request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
 architecture = "moe-vlm+mtp3"
 quantization = "nvfp4+mtp3"
@@ -1649,13 +1688,13 @@ args = [
 
 [[models]]
 id = "qwen36-35b-a3b-nvfp4-mtp3-halo"
-description = "Thinking-off HALO fallback derived from the conservative Qwen3.6 NVFP4+MTP3 profile."
+description = "Retained thinking-off HALO diagnostic derived from the conservative Qwen3.6 NVFP4+MTP3 profile."
 support_status = "spark_vllm_recipe"
 backend = "vllm"
 source = "nvidia/Qwen3.6-35B-A3B-NVFP4"
 revision = "491c2f1ea524c639598bf8fa787a93fed5a6fbce"
 served_name = "nvidia/Qwen3.6-35B-A3B-NVFP4"
-tasks = ["chat", "json", "vision", "tools", "thinking"]
+tasks = ["chat", "json", "vision", "thinking"]
 request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
 architecture = "moe-vlm+mtp3"
 quantization = "nvfp4+mtp3"
@@ -1699,7 +1738,7 @@ backend = "vllm"
 source = "nvidia/Qwen3.6-35B-A3B-NVFP4"
 revision = "491c2f1ea524c639598bf8fa787a93fed5a6fbce"
 served_name = "nvidia/Qwen3.6-35B-A3B-NVFP4"
-tasks = ["chat", "json", "vision", "tools", "thinking"]
+tasks = ["chat", "json", "vision", "thinking"]
 request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
 architecture = "moe-vlm+mtp3"
 quantization = "nvfp4+mtp3"
@@ -1742,7 +1781,7 @@ backend = "vllm"
 source = "nvidia/Qwen3.6-35B-A3B-NVFP4"
 revision = "491c2f1ea524c639598bf8fa787a93fed5a6fbce"
 served_name = "nvidia/Qwen3.6-35B-A3B-NVFP4"
-tasks = ["chat", "json", "vision", "tools", "thinking"]
+tasks = ["chat", "json", "vision", "thinking"]
 request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
 architecture = "moe-vlm+mtp3"
 quantization = "nvfp4+mtp3"

@@ -84,6 +84,10 @@ HALO_VERSION = "0.3.5"
 OPENAI_AGENTS_VERSION = "0.14.7"
 OPENAI_VERSION = "2.32.0"
 PYARROW_VERSION = "21.0.0"
+HALO_SUBAGENT_ARGUMENT_ERROR = (
+    "Invalid call_subagent arguments. Retry with a JSON object containing a string "
+    "field named input."
+)
 
 HALO_FAILURE_FAMILIES = (
     "search_timeout",
@@ -1261,7 +1265,7 @@ def _request_json(
     request = urllib.request.Request(
         base_url.rstrip("/") + "/chat/completions",
         data=_canonical_json(body).encode(),
-        headers={"Content-Type": "application/json", "Authorization": "Bearer local-benchmark"},
+        headers={"Content-Type": "application/json", "Authorization": "Bearer local"},
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
@@ -1366,7 +1370,7 @@ def _worker_rlm_babilong(payload: Mapping[str, Any]) -> dict[str, Any]:
     rlm = RLM(
         backend="vllm",
         backend_kwargs={
-            "api_key": "local-benchmark",
+            "api_key": "local",
             "model_name": str(payload["model"]),
             "base_url": str(payload["base_url"]),
             "max_retries": 0,
@@ -1483,6 +1487,27 @@ def _bounded_halo_chat_create(original: Any, max_output_tokens: int) -> Any:
     return create
 
 
+def _halo_subagent_builder_with_validation_recovery(
+    original_builder: Any, validation_error_type: type[BaseException]
+) -> Any:
+    """Keep malformed ``call_subagent`` arguments model-visible and recoverable."""
+
+    def build(*args: Any, **kwargs: Any) -> Any:
+        tool = original_builder(*args, **kwargs)
+        original_invoke = tool.on_invoke_tool
+
+        async def invoke(context: Any, raw_arguments: str) -> Any:
+            try:
+                return await original_invoke(context, raw_arguments)
+            except validation_error_type:
+                return HALO_SUBAGENT_ARGUMENT_ERROR
+
+        tool.on_invoke_tool = invoke
+        return tool
+
+    return build
+
+
 def _worker_halo(payload: Mapping[str, Any]) -> dict[str, Any]:
     if payload.get("reasoning_effort") != "none":
         raise LoopCampaignError("HALO reasoning effort is unsupported by this control")
@@ -1498,8 +1523,10 @@ def _worker_halo(payload: Mapping[str, Any]) -> dict[str, Any]:
         from engine.model_provider_config import ModelProviderConfig
         from engine.models.messages import AgentMessage
         from engine.sandbox.sandbox import Sandbox
+        from engine.tools import subagent_tool_factory
         from engine.tools.subagent_result import SubagentToolResult
         from openai.resources.chat.completions import AsyncCompletions
+        from pydantic import ValidationError
     except ImportError as error:
         raise LoopCampaignError("Pinned HALO runtime is unavailable") from error
 
@@ -1530,7 +1557,7 @@ def _worker_halo(payload: Mapping[str, Any]) -> dict[str, Any]:
         compaction_model=model,
         model_provider=ModelProviderConfig(
             base_url=str(payload["base_url"]),
-            api_key="local-benchmark",
+            api_key="local",
         ),
         maximum_depth=int(payload["max_depth"]),
         maximum_parallel_subagents=int(payload["max_parallel"]),
@@ -1561,9 +1588,21 @@ def _worker_halo(payload: Mapping[str, Any]) -> dict[str, Any]:
     bounded_create = _bounded_halo_chat_create(
         AsyncCompletions.create, int(payload["max_output_tokens"])
     )
+    guarded_subagent_builder = _halo_subagent_builder_with_validation_recovery(
+        subagent_tool_factory._build_subagent_as_tool,
+        ValidationError,
+    )
     with (
         patch.object(Sandbox, "get", return_value=None),
         patch.object(AsyncCompletions, "create", new=bounded_create),
+        # HALO 0.3.5 replaces the SDK agent-as-tool invocation wrapper and loses
+        # its validation-error handler. Keep only that model-input failure
+        # recoverable while preserving every other exception and return value.
+        patch.object(
+            subagent_tool_factory,
+            "_build_subagent_as_tool",
+            new=guarded_subagent_builder,
+        ),
     ):
         for event in stream_engine_output(
             [AgentMessage(role="user", content=_halo_prompt())],
@@ -1922,11 +1961,16 @@ def _safe_error_result(error: BaseException) -> dict[str, Any]:
         for attribute, field in (
             ("tokens_used", "error_tokens_used"),
             ("token_limit", "error_token_limit"),
-            ("status_code", "error_http_status"),
         ):
             value = getattr(source, attribute, None)
             if type(value) is int and value >= 0:
                 result[field] = value
+        status_code = getattr(source, "status_code", None)
+        if type(status_code) is not int or status_code < 0:
+            response = getattr(source, "response", None)
+            status_code = getattr(response, "status_code", None)
+        if type(status_code) is int and status_code >= 0:
+            result["error_http_status"] = status_code
         code = getattr(source, "code", None)
         if isinstance(code, str) and code in _SAFE_ERROR_CODES:
             result["error_code"] = code
