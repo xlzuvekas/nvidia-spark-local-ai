@@ -42,7 +42,10 @@ RLM uses the dedicated `rlm-qwen3-8b-bf16` profile:
 `mit-oasys/rlm-qwen3-8b-v0.1` in BF16 with a 40,960-token serving context.
 The long BABILong document remains in the RLM Python context variable; bounded
 model subcalls inspect it without placing the entire 128K document into one
-server request. Thinking is disabled in every request.
+server request. This checkpoint has fixed model-recipe reasoning behavior:
+the runtime effort interface is unsupported and has not been validated, so the
+campaign records `reasoning_control = "fixed_unsupported"` and does not claim a
+thinking-off RLM treatment.
 
 | Treatment | Lengths | Tasks | Rows | Cases |
 | --- | --- | --- | --- | ---: |
@@ -59,10 +62,10 @@ The recursive bounds are fixed at:
 
 - eight iterations;
 - two concurrent recursive subcalls;
-- a 24,576-token upstream `max_tokens` guard for each RLM instance (root or
+- a 262,144-token upstream `max_tokens` guard for each RLM instance (root or
   recursive child), not a global cross-recursion token cap;
 - 768 output tokens per RLM model call;
-- 300 seconds per RLM episode; and
+- 900 seconds per RLM episode; and
 - required digest-pinned Docker isolation for recursive workers.
 
 Direct controls have a 180-second episode timeout and request only the one
@@ -75,8 +78,29 @@ RLM 0.1.3 reports `UsageSummary` for the current RLM instance but does not fold
 recursive-child usage into the parent's returned summary. The journal therefore
 labels those SDK-reported counts separately and marks their recursive coverage;
 the exclusive vLLM counter deltas are the campaign-wide token and successful-call
-accounting for an episode. The 300-second killable-worker timeout remains the
+accounting for an episode. The 900-second killable-worker timeout remains the
 global resource bound for recursive work.
+
+### Smoke-test boundary
+
+The pre-campaign smoke exercised serving, worker isolation, timeout, fallback,
+and cleanup paths, but did not produce a successful 128K RLM or scored HALO
+episode. Its scalar outcomes were:
+
+| Probe | Outcome |
+| --- | --- |
+| 8K direct control | Completed in 6.522 seconds, used 7,694 prompt and 64 generation tokens (9.812 effective generation tokens/s), and answered incorrectly. |
+| 128K depth-1 RLM, 24,576-token guard, 300-second timeout | Reached `TokenLimitExceededError` after 178.865 seconds. |
+| 128K depth-1 RLM, 131,072-token guard, 300-second timeout | Reached the 300-second episode timeout before producing an answer. |
+| 128K depth-1 RLM, 131,072-token guard, 600-second timeout | Reached `TokenLimitExceededError` after 458.422 seconds. |
+| 256-trace depth-1 HALO on Qwen3.8 | Reached seven successful model requests, then failed after 110.132 seconds with a scalar-only `UserError`; the prior protocol intentionally retained no exception prose, so the exact SDK layer is not yet identified. |
+| Same HALO probe on the Qwen3.6 fallback | Failed after 85.184 seconds with `EngineAgentExhaustedError`; no quality or throughput result was recorded. |
+
+The RLM failures show that upstream `max_tokens` counts cumulative input and
+output usage as repeated root history grows; it is not merely a per-response
+output allowance. The new 262,144-token and 900-second limits add bounded
+headroom above both observed failure boundaries. They are corrected admission
+bounds, not evidence that a 128K episode now completes.
 
 ### BABILong comparison boundary
 
@@ -118,7 +142,19 @@ Both profiles make `{"enable_thinking":false}` a server-side chat-template
 default as well as a request-body default. This matters because HALO's root and
 subagent calls use the OpenAI Agents SDK while its synthesis and compaction
 tools call Chat Completions directly. The campaign forces the Agents SDK to
-Chat Completions so all four paths use the locally validated vLLM surface.
+Chat Completions so all four paths use the locally validated vLLM surface. The
+plan records `reasoning_effort = "none"`; the pinned HALO model config omits the
+top-level API field, while both serving profiles enforce the equivalent Qwen
+control with the server-side `enable_thinking=false` default.
+
+For Qwen3.8, the supported graded effort values are `low`, `medium`, and
+`xhigh`; `high` is not supported. Qwen3.6 exposes only binary thinking control,
+not the same graded effort interface. Any later matched effort supplement must
+therefore be Qwen3.8-only. It is not admissible until the selected effort is
+verified on root, subagent, synthesis, and compaction requests; in particular,
+the direct compaction path must no longer be an open propagation gap. The
+current overnight matrix remains a thinking-off HALO control and does not mix
+effort levels.
 
 The profiles are failover choices, not a matched model panel. The runner tries
 Qwen3.8 first. If it cannot admit, or its first HALO case fails before any HALO
@@ -238,6 +274,9 @@ local run paths.
 - Resume reloads the immutable plan and append-only journal, recovers only
   containers bearing the plan's exact run identity, skips completed or other
   terminal cases, and continues the first pending case.
+- The v2 reader retains v1 plan compatibility for offline summaries. Execution
+  still requires the plan's exact repository revision, so changing protocol
+  code never silently resumes an older plan under new semantics.
 - An unexpected process failure can therefore be resumed safely. A graceful
   `SIGINT` or `SIGTERM` is an intentional campaign stop: remaining cases are
   marked terminal `case_skipped_campaign_stop` and are not re-opened by
@@ -247,7 +286,9 @@ local run paths.
 - The unattended launch is wrapped in a user-service watchdog configured to
   signal the controller before the hard stop, bound its shutdown grace, and
   restart only unexpected nonzero exits. This outer guard does not move any
-  frozen phase deadline or reopen terminal cases.
+  frozen phase deadline or reopen terminal cases. Its stop grace must cover the
+  longest frozen startup timeout plus cleanup; a 90-second grace is invalid
+  because the observed cold starts took as long as 279.914 seconds.
 - Server startup rejection, case failure, timeout, fallback selection,
   exhaustion, deadline skip, recovery, and cleanup failure are distinct scalar
   journal events. Failed or partial work must not be reported as zero quality

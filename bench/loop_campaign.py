@@ -48,9 +48,10 @@ from .runtime import (
 from .telemetry import TelemetrySampler
 
 
-PROTOCOL_VERSION = 1
-PLAN_SCHEMA_VERSION = 1
-SUMMARY_SCHEMA_VERSION = "sparkbench-loop-campaign-summary-v1"
+PROTOCOL_VERSION = 2
+PLAN_SCHEMA_VERSION = 2
+SUPPORTED_PLAN_SCHEMA_VERSIONS = frozenset({1, PLAN_SCHEMA_VERSION})
+SUMMARY_SCHEMA_VERSION = "sparkbench-loop-campaign-summary-v2"
 DEFAULT_MANIFEST = Path("manifests/campaigns/rlm_halo_overnight.toml")
 DEFAULT_MODELS = Path("manifests/models.toml")
 DEFAULT_RESULTS = Path("results/loop-campaigns")
@@ -132,6 +133,7 @@ _UPSTREAM_KEYS = frozenset(
 _RLM_KEYS = frozenset(
     {
         "model_profile",
+        "reasoning_control",
         "lengths",
         "direct_lengths",
         "tasks",
@@ -151,6 +153,7 @@ _RLM_KEYS = frozenset(
 _HALO_KEYS = frozenset(
     {
         "model_profiles",
+        "reasoning_effort",
         "trace_counts",
         "seeds",
         "depths",
@@ -293,6 +296,10 @@ def load_campaign_manifest(path: Path) -> dict[str, Any]:
     rlm = _require_exact_keys(document["rlm"], _RLM_KEYS, name="rlm")
     if not isinstance(rlm["model_profile"], str) or not rlm["model_profile"]:
         raise LoopCampaignError("rlm.model_profile is required")
+    if rlm["reasoning_control"] != "fixed_unsupported":
+        raise LoopCampaignError(
+            "rlm.reasoning_control must be fixed_unsupported for the pinned model"
+        )
     lengths = _string_list(rlm["lengths"], name="rlm.lengths")
     direct_lengths = _string_list(rlm["direct_lengths"], name="rlm.direct_lengths")
     tasks = _string_list(rlm["tasks"], name="rlm.tasks")
@@ -327,6 +334,10 @@ def load_campaign_manifest(path: Path) -> dict[str, Any]:
         raise LoopCampaignError("The frozen RLM protocol requires Docker worker isolation")
 
     halo = _require_exact_keys(document["halo"], _HALO_KEYS, name="halo")
+    if halo["reasoning_effort"] != "none":
+        raise LoopCampaignError(
+            "halo.reasoning_effort must be none for the frozen control campaign"
+        )
     halo_profiles = _string_list(halo["model_profiles"], name="halo.model_profiles")
     if len(halo_profiles) != 2:
         raise LoopCampaignError("HALO requires one primary and one fallback profile")
@@ -375,6 +386,7 @@ def build_cases(config: Mapping[str, Any]) -> list[dict[str, Any]]:
                     case = {
                         "phase": "rlm",
                         "treatment": treatment,
+                        "reasoning_control": rlm["reasoning_control"],
                         "context_length": length,
                         "task": task,
                         "row_index": row_index,
@@ -398,6 +410,7 @@ def build_cases(config: Mapping[str, Any]) -> list[dict[str, Any]]:
                 case = {
                     "phase": "rlm",
                     "treatment": "rlm_depth2",
+                    "reasoning_control": rlm["reasoning_control"],
                     "context_length": length,
                     "task": task,
                     "row_index": row_index,
@@ -423,6 +436,7 @@ def build_cases(config: Mapping[str, Any]) -> list[dict[str, Any]]:
                 case = {
                     "phase": "halo",
                     "treatment": f"halo_depth{depth}",
+                    "reasoning_effort": halo["reasoning_effort"],
                     "trace_count": trace_count,
                     "seed": seed,
                     "max_depth": depth,
@@ -437,6 +451,7 @@ def build_cases(config: Mapping[str, Any]) -> list[dict[str, Any]]:
             case = {
                 "phase": "halo",
                 "treatment": "halo_depth2",
+                "reasoning_effort": halo["reasoning_effort"],
                 "trace_count": trace_count,
                 "seed": seed,
                 "max_depth": 2,
@@ -660,6 +675,32 @@ def _verify_frozen_admission(plan: Mapping[str, Any]) -> None:
         raise LoopCampaignError("Frozen BABILong artifacts have drifted since planning")
 
 
+def _validate_reasoning_profiles(
+    config: Mapping[str, Any], models: Mapping[str, Any]
+) -> None:
+    rlm_profile = models[str(config["rlm"]["model_profile"])]
+    if getattr(rlm_profile, "request_body_json", None) is not None:
+        raise LoopCampaignError(
+            "Fixed-unsupported RLM profile must not advertise a reasoning request knob"
+        )
+    expected = {"chat_template_kwargs": {"enable_thinking": False}}
+    for profile_id in config["halo"]["model_profiles"]:
+        profile = models[str(profile_id)]
+        try:
+            request_default = json.loads(str(profile.request_body_json))
+            arguments = list(profile.args)
+            index = arguments.index("--default-chat-template-kwargs")
+            server_default = json.loads(arguments[index + 1])
+        except (AttributeError, IndexError, ValueError, json.JSONDecodeError) as error:
+            raise LoopCampaignError(
+                "HALO control profile lacks a valid thinking-off default"
+            ) from error
+        if request_default != expected or server_default != expected["chat_template_kwargs"]:
+            raise LoopCampaignError(
+                "HALO control profile must enforce enable_thinking=false"
+            )
+
+
 def create_campaign_plan(
     *,
     campaign_path: Path,
@@ -681,6 +722,7 @@ def create_campaign_plan(
     for profile_id in config["halo"]["model_profiles"]:
         if "tools" not in models[profile_id].tasks:
             raise LoopCampaignError("Every HALO profile must declare tool capability")
+    _validate_reasoning_profiles(config, models)
     if not DEFAULT_LOOP_PYTHON.is_file():
         raise LoopCampaignError("Pinned loop environment is absent")
     if not Path("/usr/bin/docker").is_file():
@@ -728,7 +770,10 @@ def load_campaign_plan(run_dir: Path) -> dict[str, Any]:
         plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise LoopCampaignError("Could not read the frozen campaign plan") from error
-    if not isinstance(plan, dict) or plan.get("schema_version") != PLAN_SCHEMA_VERSION:
+    if (
+        not isinstance(plan, dict)
+        or plan.get("schema_version") not in SUPPORTED_PLAN_SCHEMA_VERSIONS
+    ):
         raise LoopCampaignError("Frozen campaign plan schema is unsupported")
     integrity_hash = plan.get("integrity_hash")
     payload = {key: value for key, value in plan.items() if key != "integrity_hash"}
@@ -747,7 +792,42 @@ def load_campaign_plan(run_dir: Path) -> dict[str, Any]:
         raw = {key: value for key, value in case.items() if key != "case_id"}
         if case.get("case_id") != _case_id(raw):
             raise LoopCampaignError("Frozen campaign case identity does not match")
+    if plan["schema_version"] == PLAN_SCHEMA_VERSION:
+        _validate_v2_plan_semantics(plan)
     return plan
+
+
+def _validate_v2_plan_semantics(plan: Mapping[str, Any]) -> None:
+    if plan.get("protocol_version") != PROTOCOL_VERSION:
+        raise LoopCampaignError("Frozen campaign protocol version is unsupported")
+    rlm = plan.get("rlm")
+    halo = plan.get("halo")
+    if (
+        not isinstance(rlm, dict)
+        or rlm.get("reasoning_control") != "fixed_unsupported"
+    ):
+        raise LoopCampaignError("Frozen RLM reasoning control is invalid")
+    if not isinstance(halo, dict) or halo.get("reasoning_effort") != "none":
+        raise LoopCampaignError("Frozen HALO reasoning effort is invalid")
+    cases = plan.get("cases")
+    if not isinstance(cases, list) or not cases:
+        raise LoopCampaignError("Frozen campaign cases are missing")
+    for case in cases:
+        phase = case.get("phase")
+        if phase == "rlm":
+            if (
+                case.get("reasoning_control") != rlm["reasoning_control"]
+                or "reasoning_effort" in case
+            ):
+                raise LoopCampaignError("Frozen RLM case reasoning control is invalid")
+        elif phase == "halo":
+            if (
+                case.get("reasoning_effort") != halo["reasoning_effort"]
+                or "reasoning_control" in case
+            ):
+                raise LoopCampaignError("Frozen HALO case reasoning effort is invalid")
+        else:
+            raise LoopCampaignError("Frozen campaign case phase is invalid")
 
 
 def babilong_arrow_path(context_length: str, task: str) -> Path:
@@ -1201,6 +1281,8 @@ def _request_json(
 
 
 def _worker_direct_babilong(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if payload.get("reasoning_control") != "fixed_unsupported":
+        raise LoopCampaignError("RLM reasoning control is unsupported")
     started = time.perf_counter()
     response = _request_json(
         base_url=str(payload["base_url"]),
@@ -1218,7 +1300,6 @@ def _worker_direct_babilong(payload: Mapping[str, Any]) -> dict[str, Any]:
             ],
             "temperature": 0.0,
             "max_tokens": 64,
-            "chat_template_kwargs": {"enable_thinking": False},
         },
     )
     choices = response.get("choices")
@@ -1264,6 +1345,8 @@ def _usage_int(usage: Mapping[str, Any], name: str) -> int:
 
 
 def _worker_rlm_babilong(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if payload.get("reasoning_control") != "fixed_unsupported":
+        raise LoopCampaignError("RLM reasoning control is unsupported")
     try:
         from rlm import RLM
     except ImportError as error:
@@ -1279,7 +1362,6 @@ def _worker_rlm_babilong(payload: Mapping[str, Any]) -> dict[str, Any]:
     sampling = {
         "temperature": 0.0,
         "max_tokens": int(payload["max_output_tokens"]),
-        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
     }
     rlm = RLM(
         backend="vllm",
@@ -1402,6 +1484,8 @@ def _bounded_halo_chat_create(original: Any, max_output_tokens: int) -> Any:
 
 
 def _worker_halo(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if payload.get("reasoning_effort") != "none":
+        raise LoopCampaignError("HALO reasoning effort is unsupported by this control")
     os.environ["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"] = "1"
     os.environ["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"] = "1"
     os.environ["OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA"] = "false"
@@ -1568,7 +1652,7 @@ def _worker_entry(kind: str) -> int:
         else:
             raise LoopCampaignError("Unknown worker kind")
     except BaseException as error:
-        result = {"status": "error", "error_type": type(error).__name__}
+        result = _safe_error_result(error)
     os.write(result_fd, (_canonical_json(result) + "\n").encode())
     os.close(result_fd)
     return 0 if result.get("status") == "ok" else 1
@@ -1773,6 +1857,82 @@ def _completed_case_ids(events: Iterable[Mapping[str, Any]]) -> set[str]:
     }
 
 
+_SAFE_ERROR_TEXT_FIELDS = frozenset(
+    {
+        "error_type",
+        "error_cause_type",
+        "error_code",
+        "error_frame_file",
+        "error_frame_function",
+        "error_cause_frame_file",
+        "error_cause_frame_function",
+    }
+)
+_SAFE_ERROR_TEXT = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+_SAFE_ERROR_CODES = frozenset(
+    {
+        "content_filter",
+        "context_length_exceeded",
+        "invalid_function_parameters",
+        "missing_required_parameter",
+        "string_above_max_length",
+        "unknown_parameter",
+    }
+)
+
+
+def _error_frame_fields(error: BaseException, *, prefix: str) -> dict[str, Any]:
+    traceback = error.__traceback__
+    if traceback is None:
+        return {}
+    while traceback.tb_next is not None:
+        traceback = traceback.tb_next
+    filename = Path(traceback.tb_frame.f_code.co_filename).name
+    function = traceback.tb_frame.f_code.co_name
+    if not _SAFE_ERROR_TEXT.fullmatch(filename) or not _SAFE_ERROR_TEXT.fullmatch(function):
+        return {}
+    return {
+        f"{prefix}_frame_file": filename,
+        f"{prefix}_frame_function": function,
+        f"{prefix}_frame_line": traceback.tb_lineno,
+    }
+
+
+def _safe_error_result(error: BaseException) -> dict[str, Any]:
+    """Return scalar diagnostics without exception prose, payloads, or local paths."""
+
+    result: dict[str, Any] = {
+        "status": "error",
+        "error_type": type(error).__name__,
+        **_error_frame_fields(error, prefix="error"),
+    }
+    cause = error
+    seen: set[int] = set()
+    for _ in range(8):
+        seen.add(id(cause))
+        next_cause = cause.__cause__ or cause.__context__
+        if next_cause is None or id(next_cause) in seen:
+            break
+        cause = next_cause
+    if cause is not error:
+        result["error_cause_type"] = type(cause).__name__
+        result.update(_error_frame_fields(cause, prefix="error_cause"))
+
+    for source in (error, cause):
+        for attribute, field in (
+            ("tokens_used", "error_tokens_used"),
+            ("token_limit", "error_token_limit"),
+            ("status_code", "error_http_status"),
+        ):
+            value = getattr(source, attribute, None)
+            if type(value) is int and value >= 0:
+                result[field] = value
+        code = getattr(source, "code", None)
+        if isinstance(code, str) and code in _SAFE_ERROR_CODES:
+            result["error_code"] = code
+    return result
+
+
 def _scalar_result(result: Mapping[str, Any]) -> dict[str, Any]:
     """Validate that a worker result contains JSON scalar values only."""
 
@@ -1783,7 +1943,10 @@ def _scalar_result(result: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", key):
             raise LoopCampaignError("Worker returned an invalid scalar field")
         if value is None or isinstance(value, (str, bool)):
-            if isinstance(value, str) and key != "error_type":
+            if isinstance(value, str) and (
+                key not in _SAFE_ERROR_TEXT_FIELDS
+                or not _SAFE_ERROR_TEXT.fullmatch(value)
+            ):
                 raise LoopCampaignError("Worker returned non-allowlisted text")
             output[key] = value
             continue
@@ -1908,6 +2071,7 @@ def _run_rlm_case(
         "question": row["question"],
         "target": row["target"],
         "task": case["task"],
+        "reasoning_control": case["reasoning_control"],
         "base_url": worker_base_url,
         "model": profile["served_name"],
         "request_timeout_s": min(150.0, max(30.0, timeout_s - 10)),
@@ -2013,6 +2177,7 @@ def _run_halo_case(
         "truth": truth,
         "base_url": server.base_url,
         "model": profile["served_name"],
+        "reasoning_effort": case["reasoning_effort"],
         "max_depth": case["max_depth"],
         "max_parallel": case["max_parallel"],
         "max_turns": case["max_turns"],
@@ -2043,6 +2208,8 @@ def _case_dimensions(case: Mapping[str, Any]) -> dict[str, Any]:
     allowed = (
         "phase",
         "treatment",
+        "reasoning_control",
+        "reasoning_effort",
         "context_length",
         "task",
         "row_index",
@@ -2368,21 +2535,38 @@ def summarize_campaign(run_dir: Path) -> dict[str, Any]:
     if not halo_profiles:
         halo_profiles.add(str(plan["halo"]["model_profiles"][0]))
     group_keys = {
-        (case["phase"], case["treatment"], rlm_profile)
+        (
+            case["phase"],
+            case["treatment"],
+            rlm_profile,
+            case.get("reasoning_control"),
+            case.get("reasoning_effort"),
+        )
         for case in plan["cases"]
         if case["phase"] == "rlm"
     }
     group_keys.update(
-        (case["phase"], case["treatment"], profile_id)
+        (
+            case["phase"],
+            case["treatment"],
+            profile_id,
+            case.get("reasoning_control"),
+            case.get("reasoning_effort"),
+        )
         for case in plan["cases"]
         if case["phase"] == "halo"
         for profile_id in halo_profiles
     )
-    for phase, treatment, profile_id in sorted(group_keys):
+    for phase, treatment, profile_id, reasoning_control, reasoning_effort in sorted(
+        group_keys, key=lambda item: tuple("" if value is None else str(value) for value in item)
+    ):
         planned = [
             case
             for case in plan["cases"]
-            if case["phase"] == phase and case["treatment"] == treatment
+            if case["phase"] == phase
+            and case["treatment"] == treatment
+            and case.get("reasoning_control") == reasoning_control
+            and case.get("reasoning_effort") == reasoning_effort
         ]
         observations = [
             completed_by_id[case["case_id"]]
@@ -2398,6 +2582,8 @@ def summarize_campaign(run_dir: Path) -> dict[str, Any]:
             "phase": phase,
             "treatment": treatment,
             "profile_id": profile_id,
+            "reasoning_control": reasoning_control,
+            "reasoning_effort": reasoning_effort,
             "planned_cases": len(planned),
             "completed_cases": len(observations),
             "mean_wall_s": _mean(event.get("wall_s") for event in observations),
@@ -2532,7 +2718,9 @@ def _record_case_result(
     event_name = "case_timeout" if result.get("status") == "timeout" else "case_failed"
     failure: dict[str, Any] = {"event": event_name, **base}
     if event_name == "case_failed":
-        failure["error_type"] = str(result.get("error_type") or "WorkerError")
+        diagnostics = _scalar_result(result)
+        diagnostics.setdefault("error_type", "WorkerError")
+        failure.update(diagnostics)
     journal.append(failure)
     return False
 
@@ -2591,7 +2779,7 @@ def _run_phase_case(
                 timeout_s=timeout_s,
             )
     except BaseException as error:
-        result = {"status": "error", "error_type": type(error).__name__}
+        result = _safe_error_result(error)
         metrics_delta = {}
     complete = _record_case_result(
         case=case,
@@ -2607,6 +2795,14 @@ def _run_phase_case(
 
 def _phase_cases(plan: Mapping[str, Any], phase: str) -> list[Mapping[str, Any]]:
     return [case for case in plan["cases"] if case["phase"] == phase]
+
+
+def _needs_server_restart(*, pending_count: int, current_attempt: int) -> bool:
+    """Avoid a cold restart when the final pending case just exhausted retries."""
+
+    if pending_count <= 0 or current_attempt <= 0:
+        raise ValueError("pending_count and current_attempt must be positive")
+    return current_attempt < 2 or pending_count > 1
 
 
 def _prepare_halo_fixtures(
@@ -2706,6 +2902,18 @@ def _run_rlm_phase(
                 cutoff_name=cutoff_name,
             )
             if restart and not complete:
+                if attempts + 1 >= 2:
+                    journal.append(
+                        {
+                            "event": "case_exhausted",
+                            "case_id": case["case_id"],
+                            **_case_dimensions(case),
+                        }
+                    )
+                if not _needs_server_restart(
+                    pending_count=len(pending), current_attempt=attempts + 1
+                ):
+                    break
                 telemetry.set_phase("rlm_server_restart")
                 if not _safe_stop_server(
                     server=server,
@@ -2911,6 +3119,18 @@ def _run_halo_phase(
                 cutoff_name=cutoff_name,
             )
             if restart and not complete:
+                if attempts + 1 >= 2:
+                    journal.append(
+                        {
+                            "event": "case_exhausted",
+                            "case_id": case["case_id"],
+                            **_case_dimensions(case),
+                        }
+                    )
+                if not _needs_server_restart(
+                    pending_count=len(pending), current_attempt=attempts + 1
+                ):
+                    break
                 telemetry.set_phase("halo_server_restart")
                 if not _safe_stop_server(
                     server=server,

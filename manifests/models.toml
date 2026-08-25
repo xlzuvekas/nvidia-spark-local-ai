@@ -2308,14 +2308,13 @@ args = [
 
 [[models]]
 id = "rlm-qwen3-8b-bf16"
-description = "Cached recursive-language-model Qwen3 derivative."
+description = "Cached recursive-language-model Qwen3 derivative with fixed model-recipe reasoning; runtime effort controls are unsupported and unverified."
 support_status = "exploratory"
 backend = "vllm"
 source = "mit-oasys/rlm-qwen3-8b-v0.1"
 revision = "399e50b54e59248c7e79476fe4a7f1772bb7c75b"
 served_name = "mit-oasys/rlm-qwen3-8b-v0.1"
 tasks = ["chat", "json", "thinking"]
-request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
 architecture = "dense"
 quantization = "bf16"
 lifecycle = "docker"

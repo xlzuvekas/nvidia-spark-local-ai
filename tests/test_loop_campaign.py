@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 from bench.loop_campaign import (
@@ -29,7 +30,10 @@ from bench.loop_campaign import (
     _content_hash,
     _docker_worker_command,
     _halo_profile_candidates,
+    _needs_server_restart,
+    _safe_error_result,
     _scalar_result,
+    _validate_reasoning_profiles,
     build_cases,
     compare_babilong_answer,
     generate_halo_trace_fixture,
@@ -45,7 +49,7 @@ from bench.loop_campaign import (
 def _minimal_campaign_toml() -> str:
     """Return a complete, strictly valid campaign with a small case matrix."""
 
-    return f'''schema_version = 1
+    return f'''schema_version = {PLAN_SCHEMA_VERSION}
 id = "unit-loop"
 description = "Synthetic unit-test campaign"
 
@@ -70,6 +74,7 @@ babilong_revision = "{BABILONG_REVISION}"
 
 [rlm]
 model_profile = "synthetic-rlm"
+reasoning_control = "fixed_unsupported"
 lengths = ["4k", "64k"]
 direct_lengths = ["4k"]
 tasks = ["qa1", "qa2"]
@@ -87,6 +92,7 @@ worker_isolation = "docker"
 
 [halo]
 model_profiles = ["synthetic-halo", "synthetic-halo-fallback"]
+reasoning_effort = "none"
 trace_counts = [32, 64]
 seeds = [0, 1]
 depths = [0, 1]
@@ -146,6 +152,13 @@ class LoopCaseConstructionTests(unittest.TestCase):
         self.assertEqual(len(rlm_cases), 13)
         self.assertEqual(len(halo_cases), 9)
         self.assertEqual(
+            {case["reasoning_control"] for case in rlm_cases},
+            {"fixed_unsupported"},
+        )
+        self.assertEqual(
+            {case["reasoning_effort"] for case in halo_cases}, {"none"}
+        )
+        self.assertEqual(
             [case["treatment"] for case in rlm_cases[:4]],
             ["rlm_depth1", "direct", "direct", "rlm_depth1"],
         )
@@ -189,6 +202,65 @@ class LoopCaseConstructionTests(unittest.TestCase):
         self.assertEqual(
             _halo_profile_candidates(plan, primary_success_then_failure), ["primary"]
         )
+
+    def test_manifest_rejects_unfrozen_reasoning_controls(self) -> None:
+        for old, new, message in (
+            (
+                'reasoning_control = "fixed_unsupported"',
+                'reasoning_control = "none"',
+                "fixed_unsupported",
+            ),
+            (
+                'reasoning_effort = "none"',
+                'reasoning_effort = "high"',
+                "reasoning_effort",
+            ),
+        ):
+            with self.subTest(new=new), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "campaign.toml"
+                path.write_text(_minimal_campaign_toml().replace(old, new), encoding="utf-8")
+                with self.assertRaisesRegex(LoopCampaignError, message):
+                    load_campaign_manifest(path)
+
+    def test_final_exhausted_case_does_not_require_a_cold_restart(self) -> None:
+        self.assertTrue(_needs_server_restart(pending_count=1, current_attempt=1))
+        self.assertTrue(_needs_server_restart(pending_count=2, current_attempt=2))
+        self.assertFalse(_needs_server_restart(pending_count=1, current_attempt=2))
+        with self.assertRaises(ValueError):
+            _needs_server_restart(pending_count=0, current_attempt=1)
+
+    def test_reasoning_profile_admission_rejects_drift(self) -> None:
+        config = {
+            "rlm": {"model_profile": "rlm"},
+            "halo": {"model_profiles": ["primary", "fallback"]},
+        }
+        thinking_off = '{"chat_template_kwargs":{"enable_thinking":false}}'
+        server_off = '{"enable_thinking":false}'
+        models = {
+            "rlm": SimpleNamespace(request_body_json=None),
+            "primary": SimpleNamespace(
+                request_body_json=thinking_off,
+                args=("--default-chat-template-kwargs", server_off),
+            ),
+            "fallback": SimpleNamespace(
+                request_body_json=thinking_off,
+                args=("--default-chat-template-kwargs", server_off),
+            ),
+        }
+        _validate_reasoning_profiles(config, models)
+
+        drifted = dict(models)
+        drifted["primary"] = SimpleNamespace(
+            request_body_json=thinking_off,
+            args=("--default-chat-template-kwargs", '{"enable_thinking":true}'),
+        )
+        with self.assertRaisesRegex(LoopCampaignError, "enable_thinking=false"):
+            _validate_reasoning_profiles(config, drifted)
+
+        drifted = dict(models)
+        drifted["rlm"] = SimpleNamespace(request_body_json=thinking_off)
+        with self.assertRaisesRegex(LoopCampaignError, "reasoning request knob"):
+            _validate_reasoning_profiles(config, drifted)
 
 
 class BabiLongScoringTests(unittest.TestCase):
@@ -402,6 +474,41 @@ malformed
 
 
 class ScalarResultTests(unittest.TestCase):
+    def test_safe_error_result_keeps_only_scalar_failure_fingerprints(self) -> None:
+        class ProviderError(Exception):
+            code = "invalid_function_parameters"
+            status_code = 400
+
+        try:
+            try:
+                raise ProviderError("private provider response")
+            except ProviderError as cause:
+                raise RuntimeError("private outer message") from cause
+        except RuntimeError as error:
+            result = _safe_error_result(error)
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_type"], "RuntimeError")
+        self.assertEqual(result["error_cause_type"], "ProviderError")
+        self.assertEqual(result["error_code"], "invalid_function_parameters")
+        self.assertEqual(result["error_http_status"], 400)
+        self.assertEqual(result["error_frame_file"], "test_loop_campaign.py")
+        self.assertEqual(result["error_cause_frame_file"], "test_loop_campaign.py")
+        self.assertNotIn("message", result)
+        self.assertNotIn("private", json.dumps(result))
+        self.assertEqual(_scalar_result(result)["error_type"], "RuntimeError")
+
+        ProviderError.code = "req_identifier_123"
+        identifier_result = _safe_error_result(ProviderError("private"))
+        self.assertNotIn("error_code", identifier_result)
+
+        token_error = RuntimeError("private")
+        token_error.tokens_used = 140_027  # type: ignore[attr-defined]
+        token_error.token_limit = 131_072  # type: ignore[attr-defined]
+        token_result = _safe_error_result(token_error)
+        self.assertEqual(token_result["error_tokens_used"], 140_027)
+        self.assertEqual(token_result["error_token_limit"], 131_072)
+
     def test_accepts_only_allowlisted_scalar_shapes(self) -> None:
         self.assertEqual(
             _scalar_result(
@@ -486,6 +593,7 @@ class FrozenPlanTests(unittest.TestCase):
         raw_case: dict[str, object] = {
             "phase": "halo",
             "treatment": "halo_depth0",
+            "reasoning_effort": "none",
             "trace_count": 32,
             "seed": 0,
             "max_depth": 0,
@@ -499,6 +607,8 @@ class FrozenPlanTests(unittest.TestCase):
             "schema_version": PLAN_SCHEMA_VERSION,
             "protocol_version": PROTOCOL_VERSION,
             "campaign_id": "unit-loop",
+            "rlm": {"reasoning_control": "fixed_unsupported"},
+            "halo": {"reasoning_effort": "none"},
             "cases": [case],
         }
 
@@ -508,6 +618,20 @@ class FrozenPlanTests(unittest.TestCase):
             plan = _write_plan(plan_path, base)
             self.assertEqual(load_campaign_plan(run_dir), plan)
 
+            legacy_base = copy.deepcopy(base)
+            legacy_base["schema_version"] = 1
+            legacy_base["protocol_version"] = 1
+            legacy_plan = _write_plan(plan_path, legacy_base)
+            self.assertEqual(load_campaign_plan(run_dir), legacy_plan)
+
+            plan = _write_plan(plan_path, base)
+            protocol_tamper = copy.deepcopy(base)
+            protocol_tamper["protocol_version"] = 1
+            _write_plan(plan_path, protocol_tamper)
+            with self.assertRaisesRegex(LoopCampaignError, "protocol version"):
+                load_campaign_plan(run_dir)
+
+            plan = _write_plan(plan_path, base)
             integrity_tamper = copy.deepcopy(plan)
             integrity_tamper["campaign_id"] = "tampered"
             plan_path.write_text(json.dumps(integrity_tamper), encoding="utf-8")
@@ -526,6 +650,7 @@ class FrozenPlanTests(unittest.TestCase):
         raw_case: dict[str, object] = {
             "phase": "halo",
             "treatment": "halo_depth0",
+            "reasoning_effort": "none",
             "trace_count": 32,
             "seed": 0,
             "max_depth": 0,
@@ -535,8 +660,14 @@ class FrozenPlanTests(unittest.TestCase):
             "schema_version": PLAN_SCHEMA_VERSION,
             "protocol_version": PROTOCOL_VERSION,
             "campaign_id": "unit-loop",
-            "rlm": {"model_profile": "synthetic-rlm"},
-            "halo": {"model_profiles": ["synthetic-halo"]},
+            "rlm": {
+                "model_profile": "synthetic-rlm",
+                "reasoning_control": "fixed_unsupported",
+            },
+            "halo": {
+                "model_profiles": ["synthetic-halo"],
+                "reasoning_effort": "none",
+            },
             "cases": [case],
         }
         complete = {
@@ -570,6 +701,8 @@ class FrozenPlanTests(unittest.TestCase):
                 pending["status"], "measurements_complete_cleanup_pending"
             )
             group = pending["groups"][0]
+            self.assertEqual(group["reasoning_effort"], "none")
+            self.assertIsNone(group["reasoning_control"])
             self.assertIsNone(group["cached_prompt_tokens"])
             self.assertIsNone(group["cache_fraction"])
 

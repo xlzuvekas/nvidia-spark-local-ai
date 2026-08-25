@@ -1,4 +1,4 @@
-schema_version = 1
+schema_version = 2
 id = "rlm-halo-overnight-2026-08-25"
 description = "Deadline-bounded local comparison of direct prompting, recursive RLM inference, and HALO trace analysis on one DGX Spark."
 
@@ -23,22 +23,24 @@ babilong_revision = "ee0d588794c7ac098062ee0d247c733d62e94fe2"
 
 [rlm]
 model_profile = "rlm-qwen3-8b-bf16"
+reasoning_control = "fixed_unsupported"
 lengths = ["8k", "32k", "64k", "128k"]
 direct_lengths = ["8k", "32k"]
 tasks = ["qa1", "qa2", "qa3"]
 row_indices = [11, 47, 73]
 max_iterations = 8
 max_concurrent_subcalls = 2
-max_total_tokens = 24576
+max_total_tokens = 262144
 max_output_tokens = 768
 direct_timeout_s = 180
-episode_timeout_s = 300
+episode_timeout_s = 900
 recursive_depth2_tasks = ["qa2", "qa3"]
 recursive_depth2_lengths = ["32k", "128k"]
 recursive_depth2_rows = [11, 47]
 worker_isolation = "docker"
 
 [halo]
+reasoning_effort = "none"
 model_profiles = [
   "qwen38-27b-nvfp4-mtp3-halo",
   "qwen36-35b-a3b-nvfp4-mtp3-halo",
