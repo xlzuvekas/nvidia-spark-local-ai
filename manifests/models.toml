@@ -226,6 +226,45 @@ args = [
 ]
 
 [[models]]
+id = "qwen38-27b-nvfp4-mtp3-halo"
+description = "Thinking-off HALO profile derived from the eight-sequence NVFP4+MTP3 throughput geometry."
+support_status = "exploratory"
+backend = "vllm"
+source = "Inferact/Qwen3.8-27B-NVFP4"
+revision = "6128240ebaf4eaa7bad2b3d1c72c37d677c5f462"
+served_name = "Qwen/Qwen3.8-27B"
+tasks = ["chat", "json", "tools"]
+architecture = "dense"
+quantization = "nvfp4+mtp3"
+lifecycle = "docker"
+image = "vllm/vllm-openai:qwen38"
+image_digest = "sha256:4a2f33a884222f7049b983263ad9976f89452bb81affecf5b67d89ad35c1bc31"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 100.0
+endpoint = "http://127.0.0.1:8000/v1"
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+args = [
+  "--served-model-name", "Qwen/Qwen3.8-27B",
+  "--host", "0.0.0.0",
+  "--port", "8000",
+  "--tensor-parallel-size", "1",
+  "--max-model-len", "32768",
+  "--gpu-memory-utilization", "0.80",
+  "--kv-cache-dtype", "fp8",
+  "--max-num-seqs", "8",
+  "--max-num-batched-tokens", "8192",
+  "--enable-chunked-prefill",
+  "--enable-prefix-caching",
+  "--default-chat-template-kwargs", '{"enable_thinking":false}',
+  "--reasoning-parser", "qwen3",
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "qwen3_coder",
+  "--speculative-config", '{"method":"mtp","num_speculative_tokens":3}',
+]
+
+[[models]]
 id = "qwen38-27b-nvfp4-mtp3-long-tps"
 description = "Conservative cache-off native-context NVFP4+MTP3 profile for C1/C2 long-context throughput."
 support_status = "exploratory"
@@ -1602,6 +1641,50 @@ args = [
   "--async-scheduling",
   "--enable-prefix-caching",
   "--load-format", "fastsafetensors",
+  "--speculative-config", '{"method":"mtp","num_speculative_tokens":3,"moe_backend":"triton"}',
+  "--reasoning-parser", "qwen3",
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "qwen3_coder",
+]
+
+[[models]]
+id = "qwen36-35b-a3b-nvfp4-mtp3-halo"
+description = "Thinking-off HALO fallback derived from the conservative Qwen3.6 NVFP4+MTP3 profile."
+support_status = "spark_vllm_recipe"
+backend = "vllm"
+source = "nvidia/Qwen3.6-35B-A3B-NVFP4"
+revision = "491c2f1ea524c639598bf8fa787a93fed5a6fbce"
+served_name = "nvidia/Qwen3.6-35B-A3B-NVFP4"
+tasks = ["chat", "json", "vision", "tools", "thinking"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "moe-vlm+mtp3"
+quantization = "nvfp4+mtp3"
+lifecycle = "docker"
+image = "nvcr.io/nvidia/vllm:26.07-py3"
+image_digest = "sha256:95c498a475142c20c989c65e5d223348c09fed83ba17ddf44f117610c0bd3268"
+cache_dir = "user"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 64.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--served-model-name", "nvidia/Qwen3.6-35B-A3B-NVFP4",
+  "--host", "0.0.0.0",
+  "--port", "8000",
+  "--tensor-parallel-size", "1",
+  "--trust-remote-code",
+  "--kv-cache-dtype", "fp8",
+  "--moe-backend", "marlin",
+  "--max-model-len", "32768",
+  "--gpu-memory-utilization", "0.50",
+  "--max-num-seqs", "8",
+  "--max-num-batched-tokens", "8192",
+  "--enable-chunked-prefill",
+  "--async-scheduling",
+  "--enable-prefix-caching",
+  "--load-format", "fastsafetensors",
+  "--default-chat-template-kwargs", '{"enable_thinking":false}',
   "--speculative-config", '{"method":"mtp","num_speculative_tokens":3,"moe_backend":"triton"}',
   "--reasoning-parser", "qwen3",
   "--enable-auto-tool-choice",

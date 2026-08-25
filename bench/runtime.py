@@ -143,9 +143,14 @@ def wait_for_endpoint(
             state = _run(
                 ["docker", "inspect", "--format", "{{.State.Status}} {{.State.ExitCode}}", container_id],
                 check=False,
+                timeout=10,
             )
             if state.returncode or state.stdout.startswith("exited"):
-                logs = _run(["docker", "logs", "--tail", "100", container_id], check=False)
+                logs = _run(
+                    ["docker", "logs", "--tail", "100", container_id],
+                    check=False,
+                    timeout=30,
+                )
                 raise RuntimeErrorWithContext(
                     _redact_text(
                         f"Server exited during startup: {state.stdout.strip()}\n"
@@ -805,6 +810,7 @@ def _existing_container(
             "{{.ID}} {{.Label \"ai.sparkbench.managed\"}} {{.Label \"ai.sparkbench.run\"}}",
         ],
         check=False,
+        timeout=20,
     )
     if result.returncode:
         raise RuntimeErrorWithContext(
@@ -873,6 +879,7 @@ class ManagedServer:
                     self.container_id,
                 ],
                 check=False,
+                timeout=20,
             )
             labels = inspect.stdout.strip().split(maxsplit=1)
             owned = (
@@ -1809,7 +1816,9 @@ def capture_server_provenance(server: ManagedServer) -> dict[str, Any]:
         "startup_s": server.startup_s,
     }
     if server.container_id:
-        result = _run(["docker", "inspect", server.container_id], check=False)
+        result = _run(
+            ["docker", "inspect", server.container_id], check=False, timeout=20
+        )
         if result.returncode == 0:
             inspect = json.loads(result.stdout)[0]
             argv = inspect["Config"].get("Entrypoint", []) + inspect[
@@ -1846,7 +1855,9 @@ def save_server_logs(server: ManagedServer, path: Path) -> None:
         return
     if not server.container_id:
         return
-    result = _run(["docker", "logs", server.container_id], check=False)
+    result = _run(
+        ["docker", "logs", server.container_id], check=False, timeout=30
+    )
     payload = result.stdout
     if result.stderr:
         if payload and not payload.endswith("\n"):

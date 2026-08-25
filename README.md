@@ -23,6 +23,7 @@ quality checks, and the provenance needed to interpret each number.
 | Which profiles and cached artifacts exist? | [Local model inventory](docs/local-model-inventory.md) and [candidate survey](docs/model-candidates-2026-08-15.md) |
 | How did local models handle bounded memory decisions? | [Graphiti-style resolver and synthetic transaction component results](docs/memory-operations-results-2026-08-24.md) |
 | How should Laguna, Graphiti, and MemFS-style reflection be tested locally? | [Article audit and bounded memory benchmark plan](docs/laguna-graphiti-memory-plan-2026-08-24.md) |
+| How will the overnight RLM and HALO loops be compared? | [Frozen paired BABILong-derived and synthetic Graphiti-like campaign protocol](docs/rlm-halo-overnight-2026-08-25.md) |
 
 The generated public evidence archive is intentionally separate from raw run
 data. Its [human-readable map](evidence/README.md) and
@@ -153,6 +154,7 @@ geometries, slot counts, or validation states.
 - [Cached media capabilities](docs/cached-media-capabilities-2026-08-15.md)
 - [Cached training capability](docs/cached-training-capability-2026-08-15.md)
 - [Laguna, Graphiti, and memory-reflection benchmark plan](docs/laguna-graphiti-memory-plan-2026-08-24.md)
+- [RLM and HALO overnight campaign protocol](docs/rlm-halo-overnight-2026-08-25.md)
 - [Nemotron diffusion direct-run guide](docs/nemotron-diffusion-direct.md)
 - [Experimental NInfer SM121a patch and reproduction notes](patches/ninfer/README.md)
 

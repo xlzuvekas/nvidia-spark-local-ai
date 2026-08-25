@@ -1,0 +1,54 @@
+schema_version = 1
+id = "rlm-halo-overnight-2026-08-25"
+description = "Deadline-bounded local comparison of direct prompting, recursive RLM inference, and HALO trace analysis on one DGX Spark."
+
+[window]
+rlm_stop_at = "2026-08-25T20:38:20-07:00"
+measurement_stop_at = "2026-08-26T05:38:20-07:00"
+hard_stop_at = "2026-08-26T06:38:20-07:00"
+cleanup_reserve_s = 3600
+
+[upstreams]
+rlm_source = "alexzhang13/rlm"
+rlm_revision = "0b45df99c43fb3844a3b796a15d13c0f9d07afd8"
+rlm_version = "0.1.3"
+halo_source = "context-labs/HALO"
+halo_revision = "b7f8509745d67b499b4e80efe20ea37c03426a74"
+halo_version = "0.3.5"
+openai_agents_version = "0.14.7"
+openai_version = "2.32.0"
+pyarrow_version = "21.0.0"
+babilong_source = "RMT-team/babilong"
+babilong_revision = "ee0d588794c7ac098062ee0d247c733d62e94fe2"
+
+[rlm]
+model_profile = "rlm-qwen3-8b-bf16"
+lengths = ["8k", "32k", "64k", "128k"]
+direct_lengths = ["8k", "32k"]
+tasks = ["qa1", "qa2", "qa3"]
+row_indices = [11, 47, 73]
+max_iterations = 8
+max_concurrent_subcalls = 2
+max_total_tokens = 24576
+max_output_tokens = 768
+direct_timeout_s = 180
+episode_timeout_s = 300
+recursive_depth2_tasks = ["qa2", "qa3"]
+recursive_depth2_lengths = ["32k", "128k"]
+recursive_depth2_rows = [11, 47]
+worker_isolation = "docker"
+
+[halo]
+model_profiles = [
+  "qwen38-27b-nvfp4-mtp3-halo",
+  "qwen36-35b-a3b-nvfp4-mtp3-halo",
+]
+trace_counts = [256, 2048, 8192]
+seeds = [0, 1, 2]
+depths = [0, 1]
+max_parallel = 2
+max_turns = 10
+max_output_tokens = 1024
+episode_timeout_s = 600
+depth2_trace_counts = [8192]
+depth2_seeds = [0]
