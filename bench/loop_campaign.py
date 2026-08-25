@@ -3096,15 +3096,16 @@ def main(argv: list[str] | None = None) -> int:
     if arguments and arguments[0].startswith("_worker-"):
         return _worker_entry(arguments[0].removeprefix("_worker-"))
     try:
-        controller_python = DEFAULT_LOOP_PYTHON.resolve(strict=True)
+        DEFAULT_LOOP_PYTHON.resolve(strict=True)
+        loop_prefix = DEFAULT_LOOP_PYTHON.parents[1].resolve(strict=True)
     except OSError:
         print("error: pinned loop environment is absent", file=sys.stderr)
         return 2
-    if Path(sys.executable).resolve() != controller_python:
+    if Path(sys.prefix).resolve() != loop_prefix:
         os.execv(
-            str(controller_python),
+            str(DEFAULT_LOOP_PYTHON),
             [
-                str(controller_python),
+                str(DEFAULT_LOOP_PYTHON),
                 str(Path(__file__).parents[1] / "loop_campaign.py"),
                 *arguments,
             ],
