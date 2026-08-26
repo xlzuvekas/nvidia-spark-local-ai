@@ -268,6 +268,12 @@ both completed and stopped their owned container. Their tracked timing remains
 admission-only: the controls have different weights and token counts, and the
 SGLang OpenAI path exported no speculative-acceptance aggregate.
 
+A later manual diagnostic admitted SM121 to the existing FlashInfer paged
+decode resolver. The [exact two-line patch](patches/sglang/README.md) selected
+the installed XQA-capable wrapper and completed native-QSA 4-to-8 and warm
+6-to-32-token requests on the tiny fixture. This is a bounded kernel-routing
+result, not a clean SparkBench run, full-model admission, or throughput claim.
+
 The 125.96 GiB Radix native checkpoint was not downloaded or attempted: its
 published payload already exceeds the Spark's 119.694 GiB total physical
 unified memory before runtime and cache overhead. See the

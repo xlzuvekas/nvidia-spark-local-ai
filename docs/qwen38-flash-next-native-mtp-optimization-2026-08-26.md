@@ -218,9 +218,18 @@ The installed FlashInfer `0.6.17` XQA implementation already admits compute
 capability major 12, page size 64, and QSA's supported head geometry. The
 smallest credible upstream experiment is therefore to admit
 `is_sm120_supported()` alongside the SM100 check and let FlashInfer's existing
-auto dispatch select XQA on SM120/SM121. This is a source-supported hypothesis,
-not a measured fix. It needs a resolver unit test, an SM12x packed-XQA parity
-test, and the native tiny QSA server smoke before the blocker can be closed.
+auto dispatch select XQA on SM120/SM121.
+
+That exact two-line change was then mounted read-only over the pinned image.
+On compute capability 12.1, the resolver selected
+`flashinfer.decode.trtllm_batch_decode_with_kv_cache`. With native QSA retained,
+the real tiny fixture completed a 4-to-8-token request in `7.234597 s` including
+first-use compilation, then a warm 6-to-32-token request in `0.278661 s`; both
+returned HTTP `200`. This closes the observed CuTe blocker for this fixture,
+not for the full model. It still needs an SM12x packed-XQA parity test, a pinned
+derived-image rerun, and full-shape validation before an upstream support claim.
+The exact source hashes, patch, and boundaries are preserved in the
+[experimental SGLang SM121 XQA guide](../patches/sglang/README.md).
 
 This path is promising because the measured image imported the relevant class,
 and the support-lineage source at PR commit `73a2552` contains a

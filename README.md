@@ -41,10 +41,12 @@ explains how to create and verify both files.
   and ModelOpt NVFP4 paths on GB10/SM121. Its isolated NVFP4 embedding method
   matched an independent reference with maximum absolute error `0`, but BF16
   FlashInfer GDN required FP32 and native QSA failed during CuTe MLIR
-  compilation. With QSA disabled, a pinned real 0.2B development checkpoint
-  returned HTTP `200`; a separate dummy-weight `NEXTN` control reported 15
-  proposed, 15 verified, and 0 accepted tokens. These establish bounded runtime
-  diagnostics only. Clean SparkBench reruns of the
+  compilation. An [experimental two-line SM121 XQA route](patches/sglang/README.md)
+  subsequently completed native-QSA 4-to-8 and 6-to-32-token fixture requests.
+  With QSA disabled, the pinned real 0.2B development checkpoint also returned
+  HTTP `200`; a separate dummy-weight `NEXTN` control reported 15 proposed, 15
+  verified, and 0 accepted tokens. These establish bounded runtime diagnostics
+  only. Clean SparkBench reruns of the
   [real-weight control](evidence/runs/20260826T190843Z-qwen38-flash-next-tiny-qsa-disabled-sglang-smoke-30d30d00/summary.json)
   and [dummy `NEXTN` control](evidence/runs/20260826T190953Z-qwen38-flash-next-tiny-dummy-nextn-sglang-smoke-931e5c58/summary.json)
   are tracked, but the fixture omits MTP weights, its configuration needed two
@@ -206,6 +208,7 @@ geometries, slot counts, or validation states.
 - [RLM and HALO overnight campaign protocol](docs/rlm-halo-overnight-2026-08-25.md)
 - [Nemotron diffusion direct-run guide](docs/nemotron-diffusion-direct.md)
 - [Experimental NInfer SM121a patch and reproduction notes](patches/ninfer/README.md)
+- [Experimental SGLang QSA SM121 XQA patch and diagnostics](patches/sglang/README.md)
 
 ## Reproduce the original Qwen3.8 path
 
