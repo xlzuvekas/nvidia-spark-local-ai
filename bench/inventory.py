@@ -126,6 +126,7 @@ def discover_docker_images(
         [
             "image",
             "ls",
+            "--all",
             "--digests",
             "--no-trunc",
             "--format",

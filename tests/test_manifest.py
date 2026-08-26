@@ -423,6 +423,136 @@ class ManifestLoaderTests(unittest.TestCase):
             with self.subTest(candidate=candidate), self.assertRaises(ManifestError):
                 validate_model(candidate)
 
+    def test_qwen38_flash_next_sglang_smokes_are_pinned_and_bounded(self) -> None:
+        models = load_models(ROOT / "manifests" / "models.toml")
+        native = models["qwen38-flash-next-tiny-qsa-sglang"]
+        control = models[
+            "qwen38-flash-next-tiny-qsa-disabled-sglang"
+        ]
+        nextn = models["qwen38-flash-next-tiny-dummy-nextn-sglang"]
+        profiles = (native, control, nextn)
+        image_digest = (
+            "sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48"
+            "a28b952b3a888bd4"
+        )
+        fetch_allow_patterns = (
+            ".gitattributes",
+            "README.md",
+            "chat_template.jinja",
+            "config.json",
+            "generation_config.json",
+            "model.safetensors",
+            "tokenizer.json",
+            "tokenizer_config.json",
+        )
+
+        for model in profiles:
+            with self.subTest(model=model.id):
+                self.assertEqual(model.backend, "sglang")
+                self.assertEqual(
+                    model.source,
+                    "inference-optimization/"
+                    "Qwen3.8-Flash-Next-0.2B-A0.2B",
+                )
+                self.assertEqual(
+                    model.revision,
+                    "5fbd297b1529cfa7db2510896d1ad77d1bf41e44",
+                )
+                self.assertEqual(model.weight_file_count, 1)
+                self.assertEqual(model.weight_size_bytes, 327_820_608)
+                self.assertEqual(model.tasks, ("chat",))
+                self.assertEqual(model.native_context, 262_144)
+                self.assertEqual(model.cache_dir, "user")
+                self.assertEqual(model.image_digest, image_digest)
+                self.assertEqual(
+                    model.image, f"lmsysorg/sglang@{image_digest}"
+                )
+                self.assertEqual(
+                    model.fetch_allow_patterns, fetch_allow_patterns
+                )
+                self.assertEqual(
+                    json.loads(model.request_body_json or "{}"),
+                    {"ignore_eos": True},
+                )
+                self.assertEqual(
+                    model.args[model.args.index("--mamba-ssm-dtype") + 1],
+                    "float32",
+                )
+                for backend_flag in (
+                    "--linear-attn-backend",
+                    "--linear-attn-prefill-backend",
+                    "--linear-attn-decode-backend",
+                    "--linear-attn-verify-backend",
+                    "--attention-backend",
+                    "--moe-runner-backend",
+                ):
+                    self.assertEqual(
+                        model.args[model.args.index(backend_flag) + 1],
+                        "triton",
+                    )
+                for reserved in (
+                    "--api-key",
+                    "--model-path",
+                    "--speculative-draft-model-path",
+                ):
+                    self.assertNotIn(reserved, model.args)
+
+        self.assertEqual(native.support_status, "incompatible")
+        self.assertEqual(control.support_status, "exploratory")
+        self.assertEqual(nextn.support_status, "exploratory")
+        self.assertNotIn(
+            "indexer_n_heads",
+            native.args[native.args.index("--json-model-override-args") + 1],
+        )
+        for model in (control, nextn):
+            override = json.loads(
+                model.args[
+                    model.args.index("--json-model-override-args") + 1
+                ]
+            )
+            self.assertTrue(override["language_model_only"])
+            self.assertIsNone(override["text_config"]["indexer_n_heads"])
+            self.assertEqual(
+                override["text_config"]["layer_types"],
+                [
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                ],
+            )
+
+        self.assertNotIn("--load-format", control.args)
+        self.assertNotIn("--speculative-algorithm", control.args)
+        self.assertEqual(
+            nextn.args[nextn.args.index("--load-format") + 1], "dummy"
+        )
+        self.assertEqual(
+            nextn.args[
+                nextn.args.index("--speculative-draft-load-format") + 1
+            ],
+            "dummy",
+        )
+        self.assertEqual(
+            nextn.args[nextn.args.index("--speculative-algorithm") + 1],
+            "NEXTN",
+        )
+        self.assertEqual(
+            nextn.args[nextn.args.index("--speculative-num-steps") + 1],
+            "1",
+        )
+        self.assertEqual(
+            nextn.args[nextn.args.index("--speculative-eagle-topk") + 1],
+            "1",
+        )
+        self.assertEqual(
+            nextn.args[
+                nextn.args.index("--speculative-num-draft-tokens") + 1
+            ],
+            "2",
+        )
+        self.assertIsNone(nextn.draft_source)
+
     def test_phi4_reasoning_fp8_profile_is_pinned_and_conservative(self) -> None:
         model = load_models(ROOT / "manifests" / "models.toml")[
             "phi-4-reasoning-plus-fp8"

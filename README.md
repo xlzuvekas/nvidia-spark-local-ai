@@ -13,7 +13,7 @@ quality checks, and the provenance needed to interpret each number.
 | How does Qwen3.6 perform on a strict two-hop long-context needle? | [Two-hop retrieval: Qwen3.6 baseline versus MTP2 through the 245,760-target tier](docs/multihop-long-context-results-2026-08-18.md) |
 | How fast are Qwen3.6 and Qwen3.8 under concurrency and 61K–246K inputs? | [Cache-off NVFP4+MTP3 throughput, wall time, TTFT, retries, and validation](docs/qwen36-qwen38-long-context-tps-2026-08-25.md) |
 | How does Qwen3.8-Flash-Next run on one Spark? | [Day-zero IQ4_XS llama.cpp throughput, validation, and memory-pressure results](docs/qwen38-flash-next-gb10-2026-08-26.md) |
-| How could native Qwen3.8-Flash-Next NVFP4/I4 + MTP fit and be optimized? | [PLE fit math, runtime gaps, derived-checkpoint design, and benchmark ladder](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md) |
+| Does SGLang's native Flash-Next path run on GB10, and how could it fit? | [Measured day-zero diagnostics, PLE fit math, runtime gaps, and derived-checkpoint plan](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md) |
 | What does native llama.cpp prompt-KV reuse change for Qwen3.6? | [Prefix-cache controls: 8K and 32K shared-prefix cold/warm observations](docs/qwen36-prefix-cache-results-2026-08-18.md) |
 | How did Qwen3-Coder-Next fare on terminal coding tasks? | [Harbor/Terminal-Bench-derived results: Qwen Code versus OpenCode](docs/harbor-terminal-results-2026-08-18.md) |
 | How are offline coding-agent harnesses compared? | [Qwen3-Coder-Next Harbor campaign protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign) |
@@ -37,6 +37,17 @@ explains how to create and verify both files.
 
 ## What the results say
 
+- The exact SGLang Flash-Next aarch64 image imports its Qwen4 target, `NEXTN`,
+  and ModelOpt NVFP4 paths on GB10/SM121. Its isolated NVFP4 embedding method
+  matched an independent reference with maximum absolute error `0`, but BF16
+  FlashInfer GDN required FP32 and native QSA failed during CuTe MLIR
+  compilation. With QSA disabled, a pinned real 0.2B development checkpoint
+  returned HTTP `200`; a separate dummy-weight `NEXTN` control reported 15
+  proposed, 15 verified, and 0 accepted tokens. These establish bounded runtime
+  diagnostics only: the fixture omits MTP weights, its configuration needed two
+  local compatibility corrections, no timing is representative TPS or quality,
+  and the oversized full Radix checkpoint was not downloaded or attempted. See
+  the [native diagnostics and optimization plan](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md).
 - On clean revision `efabab7`, the Qwen3.8-Flash-Next IQ4_XS llama.cpp core run
   completed its terminal lifecycle and reported 20.193 aggregate output tok/s
   at D256 and 19.860/19.782/51.927/71.709 tok/s at C1/C2/C4/C8. The 16K
@@ -131,6 +142,10 @@ geometries, slot counts, or validation states.
 
 ### Measured results
 
+- [Qwen3.8-Flash-Next native SGLang diagnostics and optimization plan — 2026-08-26](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md):
+  exact aarch64 image and package imports, isolated NVFP4 embedding correctness,
+  SM121 GDN/QSA boundaries, tiny real-weight serving, synthetic `NEXTN` draft
+  counters, and the still-unattempted full-model fit route.
 - [Qwen3.8-Flash-Next day-zero GB10 results — 2026-08-26](docs/qwen38-flash-next-gb10-2026-08-26.md):
   pinned IQ4_XS llama.cpp admission, quick and core throughput, bounded text
   capability checks, and the observed unified-memory and swap boundary.
@@ -177,7 +192,6 @@ geometries, slot counts, or validation states.
 ### Method, scope, and specialized guides
 
 - [Benchmark protocol and evidence policy](BENCHMARK.md)
-- [Qwen3.8-Flash-Next native NVFP4/I4 + MTP optimization plan](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md)
 - [Offline-derived Harbor terminal coding-agent protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign)
 - [Benchmark strategy](docs/benchmark-strategy.md)
 - [Dated campaign plan](docs/benchmark-campaign-2026-08-15.md)

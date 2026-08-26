@@ -1969,6 +1969,182 @@ args = [
 ]
 
 [[models]]
+id = "qwen38-flash-next-tiny-qsa-sglang"
+description = "Pinned Qwen4Exp toy-checkpoint reproduction of the native QSA GB10 admission failure; the fixture is not a quality or throughput model and omits MTP weights."
+support_status = "incompatible"
+backend = "sglang"
+source = "inference-optimization/Qwen3.8-Flash-Next-0.2B-A0.2B"
+revision = "5fbd297b1529cfa7db2510896d1ad77d1bf41e44"
+weight_file_count = 1
+weight_size_bytes = 327820608
+served_name = "qwen38-flash-next-tiny-qsa"
+tasks = ["chat"]
+architecture = "qwen4-exp-tiny-qsa"
+quantization = "bf16-toy"
+lifecycle = "docker"
+image = "lmsysorg/sglang@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+image_digest = "sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+cache_dir = "user"
+fetch_allow_patterns = [
+  ".gitattributes",
+  "README.md",
+  "chat_template.jinja",
+  "config.json",
+  "generation_config.json",
+  "model.safetensors",
+  "tokenizer.json",
+  "tokenizer_config.json",
+]
+max_context = 256
+native_context = 262144
+startup_timeout_s = 300
+estimated_ram_gib = 2.0
+endpoint = "http://127.0.0.1:30000/v1"
+request_body_json = '{"ignore_eos":true}'
+args = [
+  "--tp-size", "1",
+  "--served-model-name", "qwen38-flash-next-tiny-qsa",
+  "--json-model-override-args", '{"language_model_only":true,"text_config":{"layer_types":["linear_attention","linear_attention","linear_attention","full_attention"]}}',
+  "--mamba-ssm-dtype", "float32",
+  "--linear-attn-backend", "triton",
+  "--linear-attn-prefill-backend", "triton",
+  "--linear-attn-decode-backend", "triton",
+  "--linear-attn-verify-backend", "triton",
+  "--attention-backend", "triton",
+  "--moe-runner-backend", "triton",
+  "--context-length", "256",
+  "--max-total-tokens", "512",
+  "--max-running-requests", "1",
+  "--chunked-prefill-size", "256",
+  "--mem-fraction-static", "0.05",
+  "--cuda-graph-backend-decode", "disabled",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--disable-radix-cache",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]
+
+[[models]]
+id = "qwen38-flash-next-tiny-qsa-disabled-sglang"
+description = "Admission-only Qwen4Exp toy checkpoint with QSA semantically disabled; exercises real BF16 GDN, PLE, MoE, dense attention, loader, and API paths on GB10."
+support_status = "exploratory"
+backend = "sglang"
+source = "inference-optimization/Qwen3.8-Flash-Next-0.2B-A0.2B"
+revision = "5fbd297b1529cfa7db2510896d1ad77d1bf41e44"
+weight_file_count = 1
+weight_size_bytes = 327820608
+served_name = "qwen38-flash-next-tiny-qsa-disabled"
+tasks = ["chat"]
+architecture = "qwen4-exp-tiny-qsa-disabled"
+quantization = "bf16-toy"
+lifecycle = "docker"
+image = "lmsysorg/sglang@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+image_digest = "sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+cache_dir = "user"
+fetch_allow_patterns = [
+  ".gitattributes",
+  "README.md",
+  "chat_template.jinja",
+  "config.json",
+  "generation_config.json",
+  "model.safetensors",
+  "tokenizer.json",
+  "tokenizer_config.json",
+]
+max_context = 256
+native_context = 262144
+startup_timeout_s = 300
+estimated_ram_gib = 2.0
+endpoint = "http://127.0.0.1:30000/v1"
+request_body_json = '{"ignore_eos":true}'
+args = [
+  "--tp-size", "1",
+  "--served-model-name", "qwen38-flash-next-tiny-qsa-disabled",
+  "--json-model-override-args", '{"language_model_only":true,"text_config":{"layer_types":["linear_attention","linear_attention","linear_attention","full_attention"],"indexer_n_heads":null}}',
+  "--mamba-ssm-dtype", "float32",
+  "--linear-attn-backend", "triton",
+  "--linear-attn-prefill-backend", "triton",
+  "--linear-attn-decode-backend", "triton",
+  "--linear-attn-verify-backend", "triton",
+  "--attention-backend", "triton",
+  "--moe-runner-backend", "triton",
+  "--context-length", "256",
+  "--max-total-tokens", "512",
+  "--max-running-requests", "1",
+  "--chunked-prefill-size", "256",
+  "--mem-fraction-static", "0.05",
+  "--cuda-graph-backend-decode", "disabled",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--disable-radix-cache",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]
+
+[[models]]
+id = "qwen38-flash-next-tiny-dummy-nextn-sglang"
+description = "Dummy-weight Qwen4Exp NEXTN execution control with QSA disabled; proves target/draft construction and speculative scheduling only, not checkpoint loading, quality, acceptance, or throughput."
+support_status = "exploratory"
+backend = "sglang"
+source = "inference-optimization/Qwen3.8-Flash-Next-0.2B-A0.2B"
+revision = "5fbd297b1529cfa7db2510896d1ad77d1bf41e44"
+weight_file_count = 1
+weight_size_bytes = 327820608
+served_name = "qwen38-flash-next-tiny-dummy-nextn"
+tasks = ["chat"]
+architecture = "qwen4-exp-tiny-qsa-disabled+nextn"
+quantization = "dummy-bf16"
+lifecycle = "docker"
+image = "lmsysorg/sglang@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+image_digest = "sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+cache_dir = "user"
+fetch_allow_patterns = [
+  ".gitattributes",
+  "README.md",
+  "chat_template.jinja",
+  "config.json",
+  "generation_config.json",
+  "model.safetensors",
+  "tokenizer.json",
+  "tokenizer_config.json",
+]
+max_context = 512
+native_context = 262144
+startup_timeout_s = 300
+estimated_ram_gib = 2.0
+endpoint = "http://127.0.0.1:30000/v1"
+request_body_json = '{"ignore_eos":true}'
+args = [
+  "--tp-size", "1",
+  "--served-model-name", "qwen38-flash-next-tiny-dummy-nextn",
+  "--load-format", "dummy",
+  "--speculative-draft-load-format", "dummy",
+  "--speculative-algorithm", "NEXTN",
+  "--speculative-num-steps", "1",
+  "--speculative-eagle-topk", "1",
+  "--speculative-num-draft-tokens", "2",
+  "--json-model-override-args", '{"language_model_only":true,"text_config":{"layer_types":["linear_attention","linear_attention","linear_attention","full_attention"],"indexer_n_heads":null}}',
+  "--mamba-ssm-dtype", "float32",
+  "--linear-attn-backend", "triton",
+  "--linear-attn-prefill-backend", "triton",
+  "--linear-attn-decode-backend", "triton",
+  "--linear-attn-verify-backend", "triton",
+  "--attention-backend", "triton",
+  "--moe-runner-backend", "triton",
+  "--context-length", "512",
+  "--max-total-tokens", "512",
+  "--max-running-requests", "1",
+  "--chunked-prefill-size", "256",
+  "--page-size", "64",
+  "--mem-fraction-static", "0.05",
+  "--cuda-graph-backend-decode", "disabled",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--disable-radix-cache",
+  "--disable-overlap-schedule",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]
+
+[[models]]
 id = "phi-4-multimodal-instruct-nvfp4"
 description = "Pinned Phi-4 multimodal NVFP4 image/text trial on the DGX Spark SGLang runtime."
 support_status = "spark_other_backend"

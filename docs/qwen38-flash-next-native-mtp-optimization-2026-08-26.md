@@ -1,4 +1,4 @@
-# Qwen3.8-Flash-Next native NVFP4/I4 + MTP plan — 2026-08-26
+# Qwen3.8-Flash-Next native NVFP4/I4 + MTP diagnostics and plan — 2026-08-26
 
 ## Decision
 
@@ -27,8 +27,12 @@ The first credible native route is a derived, text-only ModelOpt checkpoint:
    form cannot admit; and
 5. serve through the provisional SGLang Qwen4 path with native `NEXTN` MTP.
 
-This is a build and benchmark plan, not a measured native result. No native
-Flash-Next weights or new container image were downloaded during this audit.
+This is still a build and benchmark plan for the full model, not a measured
+native Flash-Next performance result. The exact SGLang day-zero image and a
+pinned 0.2B development fixture were subsequently downloaded and exercised.
+The full Qwen, Radix, and Inferact native checkpoints were neither downloaded
+nor attempted because their published forms do not satisfy the one-Spark fit
+gate.
 
 ## Why PLE is the fit lever
 
@@ -126,20 +130,61 @@ but are not native CUDA/ModelOpt serving artifacts for this experiment.
 The official
 [SGLang Flash-Next cookbook](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.8-Flash-Next)
 selects the Radix checkpoint for NVFP4. Its dedicated image is multi-architecture;
-the exact Linux aarch64 platform image inspected for this plan is:
+the exact Linux aarch64 platform image pulled and tested on the GB10 is:
 
 ```text
 lmsysorg/sglang:qwen38flashnext@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4
 ```
 
-Model support remains in open
-[SGLang PR #36497](https://github.com/sgl-project/sglang/pull/36497) at commit
-[`73a2552`](https://github.com/sgl-project/sglang/commit/73a255206f916366c8d26d4022f82ddfb0ab558d).
+The image identifies its SGLang base as commit
+[`d91c368`](https://github.com/sgl-project/sglang/commit/d91c3682b0b429e4c70df63cd57f819588ce29b0),
+with additional image overlays. Open
+[SGLang PR #36497](https://github.com/sgl-project/sglang/pull/36497) at
+[`73a2552`](https://github.com/sgl-project/sglang/commit/73a255206f916366c8d26d4022f82ddfb0ab558d)
+is useful support lineage, but it is not the image's reported build commit.
 No tagged or PyPI release contains that support. The cookbook validates NVFP4
-on B200/B300/GB300, not GB10, so the image digest is a reproducibility pin
-rather than a support claim.
+on B200/B300/GB300, not GB10, so the image digest and local diagnostics below
+are reproducibility evidence rather than a general GB10 support claim.
 
-This path is promising because the pinned source already contains a
+#### Measured GB10 diagnostics
+
+The immutable image passed a package, model-registration, and hardware import
+probe with SGLang `0.0.0.dev1+gd91c3682b`, PyTorch `2.13.0+cu130`, CUDA runtime
+`13.0`, FlashInfer `0.6.17`, and an NVIDIA GB10 reported as compute capability
+`[12, 1]`. The Qwen4 target, Qwen4 `NEXTN` draft, and ModelOpt NVFP4 embedding
+classes all imported. This proves the aarch64 package surface is present; it
+does not prove that the full checkpoint fits or that every native kernel works
+on SM121.
+
+| Diagnostic | Measured result | Boundary |
+| --- | --- | --- |
+| ModelOpt NVFP4 embedding primitive | Pass; CUDA output matched an independent E2M1/block-scale reference with maximum absolute error `0` | Isolated embedding method, not the Qwen4 PLE loader or a fused production kernel |
+| FlashInfer GDN | BF16 failed on SM121; retaining FP32 for the GDN path was required | Conditional runtime pass, not a BF16 GDN support claim |
+| Native QSA | Fail during CuTe MLIR compilation on SM121 | QSA must be disabled or fixed before a representative native run |
+| Real tiny checkpoint, QSA-disabled semantic control | HTTP `200`; 4 prompt tokens to 8 completion tokens in `1.759583 s`; model load `1.71 s` | Bounded request/response and real-weight execution control only |
+| Dummy target plus `NEXTN` MTP | Both target and MTP loaded; HTTP `200` with 16 completion tokens in `0.338387 s`; 15 proposed, 15 verified, 0 accepted | Synthetic weights; proves draft execution and counters, not useful speculation |
+| Full Radix NVFP4 checkpoint | Not downloaded or attempted | Published payload already exceeds total physical unified memory |
+
+Both server controls used the pinned
+[`inference-optimization/Qwen3.8-Flash-Next-0.2B-A0.2B`](https://huggingface.co/inference-optimization/Qwen3.8-Flash-Next-0.2B-A0.2B/tree/5fbd297b1529cfa7db2510896d1ad77d1bf41e44)
+fixture at revision `5fbd297b1529cfa7db2510896d1ad77d1bf41e44`.
+It is a small development architecture fixture, not a quality model. Its
+`layer_types` used the stale `qwen_sparse_attention` label; the local runtime
+copy corrected that value to the official `full_attention` label. The same
+copy set the root `language_model_only` field to `true` for SGLang's text-only
+loader, and the real-weight control disabled QSA after the native QSA kernel
+failed. Those are fixture/runtime workarounds, not modifications to the pinned
+cached snapshot or evidence that the full artifact works unchanged.
+
+The fixture intentionally omits actual MTP tensors. Consequently the
+real-weight control did not exercise `NEXTN`; the separate `--load-format
+dummy` control instantiated synthetic target and MTP tensors from the fixture
+shapes. Its zero accepted drafts are expected diagnostic evidence, not a model
+quality or speed result. Neither request timing is representative TPS, and the
+two timings must not be compared as a performance experiment.
+
+This path is promising because the measured image imported the relevant class,
+and the support-lineage source at PR commit `73a2552` contains a
 [`ModelOptNvFp4EmbeddingMethod`](https://github.com/sgl-project/sglang/blob/73a255206f916366c8d26d4022f82ddfb0ab558d/python/sglang/srt/layers/quantization/modelopt_quant.py#L633-L728)
 that gathers packed NVFP4 embedding rows, expands their E2M1 values and group
 scales, and emits BF16. It currently uses PyTorch indexing and unpacking rather
@@ -212,19 +257,21 @@ publishes FP8 TP4 plus MTP3 and has no native single-Spark NVFP4/I4 route.
 
 ## Build sequence
 
-1. **Tiny format fixture.** Export a synthetic group-16 NVFP4 embedding with
-   dimension 160 and multiple PLE-style shards. Load it through the exact
-   aarch64 image and compare every gathered BF16 value with an independent
-   E2M1/block-scale reference. Test duplicate IDs, first/last rows, shard
-   boundaries, and malformed/missing scales.
+1. **Complete the tiny format fixture.** The isolated group-16 NVFP4 embedding
+   primitive already matched the independent E2M1/block-scale reference with
+   zero maximum absolute error on SM121. Extend that control to dimension 160
+   and multiple PLE-style shards, then test duplicate IDs, first/last rows,
+   shard boundaries, and malformed/missing scales through the Qwen4 loader.
 2. **Qwen4 loader and kernel patch.** Pass the quantization configuration and
    prefix into the PLE embedding, add sharded packed-weight and scale loading,
    and fuse packed-U8 gather/dequant to BF16. Keep the existing BF16/FP8 path
    unchanged. Add a full-shape metadata-only allocation check so a wrong dtype
    cannot allocate a 95 GiB BF16 table.
-3. **Runtime-only smoke.** Use a synthetic/tiny PLE derivative or omit PLE via
-   a frozen config solely to prove Qwen4, NVFP4 kernels, text-only loading, and
-   `NEXTN` execute on SM121. This is not a model-quality result.
+3. **Harden the runtime-only smoke.** The pinned tiny fixture proved text-only
+   real-weight execution with QSA disabled, and dummy weights proved Qwen4
+   `NEXTN` draft activity on SM121. Fix or explicitly route around the native
+   QSA CuTe MLIR failure, retain FP32 GDN, and automate both controls. These are
+   still architecture diagnostics, not model-quality or throughput results.
 4. **Stream the derivative.** Start from the pinned Radix checkpoint and
    transform PLE shards one at a time; never load or dequantize the complete
    table. Preserve all unmodified tensor bytes and record the source revision,
@@ -245,9 +292,9 @@ publishes FP8 TP4 plus MTP3 and has no native single-Spark NVFP4/I4 route.
 8. **Escalate context and concurrency.** Move through 16K, 32K, 64K, and 128K
    in fresh lifetimes; attempt 262K only after the memory equation closes.
 
-The large artifact/image acquisition starts only after steps 1–3 pass. This
-avoids downloading a 125.96 GiB source merely to discover that the packed PLE
-layout or SM121 kernel cannot load.
+The full 125.96 GiB artifact acquisition starts only after steps 1–3 pass. The
+exact image is already local, but the failed native QSA probe and incomplete
+Qwen4 PLE-loader fixture still justify deferring the oversized weight source.
 
 ## Optimization matrix after admission
 

@@ -222,6 +222,50 @@ The complete refresh verifies deterministically with both Harbor inputs. See the
 [day-zero GB10 report](docs/qwen38-flash-next-gb10-2026-08-26.md) for artifact
 hashes, smoke history, results, and comparison limits.
 
+### Qwen3.8-Flash-Next SGLang day-zero diagnostics
+
+The native runtime probe pins the Linux aarch64 image
+`lmsysorg/sglang:qwen38flashnext@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4`.
+Its labels report SGLang base commit
+`d91c3682b0b429e4c70df63cd57f819588ce29b0`; open PR #36497 commit
+`73a255206f916366c8d26d4022f82ddfb0ab558d` is support lineage, not the image
+build commit. The import control measured SGLang `0.0.0.dev1+gd91c3682b`,
+PyTorch `2.13.0+cu130`, CUDA runtime `13.0`, FlashInfer `0.6.17`, and an NVIDIA
+GB10 at compute capability `[12, 1]`. Qwen4 target, `NEXTN`, and ModelOpt NVFP4
+embedding symbols imported successfully.
+
+The isolated CUDA NVFP4 embedding primitive matched an independent
+E2M1/block-scale reference with maximum absolute error `0`. That is a primitive
+correctness result, not proof that Qwen4 loads a sharded NVFP4 PLE table. The
+BF16 FlashInfer GDN probe failed on SM121 and required FP32, while native QSA
+failed during CuTe MLIR compilation. Preserve those failures: disabling QSA and
+retaining FP32 GDN defines a diagnostic control, not a representative optimized
+configuration.
+
+The server fixture is
+`inference-optimization/Qwen3.8-Flash-Next-0.2B-A0.2B` revision
+`5fbd297b1529cfa7db2510896d1ad77d1bf41e44`. A temporary runtime copy corrected
+its stale `qwen_sparse_attention` layer label to the official `full_attention`
+value and set root `language_model_only` to `true` for the text-only loader.
+With QSA disabled, the real tiny checkpoint loaded in `1.71 s` and returned
+HTTP `200` for a 4-prompt-token to 8-completion-token request in `1.759583 s`
+client wall time.
+
+The fixture omits actual MTP weights. A separate `--load-format dummy` control
+therefore instantiated synthetic target and MTP tensors solely to exercise the
+native `NEXTN` path. It returned HTTP `200` with 16 completion tokens in
+`0.338387 s` and reported 15 proposed, 15 verified, and 0 accepted draft
+tokens. This proves draft execution and counter visibility, but zero accepted
+drafts provide no acceleration evidence. Synthetic and tiny-fixture timing is
+not representative TPS, model quality, or a comparison between MTP and
+non-MTP serving.
+
+The 125.96 GiB Radix native checkpoint was not downloaded or attempted: its
+published payload already exceeds the Spark's 119.694 GiB total physical
+unified memory before runtime and cache overhead. See the
+[native diagnostics and optimization plan](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md)
+for fit math, integration gaps, and the bounded next steps.
+
 ### Agentic tool-use protocol
 
 The `agentic-tools` suite is a bounded admission gate for multi-turn function
