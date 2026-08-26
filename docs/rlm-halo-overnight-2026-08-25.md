@@ -49,16 +49,16 @@ thinking-off RLM treatment.
 
 | Treatment | Lengths | Tasks | Rows | Cases |
 | --- | --- | --- | --- | ---: |
-| RLM depth 1 | 8K, 32K, 64K, 128K | `qa1` | 11, 47 | 8 |
-| Direct paired control | 8K, 32K | `qa1` | 11, 47 | 4 |
+| RLM depth 1 | 8K, 32K, 64K, 128K | `qa1` | 11 | 4 |
+| Direct paired control | 8K, 32K | `qa1` | 11 | 2 |
 | Held RLM depth-2 sentinel | 128K | `qa1` | 11 | 1 |
 
-That produces 13 planned RLM-phase cases: 12 executable cases and one explicit
+That produces 7 planned RLM-phase cases: 6 executable cases and one explicit
 held depth-2 sentinel. Length and treatment order rotate by replicate so the
-four direct/RLM pairs are not always exposed to the same server age. The 64K
-and 128K cells are recursive-only coverage. This reduced QA1 panel is the
-largest coherent one-attempt envelope that fits the remaining fixed RLM window;
-it is not a three-task BABILong panel.
+two direct/RLM pairs are not always exposed to the same server age. The 64K and
+128K cells are recursive-only coverage. This one-row QA1 panel preserves all
+four context lengths while retaining retry margin in the remaining fixed RLM
+window; it is not a three-task BABILong panel.
 
 The recursive bounds are fixed at:
 
@@ -91,8 +91,8 @@ global resource bound for recursive work.
 ### Smoke-test boundary
 
 The pre-campaign smoke and exact canaries exercised serving, worker isolation,
-timeout, retry, and cleanup paths. They did not produce a successful 128K RLM
-episode; the matched no-MTP HALO canary did complete and score. Their scalar
+timeout, retry, compaction admission, and cleanup paths. The final compacted
+128K RLM gate and matched no-MTP HALO canary completed and scored. Their scalar
 outcomes were:
 
 | Probe | Outcome |
@@ -102,6 +102,7 @@ outcomes were:
 | 128K depth-1 RLM, 131,072-token guard, 300-second timeout | Reached the 300-second episode timeout before producing an answer. |
 | 128K depth-1 RLM, 131,072-token guard, 600-second timeout | Reached `TokenLimitExceededError` after 458.422 seconds. |
 | 128K depth-1 RLM, 262,144-token guard, 900-second timeout | The first attempt cleared the earlier aggregate-token boundary, accepted eight model requests, and then returned HTTP 400 on the ninth/default-answer request after 558.709 seconds. Accepted root prompts had grown through 39,802 tokens; reserving 768 output tokens leaves a 40,192-token input envelope under the served 40,960-token context. The retry received only the campaign's remaining 361.453-second allowance and timed out. No scored result was produced; exact container and network cleanup was verified. |
+| Exact 128K depth-1 RLM with compaction enabled at 0.85 | Completed correctly on attempt one in 504.926 seconds over 9 successful model requests. It processed 107,755 prompt tokens, of which 95,728 were cached (88.839%), and 6,150 generation tokens at 12.180 effective generation tokens/s. The trajectory finished before the 27,852-token root-history trigger, so `compaction_count = 0`: this admits the exact treatment but does not exercise the compaction branch. Normal cleanup and the independent exact-plan post-stop cleanup both verified no owned resources remained. |
 | Pre-fix 256-trace depth-1 HALO on Qwen3.8 with MTP3 | Server startup took 261.759 seconds. All 8 model requests returned HTTP 200, then the episode failed after 111.263 seconds with `UserError` caused by `ValidationError`. Source isolation identified the pinned HALO `call_subagent` `AgentAsToolInput` parse, which overwrote the SDK error handler. The local protocol workaround catches only that validation class and returns a constant retry result without retaining arguments or validation text. |
 | Post-fix 256-trace depth-1 HALO on Qwen3.8 with MTP3 | Server startup took 267.789 seconds. The canary cleared the old validation boundary with 13 HTTP 200 model requests, then encountered 20 repeated HTTP 400 responses and failed after 285.775 seconds with `EngineAgentExhaustedError`; no scored result was produced. |
 | Matched post-fix HALO canary on Qwen3.8 without MTP | Server startup took 245.576 seconds and the episode completed in 312.132 seconds over 19 model requests. It used 151,790 prompt tokens, of which 108,192 were cached (71.277%), and 2,656 generation tokens at 8.509 effective generation tokens/s. The response was valid JSON with family precision 1.0, recall 0.25, F1 0.4, count accuracy 0.041667, citation coverage 0.25, and citation precision 1.0. One subagent completed and the episode made 32 tool calls. |
@@ -116,10 +117,12 @@ request no longer fits the server. The smallest depth-1 repair is an explicit,
 fingerprinted `compaction = true` treatment at threshold `0.85`. The pinned RLM
 model lookup maps this Qwen3-8B name to 32,768 tokens, yielding a 27,852-token
 threshold and 12,340 tokens of headroom after the 768-token output reserve.
-That materially changes the treatment and requires another exact 128K canary.
-Pinned RLM does not propagate these settings into recursive children, so the
-depth-2 supplement remains held pending a narrow propagation patch and test.
-The executable RLM phase remains gated on that compacted 128K canary.
+That materially changes the treatment, so it was admitted through the exact
+128K canary above. The canary completed but did not cross the trigger; overnight
+results must therefore report compaction counts and treat zero as unexercised,
+not as proof that compaction ran. Pinned RLM does not propagate these settings
+into recursive children, so the depth-2 supplement remains held pending a
+narrow propagation patch and test.
 
 All HALO canaries used the `none` reasoning controls. The exact canary campaign
 completed cleanly and verified cleanup. At `n=1`, the no-MTP success validates
@@ -136,7 +139,7 @@ The planner admits only the expected three-column, 100-row files and the
 selected fixed row indices. Context and answer text never enter the journal.
 
 These are BABILong-derived paired probes, not an official BABILong leaderboard
-submission. They use one task and two fixed rows, a local model,
+submission. They use one task and one fixed row, a local model,
 campaign-specific direct/RLM prompts, bounded recursive inference, and a narrow
 local scorer. Report within-campaign paired differences; do not compare the
 resulting accuracy directly with published full-suite scores.
