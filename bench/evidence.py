@@ -165,6 +165,8 @@ _LOOP_MODEL_SOURCE_FIELDS = frozenset(
         "runtime_source_dir",
         "served_name",
         "sglang_allow_hf_metadata_probe",
+        "sglang_ple_mmap",
+        "sglang_source_overlays",
         "source",
         "startup_timeout_s",
         "support_status",

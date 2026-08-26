@@ -253,6 +253,8 @@ _MODEL_KEYS = frozenset(
         "draft_model_digest",
         "draft_model_size_bytes",
         "sglang_allow_hf_metadata_probe",
+        "sglang_source_overlays",
+        "sglang_ple_mmap",
         "recipe_source",
         "recipe_revision",
         "request_body_json",
@@ -274,6 +276,9 @@ _MODEL_KEYS = frozenset(
     }
 )
 _MODEL_SHARD_KEYS = frozenset({"path", "digest", "size_bytes"})
+_SGLANG_SOURCE_OVERLAY_KEYS = frozenset(
+    {"host_path", "container_path", "digest"}
+)
 _CASE_KEYS = frozenset(
     {
         "id",
@@ -301,6 +306,15 @@ class ModelShard:
     path: str
     digest: str
     size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class SGLangSourceOverlay:
+    """One digest-pinned host file mounted over an SGLang image source file."""
+
+    host_path: str
+    container_path: str
+    digest: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,6 +351,8 @@ class ModelSpec:
     draft_model_digest: str | None = None
     draft_model_size_bytes: int | None = None
     sglang_allow_hf_metadata_probe: bool = False
+    sglang_source_overlays: tuple[SGLangSourceOverlay, ...] = ()
+    sglang_ple_mmap: bool = False
     recipe_source: str | None = None
     recipe_revision: str | None = None
     request_body_json: str | None = None
@@ -456,6 +472,12 @@ def load_models(path: str | Path) -> dict[str, ModelSpec]:
             ),
             sglang_allow_hf_metadata_probe=_optional_bool(
                 row, "sglang_allow_hf_metadata_probe", context, default=False
+            ),
+            sglang_source_overlays=_sglang_source_overlays(
+                row, "sglang_source_overlays", context
+            ),
+            sglang_ple_mmap=_optional_bool(
+                row, "sglang_ple_mmap", context, default=False
             ),
             recipe_source=_optional_string(row, "recipe_source", context),
             recipe_revision=_optional_string(row, "recipe_revision", context),
@@ -719,6 +741,116 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
             f"{context}.sglang_allow_hf_metadata_probe requires an sglang "
             "draft snapshot"
         )
+    if (model.sglang_source_overlays or model.sglang_ple_mmap) and (
+        model.backend != "sglang"
+    ):
+        raise ManifestError(
+            f"{context}.sglang source overlays and PLE mmap are supported "
+            "only for sglang"
+        )
+    if model.sglang_source_overlays:
+        if len(model.sglang_source_overlays) > 8:
+            raise ManifestError(
+                f"{context}.sglang_source_overlays supports at most 8 files"
+            )
+        seen_host_paths: set[str] = set()
+        seen_container_paths: set[str] = set()
+        container_root = PurePosixPath(
+            "/sgl-workspace/sglang/python/sglang"
+        )
+        for index, overlay in enumerate(model.sglang_source_overlays):
+            overlay_context = f"{context}.sglang_source_overlays[{index}]"
+            if not isinstance(overlay, SGLangSourceOverlay):
+                raise ManifestError(
+                    f"{overlay_context} must be an SGLangSourceOverlay"
+                )
+            host_path = overlay.host_path
+            if (
+                not isinstance(host_path, str)
+                or not host_path
+                or host_path != host_path.strip()
+                or host_path.startswith(("-", "/", "\\", "~"))
+                or "\\" in host_path
+                or ":" in host_path
+                or any(character in host_path for character in "*?[")
+                or any(ord(character) < 32 for character in host_path)
+            ):
+                raise ManifestError(
+                    f"{overlay_context}.host_path must be a safe relative path"
+                )
+            relative_host = PurePosixPath(host_path)
+            if relative_host.is_absolute() or any(
+                part in {"", ".", ".."} for part in relative_host.parts
+            ):
+                raise ManifestError(
+                    f"{overlay_context}.host_path must be a safe relative path"
+                )
+            if relative_host.suffix != ".py":
+                raise ManifestError(
+                    f"{overlay_context}.host_path must name a Python source file"
+                )
+            container_path = overlay.container_path
+            if (
+                not isinstance(container_path, str)
+                or not container_path
+                or container_path != container_path.strip()
+                or "\\" in container_path
+                or ":" in container_path
+                or any(ord(character) < 32 for character in container_path)
+                or any(
+                    component in {"", ".", ".."}
+                    for component in container_path.removeprefix("/").split("/")
+                )
+            ):
+                raise ManifestError(
+                    f"{overlay_context}.container_path must be a safe absolute path"
+                )
+            absolute_container = PurePosixPath(container_path)
+            try:
+                container_relative = absolute_container.relative_to(
+                    container_root
+                )
+            except ValueError as error:
+                raise ManifestError(
+                    f"{overlay_context}.container_path must be beneath "
+                    f"{container_root}"
+                ) from error
+            if (
+                not absolute_container.is_absolute()
+                or not container_relative.parts
+                or absolute_container.suffix != ".py"
+            ):
+                raise ManifestError(
+                    f"{overlay_context}.container_path must name a Python "
+                    f"source file beneath {container_root}"
+                )
+            if relative_host.name != absolute_container.name:
+                raise ManifestError(
+                    f"{overlay_context} host and container basenames must match"
+                )
+            if not _DIGEST_PATTERN.fullmatch(overlay.digest):
+                raise ManifestError(
+                    f"{overlay_context}.digest must be a sha256 digest"
+                )
+            if host_path in seen_host_paths:
+                raise ManifestError(
+                    f"{context}.sglang_source_overlays has duplicate host paths"
+                )
+            if container_path in seen_container_paths:
+                raise ManifestError(
+                    f"{context}.sglang_source_overlays has duplicate container paths"
+                )
+            seen_host_paths.add(host_path)
+            seen_container_paths.add(container_path)
+    if model.sglang_ple_mmap and not model.sglang_source_overlays:
+        raise ManifestError(
+            f"{context}.sglang_ple_mmap requires digest-pinned source overlays"
+        )
+    if model.sglang_ple_mmap and model.draft_source is not None:
+        raise ManifestError(
+            f"{context}.sglang_ple_mmap requires an embedded draft and a "
+            "single writable backing mount"
+        )
     recipe_fields = (model.recipe_source, model.recipe_revision)
     if any(value is not None for value in recipe_fields) and not all(
         value is not None for value in recipe_fields
@@ -741,6 +873,10 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
         raise ManifestError(
             f"{context}.sglang_allow_hf_metadata_probe requires pinned recipe "
             "provenance"
+        )
+    if model.sglang_source_overlays and model.recipe_source is None:
+        raise ManifestError(
+            f"{context}.sglang_source_overlays requires pinned recipe provenance"
         )
     if model.support_status not in KNOWN_SUPPORT_STATUSES:
         raise ManifestError(
@@ -1546,6 +1682,32 @@ def _model_shards(
             )
         )
     return tuple(shards)
+
+
+def _sglang_source_overlays(
+    table: Mapping[str, Any], key: str, context: str
+) -> tuple[SGLangSourceOverlay, ...]:
+    if key not in table:
+        return ()
+    value = table[key]
+    if not isinstance(value, list) or not value:
+        raise ManifestError(f"{context}.{key} must be a non-empty array of tables")
+    overlays: list[SGLangSourceOverlay] = []
+    for index, row in enumerate(value):
+        overlay_context = f"{context}.{key}[{index}]"
+        if not isinstance(row, dict):
+            raise ManifestError(f"{overlay_context} must be a table")
+        _reject_unknown(row, _SGLANG_SOURCE_OVERLAY_KEYS, overlay_context)
+        overlays.append(
+            SGLangSourceOverlay(
+                host_path=_required_string(row, "host_path", overlay_context),
+                container_path=_required_string(
+                    row, "container_path", overlay_context
+                ),
+                digest=_required_string(row, "digest", overlay_context),
+            )
+        )
+    return tuple(overlays)
 
 
 def _validate_id(value: str, context: str) -> None:

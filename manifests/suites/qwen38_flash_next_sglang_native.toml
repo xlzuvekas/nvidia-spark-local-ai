@@ -1,0 +1,161 @@
+schema_version = 1
+
+[suite]
+id = "qwen38-flash-next-sglang-native"
+description = "Bounded one-server-lifecycle SGLang native throughput and context pass. The 8K-240K inputs use a synthetic repeated-word corpus, so they measure serving mechanics and exact-key retention rather than natural-document understanding."
+
+[[cases]]
+id = "chat-smoke"
+kind = "decode"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "json-smoke"
+kind = "capability"
+requires = ["chat", "json"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "tools-smoke"
+kind = "capability"
+requires = ["chat", "tools"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "synthetic-exact-answer"
+kind = "quality"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "decode-256-c1"
+kind = "decode"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "fresh-short-c1"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "fresh-short-c2"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 2
+prompt_repetitions = 0
+
+[[cases]]
+id = "fresh-short-c4"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 4
+prompt_repetitions = 0
+
+[[cases]]
+id = "prefill-repeat-8192"
+kind = "prefill"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 8192
+
+[[cases]]
+id = "long-context-needle-8192-c1"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 8192
+
+[[cases]]
+id = "prefill-repeat-32768"
+kind = "prefill"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 1
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 32768
+
+[[cases]]
+id = "long-context-needle-32768-c1"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 32768
+
+# These near-window cases remain serial and un-warmed so each performs one
+# isolated retrieval without multiplying the live KV demand.
+[[cases]]
+id = "long-context-needle-131072-c1"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 131072
+
+[[cases]]
+id = "long-context-needle-245760-c1"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 245760

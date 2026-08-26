@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,7 +18,12 @@ from bench.inventory import (
     assess_model_availability,
 )
 from bench.journal import Journal
-from bench.manifest import load_models
+from bench.manifest import (
+    ManifestError,
+    SGLangSourceOverlay,
+    load_models,
+    validate_model,
+)
 from bench.runner import _recover_pending_lifecycle, _request_arguments
 from bench.runtime import (
     ManagedServer,
@@ -101,6 +107,71 @@ class SGLangRuntimeTests(unittest.TestCase):
                 / revision
             )
             snapshot.mkdir(parents=True)
+
+    def test_flash_next_profile_pins_overlays_ple_and_recipe(self) -> None:
+        profile = load_models(ROOT / "manifests" / "models.toml")[
+            "qwen38-flash-next-nvfp4-mtp-sglang"
+        ]
+        self.assertEqual(
+            profile.revision,
+            "7b719225242aacd3dbd3f9407468c2ee9a9d2594",
+        )
+        self.assertEqual(
+            profile.recipe_revision,
+            "bf2b7c75870d3703730b6bd8f3bb93dc622c278d",
+        )
+        self.assertTrue(profile.sglang_ple_mmap)
+        self.assertEqual(len(profile.sglang_source_overlays), 2)
+        self.assertTrue(
+            all(
+                isinstance(overlay, SGLangSourceOverlay)
+                for overlay in profile.sglang_source_overlays
+            )
+        )
+        self.assertEqual(
+            {overlay.digest for overlay in profile.sglang_source_overlays},
+            {
+                "sha256:c687bf96b8adb980eaf3a1db2ad4a7c00b558537865d91674c0e1b43f4ae1d71",
+                "sha256:e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75",
+            },
+        )
+
+    def test_manifest_rejects_unsafe_or_unprovenanced_sglang_overlays(
+        self,
+    ) -> None:
+        profile = load_models(ROOT / "manifests" / "models.toml")[
+            "qwen38-flash-next-nvfp4-mtp-sglang"
+        ]
+        valid_overlay = profile.sglang_source_overlays[0]
+        with self.assertRaisesRegex(ManifestError, "safe relative path"):
+            validate_model(
+                replace(
+                    profile,
+                    sglang_source_overlays=(
+                        replace(valid_overlay, host_path="../qwen4_exp.py"),
+                    ),
+                )
+            )
+        with self.assertRaisesRegex(ManifestError, "must be beneath"):
+            validate_model(
+                replace(
+                    profile,
+                    sglang_source_overlays=(
+                        replace(
+                            valid_overlay,
+                            container_path="/tmp/qwen4_exp.py",
+                        ),
+                    ),
+                )
+            )
+        with self.assertRaisesRegex(ManifestError, "recipe provenance"):
+            validate_model(
+                replace(
+                    profile,
+                    recipe_source=None,
+                    recipe_revision=None,
+                )
+            )
 
     def test_launch_is_offline_digest_pinned_and_snapshot_exact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -190,6 +261,192 @@ class SGLangRuntimeTests(unittest.TestCase):
                 "Bearer generic-ephemeral-key",
             ),
         )
+
+    def test_source_overlays_and_ple_mmap_are_verified_and_minimally_mounted(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            model = self._model()
+            snapshot = (
+                workspace
+                / "data"
+                / "huggingface"
+                / "hub"
+                / "models--nvidia--Phi-4-multimodal-instruct-NVFP4"
+                / "snapshots"
+                / model.revision
+            )
+            snapshot.mkdir(parents=True)
+            overlay_root = workspace / "results" / "runtime-overlays" / "recipe"
+            model_overlay = overlay_root / "qwen4_exp.py"
+            backend_overlay = overlay_root / "qwen_sparse_attn_backend.py"
+            overlay_root.mkdir(parents=True)
+            model_overlay.write_text("PLE_PATCH = True\n", encoding="utf-8")
+            backend_overlay.write_text("QSA_PATCH = True\n", encoding="utf-8")
+
+            def digest(path: Path) -> str:
+                return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+            model.sglang_source_overlays = (
+                SimpleNamespace(
+                    host_path=(
+                        "results/runtime-overlays/recipe/qwen4_exp.py"
+                    ),
+                    container_path=(
+                        "/sgl-workspace/sglang/python/sglang/srt/models/"
+                        "qwen4_exp.py"
+                    ),
+                    digest=digest(model_overlay),
+                ),
+                SimpleNamespace(
+                    host_path=(
+                        "results/runtime-overlays/recipe/"
+                        "qwen_sparse_attn_backend.py"
+                    ),
+                    container_path=(
+                        "/sgl-workspace/sglang/python/sglang/srt/layers/"
+                        "attention/quantized_sparse_attention/"
+                        "qwen_sparse_attn_backend.py"
+                    ),
+                    digest=digest(backend_overlay),
+                ),
+            )
+            model.sglang_ple_mmap = True
+            with (
+                patch("bench.runtime.Path.home", return_value=workspace),
+                patch("bench.runtime._existing_container", return_value=None),
+                patch("bench.runtime._port_is_free", return_value=True),
+                patch("bench.runtime.wait_for_endpoint", return_value=2.5),
+                patch(
+                    "bench.runtime.secrets.token_urlsafe",
+                    return_value="overlay-ephemeral-key",
+                ),
+                patch(
+                    "bench.runtime._run",
+                    return_value=_completed(stdout="overlay-container\n"),
+                ) as run,
+            ):
+                server = start_sglang(model, workspace=workspace)
+
+            launch = run.call_args.args[0]
+            target_model = (
+                "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py"
+            )
+            target_backend = (
+                "/sgl-workspace/sglang/python/sglang/srt/layers/attention/"
+                "quantized_sparse_attention/qwen_sparse_attn_backend.py"
+            )
+            self.assertIn(f"{model_overlay}:{target_model}:ro", launch)
+            self.assertIn(f"{backend_overlay}:{target_backend}:ro", launch)
+            ple_dir = (
+                workspace
+                / ".cache"
+                / "sparkbench"
+                / "sglang"
+                / model.id
+                / "ple"
+            )
+            self.assertTrue(ple_dir.is_dir())
+            self.assertEqual(os.stat(ple_dir).st_mode & 0o777, 0o700)
+            self.assertIn(f"{ple_dir}:/ple:rw", launch)
+            self.assertIn("SGLANG_QWEN4_PLE_MMAP_DIR=/ple", launch)
+            writable_mounts = [
+                launch[index + 1]
+                for index, value in enumerate(launch)
+                if value == "--volume" and launch[index + 1].endswith(":rw")
+            ]
+            self.assertEqual(writable_mounts, [f"{ple_dir}:/ple:rw"])
+            assert server.native_provenance is not None
+            self.assertTrue(server.native_provenance["sglang_ple_mmap"])
+            self.assertEqual(
+                server.native_provenance["sglang_ple_backing_policy"],
+                "private_runtime_cache",
+            )
+            serialized = json.dumps(server.native_provenance)
+            self.assertNotIn(str(workspace), serialized)
+            self.assertIn(digest(model_overlay), serialized)
+
+    def test_source_overlay_digest_mismatch_fails_before_docker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            model = self._model()
+            snapshot = (
+                workspace
+                / "data"
+                / "huggingface"
+                / "hub"
+                / "models--nvidia--Phi-4-multimodal-instruct-NVFP4"
+                / "snapshots"
+                / model.revision
+            )
+            snapshot.mkdir(parents=True)
+            overlay = workspace / "results" / "overlay" / "qwen4_exp.py"
+            overlay.parent.mkdir(parents=True)
+            overlay.write_text("changed\n", encoding="utf-8")
+            model.sglang_source_overlays = (
+                SimpleNamespace(
+                    host_path="results/overlay/qwen4_exp.py",
+                    container_path=(
+                        "/sgl-workspace/sglang/python/sglang/srt/models/"
+                        "qwen4_exp.py"
+                    ),
+                    digest="sha256:" + "0" * 64,
+                ),
+            )
+            with (
+                patch("bench.runtime._existing_container", return_value=None),
+                patch("bench.runtime._port_is_free", return_value=True),
+                patch("bench.runtime._run") as run,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeErrorWithContext, "digest mismatch"
+                ):
+                    start_sglang(model, workspace=workspace)
+            run.assert_not_called()
+
+    def test_source_overlay_symlink_fails_before_docker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            model = self._model()
+            snapshot = (
+                workspace
+                / "data"
+                / "huggingface"
+                / "hub"
+                / "models--nvidia--Phi-4-multimodal-instruct-NVFP4"
+                / "snapshots"
+                / model.revision
+            )
+            snapshot.mkdir(parents=True)
+            real = workspace / "real.py"
+            real.write_text("patched\n", encoding="utf-8")
+            overlay_dir = workspace / "results" / "overlay"
+            overlay_dir.mkdir(parents=True)
+            overlay = overlay_dir / "qwen4_exp.py"
+            overlay.symlink_to(real)
+            model.sglang_source_overlays = (
+                SimpleNamespace(
+                    host_path="results/overlay/qwen4_exp.py",
+                    container_path=(
+                        "/sgl-workspace/sglang/python/sglang/srt/models/"
+                        "qwen4_exp.py"
+                    ),
+                    digest=(
+                        "sha256:" + hashlib.sha256(real.read_bytes()).hexdigest()
+                    ),
+                ),
+            )
+            with (
+                patch("bench.runtime._existing_container", return_value=None),
+                patch("bench.runtime._port_is_free", return_value=True),
+                patch("bench.runtime._run") as run,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeErrorWithContext, "symbolic link"
+                ):
+                    start_sglang(model, workspace=workspace)
+            run.assert_not_called()
 
     def test_unmanaged_named_container_is_never_replaced(self) -> None:
         with patch(

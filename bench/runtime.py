@@ -1001,6 +1001,143 @@ def _exact_sglang_snapshot(
     return repository_resolved, container_snapshot
 
 
+def _resolve_sglang_source_overlays(
+    model: Any, *, workspace: Path
+) -> tuple[tuple[Path, str, str, str], ...]:
+    """Resolve and verify manifest-pinned SGLang source overlays."""
+
+    configured = tuple(getattr(model, "sglang_source_overlays", ()) or ())
+    if not configured:
+        return ()
+    try:
+        workspace_root = workspace.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeErrorWithContext(
+            "Could not resolve the workspace for SGLang source overlays"
+        ) from error
+    container_root = PurePosixPath(
+        "/sgl-workspace/sglang/python/sglang"
+    )
+    resolved_overlays: list[tuple[Path, str, str, str]] = []
+    seen_host_paths: set[Path] = set()
+    seen_container_paths: set[str] = set()
+    for index, overlay in enumerate(configured):
+        context = f"SGLang source overlay {index}"
+        host_path = str(getattr(overlay, "host_path", "") or "")
+        container_path = str(
+            getattr(overlay, "container_path", "") or ""
+        )
+        expected_digest = str(getattr(overlay, "digest", "") or "")
+        relative = PurePosixPath(host_path)
+        if (
+            not host_path
+            or relative.is_absolute()
+            or host_path != str(relative)
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or "\\" in host_path
+            or ":" in host_path
+            or relative.suffix != ".py"
+        ):
+            raise RuntimeErrorWithContext(
+                f"{context} host path must be a safe relative Python path"
+            )
+        absolute_container = PurePosixPath(container_path)
+        try:
+            container_relative = absolute_container.relative_to(container_root)
+        except ValueError as error:
+            raise RuntimeErrorWithContext(
+                f"{context} target must be beneath {container_root}"
+            ) from error
+        if (
+            not absolute_container.is_absolute()
+            or not container_relative.parts
+            or any(part in {"", ".", ".."} for part in absolute_container.parts)
+            or absolute_container.suffix != ".py"
+            or relative.name != absolute_container.name
+            or ":" in container_path
+        ):
+            raise RuntimeErrorWithContext(
+                f"{context} target must be a matching SGLang Python source path"
+            )
+        if not _SHA256_PATTERN.fullmatch(expected_digest):
+            raise RuntimeErrorWithContext(
+                f"{context} must pin a full lowercase sha256 digest"
+            )
+        candidate = workspace_root.joinpath(*relative.parts)
+        cursor = workspace_root
+        try:
+            for component in relative.parts:
+                cursor = cursor / component
+                if cursor.is_symlink():
+                    raise RuntimeErrorWithContext(
+                        f"{context} must not traverse a symbolic link"
+                    )
+            host_file = candidate.resolve(strict=True)
+            host_file.relative_to(workspace_root)
+        except RuntimeErrorWithContext:
+            raise
+        except (OSError, ValueError) as error:
+            raise RuntimeErrorWithContext(
+                f"{context} is missing or escapes the workspace"
+            ) from error
+        if not host_file.is_file():
+            raise RuntimeErrorWithContext(f"{context} must be a regular file")
+        if ":" in str(host_file):
+            raise RuntimeErrorWithContext(
+                f"{context} cannot be represented as a Docker bind mount"
+            )
+        actual_digest = _sha256_file(host_file)
+        if actual_digest != expected_digest:
+            raise RuntimeErrorWithContext(
+                f"{context} digest mismatch: expected {expected_digest}, "
+                f"got {actual_digest}"
+            )
+        if host_file in seen_host_paths or container_path in seen_container_paths:
+            raise RuntimeErrorWithContext(
+                "SGLang source overlay host and target paths must be unique"
+            )
+        seen_host_paths.add(host_file)
+        seen_container_paths.add(container_path)
+        resolved_overlays.append(
+            (host_file, container_path, expected_digest, host_path)
+        )
+    return tuple(resolved_overlays)
+
+
+def _private_sglang_ple_dir(model: Any) -> Path:
+    """Create the sole writable backing directory for patched Qwen PLE."""
+
+    model_id = str(getattr(model, "id", "") or "")
+    if re.fullmatch(r"[a-z0-9][a-z0-9._-]*", model_id) is None:
+        raise RuntimeErrorWithContext(
+            "SGLang PLE mmap requires a safe stable model ID"
+        )
+    cache_root = (Path.home() / ".cache" / "sparkbench" / "sglang").resolve()
+    cache_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    candidate = cache_root / model_id / "ple"
+    cursor = cache_root
+    for component in (model_id, "ple"):
+        cursor = cursor / component
+        if cursor.is_symlink():
+            raise RuntimeErrorWithContext(
+                "SGLang PLE backing directory must not traverse a symbolic link"
+            )
+    candidate.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ple_dir = candidate.resolve(strict=True)
+    try:
+        ple_dir.relative_to(cache_root)
+    except ValueError as error:
+        raise RuntimeErrorWithContext(
+            "SGLang PLE backing directory escapes the private runtime cache"
+        ) from error
+    if not ple_dir.is_dir():
+        raise RuntimeErrorWithContext(
+            "SGLang PLE backing path must be a directory"
+        )
+    ple_dir.chmod(0o700)
+    return ple_dir
+
+
 def start_vllm(
     model: Any,
     *,
@@ -1206,6 +1343,19 @@ def start_sglang(
                 "SGLang compile cache escapes the private runtime cache"
             ) from error
         compile_cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+    source_overlays = _resolve_sglang_source_overlays(
+        model, workspace=workspace
+    )
+    ple_mmap = bool(getattr(model, "sglang_ple_mmap", False))
+    if ple_mmap and not source_overlays:
+        raise RuntimeErrorWithContext(
+            "SGLang PLE mmap requires verified source overlays"
+        )
+    if ple_mmap and container_draft_snapshot is not None:
+        raise RuntimeErrorWithContext(
+            "SGLang PLE mmap requires an embedded draft and one writable mount"
+        )
+    ple_dir = _private_sglang_ple_dir(model) if ple_mmap else None
 
     api_key = secrets.token_urlsafe(32)
     authorization = f"Bearer {api_key}"
@@ -1258,6 +1408,17 @@ def start_sglang(
                 "--volume",
                 f"{draft_repository}:/root/.cache/huggingface/hub/"
                 f"{draft_repository.name}:ro",
+            ]
+        )
+    for host_file, container_path, _digest, _relative_path in source_overlays:
+        command.extend(
+            ["--volume", f"{host_file}:{container_path}:ro"]
+        )
+    if ple_dir is not None:
+        command.extend(
+            [
+                "--volume", f"{ple_dir}:/ple:rw",
+                "--env", "SGLANG_QWEN4_PLE_MMAP_DIR=/ple",
             ]
         )
     if compile_cache is not None:
@@ -1323,6 +1484,19 @@ def start_sglang(
         "draft_revision": draft_revision,
         "draft_container_snapshot": container_draft_snapshot,
         "compile_cache_dir": str(compile_cache) if compile_cache else None,
+        "sglang_source_overlays": [
+            {
+                "host_path": relative_path,
+                "container_path": container_path,
+                "sha256": digest,
+            }
+            for _host_file, container_path, digest, relative_path in source_overlays
+        ],
+        "sglang_ple_mmap": ple_mmap,
+        "sglang_ple_container_dir": "/ple" if ple_mmap else None,
+        "sglang_ple_backing_policy": (
+            "private_runtime_cache" if ple_mmap else None
+        ),
         "sglang_allow_hf_metadata_probe": metadata_probe,
         "hf_network_policy": (
             "documented_longcat_metadata_probe"

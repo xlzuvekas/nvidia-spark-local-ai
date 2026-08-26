@@ -22,6 +22,31 @@ the native QSA smoke. The patch also admits `is_sm120_supported()`. In the exact
 image, that helper covers compute-capability major 12 with the installed CUDA,
 and FlashInfer dispatches the existing decode API to XQA.
 
+## Pinned full-checkpoint overlays
+
+`python3 prepare_sglang_overlays.py` reproduces the two ignored runtime
+overlays required by the full Flash-Next profile. It uses only the exact cached
+image above, imports the two SGLang modules in a network-disabled container
+without a GPU, extracts them through an inert container, applies the pinned
+patchers, and admits only AST-verified files with the profile's expected
+digests. It never pulls an image, and cleanup removes only the inert container
+ID that it created. Existing partial or mismatched output is not overwritten.
+
+The two vendored patchers are byte-for-byte copies from
+`hashd1ve/qwen38-flash-next-one-dgx-spark` at commit
+`bf2b7c75870d3703730b6bd8f3bb93dc622c278d` (MIT):
+
+- [`ple_mmap.py`](https://github.com/hashd1ve/qwen38-flash-next-one-dgx-spark/blob/bf2b7c75870d3703730b6bd8f3bb93dc622c278d/patches/ple_mmap.py), vendored as `bf2b7c75-ple_mmap.py`, SHA-256 `eeabdde061631c9b606d4ccc7371ff8fb01c6cc034dfe6bad1e4f29a8aa21555`;
+- [`qsa_trtllm_sm120.py`](https://github.com/hashd1ve/qwen38-flash-next-one-dgx-spark/blob/bf2b7c75870d3703730b6bd8f3bb93dc622c278d/patches/qsa_trtllm_sm120.py), vendored as `bf2b7c75-qsa_trtllm_sm120.py`, SHA-256 `f60ccb9f9e350a43155a1a7a20d154be0b7e93c29dacb3db95d397ba910090b2`.
+
+The expected generated files are
+`results/runtime-overlays/qwen38-flash-next-bf2b7c75/qwen4_exp.py`
+(`c687bf96b8adb980eaf3a1db2ad4a7c00b558537865d91674c0e1b43f4ae1d71`)
+and `qwen_sparse_attn_backend.py`
+(`e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75`).
+The upstream [MIT license](https://github.com/hashd1ve/qwen38-flash-next-one-dgx-spark/blob/bf2b7c75870d3703730b6bd8f3bb93dc622c278d/LICENSE)
+applies to the vendored patchers.
+
 ## Bounded result
 
 With the patched file mounted read-only over the exact image, the resolver

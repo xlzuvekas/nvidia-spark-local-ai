@@ -813,6 +813,8 @@ def _cross_validate_model(campaign: CampaignSpec, model: Any) -> None:
         "draft_model_digest": None,
         "draft_model_size_bytes": None,
         "sglang_allow_hf_metadata_probe": False,
+        "sglang_source_overlays": (),
+        "sglang_ple_mmap": False,
         "recipe_source": None,
         "recipe_revision": None,
         "request_body_json": None,
