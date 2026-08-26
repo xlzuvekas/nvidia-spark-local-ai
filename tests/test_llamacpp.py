@@ -137,7 +137,7 @@ class LlamaCppManifestTests(unittest.TestCase):
         self.assertEqual(model.runtime_parallel, 8)
         self.assertEqual(model.max_context, 32_768)
         self.assertEqual(model.native_context, 262_144)
-        self.assertEqual(model.estimated_ram_gib, 112.0)
+        self.assertEqual(model.estimated_ram_gib, 102.0)
         self.assertEqual(model.startup_timeout_s, 1_800)
         self.assertEqual(model.tasks, ("chat", "json", "tools"))
         self.assertEqual(
@@ -161,6 +161,8 @@ class LlamaCppManifestTests(unittest.TestCase):
             model.runtime_source_dir,
             "~/.cache/sparkbench/llama.cpp-qwen38-flash-035e2273",
         )
+        self.assertEqual(model.args.count("f16"), 2)
+        self.assertNotIn("q8_0", model.args)
         self.assertNotIn("--parallel", model.args)
         self.assertFalse(llamacpp_mtp_requested(model.args))
 
@@ -174,6 +176,8 @@ class LlamaCppManifestTests(unittest.TestCase):
         self.assertEqual(admission.max_context, 32_768)
         self.assertEqual(admission.native_context, 32_768)
         self.assertEqual(admission.estimated_ram_gib, 101.0)
+        self.assertEqual(admission.args.count("f16"), 2)
+        self.assertNotIn("q8_0", admission.args)
 
     def test_qwen3_coder_next_profile_pins_exact_p1_agent_launch(self) -> None:
         model = load_models(ROOT / "manifests" / "models.toml")[

@@ -1019,7 +1019,7 @@ args = [
 
 [[models]]
 id = "qwen38-flash-next-ud-iq4-xs-llamacpp"
-description = "Provisional single-slot Qwen3.8-Flash-Next UD-IQ4_XS split-GGUF 32K admission profile on the exact unmerged qwen4exp llama.cpp runtime, with thinking disabled."
+description = "Provisional single-slot Qwen3.8-Flash-Next UD-IQ4_XS split-GGUF 32K admission profile on the exact unmerged qwen4exp llama.cpp runtime, with F16 KV and thinking disabled."
 support_status = "spark_other_backend"
 backend = "llamacpp"
 source = "unsloth/Qwen3.8-Flash-Next-GGUF"
@@ -1059,15 +1059,15 @@ args = [
   "--fit", "off",
   "--batch-size", "8192",
   "--ubatch-size", "512",
-  "--cache-type-k", "q8_0",
-  "--cache-type-v", "q8_0",
+  "--cache-type-k", "f16",
+  "--cache-type-v", "f16",
   "--jinja",
   "--reasoning", "off",
 ]
 
 [[models]]
 id = "qwen38-flash-next-ud-iq4-xs-llamacpp-p8"
-description = "Provisional Qwen3.8-Flash-Next UD-IQ4_XS split-GGUF throughput profile on the exact unmerged qwen4exp llama.cpp runtime, with eight 32K slots and thinking disabled."
+description = "Provisional Qwen3.8-Flash-Next UD-IQ4_XS split-GGUF throughput profile on the exact unmerged qwen4exp llama.cpp runtime, with eight 32K slots, F16 KV, and thinking disabled."
 support_status = "spark_other_backend"
 backend = "llamacpp"
 source = "unsloth/Qwen3.8-Flash-Next-GGUF"
@@ -1099,7 +1099,7 @@ runtime_revision = "035e22731a7fd70b9854b3a2d64ec68e9b1a45d3"
 max_context = 32768
 native_context = 262144
 startup_timeout_s = 1800
-estimated_ram_gib = 112.0
+estimated_ram_gib = 102.0
 endpoint = "http://127.0.0.1:8000/v1"
 args = [
   "--n-gpu-layers", "all",
@@ -1107,8 +1107,8 @@ args = [
   "--fit", "off",
   "--batch-size", "8192",
   "--ubatch-size", "512",
-  "--cache-type-k", "q8_0",
-  "--cache-type-v", "q8_0",
+  "--cache-type-k", "f16",
+  "--cache-type-v", "f16",
   "--jinja",
   "--reasoning", "off",
 ]
