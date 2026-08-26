@@ -6,10 +6,13 @@ import copy
 import json
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
+import bench.loop_campaign as loop_campaign
 from bench.loop_campaign import (
     BABILONG_REVISION,
     BABILONG_SOURCE,
@@ -25,26 +28,39 @@ from bench.loop_campaign import (
     RLM_REVISION,
     RLM_SOURCE,
     RLM_VERSION,
+    RLM_ADMISSION_ADMITTED,
+    RLM_COMPACTION_CONTEXT_TOKENS,
+    RLM_COMPACTION_THRESHOLD_PCT,
+    RLM_DEPTH2_HOLD,
+    Journal,
     LoopCampaignError,
+    _build_parser,
     _case_id,
     _bounded_halo_chat_create,
     _content_hash,
     _docker_worker_command,
     _halo_profile_candidates,
     _halo_subagent_builder_with_validation_recovery,
+    _journal_held_rlm_cases,
     _needs_server_restart,
+    _recover_plan_servers,
+    _recover_plan_workers,
+    _rlm_compaction_admission,
     _safe_error_result,
     _scalar_result,
     _validate_reasoning_profiles,
     build_cases,
+    cleanup_campaign,
     compare_babilong_answer,
     generate_halo_trace_fixture,
     load_campaign_manifest,
     load_campaign_plan,
     parse_prometheus_counters,
     prometheus_delta,
+    run_worker,
     score_halo_answer,
     summarize_campaign,
+    _worker_rlm_babilong,
 )
 
 
@@ -85,6 +101,8 @@ max_iterations = 2
 max_concurrent_subcalls = 2
 max_total_tokens = 4096
 max_output_tokens = 128
+compaction = true
+compaction_threshold_pct = 0.85
 direct_timeout_s = 30
 episode_timeout_s = 60
 recursive_depth2_tasks = ["qa1"]
@@ -157,6 +175,28 @@ class LoopCaseConstructionTests(unittest.TestCase):
             {case["reasoning_control"] for case in rlm_cases},
             {"fixed_unsupported"},
         )
+        recursive = [case for case in rlm_cases if case["treatment"] != "direct"]
+        direct = [case for case in rlm_cases if case["treatment"] == "direct"]
+        self.assertTrue(all(case["compaction"] is True for case in recursive))
+        self.assertTrue(
+            all(
+                case["compaction_threshold_pct"]
+                == RLM_COMPACTION_THRESHOLD_PCT
+                for case in recursive
+            )
+        )
+        self.assertTrue(all(case["compaction"] is False for case in direct))
+        self.assertTrue(
+            all(case["compaction_threshold_pct"] is None for case in direct)
+        )
+        self.assertEqual(
+            {
+                case["admission_status"]
+                for case in rlm_cases
+                if case["treatment"] != "rlm_depth2"
+            },
+            {RLM_ADMISSION_ADMITTED},
+        )
         self.assertEqual(
             {case["reasoning_effort"] for case in halo_cases}, {"none"}
         )
@@ -176,7 +216,20 @@ class LoopCaseConstructionTests(unittest.TestCase):
             [0, 1, 1, 0],
         )
         self.assertEqual(rlm_cases[-1]["treatment"], "rlm_depth2")
+        self.assertEqual(rlm_cases[-1]["admission_status"], RLM_DEPTH2_HOLD)
         self.assertEqual(halo_cases[-1]["treatment"], "halo_depth2")
+
+        changed = copy.deepcopy(config)
+        changed["rlm"]["compaction_threshold_pct"] = 0.8
+        changed_case = next(
+            case
+            for case in build_cases(changed)
+            if case["treatment"] == "rlm_depth1"
+        )
+        original_case = next(
+            case for case in first if case["treatment"] == "rlm_depth1"
+        )
+        self.assertNotEqual(changed_case["case_id"], original_case["case_id"])
 
     def test_halo_profile_selection_locks_after_first_success(self) -> None:
         plan = {"halo": {"model_profiles": ["primary", "fallback"]}}
@@ -278,6 +331,65 @@ class LoopCaseConstructionTests(unittest.TestCase):
                 path.write_text(_minimal_campaign_toml().replace(old, new), encoding="utf-8")
                 with self.assertRaisesRegex(LoopCampaignError, message):
                     load_campaign_manifest(path)
+
+    def test_manifest_requires_exact_compaction_controls(self) -> None:
+        mutations = (
+            ("compaction = true", "compaction = false", "must be true"),
+            (
+                "compaction_threshold_pct = 0.85",
+                "compaction_threshold_pct = 1",
+                "exactly 0.85",
+            ),
+            ("compaction = true\n", "", "keys do not match"),
+        )
+        for old, new, message in mutations:
+            with self.subTest(new=new), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "campaign.toml"
+                path.write_text(
+                    _minimal_campaign_toml().replace(old, new), encoding="utf-8"
+                )
+                with self.assertRaisesRegex(LoopCampaignError, message):
+                    load_campaign_manifest(path)
+
+    def test_compaction_admission_preserves_served_context_headroom(self) -> None:
+        config = _load_minimal_config()
+        rlm = copy.deepcopy(config["rlm"])
+        rlm["max_output_tokens"] = 768
+        admission = _rlm_compaction_admission(
+            rlm, served_context_tokens=40_960
+        )
+        self.assertEqual(admission["package_context_tokens"], 32_768)
+        self.assertEqual(admission["package_context_tokens"], RLM_COMPACTION_CONTEXT_TOKENS)
+        self.assertEqual(admission["threshold_tokens"], 27_852)
+        self.assertEqual(admission["output_reserve_tokens"], 768)
+        self.assertEqual(admission["headroom_tokens"], 12_340)
+        self.assertTrue(admission["depth1_admitted"])
+        self.assertFalse(admission["depth2_admitted"])
+        with self.assertRaisesRegex(LoopCampaignError, "output headroom"):
+            _rlm_compaction_admission(rlm, served_context_tokens=28_000)
+
+    def test_depth2_hold_is_journaled_once(self) -> None:
+        config = _load_minimal_config()
+        cases = build_cases(config)
+        held = [
+            case
+            for case in cases
+            if case.get("admission_status") == RLM_DEPTH2_HOLD
+        ]
+        self.assertEqual(len(held), 1)
+        with tempfile.TemporaryDirectory() as temporary:
+            journal = Journal(Path(temporary) / "journal.jsonl")
+            plan = {"cases": cases}
+            _journal_held_rlm_cases(plan=plan, journal=journal)
+            _journal_held_rlm_cases(plan=plan, journal=journal)
+            events = [
+                event
+                for event in journal.events()
+                if event["event"] == "case_skipped_held"
+            ]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["case_id"], held[0]["case_id"])
+        self.assertEqual(events[0]["admission_status"], RLM_DEPTH2_HOLD)
 
     def test_final_exhausted_case_does_not_require_a_cold_restart(self) -> None:
         self.assertTrue(_needs_server_restart(pending_count=1, current_attempt=1))
@@ -660,6 +772,64 @@ class ScalarResultTests(unittest.TestCase):
         )
         self.assertTrue(container_name.startswith("sparkbench-loop-worker-"))
 
+    def test_rlm_worker_wires_and_counts_root_compaction(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeRLM:
+            def __init__(self, **kwargs: object) -> None:
+                captured.update(kwargs)
+
+            def _compact_history(self, *_args: object, **_kwargs: object) -> list[object]:
+                return []
+
+            def completion(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+                self._compact_history(None, None, [], 1)
+                captured["on_iteration_start"](0, 0)  # type: ignore[operator]
+                usage = SimpleNamespace(
+                    model_usage_summaries={
+                        "synthetic": SimpleNamespace(total_calls=1)
+                    },
+                    total_input_tokens=100,
+                    total_output_tokens=20,
+                )
+                return SimpleNamespace(
+                    metadata=None,
+                    response="kitchen",
+                    usage_summary=usage,
+                    execution_time=0.25,
+                )
+
+        payload = {
+            "reasoning_control": "fixed_unsupported",
+            "base_url": "http://127.0.0.1:8000/v1",
+            "model": "synthetic",
+            "request_timeout_s": 30,
+            "max_depth": 1,
+            "max_iterations": 8,
+            "max_total_tokens": 262_144,
+            "max_concurrent_subcalls": 2,
+            "max_output_tokens": 768,
+            "engine_timeout_s": 60,
+            "compaction": True,
+            "compaction_threshold_pct": 0.85,
+            "context": "synthetic context",
+            "question": "Where is Mary?",
+            "target": "kitchen",
+            "task": "qa1",
+        }
+        with patch.dict("sys.modules", {"rlm": SimpleNamespace(RLM=FakeRLM)}):
+            result = _worker_rlm_babilong(payload)
+
+        self.assertEqual(captured["max_tokens"], 262_144)
+        self.assertEqual(captured["sampling_args"]["max_tokens"], 768)  # type: ignore[index]
+        self.assertEqual(captured["sub_sampling_args"]["max_tokens"], 768)  # type: ignore[index]
+        self.assertIs(captured["compaction"], True)
+        self.assertEqual(captured["compaction_threshold_pct"], 0.85)
+        self.assertEqual(result["compaction_enabled"], True)
+        self.assertEqual(result["compaction_threshold_pct"], 0.85)
+        self.assertEqual(result["compaction_count"], 1)
+        self.assertEqual(result["iterations"], 1)
+
     def test_halo_direct_chat_calls_are_deterministic_and_output_bounded(self) -> None:
         async def original(
             _resource: object, *_args: object, **kwargs: object
@@ -762,6 +932,275 @@ class HaloSubagentValidationRecoveryTests(unittest.TestCase):
             asyncio.run(tool.on_invoke_tool(object(), '{"input":"question"}'))
 
 
+class WorkerCancellationTests(unittest.TestCase):
+    def test_stop_request_interrupts_blocking_worker_communication(self) -> None:
+        class BlockingProcess:
+            pid = 4321
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def communicate(
+                self, *, input: bytes | None, timeout: float
+            ) -> tuple[bytes, bytes]:
+                self.calls += 1
+                self.asserted_input = input
+                self.asserted_timeout = timeout
+                loop_campaign._STOP_REQUESTED = True
+                raise subprocess.TimeoutExpired("synthetic-worker", timeout)
+
+        process = BlockingProcess()
+        with (
+            patch.object(loop_campaign, "_STOP_REQUESTED", False),
+            patch.object(loop_campaign.subprocess, "Popen", return_value=process),
+            patch.object(
+                loop_campaign,
+                "_terminate_worker_process",
+                return_value=True,
+            ) as terminate,
+        ):
+            result = run_worker(
+                worker_kind="direct",
+                payload={"synthetic": True},
+                timeout_s=30,
+                workspace=Path("synthetic-workspace"),
+                isolated=False,
+            )
+
+        self.assertEqual(result, {"status": "stopped"})
+        self.assertEqual(process.calls, 1)
+        self.assertLessEqual(process.asserted_timeout, 1.0)
+        terminate.assert_called_once_with(process, container_name=None)
+
+    def test_worker_termination_targets_exact_container_and_reaps_client(self) -> None:
+        class RunningProcess:
+            pid = 9876
+
+            def __init__(self) -> None:
+                self.wait_timeouts: list[float] = []
+
+            def poll(self) -> None:
+                return None
+
+            def wait(self, *, timeout: float) -> int:
+                self.wait_timeouts.append(timeout)
+                return 0
+
+        process = RunningProcess()
+        removed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with (
+            patch.object(loop_campaign.subprocess, "run", return_value=removed) as run,
+            patch.object(loop_campaign.os, "killpg") as killpg,
+        ):
+            cleanup_ok = loop_campaign._terminate_worker_process(
+                process, container_name="sparkbench-loop-worker-0123456789abcdef"
+            )
+
+        self.assertTrue(cleanup_ok)
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "/usr/bin/docker",
+                "rm",
+                "-f",
+                "sparkbench-loop-worker-0123456789abcdef",
+            ],
+        )
+        killpg.assert_called_once_with(process.pid, loop_campaign.signal.SIGTERM)
+        self.assertEqual(process.wait_timeouts, [5])
+
+
+class ExactPlanCleanupTests(unittest.TestCase):
+    @staticmethod
+    def _write_legacy_plan(run_dir: Path) -> dict[str, object]:
+        raw_case: dict[str, object] = {
+            "phase": "halo",
+            "treatment": "halo_depth0",
+            "reasoning_effort": "none",
+            "trace_count": 32,
+            "seed": 0,
+            "max_depth": 0,
+        }
+        case = {**raw_case, "case_id": _case_id(raw_case)}
+        return _write_plan(
+            run_dir / "plan.json",
+            {
+                "schema_version": 1,
+                "protocol_version": 1,
+                "campaign_id": "synthetic-cleanup",
+                "rlm": {
+                    "model_profile": "synthetic-rlm",
+                    "reasoning_control": "fixed_unsupported",
+                },
+                "halo": {
+                    "model_profiles": ["synthetic-halo"],
+                    "reasoning_effort": "none",
+                },
+                "models": {
+                    "synthetic-halo": {},
+                    "synthetic-rlm": {},
+                },
+                "cases": [case],
+            },
+        )
+
+    def test_cleanup_is_idempotent_and_orders_exact_resource_classes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            self._write_legacy_plan(run_dir)
+            operations: list[str] = []
+            with (
+                patch.object(
+                    loop_campaign,
+                    "_recover_plan_workers",
+                    side_effect=lambda *_: operations.append("workers"),
+                ),
+                patch.object(
+                    loop_campaign,
+                    "_recover_plan_servers",
+                    side_effect=lambda *_: operations.append("server"),
+                ),
+                patch.object(
+                    loop_campaign,
+                    "_remove_worker_network",
+                    side_effect=lambda *_: operations.append("network") or True,
+                ),
+            ):
+                first = cleanup_campaign(run_dir=run_dir, workspace=root)
+                second = cleanup_campaign(run_dir=run_dir, workspace=root)
+
+            self.assertEqual(first, {"status": "cleanup_verified"})
+            self.assertEqual(second, first)
+            self.assertEqual(
+                operations,
+                ["workers", "server", "network"] * 2,
+            )
+            cleanup_events = [
+                event["event"]
+                for event in Journal(run_dir / "journal.jsonl").events()
+                if event["event"].startswith("campaign_cleanup_")
+            ]
+            self.assertEqual(
+                cleanup_events,
+                ["campaign_cleanup_verified", "campaign_cleanup_verified"],
+            )
+
+    def test_cleanup_validates_plan_before_touching_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            plan = self._write_legacy_plan(run_dir)
+            plan["campaign_id"] = "tampered"
+            (run_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            with patch.object(loop_campaign, "_recover_plan_workers") as workers:
+                with self.assertRaisesRegex(LoopCampaignError, "integrity check"):
+                    cleanup_campaign(run_dir=run_dir, workspace=root)
+            workers.assert_not_called()
+
+    def test_cleanup_attempts_every_class_but_refuses_foreign_server(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            self._write_legacy_plan(run_dir)
+            operations: list[str] = []
+
+            def reject_server(*_: object) -> None:
+                operations.append("server")
+                raise LoopCampaignError("foreign server")
+
+            with (
+                patch.object(
+                    loop_campaign,
+                    "_recover_plan_workers",
+                    side_effect=lambda *_: operations.append("workers"),
+                ),
+                patch.object(
+                    loop_campaign,
+                    "_recover_plan_servers",
+                    side_effect=reject_server,
+                ),
+                patch.object(
+                    loop_campaign,
+                    "_remove_worker_network",
+                    side_effect=lambda *_: operations.append("network") or True,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    LoopCampaignError, "cleanup was not verified"
+                ):
+                    cleanup_campaign(run_dir=run_dir, workspace=root)
+
+            self.assertEqual(operations, ["workers", "server", "network"])
+            events = Journal(run_dir / "journal.jsonl").events()
+            self.assertEqual(events[-1]["event"], "campaign_cleanup_failed")
+            self.assertEqual(events[-1]["failure_count"], 1)
+
+    def test_worker_recovery_uses_both_exact_ownership_labels(self) -> None:
+        plan = {"fingerprint": "a" * 64}
+        listed = subprocess.CompletedProcess(
+            [], 0, stdout="worker-container-id\n", stderr=""
+        )
+        removed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with tempfile.TemporaryDirectory() as temporary:
+            journal = Journal(Path(temporary) / "journal.jsonl")
+            with patch.object(
+                loop_campaign.subprocess,
+                "run",
+                side_effect=[listed, removed],
+            ) as run:
+                _recover_plan_workers(plan, journal)
+
+        inspect_command = run.call_args_list[0].args[0]
+        self.assertIn("label=ai.sparkbench.loop-worker=true", inspect_command)
+        self.assertIn(
+            "label=ai.sparkbench.loop-plan=" + "a" * 64,
+            inspect_command,
+        )
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            ["/usr/bin/docker", "rm", "-f", "worker-container-id"],
+        )
+
+    def test_server_recovery_refuses_identity_outside_frozen_profiles(self) -> None:
+        plan = {
+            "fingerprint": "b" * 64,
+            "models": {"synthetic-halo": {}, "synthetic-rlm": {}},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            journal = Journal(Path(temporary) / "journal.jsonl")
+            with patch.object(
+                loop_campaign,
+                "recover_owned_vllm",
+                return_value="different_container_present",
+            ) as recover:
+                with self.assertRaisesRegex(LoopCampaignError, "differently owned"):
+                    _recover_plan_servers(plan, journal)
+
+        self.assertEqual(recover.call_count, 2)
+        expected = {
+            "loop-" + "b" * 12 + "-synthetic-halo",
+            "loop-" + "b" * 12 + "-synthetic-rlm",
+        }
+        self.assertEqual({call.args[0] for call in recover.call_args_list}, expected)
+
+    def test_cleanup_parser_exposes_exec_stop_post_safe_absolute_inputs(self) -> None:
+        options = _build_parser().parse_args(
+            [
+                "cleanup",
+                "/var/lib/sparkbench/exact-run",
+                "--workspace",
+                "/opt/sparkbench/local-llm",
+            ]
+        )
+        self.assertEqual(options.command, "cleanup")
+        self.assertTrue(options.run_dir.is_absolute())
+        self.assertTrue(options.workspace.is_absolute())
+
+
 class FrozenPlanTests(unittest.TestCase):
     def test_round_trip_and_integrity_and_case_identity_rejection(self) -> None:
         raw_case: dict[str, object] = {
@@ -777,11 +1216,22 @@ class FrozenPlanTests(unittest.TestCase):
             "timeout_s": 30,
         }
         case = {**raw_case, "case_id": _case_id(raw_case)}
+        rlm_config = {
+            "model_profile": "synthetic-rlm",
+            "reasoning_control": "fixed_unsupported",
+            "compaction": True,
+            "compaction_threshold_pct": 0.85,
+            "max_output_tokens": 128,
+        }
         base: dict[str, object] = {
             "schema_version": PLAN_SCHEMA_VERSION,
             "protocol_version": PROTOCOL_VERSION,
             "campaign_id": "unit-loop",
-            "rlm": {"reasoning_control": "fixed_unsupported"},
+            "rlm": rlm_config,
+            "rlm_compaction_admission": _rlm_compaction_admission(
+                rlm_config, served_context_tokens=40_960
+            ),
+            "models": {"synthetic-rlm": {"max_context": 40_960}},
             "halo": {"reasoning_effort": "none"},
             "cases": [case],
         }
@@ -830,14 +1280,22 @@ class FrozenPlanTests(unittest.TestCase):
             "max_depth": 0,
         }
         case = {**raw_case, "case_id": _case_id(raw_case)}
+        rlm_config = {
+            "model_profile": "synthetic-rlm",
+            "reasoning_control": "fixed_unsupported",
+            "compaction": True,
+            "compaction_threshold_pct": 0.85,
+            "max_output_tokens": 128,
+        }
         base: dict[str, object] = {
             "schema_version": PLAN_SCHEMA_VERSION,
             "protocol_version": PROTOCOL_VERSION,
             "campaign_id": "unit-loop",
-            "rlm": {
-                "model_profile": "synthetic-rlm",
-                "reasoning_control": "fixed_unsupported",
-            },
+            "rlm": rlm_config,
+            "rlm_compaction_admission": _rlm_compaction_admission(
+                rlm_config, served_context_tokens=40_960
+            ),
+            "models": {"synthetic-rlm": {"max_context": 40_960}},
             "halo": {
                 "model_profiles": ["synthetic-halo"],
                 "reasoning_effort": "none",

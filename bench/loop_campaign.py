@@ -78,6 +78,10 @@ BABILONG_LOCATION_LABELS = (
 RLM_SOURCE = "alexzhang13/rlm"
 RLM_REVISION = "0b45df99c43fb3844a3b796a15d13c0f9d07afd8"
 RLM_VERSION = "0.1.3"
+RLM_COMPACTION_CONTEXT_TOKENS = 32_768
+RLM_COMPACTION_THRESHOLD_PCT = 0.85
+RLM_ADMISSION_ADMITTED = "admitted"
+RLM_DEPTH2_HOLD = "held_child_compaction_unverified"
 HALO_SOURCE = "context-labs/HALO"
 HALO_REVISION = "b7f8509745d67b499b4e80efe20ea37c03426a74"
 HALO_VERSION = "0.3.5"
@@ -146,6 +150,8 @@ _RLM_KEYS = frozenset(
         "max_concurrent_subcalls",
         "max_total_tokens",
         "max_output_tokens",
+        "compaction",
+        "compaction_threshold_pct",
         "direct_timeout_s",
         "episode_timeout_s",
         "recursive_depth2_tasks",
@@ -334,6 +340,15 @@ def load_campaign_manifest(path: Path) -> dict[str, Any]:
         "episode_timeout_s",
     ):
         _positive_int(rlm[field], name=f"rlm.{field}")
+    if rlm["compaction"] is not True:
+        raise LoopCampaignError("rlm.compaction must be true for the frozen protocol")
+    if (
+        type(rlm["compaction_threshold_pct"]) is not float
+        or rlm["compaction_threshold_pct"] != RLM_COMPACTION_THRESHOLD_PCT
+    ):
+        raise LoopCampaignError(
+            "rlm.compaction_threshold_pct must be exactly 0.85"
+        )
     if rlm["worker_isolation"] != "docker":
         raise LoopCampaignError("The frozen RLM protocol requires Docker worker isolation")
 
@@ -402,6 +417,15 @@ def build_cases(config: Mapping[str, Any]) -> list[dict[str, Any]]:
                         "max_concurrent_subcalls": rlm["max_concurrent_subcalls"],
                         "max_total_tokens": rlm["max_total_tokens"],
                         "max_output_tokens": rlm["max_output_tokens"],
+                        "compaction": (
+                            rlm["compaction"] if treatment != "direct" else False
+                        ),
+                        "compaction_threshold_pct": (
+                            rlm["compaction_threshold_pct"]
+                            if treatment != "direct"
+                            else None
+                        ),
+                        "admission_status": RLM_ADMISSION_ADMITTED,
                         "timeout_s": (
                             rlm["direct_timeout_s"]
                             if treatment == "direct"
@@ -426,6 +450,9 @@ def build_cases(config: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "max_concurrent_subcalls": rlm["max_concurrent_subcalls"],
                     "max_total_tokens": rlm["max_total_tokens"],
                     "max_output_tokens": rlm["max_output_tokens"],
+                    "compaction": rlm["compaction"],
+                    "compaction_threshold_pct": rlm["compaction_threshold_pct"],
+                    "admission_status": RLM_DEPTH2_HOLD,
                     "timeout_s": rlm["episode_timeout_s"],
                 }
                 cases.append({**case, "case_id": _case_id(case)})
@@ -707,6 +734,41 @@ def _validate_reasoning_profiles(
             )
 
 
+def _rlm_compaction_admission(
+    rlm: Mapping[str, Any], *, served_context_tokens: int
+) -> dict[str, Any]:
+    """Return the frozen scalar context envelope for root-history compaction."""
+
+    if rlm.get("compaction") is not True:
+        raise LoopCampaignError("RLM root-history compaction is not admitted")
+    threshold_pct = rlm.get("compaction_threshold_pct")
+    output_tokens = rlm.get("max_output_tokens")
+    if (
+        type(threshold_pct) is not float
+        or threshold_pct != RLM_COMPACTION_THRESHOLD_PCT
+        or type(output_tokens) is not int
+        or output_tokens <= 0
+        or type(served_context_tokens) is not int
+        or served_context_tokens <= 0
+    ):
+        raise LoopCampaignError("RLM compaction admission inputs are invalid")
+    threshold_tokens = int(threshold_pct * RLM_COMPACTION_CONTEXT_TOKENS)
+    headroom_tokens = served_context_tokens - threshold_tokens - output_tokens
+    if headroom_tokens <= 0:
+        raise LoopCampaignError("RLM compaction does not preserve output headroom")
+    return {
+        "enabled": True,
+        "threshold_pct": threshold_pct,
+        "package_context_tokens": RLM_COMPACTION_CONTEXT_TOKENS,
+        "threshold_tokens": threshold_tokens,
+        "served_context_tokens": served_context_tokens,
+        "output_reserve_tokens": output_tokens,
+        "headroom_tokens": headroom_tokens,
+        "depth1_admitted": True,
+        "depth2_admitted": False,
+    }
+
+
 def create_campaign_plan(
     *,
     campaign_path: Path,
@@ -729,6 +791,10 @@ def create_campaign_plan(
         if "tools" not in models[profile_id].tasks:
             raise LoopCampaignError("Every HALO profile must declare tool capability")
     _validate_reasoning_profiles(config, models)
+    rlm_profile = models[config["rlm"]["model_profile"]]
+    compaction_admission = _rlm_compaction_admission(
+        config["rlm"], served_context_tokens=int(rlm_profile.max_context)
+    )
     if not DEFAULT_LOOP_PYTHON.is_file():
         raise LoopCampaignError("Pinned loop environment is absent")
     if not Path("/usr/bin/docker").is_file():
@@ -750,6 +816,7 @@ def create_campaign_plan(
         "window": config["window"],
         "upstreams": config["upstreams"],
         "rlm": config["rlm"],
+        "rlm_compaction_admission": compaction_admission,
         "halo": config["halo"],
         "models": {
             profile_id: _profile_plan_record(models[profile_id])
@@ -815,6 +882,15 @@ def _validate_v2_plan_semantics(plan: Mapping[str, Any]) -> None:
         raise LoopCampaignError("Frozen RLM reasoning control is invalid")
     if not isinstance(halo, dict) or halo.get("reasoning_effort") != "none":
         raise LoopCampaignError("Frozen HALO reasoning effort is invalid")
+    try:
+        profile = plan["models"][rlm["model_profile"]]
+        expected_compaction = _rlm_compaction_admission(
+            rlm, served_context_tokens=int(profile["max_context"])
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise LoopCampaignError("Frozen RLM compaction admission is invalid") from error
+    if plan.get("rlm_compaction_admission") != expected_compaction:
+        raise LoopCampaignError("Frozen RLM compaction admission has drifted")
     cases = plan.get("cases")
     if not isinstance(cases, list) or not cases:
         raise LoopCampaignError("Frozen campaign cases are missing")
@@ -826,6 +902,26 @@ def _validate_v2_plan_semantics(plan: Mapping[str, Any]) -> None:
                 or "reasoning_effort" in case
             ):
                 raise LoopCampaignError("Frozen RLM case reasoning control is invalid")
+            treatment = case.get("treatment")
+            expected_status = (
+                RLM_DEPTH2_HOLD
+                if treatment == "rlm_depth2"
+                else RLM_ADMISSION_ADMITTED
+            )
+            if case.get("admission_status") != expected_status:
+                raise LoopCampaignError("Frozen RLM case admission status is invalid")
+            if treatment == "direct":
+                if (
+                    case.get("compaction") is not False
+                    or case.get("compaction_threshold_pct") is not None
+                ):
+                    raise LoopCampaignError("Frozen direct case compaction is invalid")
+            elif (
+                case.get("compaction") is not True
+                or case.get("compaction_threshold_pct")
+                != rlm["compaction_threshold_pct"]
+            ):
+                raise LoopCampaignError("Frozen RLM case compaction is invalid")
         elif phase == "halo":
             if (
                 case.get("reasoning_effort") != halo["reasoning_effort"]
@@ -1353,11 +1449,22 @@ def _usage_int(usage: Mapping[str, Any], name: str) -> int:
 def _worker_rlm_babilong(payload: Mapping[str, Any]) -> dict[str, Any]:
     if payload.get("reasoning_control") != "fixed_unsupported":
         raise LoopCampaignError("RLM reasoning control is unsupported")
+    if (
+        payload.get("compaction") is not True
+        or payload.get("compaction_threshold_pct")
+        != RLM_COMPACTION_THRESHOLD_PCT
+    ):
+        raise LoopCampaignError("RLM compaction controls are not admitted")
     try:
         from rlm import RLM
     except ImportError as error:
         raise LoopCampaignError("Pinned RLM package is unavailable") from error
-    counters = {"iterations": 0, "recursive_subcalls": 0}
+    counters = {"iterations": 0, "recursive_subcalls": 0, "compactions": 0}
+
+    class CountingRLM(RLM):
+        def _compact_history(self, *args: Any, **kwargs: Any) -> Any:
+            counters["compactions"] += 1
+            return super()._compact_history(*args, **kwargs)
 
     def on_iteration_start(*_: Any) -> None:
         counters["iterations"] += 1
@@ -1369,7 +1476,7 @@ def _worker_rlm_babilong(payload: Mapping[str, Any]) -> dict[str, Any]:
         "temperature": 0.0,
         "max_tokens": int(payload["max_output_tokens"]),
     }
-    rlm = RLM(
+    rlm = CountingRLM(
         backend="vllm",
         backend_kwargs={
             "api_key": "local",
@@ -1385,6 +1492,8 @@ def _worker_rlm_babilong(payload: Mapping[str, Any]) -> dict[str, Any]:
         max_tokens=int(payload["max_total_tokens"]),
         max_errors=3,
         max_concurrent_subcalls=int(payload["max_concurrent_subcalls"]),
+        compaction=True,
+        compaction_threshold_pct=float(payload["compaction_threshold_pct"]),
         sampling_args=sampling,
         sub_sampling_args=sampling,
         on_iteration_start=on_iteration_start,
@@ -1422,6 +1531,9 @@ def _worker_rlm_babilong(payload: Mapping[str, Any]) -> dict[str, Any]:
         "usage_includes_recursive_children": False,
         "iterations": counters["iterations"],
         "recursive_subcalls": counters["recursive_subcalls"],
+        "compaction_enabled": True,
+        "compaction_threshold_pct": float(payload["compaction_threshold_pct"]),
+        "compaction_count": counters["compactions"],
         "output_chars": len(answer),
     }
     del answer, result, rlm
@@ -1767,6 +1879,46 @@ def _host_worker_command(*, worker_kind: str) -> list[str]:
     return [str(DEFAULT_LOOP_PYTHON), str(Path(__file__).parents[1] / "loop_campaign.py"), f"_worker-{worker_kind}"]
 
 
+def _terminate_worker_process(
+    process: subprocess.Popen[bytes], *, container_name: str | None
+) -> bool:
+    """Remove an exact worker container and reap its attached client process."""
+
+    cleanup_ok = True
+    if container_name is not None:
+        try:
+            removed = subprocess.run(
+                ["/usr/bin/docker", "rm", "-f", container_name],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            cleanup_ok = False
+        else:
+            cleanup_ok = removed.returncode == 0
+    if process.poll() is not None:
+        process.wait(timeout=0)
+        return cleanup_ok
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            cleanup_ok = False
+    return cleanup_ok
+
+
 def run_worker(
     *,
     worker_kind: str,
@@ -1782,6 +1934,8 @@ def run_worker(
 
     if timeout_s <= 0:
         return {"status": "timeout"}
+    if _STOP_REQUESTED:
+        return {"status": "stopped"}
     container_name = None
     if isolated:
         if isolation_plan is None or isolation_case is None or worker_source is None:
@@ -1801,30 +1955,36 @@ def run_worker(
         stderr=subprocess.PIPE,
         start_new_session=True,
     )
-    try:
-        stdout, _ = process.communicate(
-            input=_canonical_json(payload).encode(),
-            timeout=timeout_s,
-        )
-    except subprocess.TimeoutExpired:
-        if container_name is not None:
-            subprocess.run(
-                ["/usr/bin/docker", "rm", "-f", container_name],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=15,
+    deadline = time.monotonic() + timeout_s
+    worker_input: bytes | None = _canonical_json(payload).encode()
+    while True:
+        if _STOP_REQUESTED:
+            cleanup_ok = _terminate_worker_process(
+                process, container_name=container_name
             )
+            return {
+                "status": "stopped" if cleanup_ok else "error",
+                **({} if cleanup_ok else {"error_type": "WorkerCleanupError"}),
+            }
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            cleanup_ok = _terminate_worker_process(
+                process, container_name=container_name
+            )
+            return {
+                "status": "timeout" if cleanup_ok else "error",
+                **({} if cleanup_ok else {"error_type": "WorkerCleanupError"}),
+            }
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-            process.wait(timeout=5)
-        except (ProcessLookupError, subprocess.TimeoutExpired):
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait(timeout=5)
-        return {"status": "timeout"}
+            stdout, _ = process.communicate(
+                input=worker_input,
+                timeout=min(1.0, remaining),
+            )
+            break
+        except subprocess.TimeoutExpired:
+            # Python retains partially written input and captured output across
+            # communicate() retries. Subsequent calls must not resend stdin.
+            worker_input = None
     if len(stdout) > MAX_WORKER_OUTPUT_BYTES:
         return {"status": "error", "error_type": "WorkerOutputBound"}
     result: Any = None
@@ -2132,6 +2292,8 @@ def _run_rlm_case(
                 "max_concurrent_subcalls": case["max_concurrent_subcalls"],
                 "max_total_tokens": case["max_total_tokens"],
                 "max_output_tokens": case["max_output_tokens"],
+                "compaction": case["compaction"],
+                "compaction_threshold_pct": case["compaction_threshold_pct"],
                 "engine_timeout_s": max(20.0, timeout_s - 15),
             }
         )
@@ -2265,6 +2427,9 @@ def _case_dimensions(case: Mapping[str, Any]) -> dict[str, Any]:
         "trace_count",
         "seed",
         "max_depth",
+        "compaction",
+        "compaction_threshold_pct",
+        "admission_status",
     )
     return {key: case[key] for key in allowed if key in case}
 
@@ -2273,6 +2438,7 @@ def _terminal_case_ids(events: Iterable[Mapping[str, Any]]) -> set[str]:
     terminal_events = {
         "case_complete",
         "case_exhausted",
+        "case_skipped_held",
         "case_skipped_deadline",
         "case_skipped_campaign_stop",
     }
@@ -2282,6 +2448,25 @@ def _terminal_case_ids(events: Iterable[Mapping[str, Any]]) -> set[str]:
         if event.get("event") in terminal_events
         and isinstance(event.get("case_id"), str)
     }
+
+
+def _journal_held_rlm_cases(
+    *, plan: Mapping[str, Any], journal: Journal
+) -> None:
+    terminal = _terminal_case_ids(journal.events())
+    for case in plan["cases"]:
+        if (
+            case.get("phase") == "rlm"
+            and case.get("admission_status") == RLM_DEPTH2_HOLD
+            and case["case_id"] not in terminal
+        ):
+            journal.append(
+                {
+                    "event": "case_skipped_held",
+                    "case_id": case["case_id"],
+                    **_case_dimensions(case),
+                }
+            )
 
 
 def _journal_deadline_skips(
@@ -2354,6 +2539,8 @@ def _recover_plan_workers(plan: Mapping[str, Any], journal: Journal) -> None:
             "/usr/bin/docker",
             "ps",
             "-aq",
+            "--filter",
+            "label=ai.sparkbench.loop-worker=true",
             "--filter",
             f"label=ai.sparkbench.loop-plan={plan['fingerprint']}",
         ],
@@ -2564,6 +2751,12 @@ def summarize_campaign(run_dir: Path) -> dict[str, Any]:
         if event.get("event") in {"case_skipped_deadline", "case_skipped_campaign_stop"}
         and isinstance(event.get("case_id"), str)
     }
+    held = {
+        str(event["case_id"])
+        for event in events
+        if event.get("event") == "case_skipped_held"
+        and isinstance(event.get("case_id"), str)
+    }
 
     groups: list[dict[str, Any]] = []
     rlm_profile = str(plan["rlm"]["model_profile"])
@@ -2727,6 +2920,7 @@ def summarize_campaign(run_dir: Path) -> dict[str, Any]:
         "planned_cases": planned_count,
         "completed_cases": completed,
         "exhausted_cases": len(exhausted),
+        "held_cases": len(held),
         "deadline_skipped_cases": len(deadline_skipped),
         "failed_attempts": sum(
             event.get("event") in {"case_failed", "case_timeout"} for event in events
@@ -2763,6 +2957,9 @@ def _record_case_result(
             }
         )
         return True
+    if result.get("status") == "stopped":
+        journal.append({"event": "case_skipped_campaign_stop", **base})
+        return False
     event_name = "case_timeout" if result.get("status") == "timeout" else "case_failed"
     failure: dict[str, Any] = {"event": event_name, **base}
     if event_name == "case_failed":
@@ -2838,7 +3035,7 @@ def _run_phase_case(
         journal=journal,
     )
     summarize_campaign(run_dir)
-    return complete, not complete
+    return complete, not complete and result.get("status") != "stopped"
 
 
 def _phase_cases(plan: Mapping[str, Any], phase: str) -> list[Mapping[str, Any]]:
@@ -2881,6 +3078,7 @@ def _run_rlm_phase(
 ) -> None:
     phase = "rlm"
     cutoff_name = "rlm_stop_at"
+    _journal_held_rlm_cases(plan=plan, journal=journal)
     if _STOP_REQUESTED or _seconds_until(plan["window"][cutoff_name]) < 120:
         _journal_deadline_skips(
             plan=plan,
@@ -3239,6 +3437,51 @@ def _run_halo_phase(
     )
 
 
+def cleanup_campaign(*, run_dir: Path, workspace: Path) -> dict[str, Any]:
+    """Idempotently remove only resources owned by one valid frozen plan."""
+
+    plan = load_campaign_plan(run_dir)
+    journal = Journal(run_dir / "journal.jsonl")
+    lock_path = results_lock_path(workspace)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock_stream:
+        try:
+            fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise LoopCampaignError(
+                "Another SparkBench run holds the results lock"
+            ) from error
+        failures: list[BaseException] = []
+        try:
+            _recover_plan_workers(plan, journal)
+        except BaseException as error:
+            failures.append(error)
+        try:
+            _recover_plan_servers(plan, journal)
+        except BaseException as error:
+            failures.append(error)
+        try:
+            network_ok = _remove_worker_network(plan, journal)
+        except BaseException as error:
+            failures.append(error)
+        else:
+            if not network_ok:
+                failures.append(
+                    LoopCampaignError("Exact-plan worker network cleanup failed")
+                )
+        if failures:
+            journal.append(
+                {
+                    "event": "campaign_cleanup_failed",
+                    "error_type": type(failures[0]).__name__,
+                    "failure_count": len(failures),
+                }
+            )
+            raise LoopCampaignError("Exact-plan cleanup was not verified") from failures[0]
+        journal.append({"event": "campaign_cleanup_verified"})
+    return {"status": "cleanup_verified"}
+
+
 def execute_campaign(*, run_dir: Path, workspace: Path) -> dict[str, Any]:
     """Execute or resume a frozen campaign under the repository-wide lock."""
 
@@ -3346,17 +3589,20 @@ def execute_campaign(*, run_dir: Path, workspace: Path) -> dict[str, Any]:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Plan, execute, resume, and summarize local RLM/HALO campaigns."
+        description=(
+            "Plan, execute, resume, clean up, and summarize local RLM/HALO "
+            "campaigns."
+        )
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     plan_parser = subparsers.add_parser("plan", help="freeze a campaign plan")
     plan_parser.add_argument("--campaign", type=Path, default=DEFAULT_MANIFEST)
     plan_parser.add_argument("--models", type=Path, default=DEFAULT_MODELS)
     plan_parser.add_argument("--results", type=Path, default=DEFAULT_RESULTS)
-    for command in ("run", "resume", "summarize"):
+    for command in ("run", "resume", "cleanup", "summarize"):
         command_parser = subparsers.add_parser(command)
         command_parser.add_argument("run_dir", type=Path)
-        if command in {"run", "resume"}:
+        if command in {"run", "resume", "cleanup"}:
             command_parser.add_argument("--workspace", type=Path, default=Path.cwd())
     return parser
 
@@ -3393,6 +3639,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if options.command in {"run", "resume"}:
             summary = execute_campaign(
+                run_dir=options.run_dir.resolve(), workspace=options.workspace.resolve()
+            )
+        elif options.command == "cleanup":
+            summary = cleanup_campaign(
                 run_dir=options.run_dir.resolve(), workspace=options.workspace.resolve()
             )
         else:

@@ -26,17 +26,19 @@ model_profile = "rlm-qwen3-8b-bf16"
 reasoning_control = "fixed_unsupported"
 lengths = ["8k", "32k", "64k", "128k"]
 direct_lengths = ["8k", "32k"]
-tasks = ["qa1", "qa2", "qa3"]
-row_indices = [11, 47, 73]
+tasks = ["qa1"]
+row_indices = [11, 47]
 max_iterations = 8
 max_concurrent_subcalls = 2
 max_total_tokens = 262144
 max_output_tokens = 768
+compaction = true
+compaction_threshold_pct = 0.85
 direct_timeout_s = 180
 episode_timeout_s = 900
-recursive_depth2_tasks = ["qa2", "qa3"]
-recursive_depth2_lengths = ["32k", "128k"]
-recursive_depth2_rows = [11, 47]
+recursive_depth2_tasks = ["qa1"]
+recursive_depth2_lengths = ["128k"]
+recursive_depth2_rows = [11]
 worker_isolation = "docker"
 
 [halo]

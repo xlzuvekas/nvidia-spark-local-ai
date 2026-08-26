@@ -49,14 +49,16 @@ thinking-off RLM treatment.
 
 | Treatment | Lengths | Tasks | Rows | Cases |
 | --- | --- | --- | --- | ---: |
-| RLM depth 1 | 8K, 32K, 64K, 128K | `qa1`, `qa2`, `qa3` | 11, 47, 73 | 36 |
-| Direct paired control | 8K, 32K | `qa1`, `qa2`, `qa3` | 11, 47, 73 | 18 |
-| RLM depth-2 supplement | 32K, 128K | `qa2`, `qa3` | 11, 47 | 8 |
+| RLM depth 1 | 8K, 32K, 64K, 128K | `qa1` | 11, 47 | 8 |
+| Direct paired control | 8K, 32K | `qa1` | 11, 47 | 4 |
+| Held RLM depth-2 sentinel | 128K | `qa1` | 11 | 1 |
 
-That produces 62 RLM-phase episodes. Length, task, and treatment order rotate
-by replicate so the direct/RLM pairs are not always exposed to the same server
-age. Only the 18 shared 8K/32K cells are paired direct-versus-RLM comparisons;
-the 64K/128K and depth-2 cells are recursive-only coverage.
+That produces 13 planned RLM-phase cases: 12 executable cases and one explicit
+held depth-2 sentinel. Length and treatment order rotate by replicate so the
+four direct/RLM pairs are not always exposed to the same server age. The 64K
+and 128K cells are recursive-only coverage. This reduced QA1 panel is the
+largest coherent one-attempt envelope that fits the remaining fixed RLM window;
+it is not a three-task BABILong panel.
 
 The recursive bounds are fixed at:
 
@@ -67,6 +69,11 @@ The recursive bounds are fixed at:
 - 768 output tokens per RLM model call;
 - 900 seconds per RLM episode; and
 - required digest-pinned Docker isolation for recursive workers.
+
+Depth-1 cases explicitly enable pinned RLM 0.1.3 root-history compaction at
+`0.85`. The package maps the served model name to a 32,768-token context for
+compaction, so the frozen threshold is 27,852 tokens. Depth-2 remains held
+because the pinned package does not propagate compaction into child RLMs.
 
 Direct controls have a 180-second episode timeout and request only the one
 location label. Accuracy uses the fixed location-label uniqueness rule. The
@@ -112,7 +119,7 @@ threshold and 12,340 tokens of headroom after the 768-token output reserve.
 That materially changes the treatment and requires another exact 128K canary.
 Pinned RLM does not propagate these settings into recursive children, so the
 depth-2 supplement remains held pending a narrow propagation patch and test.
-Do not launch the full RLM phase from the current frozen plan.
+The executable RLM phase remains gated on that compacted 128K canary.
 
 All HALO canaries used the `none` reasoning controls. The exact canary campaign
 completed cleanly and verified cleanup. At `n=1`, the no-MTP success validates
@@ -129,10 +136,10 @@ The planner admits only the expected three-column, 100-row files and the
 selected fixed row indices. Context and answer text never enter the journal.
 
 These are BABILong-derived paired probes, not an official BABILong leaderboard
-submission. They use only three tasks and three fixed rows, a local quantized
-model, campaign-specific direct/RLM prompts, bounded recursive inference, and a
-narrow local scorer. Report within-campaign paired differences; do not compare
-the resulting accuracy directly with published full-suite scores.
+submission. They use one task and two fixed rows, a local model,
+campaign-specific direct/RLM prompts, bounded recursive inference, and a narrow
+local scorer. Report within-campaign paired differences; do not compare the
+resulting accuracy directly with published full-suite scores.
 
 ## HALO matrix
 
@@ -300,10 +307,11 @@ local run paths.
   longest frozen startup timeout plus cleanup; a 90-second grace is invalid
   because the observed cold starts took as long as 279.914 seconds.
 - Docker owns the model and worker container processes outside the user-service
-  cgroup. A normal controller return performs exact-identity cleanup, as the
-  latest 128K canary verified, but the watchdog alone cannot guarantee cleanup
-  after controller `SIGKILL`. An unattended launch therefore also requires an
-  exact-plan, idempotent post-stop cleanup helper before admission.
+  cgroup. A normal controller return performs exact-identity cleanup, but the
+  watchdog alone cannot guarantee cleanup after controller `SIGKILL`. Every
+  unattended unit therefore invokes the exact-plan, idempotent `cleanup`
+  command as `ExecStopPost`; it validates the frozen plan before removing only
+  workers, a server, and a network carrying that plan's exact ownership.
 - Server startup rejection, case failure, timeout, exhaustion, deadline skip,
   recovery, and cleanup failure are distinct scalar
   journal events. Failed or partial work must not be reported as zero quality
@@ -344,6 +352,13 @@ Regenerate the deterministic scalar summary without starting a server:
 python3 loop_campaign.py summarize results/loop-campaigns/<run-directory>
 ```
 
-Use `--workspace /absolute/path/to/local-llm` with `run` or `resume` only when
-the current working directory is not the repository root. Planning after the
-hard deadline is rejected rather than silently shifting the frozen window.
+Idempotently verify and remove only that frozen plan's owned Docker resources:
+
+```bash
+python3 loop_campaign.py cleanup results/loop-campaigns/<run-directory> \
+  --workspace /absolute/path/to/local-llm
+```
+
+Use `--workspace /absolute/path/to/local-llm` with `run`, `resume`, or `cleanup`
+when the current working directory is not the repository root. Planning after
+the hard deadline is rejected rather than silently shifting the frozen window.
