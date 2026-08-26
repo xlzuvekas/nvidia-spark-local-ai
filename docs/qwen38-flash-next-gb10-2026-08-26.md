@@ -216,6 +216,11 @@ is 172.782 GiB, so neither admits on one Spark.
 Those recipes are useful datacenter references, but they are not alternative
 measurements in this report. The smaller target-only GGUF is the only tested
 single-Spark path, and its lack of MTP makes its TPS a different deployment.
+The follow-on
+[native NVFP4/I4 + MTP plan](qwen38-flash-next-native-mtp-optimization-2026-08-26.md)
+identifies PLE quantization as the fit lever, records the provisional runtime
+gaps, and defines the admission and optimization ladder without treating this
+GGUF as an MTP implementation.
 
 ## GLM-5.3-Flash disposition
 

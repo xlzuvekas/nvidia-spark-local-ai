@@ -13,6 +13,7 @@ quality checks, and the provenance needed to interpret each number.
 | How does Qwen3.6 perform on a strict two-hop long-context needle? | [Two-hop retrieval: Qwen3.6 baseline versus MTP2 through the 245,760-target tier](docs/multihop-long-context-results-2026-08-18.md) |
 | How fast are Qwen3.6 and Qwen3.8 under concurrency and 61K–246K inputs? | [Cache-off NVFP4+MTP3 throughput, wall time, TTFT, retries, and validation](docs/qwen36-qwen38-long-context-tps-2026-08-25.md) |
 | How does Qwen3.8-Flash-Next run on one Spark? | [Day-zero IQ4_XS llama.cpp throughput, validation, and memory-pressure results](docs/qwen38-flash-next-gb10-2026-08-26.md) |
+| How could native Qwen3.8-Flash-Next NVFP4/I4 + MTP fit and be optimized? | [PLE fit math, runtime gaps, derived-checkpoint design, and benchmark ladder](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md) |
 | What does native llama.cpp prompt-KV reuse change for Qwen3.6? | [Prefix-cache controls: 8K and 32K shared-prefix cold/warm observations](docs/qwen36-prefix-cache-results-2026-08-18.md) |
 | How did Qwen3-Coder-Next fare on terminal coding tasks? | [Harbor/Terminal-Bench-derived results: Qwen Code versus OpenCode](docs/harbor-terminal-results-2026-08-18.md) |
 | How are offline coding-agent harnesses compared? | [Qwen3-Coder-Next Harbor campaign protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign) |
@@ -176,6 +177,7 @@ geometries, slot counts, or validation states.
 ### Method, scope, and specialized guides
 
 - [Benchmark protocol and evidence policy](BENCHMARK.md)
+- [Qwen3.8-Flash-Next native NVFP4/I4 + MTP optimization plan](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md)
 - [Offline-derived Harbor terminal coding-agent protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign)
 - [Benchmark strategy](docs/benchmark-strategy.md)
 - [Dated campaign plan](docs/benchmark-campaign-2026-08-15.md)
