@@ -94,6 +94,7 @@ outcomes were:
 | 128K depth-1 RLM, 24,576-token guard, 300-second timeout | Reached `TokenLimitExceededError` after 178.865 seconds. |
 | 128K depth-1 RLM, 131,072-token guard, 300-second timeout | Reached the 300-second episode timeout before producing an answer. |
 | 128K depth-1 RLM, 131,072-token guard, 600-second timeout | Reached `TokenLimitExceededError` after 458.422 seconds. |
+| 128K depth-1 RLM, 262,144-token guard, 900-second timeout | The first attempt cleared the earlier aggregate-token boundary, accepted eight model requests, and then returned HTTP 400 on the ninth/default-answer request after 558.709 seconds. Accepted root prompts had grown through 39,802 tokens; reserving 768 output tokens leaves a 40,192-token input envelope under the served 40,960-token context. The retry received only the campaign's remaining 361.453-second allowance and timed out. No scored result was produced; exact container and network cleanup was verified. |
 | Pre-fix 256-trace depth-1 HALO on Qwen3.8 with MTP3 | Server startup took 261.759 seconds. All 8 model requests returned HTTP 200, then the episode failed after 111.263 seconds with `UserError` caused by `ValidationError`. Source isolation identified the pinned HALO `call_subagent` `AgentAsToolInput` parse, which overwrote the SDK error handler. The local protocol workaround catches only that validation class and returns a constant retry result without retaining arguments or validation text. |
 | Post-fix 256-trace depth-1 HALO on Qwen3.8 with MTP3 | Server startup took 267.789 seconds. The canary cleared the old validation boundary with 13 HTTP 200 model requests, then encountered 20 repeated HTTP 400 responses and failed after 285.775 seconds with `EngineAgentExhaustedError`; no scored result was produced. |
 | Matched post-fix HALO canary on Qwen3.8 without MTP | Server startup took 245.576 seconds and the episode completed in 312.132 seconds over 19 model requests. It used 151,790 prompt tokens, of which 108,192 were cached (71.277%), and 2,656 generation tokens at 8.509 effective generation tokens/s. The response was valid JSON with family precision 1.0, recall 0.25, F1 0.4, count accuracy 0.041667, citation coverage 0.25, and citation precision 1.0. One subagent completed and the episode made 32 tool calls. |
@@ -101,9 +102,17 @@ outcomes were:
 
 The RLM failures show that upstream `max_tokens` counts cumulative input and
 output usage as repeated root history grows; it is not merely a per-response
-output allowance. The new 262,144-token and 900-second limits add bounded
-headroom above both observed failure boundaries. They are corrected admission
-bounds, not evidence that a 128K episode now completes.
+output allowance and cannot protect one oversized request. The 262,144-token
+guard cleared the aggregate boundary and exposed the next one: this integration
+leaves pinned RLM 0.1.3 compaction disabled, so the root history grows until a
+request no longer fits the server. The smallest depth-1 repair is an explicit,
+fingerprinted `compaction = true` treatment at threshold `0.85`. The pinned RLM
+model lookup maps this Qwen3-8B name to 32,768 tokens, yielding a 27,852-token
+threshold and 12,340 tokens of headroom after the 768-token output reserve.
+That materially changes the treatment and requires another exact 128K canary.
+Pinned RLM does not propagate these settings into recursive children, so the
+depth-2 supplement remains held pending a narrow propagation patch and test.
+Do not launch the full RLM phase from the current frozen plan.
 
 All HALO canaries used the `none` reasoning controls. The exact canary campaign
 completed cleanly and verified cleanup. At `n=1`, the no-MTP success validates
@@ -290,6 +299,11 @@ local run paths.
   frozen phase deadline or reopen terminal cases. Its stop grace must cover the
   longest frozen startup timeout plus cleanup; a 90-second grace is invalid
   because the observed cold starts took as long as 279.914 seconds.
+- Docker owns the model and worker container processes outside the user-service
+  cgroup. A normal controller return performs exact-identity cleanup, as the
+  latest 128K canary verified, but the watchdog alone cannot guarantee cleanup
+  after controller `SIGKILL`. An unattended launch therefore also requires an
+  exact-plan, idempotent post-stop cleanup helper before admission.
 - Server startup rejection, case failure, timeout, exhaustion, deadline skip,
   recovery, and cleanup failure are distinct scalar
   journal events. Failed or partial work must not be reported as zero quality
