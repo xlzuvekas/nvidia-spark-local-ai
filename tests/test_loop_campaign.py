@@ -32,6 +32,7 @@ from bench.loop_campaign import (
     RLM_COMPACTION_CONTEXT_TOKENS,
     RLM_COMPACTION_THRESHOLD_PCT,
     RLM_DEPTH2_HOLD,
+    RLM_FORCED_COMPACTION_THRESHOLD_PCT,
     Journal,
     LoopCampaignError,
     _build_parser,
@@ -348,6 +349,54 @@ class LoopCaseConstructionTests(unittest.TestCase):
                 path.write_text(
                     _minimal_campaign_toml().replace(old, new), encoding="utf-8"
                 )
+                with self.assertRaisesRegex(LoopCampaignError, message):
+                    load_campaign_manifest(path)
+
+    def test_optional_forced_compaction_diagnostic_is_strict_and_precedes_core(
+        self,
+    ) -> None:
+        table = '''[rlm.compaction_diagnostic]
+threshold_pct = 0.20
+tasks = ["qa1"]
+lengths = ["64k"]
+row_indices = [0]
+
+[halo]'''
+        document = _minimal_campaign_toml().replace("[halo]", table)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "campaign.toml"
+            path.write_text(document, encoding="utf-8")
+            config = load_campaign_manifest(path)
+
+        cases = build_cases(config)
+        self.assertEqual(len(cases), 23)
+        forced = cases[0]
+        self.assertEqual(forced["treatment"], "rlm_depth1_forced_compaction")
+        self.assertEqual(
+            forced["compaction_threshold_pct"],
+            RLM_FORCED_COMPACTION_THRESHOLD_PCT,
+        )
+        self.assertEqual(forced["context_length"], "64k")
+        self.assertEqual(forced["task"], "qa1")
+        self.assertEqual(forced["row_index"], 0)
+        self.assertEqual(forced["max_depth"], 1)
+        self.assertEqual(forced["max_iterations"], config["rlm"]["max_iterations"])
+        self.assertEqual(forced["timeout_s"], config["rlm"]["episode_timeout_s"])
+        self.assertEqual(forced["admission_status"], RLM_ADMISSION_ADMITTED)
+
+        mutations = (
+            ("threshold_pct = 0.20", "threshold_pct = 0.25", "exactly 0.20"),
+            ("row_indices = [0]", "row_indices = [99]", "core subsets"),
+            (
+                'row_indices = [0]\n',
+                'row_indices = [0]\nunknown = true\n',
+                "keys do not match",
+            ),
+        )
+        for old, new, message in mutations:
+            with self.subTest(new=new), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "campaign.toml"
+                path.write_text(document.replace(old, new), encoding="utf-8")
                 with self.assertRaisesRegex(LoopCampaignError, message):
                     load_campaign_manifest(path)
 
@@ -779,12 +828,15 @@ class ScalarResultTests(unittest.TestCase):
             def __init__(self, **kwargs: object) -> None:
                 captured.update(kwargs)
 
+            def _completion_turn(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
             def _compact_history(self, *_args: object, **_kwargs: object) -> list[object]:
                 return []
 
             def completion(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+                self._completion_turn(None, None, None)
                 self._compact_history(None, None, [], 1)
-                captured["on_iteration_start"](0, 0)  # type: ignore[operator]
                 usage = SimpleNamespace(
                     model_usage_summaries={
                         "synthetic": SimpleNamespace(total_calls=1)
@@ -829,6 +881,23 @@ class ScalarResultTests(unittest.TestCase):
         self.assertEqual(result["compaction_threshold_pct"], 0.85)
         self.assertEqual(result["compaction_count"], 1)
         self.assertEqual(result["iterations"], 1)
+
+        forced_payload = {
+            **payload,
+            "compaction_threshold_pct": RLM_FORCED_COMPACTION_THRESHOLD_PCT,
+        }
+        with patch.dict("sys.modules", {"rlm": SimpleNamespace(RLM=FakeRLM)}):
+            forced_result = _worker_rlm_babilong(forced_payload)
+        self.assertEqual(
+            captured["compaction_threshold_pct"],
+            RLM_FORCED_COMPACTION_THRESHOLD_PCT,
+        )
+        self.assertEqual(
+            forced_result["compaction_threshold_pct"],
+            RLM_FORCED_COMPACTION_THRESHOLD_PCT,
+        )
+        self.assertEqual(forced_result["compaction_count"], 1)
+        self.assertEqual(forced_result["iterations"], 1)
 
     def test_halo_direct_chat_calls_are_deterministic_and_output_bounded(self) -> None:
         async def original(
@@ -1202,6 +1271,61 @@ class ExactPlanCleanupTests(unittest.TestCase):
 
 
 class FrozenPlanTests(unittest.TestCase):
+    def test_forced_compaction_plan_is_fingerprinted_and_semantically_strict(
+        self,
+    ) -> None:
+        diagnostic = '''[rlm.compaction_diagnostic]
+threshold_pct = 0.20
+tasks = ["qa1"]
+lengths = ["64k"]
+row_indices = [0]
+
+[halo]'''
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            manifest_path = run_dir / "campaign.toml"
+            manifest_path.write_text(
+                _minimal_campaign_toml().replace("[halo]", diagnostic),
+                encoding="utf-8",
+            )
+            config = load_campaign_manifest(manifest_path)
+            forced_case = build_cases(config)[0]
+            rlm_config = copy.deepcopy(config["rlm"])
+            base: dict[str, object] = {
+                "schema_version": PLAN_SCHEMA_VERSION,
+                "protocol_version": PROTOCOL_VERSION,
+                "campaign_id": "unit-loop",
+                "rlm": rlm_config,
+                "rlm_compaction_admission": _rlm_compaction_admission(
+                    rlm_config, served_context_tokens=40_960
+                ),
+                "models": {"synthetic-rlm": {"max_context": 40_960}},
+                "halo": {"reasoning_effort": "none"},
+                "cases": [forced_case],
+            }
+            plan = _write_plan(run_dir / "plan.json", base)
+            loaded = load_campaign_plan(run_dir)
+            self.assertEqual(loaded, plan)
+            self.assertEqual(
+                loaded["cases"][0]["compaction_threshold_pct"],
+                RLM_FORCED_COMPACTION_THRESHOLD_PCT,
+            )
+
+            drifted = copy.deepcopy(base)
+            drifted_case = drifted["cases"][0]
+            assert isinstance(drifted_case, dict)
+            drifted_case["compaction_threshold_pct"] = RLM_COMPACTION_THRESHOLD_PCT
+            drifted_case["case_id"] = _case_id(
+                {
+                    key: value
+                    for key, value in drifted_case.items()
+                    if key != "case_id"
+                }
+            )
+            _write_plan(run_dir / "plan.json", drifted)
+            with self.assertRaisesRegex(LoopCampaignError, "case compaction"):
+                load_campaign_plan(run_dir)
+
     def test_round_trip_and_integrity_and_case_identity_rejection(self) -> None:
         raw_case: dict[str, object] = {
             "phase": "halo",

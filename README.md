@@ -24,6 +24,7 @@ quality checks, and the provenance needed to interpret each number.
 | How did local models handle bounded memory decisions? | [Graphiti-style resolver and synthetic transaction component results](docs/memory-operations-results-2026-08-24.md) |
 | How should Laguna, Graphiti, and MemFS-style reflection be tested locally? | [Article audit and bounded memory benchmark plan](docs/laguna-graphiti-memory-plan-2026-08-24.md) |
 | How will the overnight RLM and HALO loops be compared? | [Frozen paired BABILong-derived and synthetic Graphiti-like campaign protocol](docs/rlm-halo-overnight-2026-08-25.md) |
+| How is the remaining RLM/HALO window being used? | [Verified first-run audit and adaptive compaction, breadth, turn-budget, and 65K-trace continuation](docs/rlm-halo-continuation-2026-08-26.md) |
 
 The generated public evidence archive is intentionally separate from raw run
 data. Its [human-readable map](evidence/README.md) and

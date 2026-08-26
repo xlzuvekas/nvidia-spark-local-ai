@@ -80,6 +80,7 @@ RLM_REVISION = "0b45df99c43fb3844a3b796a15d13c0f9d07afd8"
 RLM_VERSION = "0.1.3"
 RLM_COMPACTION_CONTEXT_TOKENS = 32_768
 RLM_COMPACTION_THRESHOLD_PCT = 0.85
+RLM_FORCED_COMPACTION_THRESHOLD_PCT = 0.20
 RLM_ADMISSION_ADMITTED = "admitted"
 RLM_DEPTH2_HOLD = "held_child_compaction_unverified"
 HALO_SOURCE = "context-labs/HALO"
@@ -159,6 +160,10 @@ _RLM_KEYS = frozenset(
         "recursive_depth2_rows",
         "worker_isolation",
     }
+)
+_RLM_OPTIONAL_KEYS = frozenset({"compaction_diagnostic"})
+_RLM_COMPACTION_DIAGNOSTIC_KEYS = frozenset(
+    {"threshold_pct", "tasks", "lengths", "row_indices"}
 )
 _HALO_KEYS = frozenset(
     {
@@ -303,7 +308,17 @@ def load_campaign_manifest(path: Path) -> dict[str, Any]:
     if upstreams != exact_upstreams:
         raise LoopCampaignError("Campaign upstream pins do not match the protocol")
 
-    rlm = _require_exact_keys(document["rlm"], _RLM_KEYS, name="rlm")
+    rlm_value = document["rlm"]
+    if not isinstance(rlm_value, dict):
+        raise LoopCampaignError("rlm must be a table")
+    rlm_unknown = set(rlm_value) - (_RLM_KEYS | _RLM_OPTIONAL_KEYS)
+    rlm_missing = _RLM_KEYS - set(rlm_value)
+    if rlm_unknown or rlm_missing:
+        raise LoopCampaignError(
+            "rlm keys do not match the frozen schema "
+            f"(missing={sorted(rlm_missing)}, unknown={sorted(rlm_unknown)})"
+        )
+    rlm = rlm_value
     if not isinstance(rlm["model_profile"], str) or not rlm["model_profile"]:
         raise LoopCampaignError("rlm.model_profile is required")
     if rlm["reasoning_control"] != "fixed_unsupported":
@@ -349,6 +364,39 @@ def load_campaign_manifest(path: Path) -> dict[str, Any]:
         raise LoopCampaignError(
             "rlm.compaction_threshold_pct must be exactly 0.85"
         )
+    diagnostic = rlm.get("compaction_diagnostic")
+    if diagnostic is not None:
+        diagnostic = _require_exact_keys(
+            diagnostic,
+            _RLM_COMPACTION_DIAGNOSTIC_KEYS,
+            name="rlm.compaction_diagnostic",
+        )
+        if (
+            type(diagnostic["threshold_pct"]) is not float
+            or diagnostic["threshold_pct"]
+            != RLM_FORCED_COMPACTION_THRESHOLD_PCT
+        ):
+            raise LoopCampaignError(
+                "rlm.compaction_diagnostic.threshold_pct must be exactly 0.20"
+            )
+        diagnostic_tasks = _string_list(
+            diagnostic["tasks"], name="rlm.compaction_diagnostic.tasks"
+        )
+        diagnostic_lengths = _string_list(
+            diagnostic["lengths"], name="rlm.compaction_diagnostic.lengths"
+        )
+        diagnostic_rows = _int_list(
+            diagnostic["row_indices"],
+            name="rlm.compaction_diagnostic.row_indices",
+        )
+        if (
+            not set(diagnostic_tasks) <= set(tasks)
+            or not set(diagnostic_lengths) <= set(lengths)
+            or not set(diagnostic_rows) <= set(rows)
+        ):
+            raise LoopCampaignError(
+                "RLM compaction diagnostic selectors must be core subsets"
+            )
     if rlm["worker_isolation"] != "docker":
         raise LoopCampaignError("The frozen RLM protocol requires Docker worker isolation")
 
@@ -392,6 +440,32 @@ def build_cases(config: Mapping[str, Any]) -> list[dict[str, Any]]:
     lengths = list(rlm["lengths"])
     tasks = list(rlm["tasks"])
     direct_lengths = set(rlm["direct_lengths"])
+    diagnostic = rlm.get("compaction_diagnostic")
+    if diagnostic is not None:
+        for row_index in diagnostic["row_indices"]:
+            for length in diagnostic["lengths"]:
+                for task in diagnostic["tasks"]:
+                    case = {
+                        "phase": "rlm",
+                        "treatment": "rlm_depth1_forced_compaction",
+                        "reasoning_control": rlm["reasoning_control"],
+                        "context_length": length,
+                        "task": task,
+                        "row_index": row_index,
+                        "replicate": list(rlm["row_indices"]).index(row_index),
+                        "max_depth": 1,
+                        "max_iterations": rlm["max_iterations"],
+                        "max_concurrent_subcalls": rlm[
+                            "max_concurrent_subcalls"
+                        ],
+                        "max_total_tokens": rlm["max_total_tokens"],
+                        "max_output_tokens": rlm["max_output_tokens"],
+                        "compaction": True,
+                        "compaction_threshold_pct": diagnostic["threshold_pct"],
+                        "admission_status": RLM_ADMISSION_ADMITTED,
+                        "timeout_s": rlm["episode_timeout_s"],
+                    }
+                    cases.append({**case, "case_id": _case_id(case)})
     for replicate, row_index in enumerate(rlm["row_indices"]):
         length_order = lengths[replicate % len(lengths) :] + lengths[: replicate % len(lengths)]
         for length_index, length in enumerate(length_order):
@@ -891,6 +965,25 @@ def _validate_v2_plan_semantics(plan: Mapping[str, Any]) -> None:
         raise LoopCampaignError("Frozen RLM compaction admission is invalid") from error
     if plan.get("rlm_compaction_admission") != expected_compaction:
         raise LoopCampaignError("Frozen RLM compaction admission has drifted")
+    diagnostic = rlm.get("compaction_diagnostic")
+    if diagnostic is not None:
+        if (
+            not isinstance(diagnostic, dict)
+            or set(diagnostic) != _RLM_COMPACTION_DIAGNOSTIC_KEYS
+            or diagnostic.get("threshold_pct")
+            != RLM_FORCED_COMPACTION_THRESHOLD_PCT
+            or not all(
+                isinstance(diagnostic.get(name), list) and diagnostic[name]
+                for name in ("tasks", "lengths", "row_indices")
+            )
+            or not set(diagnostic["tasks"]) <= set(rlm.get("tasks", ()))
+            or not set(diagnostic["lengths"]) <= set(rlm.get("lengths", ()))
+            or not set(diagnostic["row_indices"])
+            <= set(rlm.get("row_indices", ()))
+        ):
+            raise LoopCampaignError(
+                "Frozen RLM compaction diagnostic is invalid"
+            )
     cases = plan.get("cases")
     if not isinstance(cases, list) or not cases:
         raise LoopCampaignError("Frozen campaign cases are missing")
@@ -916,12 +1009,31 @@ def _validate_v2_plan_semantics(plan: Mapping[str, Any]) -> None:
                     or case.get("compaction_threshold_pct") is not None
                 ):
                     raise LoopCampaignError("Frozen direct case compaction is invalid")
-            elif (
-                case.get("compaction") is not True
-                or case.get("compaction_threshold_pct")
-                != rlm["compaction_threshold_pct"]
-            ):
-                raise LoopCampaignError("Frozen RLM case compaction is invalid")
+            else:
+                expected_threshold = rlm["compaction_threshold_pct"]
+                if treatment == "rlm_depth1_forced_compaction":
+                    diagnostic = rlm.get("compaction_diagnostic")
+                    if not isinstance(diagnostic, dict):
+                        raise LoopCampaignError(
+                            "Frozen forced-compaction case lacks its diagnostic"
+                        )
+                    expected_threshold = diagnostic.get("threshold_pct")
+                    if (
+                        case.get("task") not in diagnostic.get("tasks", ())
+                        or case.get("context_length")
+                        not in diagnostic.get("lengths", ())
+                        or case.get("row_index")
+                        not in diagnostic.get("row_indices", ())
+                    ):
+                        raise LoopCampaignError(
+                            "Frozen forced-compaction case selectors are invalid"
+                        )
+                if (
+                    case.get("compaction") is not True
+                    or case.get("compaction_threshold_pct")
+                    != expected_threshold
+                ):
+                    raise LoopCampaignError("Frozen RLM case compaction is invalid")
         elif phase == "halo":
             if (
                 case.get("reasoning_effort") != halo["reasoning_effort"]
@@ -1449,10 +1561,10 @@ def _usage_int(usage: Mapping[str, Any], name: str) -> int:
 def _worker_rlm_babilong(payload: Mapping[str, Any]) -> dict[str, Any]:
     if payload.get("reasoning_control") != "fixed_unsupported":
         raise LoopCampaignError("RLM reasoning control is unsupported")
-    if (
-        payload.get("compaction") is not True
-        or payload.get("compaction_threshold_pct")
-        != RLM_COMPACTION_THRESHOLD_PCT
+    threshold_pct = payload.get("compaction_threshold_pct")
+    if payload.get("compaction") is not True or threshold_pct not in (
+        RLM_COMPACTION_THRESHOLD_PCT,
+        RLM_FORCED_COMPACTION_THRESHOLD_PCT,
     ):
         raise LoopCampaignError("RLM compaction controls are not admitted")
     try:
@@ -1462,12 +1574,13 @@ def _worker_rlm_babilong(payload: Mapping[str, Any]) -> dict[str, Any]:
     counters = {"iterations": 0, "recursive_subcalls": 0, "compactions": 0}
 
     class CountingRLM(RLM):
+        def _completion_turn(self, *args: Any, **kwargs: Any) -> Any:
+            counters["iterations"] += 1
+            return super()._completion_turn(*args, **kwargs)
+
         def _compact_history(self, *args: Any, **kwargs: Any) -> Any:
             counters["compactions"] += 1
             return super()._compact_history(*args, **kwargs)
-
-    def on_iteration_start(*_: Any) -> None:
-        counters["iterations"] += 1
 
     def on_subcall_start(*_: Any) -> None:
         counters["recursive_subcalls"] += 1
@@ -1493,10 +1606,9 @@ def _worker_rlm_babilong(payload: Mapping[str, Any]) -> dict[str, Any]:
         max_errors=3,
         max_concurrent_subcalls=int(payload["max_concurrent_subcalls"]),
         compaction=True,
-        compaction_threshold_pct=float(payload["compaction_threshold_pct"]),
+        compaction_threshold_pct=float(threshold_pct),
         sampling_args=sampling,
         sub_sampling_args=sampling,
-        on_iteration_start=on_iteration_start,
         on_subcall_start=on_subcall_start,
         verbose=False,
         logger=None,
