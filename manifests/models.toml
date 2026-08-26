@@ -1018,6 +1018,102 @@ args = [
 ]
 
 [[models]]
+id = "qwen38-flash-next-ud-iq4-xs-llamacpp"
+description = "Provisional single-slot Qwen3.8-Flash-Next UD-IQ4_XS split-GGUF 32K admission profile on the exact unmerged qwen4exp llama.cpp runtime, with thinking disabled."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.8-Flash-Next-GGUF"
+revision = "2c41bd2a0b3f51c503c11f1c7ed2e6bb34036beb"
+served_name = "Qwen/Qwen3.8-Flash-Next"
+tasks = ["chat", "json", "tools"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "qwen4exp"
+quantization = "ud-iq4_xs"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = [
+  "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf",
+  "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00002-of-00003.gguf",
+  "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00003-of-00003.gguf",
+]
+model_shards = [
+  { path = "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf", digest = "sha256:5ce89370720f8bf90890f439361282104c1aa1482d4013bb9a50923e758e71a4", size_bytes = 10946624 },
+  { path = "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00002-of-00003.gguf", digest = "sha256:577a38a2392b40ca2193cea502e1d92f60b8cd370675d308e0ec21885d9daaa7", size_bytes = 49835229856 },
+  { path = "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00003-of-00003.gguf", digest = "sha256:d4634e6d84f0ebb0940be15c90d3790bf6464e3dea3a1cddc567dc0e83ad8833", size_bytes = 43836407744 },
+]
+weight_file_count = 3
+weight_size_bytes = 93682584224
+runtime_binary = "~/.cache/sparkbench/llama.cpp-qwen38-flash-035e2273/build-static/bin/llama-server"
+runtime_digest = "sha256:6b0e09f19768e1424eac29b27d6d7f5ca661a9f73b5b7a2ecba5e768af8a366a"
+runtime_parallel = 1
+runtime_source_dir = "~/.cache/sparkbench/llama.cpp-qwen38-flash-035e2273"
+runtime_revision = "035e22731a7fd70b9854b3a2d64ec68e9b1a45d3"
+max_context = 32768
+native_context = 32768
+startup_timeout_s = 1800
+estimated_ram_gib = 101.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+]
+
+[[models]]
+id = "qwen38-flash-next-ud-iq4-xs-llamacpp-p8"
+description = "Provisional Qwen3.8-Flash-Next UD-IQ4_XS split-GGUF throughput profile on the exact unmerged qwen4exp llama.cpp runtime, with eight 32K slots and thinking disabled."
+support_status = "spark_other_backend"
+backend = "llamacpp"
+source = "unsloth/Qwen3.8-Flash-Next-GGUF"
+revision = "2c41bd2a0b3f51c503c11f1c7ed2e6bb34036beb"
+served_name = "Qwen/Qwen3.8-Flash-Next"
+tasks = ["chat", "json", "tools"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "qwen4exp"
+quantization = "ud-iq4_xs"
+lifecycle = "subprocess"
+cache_dir = "user"
+fetch_allow_patterns = [
+  "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf",
+  "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00002-of-00003.gguf",
+  "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00003-of-00003.gguf",
+]
+model_shards = [
+  { path = "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf", digest = "sha256:5ce89370720f8bf90890f439361282104c1aa1482d4013bb9a50923e758e71a4", size_bytes = 10946624 },
+  { path = "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00002-of-00003.gguf", digest = "sha256:577a38a2392b40ca2193cea502e1d92f60b8cd370675d308e0ec21885d9daaa7", size_bytes = 49835229856 },
+  { path = "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00003-of-00003.gguf", digest = "sha256:d4634e6d84f0ebb0940be15c90d3790bf6464e3dea3a1cddc567dc0e83ad8833", size_bytes = 43836407744 },
+]
+weight_file_count = 3
+weight_size_bytes = 93682584224
+runtime_binary = "~/.cache/sparkbench/llama.cpp-qwen38-flash-035e2273/build-static/bin/llama-server"
+runtime_digest = "sha256:6b0e09f19768e1424eac29b27d6d7f5ca661a9f73b5b7a2ecba5e768af8a366a"
+runtime_parallel = 8
+runtime_source_dir = "~/.cache/sparkbench/llama.cpp-qwen38-flash-035e2273"
+runtime_revision = "035e22731a7fd70b9854b3a2d64ec68e9b1a45d3"
+max_context = 32768
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 112.0
+endpoint = "http://127.0.0.1:8000/v1"
+args = [
+  "--n-gpu-layers", "all",
+  "--flash-attn", "on",
+  "--fit", "off",
+  "--batch-size", "8192",
+  "--ubatch-size", "512",
+  "--cache-type-k", "q8_0",
+  "--cache-type-v", "q8_0",
+  "--jinja",
+  "--reasoning", "off",
+]
+
+[[models]]
 id = "qwen38-27b-ud-q4-k-xl-llamacpp"
 description = "Unsloth Dynamic Q4_K_XL GGUF on pinned native llama.cpp without speculation."
 support_status = "spark_other_backend"

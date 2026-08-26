@@ -76,6 +76,105 @@ def _completed(
 
 
 class LlamaCppManifestTests(unittest.TestCase):
+    def test_qwen38_flash_next_profile_pins_split_gguf_and_runtime(self) -> None:
+        model = load_models(ROOT / "manifests" / "models.toml")[
+            "qwen38-flash-next-ud-iq4-xs-llamacpp-p8"
+        ]
+
+        expected_shards = (
+            ModelShard(
+                path=(
+                    "UD-IQ4_XS/"
+                    "Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf"
+                ),
+                digest=(
+                    "sha256:5ce89370720f8bf90890f439361282104c1aa1482d"
+                    "4013bb9a50923e758e71a4"
+                ),
+                size_bytes=10_946_624,
+            ),
+            ModelShard(
+                path=(
+                    "UD-IQ4_XS/"
+                    "Qwen3.8-Flash-Next-UD-IQ4_XS-00002-of-00003.gguf"
+                ),
+                digest=(
+                    "sha256:577a38a2392b40ca2193cea502e1d92f60b8cd370"
+                    "675d308e0ec21885d9daaa7"
+                ),
+                size_bytes=49_835_229_856,
+            ),
+            ModelShard(
+                path=(
+                    "UD-IQ4_XS/"
+                    "Qwen3.8-Flash-Next-UD-IQ4_XS-00003-of-00003.gguf"
+                ),
+                digest=(
+                    "sha256:d4634e6d84f0ebb0940be15c90d3790bf6464e3de"
+                    "a3a1cddc567dc0e83ad8833"
+                ),
+                size_bytes=43_836_407_744,
+            ),
+        )
+
+        self.assertEqual(model.backend, "llamacpp")
+        self.assertEqual(model.lifecycle, "subprocess")
+        self.assertEqual(model.source, "unsloth/Qwen3.8-Flash-Next-GGUF")
+        self.assertEqual(
+            model.revision,
+            "2c41bd2a0b3f51c503c11f1c7ed2e6bb34036beb",
+        )
+        self.assertEqual(model.served_name, "Qwen/Qwen3.8-Flash-Next")
+        self.assertEqual(model.architecture, "qwen4exp")
+        self.assertEqual(model.quantization, "ud-iq4_xs")
+        self.assertEqual(model.model_shards, expected_shards)
+        self.assertEqual(
+            model.fetch_allow_patterns,
+            tuple(shard.path for shard in expected_shards),
+        )
+        self.assertEqual(model.weight_file_count, 3)
+        self.assertEqual(model.weight_size_bytes, 93_682_584_224)
+        self.assertEqual(model.runtime_parallel, 8)
+        self.assertEqual(model.max_context, 32_768)
+        self.assertEqual(model.native_context, 262_144)
+        self.assertEqual(model.estimated_ram_gib, 112.0)
+        self.assertEqual(model.startup_timeout_s, 1_800)
+        self.assertEqual(model.tasks, ("chat", "json", "tools"))
+        self.assertEqual(
+            model.request_body_json,
+            '{"chat_template_kwargs":{"enable_thinking":false}}',
+        )
+        self.assertEqual(
+            model.runtime_digest,
+            "sha256:6b0e09f19768e1424eac29b27d6d7f5ca661a9f73b5b7a2ecba5e768af8a366a",
+        )
+        self.assertEqual(
+            model.runtime_revision,
+            "035e22731a7fd70b9854b3a2d64ec68e9b1a45d3",
+        )
+        self.assertEqual(
+            model.runtime_binary,
+            "~/.cache/sparkbench/llama.cpp-qwen38-flash-035e2273/"
+            "build-static/bin/llama-server",
+        )
+        self.assertEqual(
+            model.runtime_source_dir,
+            "~/.cache/sparkbench/llama.cpp-qwen38-flash-035e2273",
+        )
+        self.assertNotIn("--parallel", model.args)
+        self.assertFalse(llamacpp_mtp_requested(model.args))
+
+        admission = load_models(ROOT / "manifests" / "models.toml")[
+            "qwen38-flash-next-ud-iq4-xs-llamacpp"
+        ]
+        self.assertEqual(admission.model_shards, expected_shards)
+        self.assertEqual(admission.runtime_digest, model.runtime_digest)
+        self.assertEqual(admission.runtime_revision, model.runtime_revision)
+        self.assertEqual(admission.runtime_parallel, 1)
+        self.assertEqual(admission.max_context, 32_768)
+        self.assertEqual(admission.native_context, 32_768)
+        self.assertEqual(admission.estimated_ram_gib, 101.0)
+
     def test_qwen3_coder_next_profile_pins_exact_p1_agent_launch(self) -> None:
         model = load_models(ROOT / "manifests" / "models.toml")[
             "qwen3-coder-next-80b-a3b-ud-q4-k-xl-llamacpp"
