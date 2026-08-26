@@ -2,7 +2,7 @@ schema_version = 1
 
 [suite]
 id = "qwen38-flash-next-sglang-native"
-description = "Bounded one-server-lifecycle SGLang native throughput and context pass. The 8K-240K inputs use a synthetic repeated-word corpus, so they measure serving mechanics and exact-key retention rather than natural-document understanding."
+description = "Bounded one-server-lifecycle SGLang native throughput and context pass. The 8K-240K inputs repeat one synthetic word, so they measure serving mechanics and exact-key retention rather than natural-document understanding or cold/varied-token NVMe-PLE cost."
 
 [[cases]]
 id = "chat-smoke"

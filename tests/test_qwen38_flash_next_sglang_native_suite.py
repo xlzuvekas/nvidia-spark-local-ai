@@ -22,6 +22,7 @@ class Qwen38FlashNextSglangNativeSuiteTests(unittest.TestCase):
         cases = {case.id: case for case in suite.cases}
 
         self.assertEqual(suite.id, "qwen38-flash-next-sglang-native")
+        self.assertIn("NVMe-PLE", suite.description)
         self.assertEqual(len(cases), 14)
         self.assertNotIn("cache", {case.kind for case in cases.values()})
         self.assertEqual(cases["chat-smoke"].kind, "decode")
