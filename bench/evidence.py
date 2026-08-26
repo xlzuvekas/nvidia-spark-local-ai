@@ -62,6 +62,8 @@ HARBOR_EXPECTED_DERIVATION_DIGEST = (
     "sha256:4749be56af707f6d7615ac5cdb0fb7fa8d50fcdd49e5d4c9a9bfebb71677b4ef"
 )
 HARBOR_REPLICATE_COUNT = 2
+LOOP_EVIDENCE_KIND = "rlm_halo_loop_campaign"
+LOOP_RESULT_ROOTS = ("loop-campaigns", "loop-smoke-plans", "loop-smokes")
 MAX_SOURCE_JSON_BYTES = 16 * 1024 * 1024
 MAX_SOURCE_LINE_BYTES = 1024 * 1024
 MAX_OUTPUT_FILE_BYTES = 2 * 1024 * 1024
@@ -98,6 +100,340 @@ _GROUPED_RUN_ROOT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"qwen36-core-(20[0-9]{6}T[0-9]{6})\Z"), "%Y%m%dT%H%M%S"),
     (re.compile(r"reasoning-(20[0-9]{6})\Z"), "%Y%m%d"),
 )
+
+_LOOP_PLAN_TOP_FIELDS = frozenset(
+    {
+        "campaign_id",
+        "cases",
+        "created_at",
+        "dataset",
+        "description",
+        "fingerprint",
+        "halo",
+        "integrity_hash",
+        "models",
+        "protocol_version",
+        "repository",
+        "rlm",
+        "schema_version",
+        "upstreams",
+        "window",
+        "worker",
+    }
+)
+_LOOP_MODEL_SOURCE_FIELDS = frozenset(
+    {
+        "architecture",
+        "args",
+        "backend",
+        "cache_dir",
+        "description",
+        "draft_model_digest",
+        "draft_model_file",
+        "draft_model_size_bytes",
+        "draft_revision",
+        "draft_source",
+        "draft_weight_size_bytes",
+        "endpoint",
+        "estimated_ram_gib",
+        "fetch_allow_patterns",
+        "fetch_ignore_patterns",
+        "id",
+        "image",
+        "image_digest",
+        "lifecycle",
+        "max_context",
+        "mmproj_digest",
+        "mmproj_file",
+        "mmproj_size_bytes",
+        "model_digest",
+        "model_file",
+        "model_shards",
+        "model_size_bytes",
+        "native_context",
+        "prefix_cache_mode",
+        "quantization",
+        "recipe_revision",
+        "recipe_source",
+        "request_body_json",
+        "revision",
+        "runtime_binary",
+        "runtime_digest",
+        "runtime_parallel",
+        "runtime_python",
+        "runtime_revision",
+        "runtime_source_dir",
+        "served_name",
+        "sglang_allow_hf_metadata_probe",
+        "source",
+        "startup_timeout_s",
+        "support_status",
+        "tasks",
+        "weight_file_count",
+        "weight_size_bytes",
+    }
+)
+_LOOP_CASE_FIELDS = frozenset(
+    {
+        "admission_status",
+        "case_id",
+        "compaction",
+        "compaction_threshold_pct",
+        "context_length",
+        "max_concurrent_subcalls",
+        "max_depth",
+        "max_iterations",
+        "max_output_tokens",
+        "max_parallel",
+        "max_total_tokens",
+        "max_turns",
+        "phase",
+        "reasoning_control",
+        "reasoning_effort",
+        "replicate",
+        "row_index",
+        "seed",
+        "task",
+        "timeout_s",
+        "trace_count",
+        "treatment",
+    }
+)
+_LOOP_CASE_STRING_FIELDS = frozenset(
+    {
+        "admission_status",
+        "case_id",
+        "context_length",
+        "phase",
+        "reasoning_control",
+        "reasoning_effort",
+        "task",
+        "treatment",
+    }
+)
+_LOOP_CASE_BOOLEAN_FIELDS = frozenset({"compaction"})
+_LOOP_CASE_INTEGER_FIELDS = frozenset(
+    {
+        "max_concurrent_subcalls",
+        "max_depth",
+        "max_iterations",
+        "max_output_tokens",
+        "max_parallel",
+        "max_total_tokens",
+        "max_turns",
+        "replicate",
+        "row_index",
+        "seed",
+        "timeout_s",
+        "trace_count",
+    }
+)
+_LOOP_BOUND_DIMENSION_FIELDS = frozenset(
+    {
+        "admission_status",
+        "compaction",
+        "compaction_threshold_pct",
+        "context_length",
+        "max_depth",
+        "phase",
+        "reasoning_control",
+        "reasoning_effort",
+        "replicate",
+        "row_index",
+        "seed",
+        "task",
+        "trace_count",
+        "treatment",
+    }
+)
+_LOOP_MEASUREMENT_BOOLEAN_FIELDS = frozenset(
+    {
+        "compaction",
+        "compaction_enabled",
+        "correct",
+        "json_valid",
+        "root_finalized",
+        "run_code_disabled",
+        "usage_includes_recursive_children",
+    }
+)
+_LOOP_MEASUREMENT_INTEGER_FIELDS = frozenset(
+    {
+        "assistant_items",
+        "attempt",
+        "child_tool_calls",
+        "child_turns",
+        "compaction_count",
+        "completed_subagents",
+        "durable_items",
+        "final_answer_chars",
+        "iterations",
+        "max_depth",
+        "max_observed_depth",
+        "observed_subagents",
+        "output_chars",
+        "predicted_family_count",
+        "recursive_subcalls",
+        "replicate",
+        "reported_calls",
+        "reported_input_tokens",
+        "reported_output_tokens",
+        "row_index",
+        "seed",
+        "subagent_requests",
+        "tool_calls",
+        "trace_count",
+    }
+)
+_LOOP_MEASUREMENT_NUMERIC_FIELDS = frozenset(
+    {
+        "citation_family_coverage",
+        "citation_precision",
+        "compaction_threshold_pct",
+        "effective_generation_tps",
+        "engine_wall_s",
+        "exact_count_rate",
+        "family_f1",
+        "family_precision",
+        "family_recall",
+        "mean_count_accuracy",
+        "vllm_cached_prompt_tokens",
+        "vllm_generation_tokens",
+        "vllm_prefix_cache_hit_rate",
+        "vllm_prefix_cache_hits",
+        "vllm_prefix_cache_queries",
+        "vllm_prompt_tokens",
+        "vllm_successful_requests",
+        "wall_s",
+    }
+)
+_LOOP_MEASUREMENT_STRING_FIELDS = _LOOP_CASE_STRING_FIELDS | frozenset(
+    {"profile_id"}
+)
+_LOOP_MEASUREMENT_FIELDS = (
+    _LOOP_MEASUREMENT_BOOLEAN_FIELDS
+    | _LOOP_MEASUREMENT_INTEGER_FIELDS
+    | _LOOP_MEASUREMENT_NUMERIC_FIELDS
+    | _LOOP_MEASUREMENT_STRING_FIELDS
+)
+_LOOP_MEASUREMENT_OUTPUT_FIELDS = (
+    _LOOP_MEASUREMENT_FIELDS - {"tool_calls"}
+) | {"executed_tool_call_count"}
+_LOOP_EVENT_TYPES = frozenset(
+    {
+        "campaign_cleanup_failed",
+        "campaign_cleanup_verified",
+        "campaign_failed",
+        "campaign_finished",
+        "campaign_resumed",
+        "campaign_started",
+        "case_complete",
+        "case_exhausted",
+        "case_failed",
+        "case_skipped_campaign_stop",
+        "case_skipped_deadline",
+        "case_skipped_held",
+        "case_started",
+        "case_timeout",
+        "halo_fallback_selected",
+        "halo_index_complete",
+        "halo_profile_rejected",
+        "server_ready",
+        "server_recovered",
+        "server_starting",
+        "server_stop_failed",
+        "server_stopped",
+        "worker_network_cleanup_failed",
+        "worker_network_cleanup_inspection_failed",
+        "worker_network_cleanup_refused",
+        "worker_network_ready",
+        "worker_network_removed",
+        "worker_source_staged",
+        "workers_recovered",
+    }
+)
+_LOOP_EVENT_FIELDS = _LOOP_MEASUREMENT_FIELDS | frozenset(
+    {
+        "completed_cases",
+        "container_count",
+        "error_cause_frame_file",
+        "error_cause_frame_function",
+        "error_cause_frame_line",
+        "error_cause_type",
+        "error_code",
+        "error_frame_file",
+        "error_frame_function",
+        "error_frame_line",
+        "error_http_status",
+        "error_token_limit",
+        "error_tokens_used",
+        "error_type",
+        "event",
+        "fixture_id",
+        "index_size_bytes",
+        "index_wall_s",
+        "indexed_trace_count",
+        "plan_fingerprint",
+        "recovery",
+        "repository_revision",
+        "startup_s",
+        "status",
+        "timestamp",
+        "timeout_s",
+    }
+)
+_LOOP_SUMMARY_COMMON_GROUP_FIELDS = frozenset(
+    {
+        "cache_fraction",
+        "cached_prompt_tokens",
+        "completed_cases",
+        "effective_generation_tps",
+        "generation_tokens",
+        "mean_wall_s",
+        "phase",
+        "planned_cases",
+        "profile_id",
+        "prompt_tokens",
+        "reasoning_control",
+        "reasoning_effort",
+        "treatment",
+    }
+)
+_LOOP_SUMMARY_RLM_GROUP_FIELDS = _LOOP_SUMMARY_COMMON_GROUP_FIELDS | frozenset(
+    {
+        "accuracy",
+        "correct_cases",
+        "mean_reported_calls",
+        "mean_vllm_successful_requests",
+    }
+)
+_LOOP_SUMMARY_HALO_GROUP_FIELDS = _LOOP_SUMMARY_COMMON_GROUP_FIELDS | frozenset(
+    {
+        "json_valid_rate",
+        "mean_citation_precision",
+        "mean_count_accuracy",
+        "mean_family_f1",
+    }
+)
+_LOOP_UPSTREAMS = {
+    "babilong_revision": "ee0d588794c7ac098062ee0d247c733d62e94fe2",
+    "babilong_source": "RMT-team/babilong",
+    "halo_revision": "b7f8509745d67b499b4e80efe20ea37c03426a74",
+    "halo_source": "context-labs/HALO",
+    "halo_version": "0.3.5",
+    "openai_agents_version": "0.14.7",
+    "openai_version": "2.32.0",
+    "pyarrow_version": "21.0.0",
+    "rlm_revision": "0b45df99c43fb3844a3b796a15d13c0f9d07afd8",
+    "rlm_source": "alexzhang13/rlm",
+    "rlm_version": "0.1.3",
+}
+_LOOP_WORKER_IMAGE = (
+    "nvcr.io/nvidia/vllm:26.07-py3@"
+    "sha256:95c498a475142c20c989c65e5d223348c09fed83ba17ddf44f117610c0bd3268"
+)
+_LOOP_CONTEXT_LENGTHS = frozenset({"4k", "8k", "16k", "32k", "64k", "128k"})
+_LOOP_TASKS = frozenset(f"qa{index}" for index in range(1, 11))
 
 _HARBOR_ZERO_INFRASTRUCTURE_FIELDS = (
     "harbor_process_failures",
@@ -8059,6 +8395,1249 @@ def _export_run(
     }
 
 
+def _loop_content_hash(value: Any, *, length: int = 64) -> str:
+    return hashlib.sha256(_canonical(value).rstrip(b"\n")).hexdigest()[:length]
+
+
+def _project_loop_case(value: Any, *, variant: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or not value:
+        raise EvidenceError("loop case must be an object")
+    phase = value.get("phase")
+    rlm_fields = {
+        "case_id",
+        "context_length",
+        "max_concurrent_subcalls",
+        "max_depth",
+        "max_iterations",
+        "max_output_tokens",
+        "max_total_tokens",
+        "phase",
+        "replicate",
+        "row_index",
+        "task",
+        "timeout_s",
+        "treatment",
+    }
+    halo_fields = {
+        "case_id",
+        "max_depth",
+        "max_output_tokens",
+        "max_parallel",
+        "max_turns",
+        "phase",
+        "seed",
+        "timeout_s",
+        "trace_count",
+        "treatment",
+    }
+    if variant in {"legacy_v2", "current_v2"}:
+        rlm_fields.add("reasoning_control")
+        halo_fields.add("reasoning_effort")
+    if variant == "current_v2":
+        rlm_fields.update(
+            {"admission_status", "compaction", "compaction_threshold_pct"}
+        )
+    expected_fields = rlm_fields if phase == "rlm" else halo_fields
+    if variant not in {"legacy_v1", "legacy_v2", "current_v2"} or set(value) != expected_fields:
+        raise EvidenceError("loop case schema changed")
+    projected: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in _LOOP_CASE_STRING_FIELDS:
+            projected[key] = _safe_id(
+                item,
+                name=f"loop case.{key}",
+                nullable=key in {"reasoning_control", "reasoning_effort"},
+            )
+        elif key in _LOOP_CASE_BOOLEAN_FIELDS:
+            if item is not None and type(item) is not bool:
+                raise EvidenceError(f"loop case {key} must be boolean or null")
+            projected[key] = item
+        elif key in _LOOP_CASE_INTEGER_FIELDS:
+            if item is not None and (type(item) is not int or item < 0):
+                raise EvidenceError(
+                    f"loop case {key} must be a non-negative integer or null"
+                )
+            projected[key] = item
+        elif key == "compaction_threshold_pct":
+            number = _finite(item, name=f"loop case.{key}")
+            if number is not None and not 0 < float(number) < 1:
+                raise EvidenceError("loop compaction threshold is invalid")
+            projected[key] = number
+        else:  # pragma: no cover - guarded by the exact field partition above
+            raise EvidenceError(f"loop case field is unprojected: {key}")
+    phase = projected.get("phase")
+    treatment = projected.get("treatment")
+    expected_treatments = {
+        "rlm": {"direct", "rlm_depth1", "rlm_depth1_forced_compaction", "rlm_depth2"},
+        "halo": {"halo_depth0", "halo_depth1", "halo_depth2"},
+    }
+    if phase not in expected_treatments or treatment not in expected_treatments[phase]:
+        raise EvidenceError("loop case phase or treatment is unsupported")
+    if (
+        (phase == "rlm" and projected.get("context_length") not in _LOOP_CONTEXT_LENGTHS)
+        or (phase == "rlm" and projected.get("task") not in _LOOP_TASKS)
+        or projected.get("reasoning_control") not in {None, "fixed_unsupported"}
+        or projected.get("reasoning_effort") not in {None, "none"}
+        or projected.get("admission_status")
+        not in {None, "admitted", "held_child_compaction_unverified"}
+    ):
+        raise EvidenceError("loop case dimensions are outside the frozen domains")
+    if variant == "current_v2" and phase == "rlm":
+        expected_admission = (
+            "held_child_compaction_unverified"
+            if treatment == "rlm_depth2"
+            else "admitted"
+        )
+        expected_compaction = treatment != "direct"
+        expected_threshold = (
+            None
+            if treatment == "direct"
+            else (0.20 if treatment == "rlm_depth1_forced_compaction" else 0.85)
+        )
+        if (
+            projected.get("admission_status") != expected_admission
+            or projected.get("compaction") is not expected_compaction
+            or projected.get("compaction_threshold_pct") != expected_threshold
+        ):
+            raise EvidenceError("loop case compaction semantics changed")
+    case_id = projected["case_id"]
+    if not re.fullmatch(rf"{phase}-[0-9a-f]{{16}}", str(case_id)):
+        raise EvidenceError("loop case identifier is invalid")
+    expected_id = f"{phase}-{_loop_content_hash({key: value[key] for key in value if key != 'case_id'}, length=16)}"
+    if case_id != expected_id:
+        raise EvidenceError("loop case identifier does not bind its dimensions")
+    return projected
+
+
+def _project_loop_protocol_section(
+    value: Any,
+    *,
+    name: str,
+    allowed: frozenset[str],
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or not set(value) <= allowed:
+        raise EvidenceError(f"loop {name} protocol schema changed")
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        if key == "compaction_diagnostic":
+            if not isinstance(item, dict) or set(item) != {
+                "lengths",
+                "row_indices",
+                "tasks",
+                "threshold_pct",
+            }:
+                raise EvidenceError("loop compaction diagnostic schema changed")
+            result[key] = _project_loop_protocol_section(
+                item,
+                name="compaction diagnostic",
+                allowed=frozenset(item),
+            )
+        elif isinstance(item, list):
+            if not item:
+                raise EvidenceError(f"loop {name}.{key} must not be empty")
+            projected_items: list[Any] = []
+            for entry in item:
+                if type(entry) is int and entry >= 0:
+                    projected_items.append(entry)
+                else:
+                    projected_items.append(
+                        _safe_id(entry, name=f"loop {name}.{key}")
+                    )
+            if len({_canonical(entry) for entry in projected_items}) != len(
+                projected_items
+            ):
+                raise EvidenceError(f"loop {name}.{key} contains duplicates")
+            result[key] = projected_items
+        elif item is None or type(item) is bool:
+            result[key] = item
+        elif type(item) is int:
+            if item < 0:
+                raise EvidenceError(f"loop {name}.{key} must be non-negative")
+            result[key] = item
+        elif isinstance(item, float):
+            number = _finite(item, name=f"loop {name}.{key}")
+            if number is None or number < 0:
+                raise EvidenceError(f"loop {name}.{key} must be non-negative")
+            result[key] = number
+        else:
+            result[key] = _safe_id(item, name=f"loop {name}.{key}")
+    return result
+
+
+def _project_loop_model(value: Any, *, profile_id: str) -> dict[str, Any]:
+    required = {
+        "architecture",
+        "backend",
+        "estimated_ram_gib",
+        "id",
+        "image",
+        "image_digest",
+        "lifecycle",
+        "max_context",
+        "native_context",
+        "quantization",
+        "revision",
+        "source",
+        "startup_timeout_s",
+        "support_status",
+        "tasks",
+    }
+    if (
+        not isinstance(value, dict)
+        or not required <= set(value)
+        or set(value) != _LOOP_MODEL_SOURCE_FIELDS
+        or value.get("id") != profile_id
+    ):
+        raise EvidenceError("loop model source schema changed")
+    projected = _project_model({"model": value}, None)
+    projected["container_image"] = _safe_id(
+        value.get("image"), name="loop model.container_image"
+    )
+    projected["container_image_sha256"] = _sha256(
+        value.get("image_digest"), name="loop model.container_image"
+    )
+    return projected
+
+
+def _project_loop_plan(
+    value: Any, *, run_id: str, source_group: str
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise EvidenceError("loop plan must be an object")
+    schema = value.get("schema_version")
+    protocol = value.get("protocol_version")
+    expected_fields = set(_LOOP_PLAN_TOP_FIELDS)
+    if "rlm_compaction_admission" in value:
+        expected_fields.add("rlm_compaction_admission")
+    if set(value) != expected_fields or (schema, protocol) not in {(1, 1), (2, 2)}:
+        raise EvidenceError("loop plan schema changed")
+    if schema == 1 and "rlm_compaction_admission" in value:
+        raise EvidenceError("legacy loop plan has a current-only admission section")
+    variant = (
+        "legacy_v1"
+        if schema == 1
+        else (
+            "current_v2"
+            if "rlm_compaction_admission" in value
+            else "legacy_v2"
+        )
+    )
+    _parse_timestamp(value.get("created_at"), name="loop plan.created_at")
+    if not isinstance(value.get("description"), str):
+        raise EvidenceError("loop plan description must be text")
+    fingerprint = _sha256(value.get("fingerprint"), name="loop plan fingerprint")
+    integrity = _sha256(value.get("integrity_hash"), name="loop plan integrity")
+    without_integrity = {
+        key: item for key, item in value.items() if key != "integrity_hash"
+    }
+    if _loop_content_hash(without_integrity) != integrity:
+        raise EvidenceError("loop plan integrity hash changed")
+    fingerprint_payload = {
+        key: item for key, item in without_integrity.items() if key != "fingerprint"
+    }
+    if _loop_content_hash(fingerprint_payload) != fingerprint:
+        raise EvidenceError("loop plan fingerprint changed")
+    if not run_id.endswith(f"-{fingerprint[:8]}"):
+        raise EvidenceError("loop run directory does not bind its plan fingerprint")
+
+    campaign_id = _safe_id(value.get("campaign_id"), name="loop campaign ID")
+    repository = value.get("repository")
+    if (
+        not isinstance(repository, dict)
+        or set(repository) != {"clean", "revision"}
+        or repository.get("clean") is not True
+    ):
+        raise EvidenceError("loop repository provenance changed")
+    repository_revision = _revision(
+        repository.get("revision"), name="loop repository revision"
+    )
+    if value.get("upstreams") != _LOOP_UPSTREAMS:
+        raise EvidenceError("loop upstream pins changed")
+    worker = value.get("worker")
+    if worker != {"image": _LOOP_WORKER_IMAGE, "isolation": "docker"}:
+        raise EvidenceError("loop worker pin changed")
+
+    dataset = value.get("dataset")
+    if not isinstance(dataset, dict) or set(dataset) != {
+        "revision",
+        "rows_per_split",
+        "selected_files",
+        "source",
+    }:
+        raise EvidenceError("loop dataset schema changed")
+    if (
+        dataset.get("source") != _LOOP_UPSTREAMS["babilong_source"]
+        or dataset.get("revision") != _LOOP_UPSTREAMS["babilong_revision"]
+        or type(dataset.get("rows_per_split")) is not int
+        or dataset["rows_per_split"] <= 0
+        or not isinstance(dataset.get("selected_files"), list)
+    ):
+        raise EvidenceError("loop dataset pin changed")
+    dataset_artifacts: list[dict[str, Any]] = []
+    seen_dataset_targets: set[str] = set()
+    for artifact in dataset["selected_files"]:
+        if not isinstance(artifact, dict) or set(artifact) != {
+            "context_length",
+            "sha256",
+            "size_bytes",
+            "task",
+        }:
+            raise EvidenceError("loop dataset artifact schema changed")
+        context_length = _safe_id(
+            artifact.get("context_length"), name="loop dataset context"
+        )
+        task = _safe_id(artifact.get("task"), name="loop dataset task")
+        if context_length not in _LOOP_CONTEXT_LENGTHS or task not in _LOOP_TASKS:
+            raise EvidenceError("loop dataset artifact selection changed")
+        target = f"{context_length}-{task}"
+        if target in seen_dataset_targets:
+            raise EvidenceError("loop dataset artifact is duplicated")
+        seen_dataset_targets.add(target)
+        size = artifact.get("size_bytes")
+        if type(size) is not int or size <= 0:
+            raise EvidenceError("loop dataset artifact size is invalid")
+        dataset_artifacts.append(
+            {
+                "sha256": _sha256(
+                    artifact.get("sha256"), name="loop dataset artifact"
+                ),
+                "size_bytes": size,
+                "target": target,
+            }
+        )
+
+    models = value.get("models")
+    if not isinstance(models, dict) or not models:
+        raise EvidenceError("loop plan models are missing")
+    projected_models = [
+        _project_loop_model(models[profile_id], profile_id=profile_id)
+        for profile_id in sorted(models)
+    ]
+    model_ids = {model["id"] for model in projected_models}
+    rlm_allowed = frozenset(
+        {
+            "compaction",
+            "compaction_diagnostic",
+            "compaction_threshold_pct",
+            "direct_lengths",
+            "direct_timeout_s",
+            "episode_timeout_s",
+            "lengths",
+            "max_concurrent_subcalls",
+            "max_iterations",
+            "max_output_tokens",
+            "max_total_tokens",
+            "model_profile",
+            "reasoning_control",
+            "recursive_depth2_lengths",
+            "recursive_depth2_rows",
+            "recursive_depth2_tasks",
+            "row_indices",
+            "tasks",
+            "worker_isolation",
+        }
+    )
+    halo_allowed = frozenset(
+        {
+            "depth2_seeds",
+            "depth2_trace_counts",
+            "depths",
+            "episode_timeout_s",
+            "max_output_tokens",
+            "max_parallel",
+            "max_turns",
+            "model_profiles",
+            "reasoning_effort",
+            "seeds",
+            "trace_counts",
+        }
+    )
+    rlm_v1_fields = {
+        "direct_lengths",
+        "direct_timeout_s",
+        "episode_timeout_s",
+        "lengths",
+        "max_concurrent_subcalls",
+        "max_iterations",
+        "max_output_tokens",
+        "max_total_tokens",
+        "model_profile",
+        "recursive_depth2_lengths",
+        "recursive_depth2_rows",
+        "recursive_depth2_tasks",
+        "row_indices",
+        "tasks",
+        "worker_isolation",
+    }
+    rlm_v2_fields = rlm_v1_fields | {"reasoning_control"}
+    rlm_current_fields = rlm_v2_fields | {
+        "compaction",
+        "compaction_threshold_pct",
+    }
+    expected_rlm_fields = {
+        "legacy_v1": rlm_v1_fields,
+        "legacy_v2": rlm_v2_fields,
+        "current_v2": rlm_current_fields,
+    }[variant]
+    raw_rlm = value.get("rlm")
+    if not isinstance(raw_rlm, dict):
+        raise EvidenceError("loop RLM protocol is missing")
+    if variant == "current_v2" and "compaction_diagnostic" in raw_rlm:
+        expected_rlm_fields = expected_rlm_fields | {"compaction_diagnostic"}
+    if set(raw_rlm) != expected_rlm_fields:
+        raise EvidenceError("loop RLM protocol variant changed")
+    halo_v1_fields = {
+        "depth2_seeds",
+        "depth2_trace_counts",
+        "depths",
+        "episode_timeout_s",
+        "max_output_tokens",
+        "max_parallel",
+        "max_turns",
+        "model_profiles",
+        "seeds",
+        "trace_counts",
+    }
+    expected_halo_fields = (
+        halo_v1_fields
+        if variant == "legacy_v1"
+        else halo_v1_fields | {"reasoning_effort"}
+    )
+    raw_halo = value.get("halo")
+    if not isinstance(raw_halo, dict) or set(raw_halo) != expected_halo_fields:
+        raise EvidenceError("loop HALO protocol variant changed")
+    rlm = _project_loop_protocol_section(
+        raw_rlm, name="rlm", allowed=rlm_allowed
+    )
+    halo = _project_loop_protocol_section(
+        raw_halo, name="halo", allowed=halo_allowed
+    )
+    if rlm.get("model_profile") not in model_ids:
+        raise EvidenceError("loop RLM profile is not frozen in the plan")
+    halo_profiles = halo.get("model_profiles")
+    referenced_models = {str(rlm.get("model_profile")), *map(str, halo_profiles or [])}
+    if (
+        not isinstance(halo_profiles, list)
+        or not halo_profiles
+        or not set(halo_profiles) <= model_ids
+        or model_ids != referenced_models
+    ):
+        raise EvidenceError("loop HALO profiles are not frozen in the plan")
+
+    cases = value.get("cases")
+    if not isinstance(cases, list) or not cases:
+        raise EvidenceError("loop plan cases are missing")
+    projected_cases = [
+        _project_loop_case(case, variant=variant) for case in cases
+    ]
+    case_ids = [case["case_id"] for case in projected_cases]
+    if len(case_ids) != len(set(case_ids)):
+        raise EvidenceError("loop plan contains duplicate case identifiers")
+
+    window = value.get("window")
+    if not isinstance(window, dict) or set(window) != {
+        "cleanup_reserve_s",
+        "hard_stop_at",
+        "measurement_stop_at",
+        "rlm_stop_at",
+    }:
+        raise EvidenceError("loop window schema changed")
+    for key in ("rlm_stop_at", "measurement_stop_at", "hard_stop_at"):
+        _parse_timestamp(window.get(key), name=f"loop window.{key}")
+    if type(window.get("cleanup_reserve_s")) is not int or window["cleanup_reserve_s"] <= 0:
+        raise EvidenceError("loop cleanup reserve is invalid")
+
+    compaction_admission = value.get("rlm_compaction_admission")
+    if compaction_admission is not None:
+        compaction_admission = _project_loop_protocol_section(
+            compaction_admission,
+            name="rlm compaction admission",
+            allowed=frozenset(
+                {
+                    "depth1_admitted",
+                    "depth2_admitted",
+                    "enabled",
+                    "headroom_tokens",
+                    "output_reserve_tokens",
+                    "package_context_tokens",
+                    "served_context_tokens",
+                    "threshold_pct",
+                    "threshold_tokens",
+                }
+            ),
+        )
+        if set(compaction_admission) != {
+            "depth1_admitted",
+            "depth2_admitted",
+            "enabled",
+            "headroom_tokens",
+            "output_reserve_tokens",
+            "package_context_tokens",
+            "served_context_tokens",
+            "threshold_pct",
+            "threshold_tokens",
+        }:
+            raise EvidenceError("loop compaction admission schema changed")
+    if variant == "current_v2":
+        if (
+            rlm.get("compaction") is not True
+            or rlm.get("compaction_threshold_pct") != 0.85
+            or rlm.get("reasoning_control") != "fixed_unsupported"
+            or halo.get("reasoning_effort") != "none"
+            or compaction_admission is None
+        ):
+            raise EvidenceError("current loop protocol semantics changed")
+    elif variant == "legacy_v2" and (
+        rlm.get("reasoning_control") != "fixed_unsupported"
+        or halo.get("reasoning_effort") != "none"
+        or compaction_admission is not None
+    ):
+        raise EvidenceError("legacy-v2 loop protocol semantics changed")
+
+    return {
+        "campaign_id": campaign_id,
+        "cases": projected_cases,
+        "dataset": {
+            "artifacts": sorted(dataset_artifacts, key=lambda item: item["target"]),
+            "revision": _revision(dataset["revision"], name="loop dataset revision"),
+            "rows_per_split": dataset["rows_per_split"],
+            "source": _safe_id(dataset["source"], name="loop dataset source"),
+        },
+        "models": projected_models,
+        "plan_fingerprint": fingerprint,
+        "plan_integrity_sha256": integrity,
+        "plan_schema_version": schema,
+        "protocol": {
+            "halo": halo,
+            "rlm": rlm,
+            "rlm_compaction_admission": compaction_admission,
+        },
+        "protocol_version": protocol,
+        "repository": {
+            "clean": True,
+            "revision": repository_revision,
+        },
+        "source_group": _safe_id(source_group, name="loop source group"),
+        "upstreams": dict(_LOOP_UPSTREAMS),
+        "worker": {
+            "container_image": _LOOP_WORKER_IMAGE.split("@", 1)[0],
+            "container_image_sha256": _sha256(
+                _LOOP_WORKER_IMAGE.split("@", 1)[1], name="loop worker image"
+            ),
+            "isolation": "docker",
+        },
+    }
+
+
+def _loop_case_dimensions_match(event: dict[str, Any], case: dict[str, Any]) -> bool:
+    return all(
+        key not in event or _json_strict_equal(event[key], case.get(key))
+        for key in _LOOP_BOUND_DIMENSION_FIELDS
+    )
+
+
+def _project_loop_measurement(value: Any, *, source: bool) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise EvidenceError("loop measurement must be an object")
+    ignored = {"event", "timestamp"} if source else set()
+    permitted = (
+        _LOOP_MEASUREMENT_FIELDS
+        if source
+        else _LOOP_MEASUREMENT_OUTPUT_FIELDS | {"sample_index"}
+    )
+    if not set(value) - ignored <= permitted:
+        raise EvidenceError("loop completed-case schema changed")
+    required = {"attempt", "case_id", "phase", "profile_id", "treatment"}
+    if not required <= set(value):
+        raise EvidenceError("loop completed-case identity is incomplete")
+    if source and value.get("event") != "case_complete":
+        raise EvidenceError("loop measurement source event is invalid")
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in ignored:
+            continue
+        if key == "sample_index":
+            if type(item) is not int or item <= 0:
+                raise EvidenceError("loop sample index must be positive")
+            result[key] = item
+        elif key in _LOOP_MEASUREMENT_STRING_FIELDS:
+            result[key] = _safe_id(
+                item,
+                name=f"loop measurement.{key}",
+                nullable=key in {"reasoning_control", "reasoning_effort"},
+            )
+        elif key in _LOOP_MEASUREMENT_BOOLEAN_FIELDS:
+            if item is not None and type(item) is not bool:
+                raise EvidenceError(f"loop measurement {key} must be boolean or null")
+            result[key] = item
+        elif key in _LOOP_MEASUREMENT_INTEGER_FIELDS or key == "executed_tool_call_count":
+            if item is not None and (type(item) is not int or item < 0):
+                raise EvidenceError(
+                    f"loop measurement {key} must be a non-negative integer or null"
+                )
+            result[
+                "executed_tool_call_count" if source and key == "tool_calls" else key
+            ] = item
+        elif key in _LOOP_MEASUREMENT_NUMERIC_FIELDS:
+            number = _finite(item, name=f"loop measurement.{key}")
+            if number is not None and number < 0:
+                raise EvidenceError(f"loop measurement {key} must be non-negative")
+            result[key] = number
+        else:  # pragma: no cover - guarded by the exact field partition above
+            raise EvidenceError(f"loop measurement field is unprojected: {key}")
+    return result
+
+
+def _validate_loop_journal(
+    events: list[dict[str, Any]], *, plan: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    cases = {case["case_id"]: case for case in plan["cases"]}
+    models = {model["id"] for model in plan["models"]}
+    starts: set[tuple[str, int, str]] = set()
+    completed: set[str] = set()
+    terminal_cases: set[str] = set()
+    measurements: list[dict[str, Any]] = []
+    previous_timestamp: datetime | None = None
+    for event in events:
+        if not isinstance(event, dict) or not set(event) <= _LOOP_EVENT_FIELDS:
+            raise EvidenceError("loop journal event schema changed")
+        event_type = event.get("event")
+        if event_type not in _LOOP_EVENT_TYPES:
+            raise EvidenceError("loop journal event type changed")
+        timestamp = _parse_timestamp(event.get("timestamp"), name="loop event.timestamp")
+        if previous_timestamp is not None and timestamp < previous_timestamp:
+            raise EvidenceError("loop journal timestamps move backwards")
+        previous_timestamp = timestamp
+        for key, item in event.items():
+            if isinstance(item, (dict, list)):
+                raise EvidenceError("loop journal contains a nonscalar field")
+            if isinstance(item, float) and not math.isfinite(item):
+                raise EvidenceError("loop journal contains a non-finite scalar")
+        case_id = event.get("case_id")
+        if case_id is not None:
+            if case_id not in cases or not _loop_case_dimensions_match(event, cases[case_id]):
+                raise EvidenceError("loop journal case does not bind the frozen plan")
+            if case_id in terminal_cases:
+                raise EvidenceError("loop journal continues after a terminal case event")
+        profile_id = event.get("profile_id")
+        if profile_id is not None and profile_id not in models:
+            raise EvidenceError("loop journal profile is not frozen in the plan")
+        if case_id is not None and profile_id is not None:
+            case = cases[case_id]
+            valid_profiles = (
+                {plan["protocol"]["rlm"]["model_profile"]}
+                if case["phase"] == "rlm"
+                else set(plan["protocol"]["halo"]["model_profiles"])
+            )
+            if profile_id not in valid_profiles:
+                raise EvidenceError("loop journal profile does not match the case phase")
+        if event_type == "case_started":
+            attempt = event.get("attempt")
+            if type(attempt) is not int or not 1 <= attempt <= 2 or profile_id is None:
+                raise EvidenceError("loop case start attempt is invalid")
+            start = (str(case_id), attempt, str(profile_id))
+            if start in starts:
+                raise EvidenceError("loop journal contains a duplicate case start")
+            starts.add(start)
+        elif event_type == "case_complete":
+            measurement = _project_loop_measurement(event, source=True)
+            identity = (
+                str(measurement["case_id"]),
+                int(measurement["attempt"]),
+                str(measurement["profile_id"]),
+            )
+            if (
+                type(measurement["attempt"]) is not int
+                or not 1 <= measurement["attempt"] <= 2
+                or identity not in starts
+                or measurement["case_id"] in completed
+            ):
+                raise EvidenceError("loop completion does not bind one unique start")
+            completed.add(str(measurement["case_id"]))
+            terminal_cases.add(str(measurement["case_id"]))
+            measurements.append(
+                {"sample_index": len(measurements) + 1, **measurement}
+            )
+        elif event_type in {
+            "case_exhausted",
+            "case_skipped_campaign_stop",
+            "case_skipped_deadline",
+            "case_skipped_held",
+        }:
+            if not isinstance(case_id, str):
+                raise EvidenceError("loop case has duplicate terminal events")
+            terminal_cases.add(case_id)
+    terminal_outcomes = {
+        "case_complete": "complete",
+        "case_exhausted": "exhausted",
+        "case_skipped_campaign_stop": "skipped_campaign_stop",
+        "case_skipped_deadline": "skipped_deadline",
+        "case_skipped_held": "held",
+    }
+    starts_by_case = Counter(
+        str(event["case_id"])
+        for event in events
+        if event.get("event") == "case_started"
+    )
+    failures_by_case = Counter(
+        str(event["case_id"])
+        for event in events
+        if event.get("event") == "case_failed"
+    )
+    timeouts_by_case = Counter(
+        str(event["case_id"])
+        for event in events
+        if event.get("event") == "case_timeout"
+    )
+    outcome_by_case = {
+        str(event["case_id"]): terminal_outcomes[str(event["event"])]
+        for event in events
+        if event.get("event") in terminal_outcomes
+    }
+    outcomes: list[dict[str, Any]] = []
+    for case in plan["cases"]:
+        case_id = str(case["case_id"])
+        attempts = starts_by_case[case_id]
+        failures = failures_by_case[case_id]
+        timeouts = timeouts_by_case[case_id]
+        if attempts > 2 or failures + timeouts > attempts:
+            raise EvidenceError("loop case attempt accounting changed")
+        outcome = outcome_by_case.get(
+            case_id, "incomplete" if attempts else "not_started"
+        )
+        outcomes.append(
+            {
+                "attempt_count": attempts,
+                "case_id": case_id,
+                "failed_attempt_count": failures,
+                "outcome": outcome,
+                "timeout_attempt_count": timeouts,
+            }
+        )
+    return measurements, outcomes
+
+
+def _loop_mean(values: Sequence[Any]) -> float | None:
+    numbers = [
+        float(value)
+        for value in values
+        if isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    ]
+    return statistics.fmean(numbers) if numbers else None
+
+
+def _loop_complete_sum(values: Sequence[dict[str, Any]], field: str) -> float | None:
+    items = [value.get(field) for value in values]
+    if not values or not all(
+        isinstance(item, (int, float))
+        and not isinstance(item, bool)
+        and math.isfinite(float(item))
+        for item in items
+    ):
+        return None
+    return sum(float(item) for item in items)
+
+
+def _loop_summary_expected(
+    *, plan: dict[str, Any], events: list[dict[str, Any]], measurements: list[dict[str, Any]]
+) -> dict[str, Any]:
+    completed_by_id = {row["case_id"]: row for row in measurements}
+    terminal_types = {
+        "case_complete",
+        "case_exhausted",
+        "case_skipped_campaign_stop",
+        "case_skipped_deadline",
+        "case_skipped_held",
+    }
+    terminal_ids = {
+        event.get("case_id")
+        for event in events
+        if event.get("event") in terminal_types and event.get("case_id") is not None
+    }
+    exhausted = {
+        event.get("case_id")
+        for event in events
+        if event.get("event") == "case_exhausted"
+    }
+    held = {
+        event.get("case_id")
+        for event in events
+        if event.get("event") == "case_skipped_held"
+    }
+    deadline = {
+        event.get("case_id")
+        for event in events
+        if event.get("event")
+        in {"case_skipped_campaign_stop", "case_skipped_deadline"}
+    }
+    rlm_profile = plan["protocol"]["rlm"]["model_profile"]
+    halo_profiles = {
+        row["profile_id"] for row in measurements if row.get("phase") == "halo"
+    }
+    fallback_profiles = [
+        event.get("profile_id")
+        for event in events
+        if event.get("event") == "halo_fallback_selected"
+    ]
+    if fallback_profiles:
+        halo_profiles.add(fallback_profiles[-1])
+    if not halo_profiles:
+        halo_profiles.add(plan["protocol"]["halo"]["model_profiles"][0])
+    group_keys = {
+        (
+            case["phase"],
+            case["treatment"],
+            rlm_profile,
+            case.get("reasoning_control"),
+            case.get("reasoning_effort"),
+        )
+        for case in plan["cases"]
+        if case["phase"] == "rlm"
+    }
+    group_keys.update(
+        (
+            case["phase"],
+            case["treatment"],
+            profile_id,
+            case.get("reasoning_control"),
+            case.get("reasoning_effort"),
+        )
+        for case in plan["cases"]
+        if case["phase"] == "halo"
+        for profile_id in halo_profiles
+    )
+    groups: list[dict[str, Any]] = []
+    for phase, treatment, profile_id, reasoning_control, reasoning_effort in sorted(
+        group_keys,
+        key=lambda item: tuple("" if value is None else str(value) for value in item),
+    ):
+        planned = [
+            case
+            for case in plan["cases"]
+            if case["phase"] == phase
+            and case["treatment"] == treatment
+            and case.get("reasoning_control") == reasoning_control
+            and case.get("reasoning_effort") == reasoning_effort
+        ]
+        observations = [
+            completed_by_id[case["case_id"]]
+            for case in planned
+            if case["case_id"] in completed_by_id
+            and completed_by_id[case["case_id"]].get("profile_id") == profile_id
+        ]
+        prompt = _loop_complete_sum(observations, "vllm_prompt_tokens")
+        cached = _loop_complete_sum(observations, "vllm_cached_prompt_tokens")
+        generation = _loop_complete_sum(observations, "vllm_generation_tokens")
+        wall = _loop_complete_sum(observations, "wall_s")
+        group: dict[str, Any] = {
+            "cache_fraction": (
+                cached / prompt
+                if cached is not None and prompt is not None and prompt > 0
+                else None
+            ),
+            "cached_prompt_tokens": cached,
+            "completed_cases": len(observations),
+            "effective_generation_tps": (
+                generation / wall
+                if generation is not None and wall is not None and wall > 0
+                else None
+            ),
+            "generation_tokens": generation,
+            "mean_wall_s": _loop_mean([row.get("wall_s") for row in observations]),
+            "phase": phase,
+            "planned_cases": len(planned),
+            "profile_id": profile_id,
+            "prompt_tokens": prompt,
+            "reasoning_control": reasoning_control,
+            "reasoning_effort": reasoning_effort,
+            "treatment": treatment,
+        }
+        if phase == "rlm":
+            correct = sum(int(row.get("correct") is True) for row in observations)
+            group.update(
+                {
+                    "accuracy": correct / len(observations) if observations else None,
+                    "correct_cases": correct,
+                    "mean_reported_calls": _loop_mean(
+                        [row.get("reported_calls") for row in observations]
+                    ),
+                    "mean_vllm_successful_requests": _loop_mean(
+                        [row.get("vllm_successful_requests") for row in observations]
+                    ),
+                }
+            )
+        else:
+            group.update(
+                {
+                    "json_valid_rate": _loop_mean(
+                        [int(row.get("json_valid") is True) for row in observations]
+                    ),
+                    "mean_citation_precision": _loop_mean(
+                        [row.get("citation_precision") for row in observations]
+                    ),
+                    "mean_count_accuracy": _loop_mean(
+                        [row.get("mean_count_accuracy") for row in observations]
+                    ),
+                    "mean_family_f1": _loop_mean(
+                        [row.get("family_f1") for row in observations]
+                    ),
+                }
+            )
+        groups.append(group)
+
+    last_start = max(
+        (
+            index
+            for index, event in enumerate(events)
+            if event.get("event") in {"campaign_resumed", "campaign_started"}
+        ),
+        default=-1,
+    )
+    latest = events[last_start + 1 :]
+    cleanup = next(
+        (
+            event.get("event")
+            for event in reversed(latest)
+            if event.get("event")
+            in {"campaign_cleanup_failed", "campaign_cleanup_verified"}
+        ),
+        None,
+    )
+    completed_count = len(completed_by_id)
+    if cleanup == "campaign_cleanup_failed":
+        status = "cleanup_failed"
+    elif completed_count == len(plan["cases"]) and cleanup == "campaign_cleanup_verified":
+        status = "complete"
+    elif completed_count == len(plan["cases"]):
+        status = "measurements_complete_cleanup_pending"
+    elif terminal_ids:
+        status = "partial"
+    else:
+        status = "not_started"
+    return {
+        "completed_cases": completed_count,
+        "deadline_skipped_cases": len(deadline),
+        "exhausted_cases": len(exhausted),
+        "failed_attempts": sum(
+            event.get("event") in {"case_failed", "case_timeout"}
+            for event in events
+        ),
+        "groups": groups,
+        "held_cases": len(held),
+        "planned_cases": len(plan["cases"]),
+        "status": status,
+    }
+
+
+def _loop_values_equal(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, float):
+        return (
+            isinstance(actual, (int, float))
+            and not isinstance(actual, bool)
+            and math.isclose(float(actual), expected, rel_tol=1e-12, abs_tol=1e-12)
+        )
+    if isinstance(expected, dict):
+        return isinstance(actual, dict) and set(actual) == set(expected) and all(
+            _loop_values_equal(actual[key], expected[key]) for key in expected
+        )
+    if isinstance(expected, list):
+        return isinstance(actual, list) and len(actual) == len(expected) and all(
+            _loop_values_equal(left, right)
+            for left, right in zip(actual, expected, strict=True)
+        )
+    return _json_strict_equal(actual, expected)
+
+
+def _project_loop_source_summary(
+    value: Any, *, plan: dict[str, Any], expected: dict[str, Any]
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise EvidenceError("loop summary must be an object")
+    source_schema = value.get("schema_version")
+    expected_schema = f"sparkbench-loop-campaign-summary-v{plan['plan_schema_version']}"
+    required = {
+        "campaign_id",
+        "completed_cases",
+        "deadline_skipped_cases",
+        "exhausted_cases",
+        "failed_attempts",
+        "generated_at",
+        "groups",
+        "plan_fingerprint",
+        "planned_cases",
+        "schema_version",
+        "status",
+    }
+    if plan["protocol"]["rlm_compaction_admission"] is not None:
+        required.add("held_cases")
+    if set(value) != required or source_schema != expected_schema:
+        raise EvidenceError("loop summary schema changed")
+    _parse_timestamp(value.get("generated_at"), name="loop summary.generated_at")
+    if (
+        value.get("campaign_id") != plan["campaign_id"]
+        or value.get("plan_fingerprint") != plan["plan_fingerprint"]
+    ):
+        raise EvidenceError("loop summary does not bind its plan")
+    normalized_groups: list[dict[str, Any]] = []
+    groups = value.get("groups")
+    if not isinstance(groups, list):
+        raise EvidenceError("loop summary groups must be a list")
+    for group in groups:
+        if not isinstance(group, dict) or group.get("phase") not in {"rlm", "halo"}:
+            raise EvidenceError("loop summary group is invalid")
+        expected_fields = (
+            _LOOP_SUMMARY_RLM_GROUP_FIELDS
+            if group["phase"] == "rlm"
+            else _LOOP_SUMMARY_HALO_GROUP_FIELDS
+        )
+        legacy_fields = expected_fields - {"reasoning_control", "reasoning_effort"}
+        if set(group) not in {expected_fields, legacy_fields}:
+            raise EvidenceError("loop summary group schema changed")
+        normalized = dict(group)
+        normalized.setdefault("reasoning_control", None)
+        normalized.setdefault("reasoning_effort", None)
+        for key in ("phase", "profile_id", "treatment"):
+            _safe_id(normalized.get(key), name=f"loop summary group.{key}")
+        for key in ("reasoning_control", "reasoning_effort"):
+            _safe_id(
+                normalized.get(key),
+                name=f"loop summary group.{key}",
+                nullable=True,
+            )
+        for key, item in normalized.items():
+            if key in {
+                "phase",
+                "profile_id",
+                "reasoning_control",
+                "reasoning_effort",
+                "treatment",
+            }:
+                continue
+            number = _finite(item, name=f"loop summary group.{key}")
+            if number is not None and number < 0:
+                raise EvidenceError("loop summary group contains a negative metric")
+        normalized_groups.append(normalized)
+    normalized_source = {
+        "completed_cases": value.get("completed_cases"),
+        "deadline_skipped_cases": value.get("deadline_skipped_cases"),
+        "exhausted_cases": value.get("exhausted_cases"),
+        "failed_attempts": value.get("failed_attempts"),
+        "groups": normalized_groups,
+        "held_cases": value.get("held_cases", 0),
+        "planned_cases": value.get("planned_cases"),
+        "status": value.get("status"),
+    }
+    if not _loop_values_equal(normalized_source, expected):
+        raise EvidenceError("loop summary aggregates disagree with its journal")
+    return expected
+
+
+def _project_loop_lifecycle(
+    events: list[dict[str, Any]], *, plan: dict[str, Any]
+) -> dict[str, Any]:
+    names = [str(event["event"]) for event in events]
+    timestamps = [
+        _parse_timestamp(event["timestamp"], name="loop lifecycle timestamp")
+        for event in events
+    ]
+    elapsed: float | None = None
+    if len(timestamps) >= 2:
+        elapsed = (timestamps[-1] - timestamps[0]).total_seconds()
+        if elapsed < 0:
+            raise EvidenceError("loop journal timestamps move backwards")
+    latest_start = max(
+        (
+            index
+            for index, name in enumerate(names)
+            if name in {"campaign_resumed", "campaign_started"}
+        ),
+        default=-1,
+    )
+    latest = names[latest_start + 1 :]
+    cleanup = next(
+        (
+            name
+            for name in reversed(latest)
+            if name in {"campaign_cleanup_failed", "campaign_cleanup_verified"}
+        ),
+        None,
+    )
+    selected_halo_profiles = [
+        event.get("profile_id")
+        for event in events
+        if event.get("event") == "case_complete" and event.get("phase") == "halo"
+    ]
+    selected_halo_profiles.extend(
+        event.get("profile_id")
+        for event in events
+        if event.get("event") == "halo_fallback_selected"
+    )
+    selected_halo_profile = (
+        selected_halo_profiles[-1]
+        if selected_halo_profiles
+        else plan["protocol"]["halo"]["model_profiles"][0]
+    )
+    return {
+        "cleanup_verified": cleanup == "campaign_cleanup_verified",
+        "event_count": len(names),
+        "event_counts": dict(sorted(Counter(names).items())),
+        "journal_elapsed_s": elapsed,
+        "selected_halo_profile": selected_halo_profile,
+        "terminal": "campaign_finished" in names,
+        "terminal_event": "campaign_finished" if "campaign_finished" in names else None,
+    }
+
+
+def _project_loop_telemetry(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    expected_fields = {
+        "cached_kib",
+        "gpu_timestamp",
+        "gpu_util_pct",
+        "memavailable_kib",
+        "memfree_kib",
+        "memory_util_pct",
+        "phase",
+        "power_w",
+        "sm_clock_mhz",
+        "swapfree_kib",
+        "swaptotal_kib",
+        "temperature_c",
+        "timestamp",
+    }
+    if any(not isinstance(record, dict) or set(record) != expected_fields for record in records):
+        raise EvidenceError("loop telemetry source schema changed")
+    return _project_telemetry(records)
+
+
+def _export_loop_campaign(
+    run_dir: Path,
+    results_root: Path,
+    output_root: Path,
+    *,
+    source_group: str,
+) -> dict[str, Any]:
+    run_id = run_dir.name
+    _date_from_run_id(run_id)
+    direct_entries = {path.name for path in run_dir.iterdir()}
+    lifecycle_entries = {
+        "journal.jsonl",
+        "plan.json",
+        "private",
+        "server",
+        "summary.json",
+        "telemetry.jsonl",
+    }
+    if direct_entries not in ({"plan.json"}, lifecycle_entries):
+        raise EvidenceError("loop source directory layout changed")
+    for name in direct_entries:
+        path = run_dir / name
+        metadata = path.lstat()
+        if name in {"private", "server"}:
+            if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                raise EvidenceError("loop raw source directory is unsafe")
+        elif not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise EvidenceError("loop public source file is unsafe")
+    plan = _project_loop_plan(
+        _load_json(run_dir / "plan.json", results_root),
+        run_id=run_id,
+        source_group=source_group,
+    )
+    lifecycle_names = {"journal.jsonl", "summary.json", "telemetry.jsonl"}
+    present_lifecycle = direct_entries & lifecycle_names
+    if present_lifecycle and present_lifecycle != lifecycle_names:
+        raise EvidenceError("loop source lifecycle files are incomplete")
+    events: list[dict[str, Any]] = []
+    measurements: list[dict[str, Any]] = []
+    outcomes: list[dict[str, Any]] = []
+    telemetry: list[dict[str, Any]] = []
+    if present_lifecycle:
+        events = _load_json_lines(run_dir / "journal.jsonl", results_root)
+        measurements, outcomes = _validate_loop_journal(events, plan=plan)
+        expected_summary = _loop_summary_expected(
+            plan=plan, events=events, measurements=measurements
+        )
+        summary = _project_loop_source_summary(
+            _load_json(run_dir / "summary.json", results_root),
+            plan=plan,
+            expected=expected_summary,
+        )
+        telemetry = _project_loop_telemetry(
+            _load_json_lines(run_dir / "telemetry.jsonl", results_root)
+        )
+        status = summary["status"]
+    else:
+        outcomes = [
+            {
+                "attempt_count": 0,
+                "case_id": case["case_id"],
+                "failed_attempt_count": 0,
+                "outcome": "not_started",
+                "timeout_attempt_count": 0,
+            }
+            for case in plan["cases"]
+        ]
+        summary = {
+            "completed_cases": 0,
+            "deadline_skipped_cases": 0,
+            "exhausted_cases": 0,
+            "failed_attempts": 0,
+            "groups": [],
+            "held_cases": 0,
+            "planned_cases": len(plan["cases"]),
+            "status": "planned",
+        }
+        status = "planned"
+    lifecycle = _project_loop_lifecycle(events, plan=plan)
+    manifest = {
+        **plan,
+        "evidence_kind": LOOP_EVIDENCE_KIND,
+        "lifecycle": lifecycle,
+        "run_date_utc": _date_from_run_id(run_id),
+        "sanitization": {
+            "free_form_text_included": False,
+            "payloads_included": False,
+            "policy": SANITIZATION_POLICY,
+            "raw_identifiers_included": False,
+        },
+        "schema_version": SCHEMA_VERSION,
+        "source_run_id": run_id,
+        "status": status,
+    }
+    telemetry_files = _telemetry_files(telemetry)
+    relative = Path("campaigns") / run_id
+    bundle_hash, _ = _write_bundle(
+        output_root,
+        relative,
+        {
+            "manifest.json": manifest,
+            "measurements.json": {
+                "measurement_count": len(measurements),
+                "measurements": measurements,
+                "schema_version": SCHEMA_VERSION,
+            },
+            "outcomes.json": {
+                "outcome_count": len(outcomes),
+                "outcomes": outcomes,
+                "schema_version": SCHEMA_VERSION,
+            },
+            "summary.json": {
+                "aggregates": summary,
+                "schema_version": SCHEMA_VERSION,
+            },
+            **telemetry_files,
+        },
+    )
+    return {
+        "bundle_sha256": bundle_hash,
+        "campaign_id": run_id,
+        "evidence_kind": LOOP_EVIDENCE_KIND,
+        "file": str(relative / "manifest.json"),
+        "status": status,
+    }
+
+
 _LLAMA_BENCH_FIELDS = {
     "avg_ns",
     "avg_ts",
@@ -9482,6 +11061,812 @@ def _verify_harbor_bundle(
         raise EvidenceError("Harbor campaign index entry changed")
 
 
+def _validate_projected_loop_manifest(value: Any) -> dict[str, Any]:
+    expected_fields = {
+        "campaign_id",
+        "cases",
+        "dataset",
+        "evidence_kind",
+        "lifecycle",
+        "models",
+        "plan_fingerprint",
+        "plan_integrity_sha256",
+        "plan_schema_version",
+        "protocol",
+        "protocol_version",
+        "repository",
+        "run_date_utc",
+        "sanitization",
+        "schema_version",
+        "source_group",
+        "source_run_id",
+        "status",
+        "upstreams",
+        "worker",
+    }
+    manifest = _expect_object_keys(value, expected_fields, name="loop manifest")
+    if (
+        manifest.get("schema_version") != SCHEMA_VERSION
+        or manifest.get("evidence_kind") != LOOP_EVIDENCE_KIND
+        or manifest.get("source_group") not in LOOP_RESULT_ROOTS
+    ):
+        raise EvidenceError("loop manifest identity changed")
+    run_id = _safe_id(manifest.get("source_run_id"), name="loop source run ID")
+    if manifest.get("run_date_utc") != _date_from_run_id(run_id):
+        raise EvidenceError("loop manifest date changed")
+    _safe_id(manifest.get("campaign_id"), name="loop protocol campaign ID")
+    fingerprint = _sha256(
+        manifest.get("plan_fingerprint"), name="loop manifest fingerprint"
+    )
+    _sha256(manifest.get("plan_integrity_sha256"), name="loop manifest integrity")
+    if not run_id.endswith(f"-{fingerprint[:8]}"):
+        raise EvidenceError("loop manifest run ID does not bind its fingerprint")
+    schema = manifest.get("plan_schema_version")
+    protocol_version = manifest.get("protocol_version")
+    protocol = manifest.get("protocol")
+    if (
+        (schema, protocol_version) not in {(1, 1), (2, 2)}
+        or not isinstance(protocol, dict)
+        or set(protocol)
+        != {"halo", "rlm", "rlm_compaction_admission"}
+    ):
+        raise EvidenceError("loop manifest protocol version changed")
+    variant = (
+        "legacy_v1"
+        if schema == 1
+        else (
+            "current_v2"
+            if protocol.get("rlm_compaction_admission") is not None
+            else "legacy_v2"
+        )
+    )
+    rlm_v1_fields = {
+        "direct_lengths",
+        "direct_timeout_s",
+        "episode_timeout_s",
+        "lengths",
+        "max_concurrent_subcalls",
+        "max_iterations",
+        "max_output_tokens",
+        "max_total_tokens",
+        "model_profile",
+        "recursive_depth2_lengths",
+        "recursive_depth2_rows",
+        "recursive_depth2_tasks",
+        "row_indices",
+        "tasks",
+        "worker_isolation",
+    }
+    expected_rlm = {
+        "legacy_v1": rlm_v1_fields,
+        "legacy_v2": rlm_v1_fields | {"reasoning_control"},
+        "current_v2": rlm_v1_fields
+        | {"compaction", "compaction_threshold_pct", "reasoning_control"},
+    }[variant]
+    rlm = protocol.get("rlm")
+    if not isinstance(rlm, dict):
+        raise EvidenceError("loop manifest RLM protocol is invalid")
+    if variant == "current_v2" and "compaction_diagnostic" in rlm:
+        expected_rlm = expected_rlm | {"compaction_diagnostic"}
+    if set(rlm) != expected_rlm:
+        raise EvidenceError("loop manifest RLM protocol schema changed")
+    validated_rlm = _project_loop_protocol_section(
+        rlm, name="published rlm", allowed=frozenset(expected_rlm)
+    )
+    if not _json_strict_equal(validated_rlm, rlm):
+        raise EvidenceError("loop manifest RLM protocol projection changed")
+    halo_v1_fields = {
+        "depth2_seeds",
+        "depth2_trace_counts",
+        "depths",
+        "episode_timeout_s",
+        "max_output_tokens",
+        "max_parallel",
+        "max_turns",
+        "model_profiles",
+        "seeds",
+        "trace_counts",
+    }
+    expected_halo = (
+        halo_v1_fields
+        if variant == "legacy_v1"
+        else halo_v1_fields | {"reasoning_effort"}
+    )
+    halo = protocol.get("halo")
+    if not isinstance(halo, dict) or set(halo) != expected_halo:
+        raise EvidenceError("loop manifest HALO protocol schema changed")
+    validated_halo = _project_loop_protocol_section(
+        halo, name="published halo", allowed=frozenset(expected_halo)
+    )
+    if not _json_strict_equal(validated_halo, halo):
+        raise EvidenceError("loop manifest HALO protocol projection changed")
+    admission = protocol.get("rlm_compaction_admission")
+    if admission is not None:
+        admission_fields = frozenset(
+            {
+                "depth1_admitted",
+                "depth2_admitted",
+                "enabled",
+                "headroom_tokens",
+                "output_reserve_tokens",
+                "package_context_tokens",
+                "served_context_tokens",
+                "threshold_pct",
+                "threshold_tokens",
+            }
+        )
+        if not isinstance(admission, dict) or set(admission) != admission_fields:
+            raise EvidenceError("loop manifest compaction admission schema changed")
+        if not _json_strict_equal(
+            _project_loop_protocol_section(
+                admission,
+                name="published compaction admission",
+                allowed=admission_fields,
+            ),
+            admission,
+        ):
+            raise EvidenceError("loop manifest compaction admission changed")
+    if variant == "current_v2" and (
+        rlm.get("compaction") is not True
+        or rlm.get("compaction_threshold_pct") != 0.85
+        or rlm.get("reasoning_control") != "fixed_unsupported"
+        or halo.get("reasoning_effort") != "none"
+    ):
+        raise EvidenceError("loop manifest current protocol semantics changed")
+    if variant == "legacy_v2" and (
+        rlm.get("reasoning_control") != "fixed_unsupported"
+        or halo.get("reasoning_effort") != "none"
+    ):
+        raise EvidenceError("loop manifest legacy-v2 semantics changed")
+
+    cases = manifest.get("cases")
+    if not isinstance(cases, list) or not cases:
+        raise EvidenceError("loop manifest cases are missing")
+    projected_cases = [
+        _project_loop_case(case, variant=variant) for case in cases
+    ]
+    if not _json_strict_equal(projected_cases, cases):
+        raise EvidenceError("loop manifest case projection changed")
+    case_ids = [case["case_id"] for case in cases]
+    if len(case_ids) != len(set(case_ids)):
+        raise EvidenceError("loop manifest case IDs are duplicated")
+
+    models = manifest.get("models")
+    model_allowed = {
+        "architecture",
+        "backend",
+        "container_image",
+        "container_image_sha256",
+        "estimated_ram_gib",
+        "id",
+        "lifecycle",
+        "max_context",
+        "native_context",
+        "prefix_cache_mode",
+        "quantization",
+        "revision",
+        "runtime_parallel",
+        "source",
+        "startup_timeout_s",
+        "support_status",
+        "tasks",
+        "weight_file_count",
+        "weight_size_bytes",
+    }
+    model_required = {
+        "architecture",
+        "backend",
+        "container_image",
+        "container_image_sha256",
+        "estimated_ram_gib",
+        "id",
+        "lifecycle",
+        "max_context",
+        "native_context",
+        "quantization",
+        "revision",
+        "source",
+        "startup_timeout_s",
+        "support_status",
+        "tasks",
+    }
+    if not isinstance(models, list) or not models:
+        raise EvidenceError("loop manifest models are missing")
+    model_ids: set[str] = set()
+    for model in models:
+        if (
+            not isinstance(model, dict)
+            or not model_required <= set(model)
+            or not set(model) <= model_allowed
+        ):
+            raise EvidenceError("loop manifest model schema changed")
+        model_id = _safe_id(model.get("id"), name="loop manifest model ID")
+        if model_id in model_ids:
+            raise EvidenceError("loop manifest model IDs are duplicated")
+        model_ids.add(model_id)
+        _safe_id(model.get("container_image"), name="loop manifest model image")
+        _sha256(
+            model.get("container_image_sha256"), name="loop manifest model image"
+        )
+        base = {
+            key: item
+            for key, item in model.items()
+            if key not in {"container_image", "container_image_sha256"}
+        }
+        if not _json_strict_equal(_project_model({"model": base}, None), base):
+            raise EvidenceError("loop manifest model projection changed")
+    halo_profiles = halo.get("model_profiles")
+    referenced_models = {str(rlm.get("model_profile")), *map(str, halo_profiles)}
+    if model_ids != referenced_models:
+        raise EvidenceError("loop manifest model set changed")
+
+    dataset = manifest.get("dataset")
+    if not isinstance(dataset, dict) or set(dataset) != {
+        "artifacts",
+        "revision",
+        "rows_per_split",
+        "source",
+    }:
+        raise EvidenceError("loop manifest dataset schema changed")
+    if (
+        dataset.get("source") != _LOOP_UPSTREAMS["babilong_source"]
+        or dataset.get("revision") != _LOOP_UPSTREAMS["babilong_revision"]
+        or type(dataset.get("rows_per_split")) is not int
+        or dataset["rows_per_split"] <= 0
+        or not isinstance(dataset.get("artifacts"), list)
+    ):
+        raise EvidenceError("loop manifest dataset pin changed")
+    targets: list[str] = []
+    for artifact in dataset["artifacts"]:
+        artifact = _expect_object_keys(
+            artifact,
+            {"sha256", "size_bytes", "target"},
+            name="loop manifest dataset artifact",
+        )
+        _sha256(artifact.get("sha256"), name="loop manifest dataset artifact")
+        target = _safe_id(
+            artifact.get("target"), name="loop manifest dataset target"
+        )
+        if not any(
+            target == f"{context_length}-{task}"
+            for context_length in _LOOP_CONTEXT_LENGTHS
+            for task in _LOOP_TASKS
+        ):
+            raise EvidenceError("loop manifest dataset target changed")
+        if type(artifact.get("size_bytes")) is not int or artifact["size_bytes"] <= 0:
+            raise EvidenceError("loop manifest dataset artifact size changed")
+        targets.append(artifact["target"])
+    if targets != sorted(set(targets)):
+        raise EvidenceError("loop manifest dataset artifact order changed")
+    if manifest.get("upstreams") != _LOOP_UPSTREAMS:
+        raise EvidenceError("loop manifest upstreams changed")
+    repository = _expect_object_keys(
+        manifest.get("repository"), {"clean", "revision"}, name="loop repository"
+    )
+    if repository.get("clean") is not True:
+        raise EvidenceError("loop manifest repository was dirty")
+    _revision(repository.get("revision"), name="loop manifest repository revision")
+    if manifest.get("worker") != {
+        "container_image": _LOOP_WORKER_IMAGE.split("@", 1)[0],
+        "container_image_sha256": _sha256(
+            _LOOP_WORKER_IMAGE.split("@", 1)[1], name="fixed loop worker image"
+        ),
+        "isolation": "docker",
+    }:
+        raise EvidenceError("loop manifest worker pin changed")
+    if manifest.get("sanitization") != {
+        "free_form_text_included": False,
+        "payloads_included": False,
+        "policy": SANITIZATION_POLICY,
+        "raw_identifiers_included": False,
+    }:
+        raise EvidenceError("loop manifest sanitization claim changed")
+    lifecycle = _expect_object_keys(
+        manifest.get("lifecycle"),
+        {
+            "cleanup_verified",
+            "event_count",
+            "event_counts",
+            "journal_elapsed_s",
+            "selected_halo_profile",
+            "terminal",
+            "terminal_event",
+        },
+        name="loop lifecycle",
+    )
+    event_counts = lifecycle.get("event_counts")
+    if not isinstance(event_counts, dict) or any(
+        name not in _LOOP_EVENT_TYPES or type(count) is not int or count < 0
+        for name, count in event_counts.items()
+    ):
+        raise EvidenceError("loop lifecycle event counts changed")
+    if (
+        type(lifecycle.get("event_count")) is not int
+        or lifecycle["event_count"] != sum(event_counts.values())
+        or type(lifecycle.get("cleanup_verified")) is not bool
+        or type(lifecycle.get("terminal")) is not bool
+    ):
+        raise EvidenceError("loop lifecycle counters changed")
+    elapsed = _finite(lifecycle.get("journal_elapsed_s"), name="loop lifecycle elapsed")
+    if elapsed is not None and elapsed < 0:
+        raise EvidenceError("loop lifecycle elapsed time changed")
+    selected = _safe_id(
+        lifecycle.get("selected_halo_profile"), name="loop selected HALO profile"
+    )
+    if selected not in set(halo_profiles):
+        raise EvidenceError("loop selected HALO profile is not frozen")
+    expected_terminal = event_counts.get("campaign_finished", 0) > 0
+    if (
+        lifecycle["terminal"] is not expected_terminal
+        or lifecycle.get("terminal_event")
+        != ("campaign_finished" if expected_terminal else None)
+        or lifecycle["cleanup_verified"]
+        is not (event_counts.get("campaign_cleanup_verified", 0) > 0)
+    ):
+        raise EvidenceError("loop lifecycle terminal classification changed")
+    allowed_statuses = {
+        "cleanup_failed",
+        "complete",
+        "measurements_complete_cleanup_pending",
+        "not_started",
+        "partial",
+        "planned",
+    }
+    if manifest.get("status") not in allowed_statuses:
+        raise EvidenceError("loop manifest status changed")
+    return manifest
+
+
+def _verify_loop_telemetry(
+    directory: Path, root: Path, *, campaign_id: str
+) -> None:
+    telemetry = _load_json(directory / "telemetry.json", root)
+    telemetry = _expect_object_keys(
+        telemetry,
+        {
+            "chunk_count",
+            "chunks",
+            "columns",
+            "sample_count",
+            "schema_version",
+            "segment_count",
+        },
+        name="loop telemetry index",
+    )
+    chunks = telemetry.get("chunks")
+    if (
+        telemetry.get("schema_version") != SCHEMA_VERSION
+        or telemetry.get("columns") != list(TELEMETRY_COLUMNS)
+        or not isinstance(chunks, list)
+        or telemetry.get("chunk_count") != len(chunks)
+        or chunks
+        != [f"telemetry-{index:04d}.json" for index in range(1, len(chunks) + 1)]
+    ):
+        raise EvidenceError(f"loop telemetry index mismatch: {campaign_id}")
+    sample_count = 0
+    segment_count = 0
+    expected_sample_index = 1
+    previous_phase_segment = 0
+    previous_phase: str | None = None
+    previous_phase_sample_index = 0
+    previous_elapsed: float | None = None
+    allowed_phases = {
+        "finalize",
+        "halo_cases",
+        "halo_cleanup",
+        "halo_index",
+        "halo_server_restart",
+        "halo_server_start",
+        "idle",
+        "rlm_cases",
+        "rlm_cleanup",
+        "rlm_server_restart",
+        "rlm_server_start",
+    }
+    for chunk_index, chunk_name in enumerate(chunks):
+        chunk = _expect_object_keys(
+            _load_json(directory / chunk_name, root),
+            {"sample_count", "schema_version", "segments"},
+            name="loop telemetry chunk",
+        )
+        if chunk.get("schema_version") != SCHEMA_VERSION or not isinstance(
+            chunk.get("segments"), list
+        ):
+            raise EvidenceError("loop telemetry chunk schema changed")
+        rows_in_chunk = 0
+        for segment_index, segment in enumerate(chunk["segments"]):
+            segment = _expect_object_keys(
+                segment,
+                {
+                    "first_phase_sample_index",
+                    "first_sample_index",
+                    "phase",
+                    "phase_segment",
+                    "rows",
+                },
+                name="loop telemetry segment",
+            )
+            phase = _safe_id(segment.get("phase"), name="loop telemetry phase")
+            rows = segment.get("rows")
+            phase_segment = segment.get("phase_segment")
+            first_phase_sample_index = segment.get("first_phase_sample_index")
+            if (
+                phase not in allowed_phases
+                or type(first_phase_sample_index) is not int
+                or type(segment.get("first_sample_index")) is not int
+                or segment["first_sample_index"] != expected_sample_index
+                or type(phase_segment) is not int
+                or not isinstance(rows, list)
+                or not rows
+            ):
+                raise EvidenceError("loop telemetry segment topology changed")
+            continuing = phase_segment == previous_phase_segment
+            if continuing:
+                if (
+                    chunk_index == 0
+                    or segment_index != 0
+                    or phase != previous_phase
+                    or first_phase_sample_index != previous_phase_sample_index + 1
+                ):
+                    raise EvidenceError("loop telemetry continuation changed")
+            elif (
+                phase_segment != previous_phase_segment + 1
+                or first_phase_sample_index != 1
+                or (previous_phase is not None and phase == previous_phase)
+                or not isinstance(rows[0], list)
+                or len(rows[0]) != len(TELEMETRY_COLUMNS)
+                or rows[0][TELEMETRY_COLUMNS.index("elapsed_s")] != 0
+            ):
+                raise EvidenceError("loop telemetry phase transition changed")
+            elapsed_index = TELEMETRY_COLUMNS.index("elapsed_s")
+            error_index = TELEMETRY_COLUMNS.index("gpu_error_present")
+            gpu_index = TELEMETRY_COLUMNS.index("gpu_util_pct")
+            memory_index = TELEMETRY_COLUMNS.index("memory_util_pct")
+            byte_indices = {
+                TELEMETRY_COLUMNS.index(name)
+                for name in (
+                    "cached_bytes",
+                    "memavailable_bytes",
+                    "memfree_bytes",
+                    "swapfree_bytes",
+                    "swaptotal_bytes",
+                )
+            }
+            segment_previous_elapsed = previous_elapsed if continuing else None
+            for row in rows:
+                if not isinstance(row, list) or len(row) != len(TELEMETRY_COLUMNS):
+                    raise EvidenceError("loop telemetry row width changed")
+                for index, item in enumerate(row):
+                    if item is None:
+                        raise EvidenceError("loop telemetry row contains a missing reading")
+                    if index == error_index:
+                        if type(item) is not bool:
+                            raise EvidenceError("loop telemetry error flag changed")
+                        continue
+                    if item is not None and (
+                        not isinstance(item, (int, float)) or isinstance(item, bool)
+                    ):
+                        raise EvidenceError("loop telemetry row contains nonnumeric data")
+                    if isinstance(item, float) and not math.isfinite(item):
+                        raise EvidenceError("loop telemetry row is non-finite")
+                    if index in byte_indices and item is not None and (
+                        type(item) is not int or item < 0
+                    ):
+                        raise EvidenceError("loop telemetry byte counter changed")
+                    if index in {gpu_index, memory_index} and item is not None and not 0 <= item <= 100:
+                        raise EvidenceError("loop telemetry utilization changed")
+                    if index not in {gpu_index, memory_index, elapsed_index, error_index} and index not in byte_indices and item is not None and item < 0:
+                        raise EvidenceError("loop telemetry physical metric changed")
+                elapsed = row[elapsed_index]
+                if (
+                    not isinstance(elapsed, (int, float))
+                    or isinstance(elapsed, bool)
+                    or elapsed < 0
+                    or (
+                        segment_previous_elapsed is not None
+                        and elapsed < segment_previous_elapsed
+                    )
+                ):
+                    raise EvidenceError("loop telemetry elapsed time changed")
+                segment_previous_elapsed = float(elapsed)
+            row_count = len(rows)
+            expected_sample_index += row_count
+            rows_in_chunk += row_count
+            segment_count += 1
+            previous_phase_segment = phase_segment
+            previous_phase = phase
+            previous_phase_sample_index = first_phase_sample_index + row_count - 1
+            previous_elapsed = float(rows[-1][elapsed_index])
+        if chunk.get("sample_count") != rows_in_chunk:
+            raise EvidenceError("loop telemetry chunk count changed")
+        sample_count += rows_in_chunk
+    if (
+        telemetry.get("sample_count") != sample_count
+        or telemetry.get("segment_count") != segment_count
+    ):
+        raise EvidenceError("loop telemetry totals changed")
+    expected_files = {
+        "checksums.json",
+        "manifest.json",
+        "measurements.json",
+        "outcomes.json",
+        "summary.json",
+        "telemetry.json",
+        *chunks,
+    }
+    if {path.name for path in directory.iterdir()} != expected_files:
+        raise EvidenceError("loop campaign bundle file set changed")
+
+
+def _verify_loop_campaign_bundle(
+    root: Path,
+    directory: Path,
+    entry: dict[str, Any],
+    primary: Any,
+) -> None:
+    manifest = _validate_projected_loop_manifest(primary)
+    campaign_id = str(entry["campaign_id"])
+    if (
+        manifest.get("source_run_id") != campaign_id
+        or manifest.get("status") != entry.get("status")
+        or entry.get("evidence_kind") != LOOP_EVIDENCE_KIND
+    ):
+        raise EvidenceError("loop campaign index binding changed")
+    measurements_document = _expect_object_keys(
+        _load_json(directory / "measurements.json", root),
+        {"measurement_count", "measurements", "schema_version"},
+        name="loop measurements",
+    )
+    measurements = measurements_document.get("measurements")
+    if (
+        measurements_document.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(measurements, list)
+        or measurements_document.get("measurement_count") != len(measurements)
+    ):
+        raise EvidenceError("loop measurement count changed")
+    cases = {case["case_id"]: case for case in manifest["cases"]}
+    model_ids = {model["id"] for model in manifest["models"]}
+    seen_cases: set[str] = set()
+    for index, measurement in enumerate(measurements, 1):
+        projected = _project_loop_measurement(measurement, source=False)
+        if not _json_strict_equal(projected, measurement):
+            raise EvidenceError("loop measurement projection changed")
+        if measurement.get("sample_index") != index:
+            raise EvidenceError("loop measurement order changed")
+        case_id = measurement.get("case_id")
+        if case_id not in cases or case_id in seen_cases:
+            raise EvidenceError("loop measurement case binding changed")
+        seen_cases.add(str(case_id))
+        case = cases[str(case_id)]
+        required_dimensions = _LOOP_BOUND_DIMENSION_FIELDS & set(case)
+        if not required_dimensions <= set(measurement) or not _loop_case_dimensions_match(
+            measurement, case
+        ):
+            raise EvidenceError("loop measurement dimensions changed")
+        profile_id = measurement.get("profile_id")
+        valid_profiles = (
+            {manifest["protocol"]["rlm"]["model_profile"]}
+            if case["phase"] == "rlm"
+            else set(manifest["protocol"]["halo"]["model_profiles"])
+        )
+        if profile_id not in model_ids or profile_id not in valid_profiles:
+            raise EvidenceError("loop measurement profile binding changed")
+
+    outcomes_document = _expect_object_keys(
+        _load_json(directory / "outcomes.json", root),
+        {"outcome_count", "outcomes", "schema_version"},
+        name="loop outcomes",
+    )
+    outcomes = outcomes_document.get("outcomes")
+    if (
+        outcomes_document.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(outcomes, list)
+        or outcomes_document.get("outcome_count") != len(outcomes)
+        or len(outcomes) != len(manifest["cases"])
+    ):
+        raise EvidenceError("loop outcome count changed")
+    allowed_outcomes = {
+        "complete",
+        "exhausted",
+        "held",
+        "incomplete",
+        "not_started",
+        "skipped_campaign_stop",
+        "skipped_deadline",
+    }
+    for case, outcome in zip(manifest["cases"], outcomes, strict=True):
+        outcome = _expect_object_keys(
+            outcome,
+            {
+                "attempt_count",
+                "case_id",
+                "failed_attempt_count",
+                "outcome",
+                "timeout_attempt_count",
+            },
+            name="loop outcome",
+        )
+        if outcome.get("case_id") != case["case_id"]:
+            raise EvidenceError("loop outcome order or case binding changed")
+        _safe_id(outcome.get("case_id"), name="loop outcome case ID")
+        if outcome.get("outcome") not in allowed_outcomes:
+            raise EvidenceError("loop outcome status changed")
+        for key in (
+            "attempt_count",
+            "failed_attempt_count",
+            "timeout_attempt_count",
+        ):
+            if type(outcome.get(key)) is not int or outcome[key] < 0:
+                raise EvidenceError("loop outcome attempt counter changed")
+        if (
+            outcome["attempt_count"] > 2
+            or outcome["failed_attempt_count"]
+            + outcome["timeout_attempt_count"]
+            > outcome["attempt_count"]
+            or (
+                outcome["outcome"] in {"not_started", "held"}
+                and outcome["attempt_count"] != 0
+            )
+            or (
+                outcome["outcome"] == "incomplete"
+                and outcome["attempt_count"] == 0
+            )
+            or (
+                outcome["outcome"] == "complete"
+                and outcome["attempt_count"] == 0
+            )
+            or (
+                outcome["outcome"] == "exhausted"
+                and (
+                    outcome["attempt_count"] != 2
+                    or outcome["failed_attempt_count"]
+                    + outcome["timeout_attempt_count"]
+                    != 2
+                )
+            )
+        ):
+            raise EvidenceError("loop outcome attempt accounting changed")
+    completed_outcomes = {
+        row["case_id"] for row in outcomes if row["outcome"] == "complete"
+    }
+    if completed_outcomes != seen_cases:
+        raise EvidenceError("loop complete outcomes disagree with measurements")
+    outcomes_by_case = {row["case_id"]: row for row in outcomes}
+    if any(
+        measurement["attempt"]
+        != outcomes_by_case[str(measurement["case_id"])]["attempt_count"]
+        for measurement in measurements
+    ):
+        raise EvidenceError("loop completion attempt disagrees with its outcome")
+
+    summary_document = _expect_object_keys(
+        _load_json(directory / "summary.json", root),
+        {"aggregates", "schema_version"},
+        name="loop summary",
+    )
+    summary = summary_document.get("aggregates")
+    summary_fields = {
+        "completed_cases",
+        "deadline_skipped_cases",
+        "exhausted_cases",
+        "failed_attempts",
+        "groups",
+        "held_cases",
+        "planned_cases",
+        "status",
+    }
+    if (
+        summary_document.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(summary, dict)
+        or set(summary) != summary_fields
+    ):
+        raise EvidenceError("loop published summary schema changed")
+    for key in (
+        "completed_cases",
+        "deadline_skipped_cases",
+        "exhausted_cases",
+        "failed_attempts",
+        "held_cases",
+        "planned_cases",
+    ):
+        if type(summary.get(key)) is not int or summary[key] < 0:
+            raise EvidenceError("loop published summary counter changed")
+    lifecycle = manifest["lifecycle"]
+    event_counts = lifecycle["event_counts"]
+    expected_counts = {
+        "completed_cases": sum(row["outcome"] == "complete" for row in outcomes),
+        "deadline_skipped_cases": sum(
+            row["outcome"] in {"skipped_deadline", "skipped_campaign_stop"}
+            for row in outcomes
+        ),
+        "exhausted_cases": sum(row["outcome"] == "exhausted" for row in outcomes),
+        "failed_attempts": sum(
+            row["failed_attempt_count"] + row["timeout_attempt_count"]
+            for row in outcomes
+        ),
+        "held_cases": sum(row["outcome"] == "held" for row in outcomes),
+        "planned_cases": len(cases),
+    }
+    if any(summary[key] != expected for key, expected in expected_counts.items()):
+        raise EvidenceError("loop published summary counters disagree with lifecycle")
+    if summary["completed_cases"] != len(measurements):
+        raise EvidenceError("loop summary disagrees with its measurements")
+    expected_event_counts = {
+        "case_complete": expected_counts["completed_cases"],
+        "case_exhausted": expected_counts["exhausted_cases"],
+        "case_failed": sum(row["failed_attempt_count"] for row in outcomes),
+        "case_skipped_campaign_stop": sum(
+            row["outcome"] == "skipped_campaign_stop" for row in outcomes
+        ),
+        "case_skipped_deadline": sum(
+            row["outcome"] == "skipped_deadline" for row in outcomes
+        ),
+        "case_skipped_held": expected_counts["held_cases"],
+        "case_started": sum(row["attempt_count"] for row in outcomes),
+        "case_timeout": sum(row["timeout_attempt_count"] for row in outcomes),
+    }
+    if any(
+        event_counts.get(name, 0) != count
+        for name, count in expected_event_counts.items()
+    ):
+        raise EvidenceError("loop outcomes disagree with lifecycle event counts")
+    pseudo_events: list[dict[str, Any]] = [
+        {"event": "case_complete", "case_id": row["case_id"]}
+        for row in measurements
+    ]
+    selected = lifecycle["selected_halo_profile"]
+    if selected != manifest["protocol"]["halo"]["model_profiles"][0]:
+        pseudo_events.append(
+            {"event": "halo_fallback_selected", "profile_id": selected}
+        )
+    for outcome in outcomes:
+        event_name = {
+            "exhausted": "case_exhausted",
+            "held": "case_skipped_held",
+            "skipped_campaign_stop": "case_skipped_campaign_stop",
+            "skipped_deadline": "case_skipped_deadline",
+        }.get(outcome["outcome"])
+        if event_name is not None:
+            pseudo_events.append(
+                {"event": event_name, "case_id": outcome["case_id"]}
+            )
+        pseudo_events.extend(
+            {"event": "case_failed", "case_id": outcome["case_id"]}
+            for _ in range(outcome["failed_attempt_count"])
+        )
+        pseudo_events.extend(
+            {"event": "case_timeout", "case_id": outcome["case_id"]}
+            for _ in range(outcome["timeout_attempt_count"])
+        )
+    if event_counts.get("campaign_cleanup_failed", 0):
+        pseudo_events.append({"event": "campaign_cleanup_failed"})
+    elif lifecycle["cleanup_verified"]:
+        pseudo_events.append({"event": "campaign_cleanup_verified"})
+    expected_summary = _loop_summary_expected(
+        plan=manifest, events=pseudo_events, measurements=measurements
+    )
+    expected_status = "planned" if summary["status"] == "planned" else expected_summary["status"]
+    groups_match = (
+        summary.get("groups") == []
+        if summary["status"] == "planned"
+        else _loop_values_equal(summary.get("groups"), expected_summary["groups"])
+    )
+    if (
+        summary.get("status") != expected_status
+        or manifest.get("status") != summary.get("status")
+        or not groups_match
+    ):
+        raise EvidenceError("loop published summary aggregates changed")
+    if summary["status"] == "planned" and (
+        measurements
+        or lifecycle["event_count"] != 0
+        or any(row["outcome"] != "not_started" for row in outcomes)
+        or _load_json(directory / "telemetry.json", root).get("sample_count") != 0
+    ):
+        raise EvidenceError("loop planned bundle contains execution evidence")
+    _verify_loop_telemetry(directory, root, campaign_id=campaign_id)
+
+
 def _verify_simple_bundle(
     root: Path,
     entry: dict[str, Any],
@@ -9521,6 +11906,19 @@ def _verify_simple_bundle(
         ):
             raise EvidenceError("Harbor campaign identity or evidence kind changed")
         _verify_harbor_bundle(root, directory, entry, primary)
+        return
+    if category == "campaigns" and (
+        entry.get("evidence_kind") == LOOP_EVIDENCE_KIND
+        or primary.get("evidence_kind") == LOOP_EVIDENCE_KIND
+        or primary.get("source_group") in LOOP_RESULT_ROOTS
+        or _RUN_ID_RE.fullmatch(str(identity)) is not None
+    ):
+        if (
+            entry.get("evidence_kind") != LOOP_EVIDENCE_KIND
+            or primary.get("evidence_kind") != LOOP_EVIDENCE_KIND
+        ):
+            raise EvidenceError("loop campaign evidence kind changed")
+        _verify_loop_campaign_bundle(root, directory, entry, primary)
         return
     if primary.get("schema_version") != SCHEMA_VERSION:
         raise EvidenceError(f"{category} schema mismatch: {identity}")
@@ -9929,6 +12327,38 @@ def _grouped_run_dirs(results_root: Path) -> dict[str, set[Path]]:
     return grouped
 
 
+def _loop_campaign_dirs(results_root: Path) -> list[tuple[str, Path]]:
+    """Enumerate only direct loop campaign directories under exact source roots."""
+
+    campaigns: list[tuple[str, Path]] = []
+    for root_name in LOOP_RESULT_ROOTS:
+        root = results_root / root_name
+        if not root.exists():
+            continue
+        metadata = root.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise EvidenceError("loop results root must be a real directory")
+        children = sorted(root.iterdir())
+        if not children:
+            raise EvidenceError("loop results root must contain at least one plan")
+        for child in children:
+            child_metadata = child.lstat()
+            if not stat.S_ISDIR(child_metadata.st_mode) or stat.S_ISLNK(
+                child_metadata.st_mode
+            ):
+                raise EvidenceError(
+                    "loop results root must contain only direct campaign directories"
+                )
+            _date_from_run_id(child.name)
+            if not (child / "plan.json").is_file():
+                raise EvidenceError("loop campaign directory is missing plan.json")
+            campaigns.append((root_name, child))
+    identities = [path.name for _, path in campaigns]
+    if len(identities) != len(set(identities)):
+        raise EvidenceError("loop campaign run identifiers are duplicated")
+    return campaigns
+
+
 def _export_evidence_locked(
     *,
     results_root: Path,
@@ -9962,7 +12392,17 @@ def _export_evidence_locked(
         for category in ("campaigns", "matrices", "runs", "standalone"):
             (temporary / category).mkdir()
         runs: list[dict[str, Any]] = []
-        run_dirs = sorted({path.parent for path in results_root.rglob("plan.json")})
+        loop_campaign_dirs = _loop_campaign_dirs(results_root)
+        loop_campaign_paths = {path for _, path in loop_campaign_dirs}
+        run_dirs = sorted(
+            {
+                path.parent
+                for path in results_root.rglob("plan.json")
+                if not any(
+                    ancestor in loop_campaign_paths for ancestor in path.parents
+                )
+            }
+        )
         grouped_runs = _grouped_run_dirs(results_root)
         recognized_top = {
             ".sparkbench.lock",
@@ -9995,6 +12435,7 @@ def _export_evidence_locked(
                 else None
             )
             runs.append(_export_run(run_dir, results_root, temporary, matrix_id))
+        recognized_top.update(root_name for root_name, _ in loop_campaign_dirs)
         actual_top = {path.name for path in results_root.iterdir()}
         if actual_top != recognized_top:
             unknown = sorted(actual_top - recognized_top)
@@ -10017,6 +12458,15 @@ def _export_evidence_locked(
             _export_campaign(results_root / name, results_root, temporary)
             for name in campaign_names
         ]
+        campaigns.extend(
+            _export_loop_campaign(
+                campaign,
+                results_root,
+                temporary,
+                source_group=root_name,
+            )
+            for root_name, campaign in loop_campaign_dirs
+        )
         if harbor_results:
             campaigns.append(_export_harbor_campaign(harbor_results, temporary))
         campaigns.sort(key=lambda campaign: campaign["campaign_id"])

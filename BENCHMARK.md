@@ -210,11 +210,15 @@ python3 sparkbench.py benchmark qwen38-flash-next-ud-iq4-xs-llamacpp-p8 \
   --suite manifests/suites/core.toml
 ```
 
-The ignored run artifacts have not been added to the tracked scalar archive.
-A full evidence refresh is currently blocked because the exporter does not
-support the new `loop-*` results topology, and a faithful refresh also requires
-the two original private Harbor lifecycle inputs. The existing evidence archive
-therefore remains the publication boundary. See the
+The evidence exporter treats each `loop-*` attempt as its own strict scalar
+campaign bundle and excludes its prompts, completions, traces, reasoning,
+request identifiers, local paths, and raw logs. The two exact private Harbor
+lifecycle records needed to reproduce the historical Harbor bundle are retained
+locally and must be supplied explicitly during a full refresh; they are inputs,
+not tracked artifacts. The tracked archive publishes the four Flash Next
+attempts under [`evidence/runs/`](evidence/runs/), including the
+[core bundle](evidence/runs/20260826T165913Z-qwen38-flash-next-ud-iq4-xs-llamacpp-p8-core-b5a0f9ad/manifest.json).
+The complete refresh verifies deterministically with both Harbor inputs. See the
 [day-zero GB10 report](docs/qwen38-flash-next-gb10-2026-08-26.md) for artifact
 hashes, smoke history, results, and comparison limits.
 

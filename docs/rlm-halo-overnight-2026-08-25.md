@@ -279,11 +279,34 @@ This is a scalar-only campaign by construction:
 - the append-only journal accepts only allowlisted scalar values and the
   frozen case/profile dimensions.
 
-Do not commit the raw run directory. Any later tracked evidence must go through
-the repository's scalar allowlist exporter and staged verification. The
-protocol document contains pins and matrix dimensions, never captured prompts,
-completions, reasoning, tool payloads, request identifiers, credentials, or
-local run paths.
+Do not commit a raw run directory. The exporter projects only allowlisted plan
+dimensions, scalar case outcomes and aggregates, and columnar telemetry, with
+per-bundle checksums and `payloads_included = false`. The complete
+attempt-scoped publication set is:
+
+- campaign attempts
+  [initial](../evidence/campaigns/20260825T203851Z-rlm-halo-overnight-2026-08-25-bed8d09d/manifest.json),
+  [clean overnight](../evidence/campaigns/20260826T012139Z-rlm-halo-overnight-2026-08-25-51cfeed7/manifest.json),
+  and [continuation](../evidence/campaigns/20260826T065438Z-rlm-halo-continuation-2026-08-26-8b52bc5c/manifest.json);
+- planning-only snapshots
+  [19927607](../evidence/campaigns/20260825T232122Z-rlm-halo-overnight-2026-08-25-19927607/manifest.json),
+  [3aa60df3](../evidence/campaigns/20260825T234316Z-rlm-halo-overnight-2026-08-25-3aa60df3/manifest.json),
+  [8ece1e23](../evidence/campaigns/20260826T000800Z-rlm-halo-overnight-2026-08-25-8ece1e23/manifest.json),
+  and [85051911](../evidence/campaigns/20260826T010628Z-rlm-halo-overnight-2026-08-25-85051911/manifest.json); and
+- smoke and canary attempts
+  [6c4e0477](../evidence/campaigns/20260825T222020Z-6c4e0477/manifest.json),
+  [41fca355](../evidence/campaigns/20260825T222823Z-41fca355/manifest.json),
+  [a3a4a866](../evidence/campaigns/20260825T224034Z-a3a4a866/manifest.json),
+  [92c8feab](../evidence/campaigns/20260825T225343Z-92c8feab/manifest.json),
+  [a35e5008](../evidence/campaigns/20260825T232132Z-a35e5008/manifest.json),
+  [HALO validation](../evidence/campaigns/20260825T234338Z-halo-validation-canary-77b62294/manifest.json),
+  [128K validation](../evidence/campaigns/20260826T000817Z-rlm-128k-validation-canary-e21117f4/manifest.json),
+  and [128K compaction](../evidence/campaigns/20260826T010751Z-rlm-128k-compaction-canary-731f4e3f/manifest.json).
+
+The raw plans, journals, fixtures, prompts, completions, reasoning, tool
+payloads, request identifiers, credentials, local paths, and server logs remain
+ignored. The published scalar bundles passed full deterministic export and
+archive verification; an immediate full re-export reported no change.
 
 ## Failure and resume rules
 

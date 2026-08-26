@@ -1,0 +1,1 @@
+{"outcome_count":2,"outcomes":[{"attempt_count":1,"case_id":"rlm-f1ee8a431dfe3b70","failed_attempt_count":0,"outcome":"skipped_campaign_stop","timeout_attempt_count":1},{"attempt_count":0,"case_id":"halo-44b90feeff4fc598","failed_attempt_count":0,"outcome":"not_started","timeout_attempt_count":0}],"schema_version":"sparkbench-evidence-v1"}

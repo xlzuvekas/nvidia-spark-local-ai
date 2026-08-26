@@ -267,11 +267,14 @@ one. Run one inference configuration at a time and preserve loopback serving.
 Raw run records remain ignored. They contain captured content and local
 runtime details and must not be committed.
 
-These Flash Next measurements are not yet represented in the tracked scalar
-evidence archive. The existing archive independently reverified unchanged at
-1,480 files and 15,863,234 bytes. A faithful full refresh is blocked by
-unsupported prior `loop-*` result topology and the absence of the two original
-private Harbor lifecycle inputs; exporting without those inputs would silently
-remove the historical Harbor campaign. The named run IDs are therefore
-provisional local evidence, not refreshed published evidence. No hand-selected
-or hand-merged archive was created.
+The four published attempt-scoped scalar bundles are the
+[Q8_0 startup failure](../evidence/runs/20260826T163638Z-qwen38-flash-next-ud-iq4-xs-llamacpp-smoke-b76517fb/manifest.json),
+[F16 P1 smoke](../evidence/runs/20260826T164557Z-qwen38-flash-next-ud-iq4-xs-llamacpp-smoke-92c5cd3c/manifest.json),
+[F16 P8 quick](../evidence/runs/20260826T165220Z-qwen38-flash-next-ud-iq4-xs-llamacpp-p8-quick-37477295/manifest.json),
+and [F16 P8 core](../evidence/runs/20260826T165913Z-qwen38-flash-next-ud-iq4-xs-llamacpp-p8-core-b5a0f9ad/manifest.json)
+bundles. The full exporter recognizes the prior `loop-*` topology, and the
+two exact private Harbor lifecycle inputs needed to preserve the historical
+campaign are available locally for explicit use during refresh. Neither raw
+source is copied into Git. A complete deterministic re-export with both inputs
+and normal archive verification passed, and a second export reported no change;
+no hand-selected or hand-merged archive is valid.

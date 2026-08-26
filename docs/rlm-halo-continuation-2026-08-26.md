@@ -207,5 +207,12 @@ All timestamps use explicit MST (`-07:00`):
 The unattended user service must retain the exact-plan `ExecStopPost` cleanup,
 restart only unexpected failures, and have absolute stop timers at 06:00 and
 06:20 MST. Raw plans, fixtures, indexes, journals, telemetry, prompts, model
-outputs, and server logs remain ignored. Any tracked evidence must use the
-scalar allowlist exporter and staged verification.
+outputs, and server logs remain ignored. The clean overnight baseline is the
+the [51cfeed7 scalar bundle](../evidence/campaigns/20260826T012139Z-rlm-halo-overnight-2026-08-25-51cfeed7/manifest.json),
+and this continuation is the
+[8b52bc5c scalar bundle](../evidence/campaigns/20260826T065438Z-rlm-halo-continuation-2026-08-26-8b52bc5c/manifest.json).
+The [overnight publication ledger](rlm-halo-overnight-2026-08-25.md#privacy-and-publication-boundary)
+accounts for the preceding plans, smoke attempts, and canaries. These projected
+bundles contain only allowlisted scalar outcomes, aggregates, safe provenance,
+and telemetry. The complete archive passed deterministic full export and normal
+verification, and its immediate re-export reported no change.

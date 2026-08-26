@@ -159,12 +159,21 @@ and local run locations remain untracked and are intentionally excluded here.
 
 ## Publication boundary
 
-The tracked evidence archive has not been refreshed for these runs. Its
-exporter operates over the complete raw-results topology and also needs the
-two external Harbor lifecycle result files required to reproduce the existing
-archive; those inputs were not available in this run. Hand-selecting or
-hand-merging the four result bundles would violate the evidence protocol. The
-current tracked archive still verifies unchanged; that verification covers
-only the pre-existing archive, not any measurement in this report. This report
-remains a scalar-only exploratory analysis pending a clean-revision rerun and
-full deterministic evidence export.
+The complete publication set preserves all six attempt directories rather than
+selecting only the four terminal measured runs:
+
+- [Qwen3.6 initial plan](../evidence/runs/20260825T053811Z-qwen36-35b-a3b-nvfp4-mtp3-long-tps-long-context-tps-b2a243cf/manifest.json);
+- [Qwen3.8 aborted initial lifecycle](../evidence/runs/20260825T053811Z-qwen38-27b-nvfp4-mtp3-long-tps-long-context-tps-6fbfc156/manifest.json);
+- [Qwen3.6 native-context run](../evidence/runs/20260825T054429Z-qwen36-35b-a3b-nvfp4-mtp3-long-tps-long-context-tps-1f2a29c4/manifest.json);
+- [Qwen3.6 C64 saturation run](../evidence/runs/20260825T054429Z-qwen36-35b-a3b-nvfp4-mtp3-tps64-throughput-saturation-88e3e7cd/manifest.json);
+- [Qwen3.8 native-context run](../evidence/runs/20260825T054429Z-qwen38-27b-nvfp4-mtp3-long-tps-long-context-tps-a1931174/manifest.json); and
+- [Qwen3.8 C64 saturation run](../evidence/runs/20260825T054429Z-qwen38-27b-nvfp4-mtp3-tps64-throughput-saturation-9d51810a/manifest.json).
+
+The exporter operates over the complete raw-results topology. The two exact
+private Harbor lifecycle records required to preserve the historical Harbor
+campaign are available locally and supplied explicitly to a full refresh; they
+remain outside Git. Hand-selecting or hand-merging only the successful runs
+would still violate the evidence protocol. The published projections exclude
+captured content and local details, and publication does not upgrade these
+dirty-worktree measurements into clean-revision evidence. A clean-revision
+rerun remains necessary for that stronger provenance claim.
