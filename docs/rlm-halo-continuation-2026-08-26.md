@@ -27,6 +27,122 @@ The first campaign supplied two strong experimental signals:
   created no subagent, and never finalized, implicating the ten-turn boundary
   rather than parallel child execution.
 
+## Completed continuation result
+
+The clean-revision continuation with plan fingerprint `8b52bc5c6bc5` ran from
+23:55:25 MST on August 25 through 05:48:47 MST on August 26. Final cleanup was
+verified at 05:48:48, before both independent stop safeguards. All 106 planned
+cases have exactly one terminal outcome:
+
+| Phase | Completed | Exhausted | Deadline-skipped | Held |
+| --- | ---: | ---: | ---: | ---: |
+| RLM | 38 | 2 | 16 | 1 |
+| HALO | 2 | 7 | 40 | 0 |
+| **Total** | **40** | **9** | **56** | **1** |
+
+The summary status is `partial` because only completed cases are scored; it is
+not a controller, accounting, or cleanup failure. All 60 started attempts have
+one outcome, all 20 server lifecycles have matched start/ready/stop events, and
+no exact-plan worker, serving container, network, or GPU process remained.
+
+### RLM findings
+
+The completed BABILong-derived panel scored 2/12 direct cases, 2/24 normal
+depth-1 cases, and 0/2 forced-compaction cases as correct. Treatment aggregates
+mix different task and context selections, so they are descriptive rather than
+a causal quality comparison. In the 12 fully attempted direct/depth-1 pairs at
+8K and 32K, direct produced two correct answers; depth 1 produced one correct
+answer, ten incorrect answers, and one deterministic token-limit exhaustion.
+Among the 11 pairs where both treatments completed, each produced one correct
+answer and depth 1 had 11.64 times the median direct wall time.
+
+None of the 24 completed normal depth-1 or two forced-compaction cases recorded
+a recursive subcall. The scored treatments therefore measured iterative RLM
+scaffolds with recursion permitted, not an exercised recursion-quality effect.
+The completed normal arm reused 82.553% of prompt tokens and reported 12.260
+effective generation tokens per end-to-end second, compared with 0.125% and
+3.814 for the much shorter direct completions. There is no cache-disabled arm,
+and the two treatments generate very different amounts of work, so these
+values do not establish a caching speedup or make depth 1 faster per task.
+
+Forced 0.20-threshold compaction actually ran in only one of its two cases. In
+that matched trajectory it compacted twice, reduced cumulative prompt traffic
+45.65%, increased accepted requests from 9 to 15, increased wall time 11.93%,
+and changed the result from correct to incorrect. The other forced case never
+crossed its threshold and matched the normal case's calls, generation, and
+incorrect outcome. One effective trajectory proves the mechanism can run but
+cannot estimate its latency or quality effect. Normal 0.85-threshold compaction
+ran once among the 24 completed normal cases.
+
+The two exhausted RLM cases repeated the same explicit aggregate-token failure
+on both attempts: 265,760 versus a 262,144 cap in one cell and 278,877 versus
+262,144 in the other. Their identical retries and intervening cold starts used
+about 20 minutes without adding information. Explicit token-limit failures
+should be non-retryable in the next controller revision.
+
+### HALO findings
+
+HALO attempted nine of 49 planned cells before the frozen cutoff. Two of four
+depth-0 cells completed; zero of five attempted depth-1 cells completed; the
+depth-2 sentinel was not attempted. Across 17 attempts there were two
+completions, eleven HTTP 400 failures, and four timeouts. The persisted scalar
+error chain identifies `EngineAgentExhaustedError`, `HTTPStatusError`, and HTTP
+400, but does not retain a structured parameter or failed-attempt token delta.
+Context growth is therefore a leading hypothesis, not a demonstrated cause.
+
+The two scored depth-0 completions used 2,048 and 65,536 synthetic traces. In
+aggregate they accepted 39 model requests, processed 554,149 prompt tokens,
+reused 482,944 of them (87.151%), generated 6,608 tokens, and reported 8.647
+effective generation tokens per end-to-end second. Both finalized as valid
+JSON with family F1 0.667 and citation precision 1.0; their mean count accuracy
+was 0.403. These are two cutoff-selected survivors, not a scale comparison.
+The 65,536-trace completion used fewer cumulative prompt tokens and less wall
+time than the 2,048-trace completion, while the identical 2,048-trace case
+failed once and then completed, showing that failure was path-dependent rather
+than monotonically determined by corpus size.
+
+Seven cell dimensions overlap the preceding 10-turn campaign. All seven
+eventually completed with `max_turns = 10`, and four returned valid JSON. With
+the same pinned model, image, and upstream revisions but `max_turns = 20`, one
+of seven completed and returned valid JSON while six exhausted retries. The
+runs were sequential, inference is stochastic, and their repository and
+campaign revisions differ, so this is a strong cross-run regression associated
+with the longer trajectory budget rather than a causal estimate. Doubling the
+turn budget did not repair depth-1 finalization in this continuation.
+
+### Schedule, resources, and interpretation
+
+The campaign ran for 5 hours 53 minutes 22 seconds. Model attempts occupied
+4 hours 42 minutes 5 seconds, or 79.8% of wall time. Twenty server launches
+occupied 1 hour 9 minutes 53 seconds, or 19.8%; HALO's 14 cold restarts alone
+used 55 minutes 40 seconds. The failure path therefore invalidated the plan's
+optimistic fit estimate and left 56 cases explicitly deadline-skipped. A
+roughly 75-second admission guard flushed each phase before its nominal cutoff
+and left the cleanup reserve intact.
+
+The 10,359-row scalar telemetry stream covers the full campaign. Trapezoidal
+integration records approximately 204.28 Wh of GPU-board energy; that excludes
+the rest of the system and facility. Observed power ranged from 5.11 to 100.07
+W, temperature peaked at 87 C, and no out-of-memory or cleanup failure was
+recorded.
+
+This continuation is an external-context experiment: BABILong documents stay
+in the RLM environment and HALO searches an indexed trace corpus. It is not a
+native model-context test beyond 128K. HALO held `reasoning_effort = "none"`;
+the pinned RLM recipe does not support a comparable runtime effort control.
+No reasoning-effort, cache-off, agent-concurrency, native-context, or exercised
+recursion effect can be inferred from this run.
+
+The next discriminating sequence is:
+
+1. retain scalar-safe failed-attempt counters and structured error classes;
+2. make deterministic token caps non-retryable and test health-checked server
+   reuse after request-level HALO failures;
+3. interleave independent 10-turn and 20-turn depth-0/2,048-trace replicates;
+4. admit a separate treatment that guarantees one child invocation before
+   comparing recursive quality; and
+5. measure caching with an explicit matched cache-off arm.
+
 ## Continuation questions
 
 The continuation is an adaptive queue with two phase cutoffs. It asks:
@@ -69,11 +185,13 @@ seconds without a model server or download.
 | Depth-2 scale sentinel | 65,536 | 0 | 1 |
 
 The plan therefore contains 106 cases: 105 executable and one explicit hold.
-The matrix is intentionally oversubscribed against pathological double-failure
-caps but fits the remaining window under the observed runtimes with margin.
-Ordering prioritizes forced compaction, then the breadth panel, then matched
-HALO intervention cells. A phase cutoff produces explicit terminal skips and
-never converts incomplete work into zero quality or throughput.
+At launch, the matrix was intentionally oversubscribed against pathological
+double-failure caps and was estimated to fit the remaining window under the
+then-observed runtimes. The completed results above show that repeated HALO
+failures and cold restarts exhausted that margin. Ordering prioritizes forced
+compaction, then the breadth panel, then matched HALO intervention cells. A
+phase cutoff produces explicit terminal skips and never converts incomplete
+work into zero quality or throughput.
 
 ## Deadlines and supervision
 

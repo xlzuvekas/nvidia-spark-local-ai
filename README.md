@@ -24,7 +24,7 @@ quality checks, and the provenance needed to interpret each number.
 | How did local models handle bounded memory decisions? | [Graphiti-style resolver and synthetic transaction component results](docs/memory-operations-results-2026-08-24.md) |
 | How should Laguna, Graphiti, and MemFS-style reflection be tested locally? | [Article audit and bounded memory benchmark plan](docs/laguna-graphiti-memory-plan-2026-08-24.md) |
 | How will the overnight RLM and HALO loops be compared? | [Frozen paired BABILong-derived and synthetic Graphiti-like campaign protocol](docs/rlm-halo-overnight-2026-08-25.md) |
-| How is the remaining RLM/HALO window being used? | [Verified first-run audit and adaptive compaction, breadth, turn-budget, and 65K-trace continuation](docs/rlm-halo-continuation-2026-08-26.md) |
+| What did the RLM/HALO continuation show? | [Audited compaction, breadth, 20-turn reliability, and 65K-trace continuation results](docs/rlm-halo-continuation-2026-08-26.md) |
 
 The generated public evidence archive is intentionally separate from raw run
 data. Its [human-readable map](evidence/README.md) and
@@ -35,6 +35,15 @@ explains how to create and verify both files.
 
 ## What the results say
 
+- In the clean RLM/HALO continuation, all 106 planned cases reached an explicit
+  terminal state, but only 40 completed and scored before the frozen cutoffs.
+  Normal depth-1 RLM scored 2/24 and recorded no recursive subcall in any
+  completed case. HALO completed 2/9 attempted 20-turn cells, including one
+  65,536-trace depth-0 case, while no attempted depth-1 cell completed. Across
+  seven overlapping cell dimensions, the prior 10-turn campaign completed 7/7
+  versus 1/7 here; this sequential cross-run regression is diagnostic, not a
+  causal estimate. Prefix reuse was high, but no cache-off arm measured its
+  benefit. See the [continuation report](docs/rlm-halo-continuation-2026-08-26.md).
 - In the exploratory cache-off NVFP4+MTP3 panel, Qwen3.6 35B-A3B reached
   893.674 aggregate output tok/s at short-prompt offered C64 versus 359.081 for
   dense Qwen3.8 27B. At the approximately 246K/C2 target, the matched valid
@@ -108,6 +117,10 @@ geometries, slot counts, or validation states.
 
 ### Measured results
 
+- [RLM and HALO continuation results — 2026-08-26](docs/rlm-halo-continuation-2026-08-26.md):
+  forced RLM compaction, BABILong-derived breadth, 20-turn HALO reliability,
+  65K synthetic-trace retrieval, lifecycle overhead, and explicit limits on
+  caching and recursion claims.
 - [Qwen3.6 versus Qwen3.8 cache-off long-context throughput — 2026-08-25](docs/qwen36-qwen38-long-context-tps-2026-08-25.md):
   short saturation, 8K/30K concurrency and native 61K–246K generation and
   retrieval, with wall time, validation failures and retry instability kept
