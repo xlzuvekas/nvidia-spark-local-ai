@@ -83,9 +83,10 @@ global resource bound for recursive work.
 
 ### Smoke-test boundary
 
-The pre-campaign smoke exercised serving, worker isolation, timeout, fallback,
-and cleanup paths, but did not produce a successful 128K RLM or scored HALO
-episode. Its scalar outcomes were:
+The pre-campaign smoke and exact canaries exercised serving, worker isolation,
+timeout, retry, and cleanup paths. They did not produce a successful 128K RLM
+episode; the matched no-MTP HALO canary did complete and score. Their scalar
+outcomes were:
 
 | Probe | Outcome |
 | --- | --- |
@@ -93,8 +94,10 @@ episode. Its scalar outcomes were:
 | 128K depth-1 RLM, 24,576-token guard, 300-second timeout | Reached `TokenLimitExceededError` after 178.865 seconds. |
 | 128K depth-1 RLM, 131,072-token guard, 300-second timeout | Reached the 300-second episode timeout before producing an answer. |
 | 128K depth-1 RLM, 131,072-token guard, 600-second timeout | Reached `TokenLimitExceededError` after 458.422 seconds. |
-| 256-trace depth-1 HALO on Qwen3.8 | Server startup took 261.759 seconds. All 8 model requests returned HTTP 200, then the episode failed after 111.263 seconds with `UserError` caused by `ValidationError`. Source isolation identified the pinned HALO `call_subagent` `AgentAsToolInput` parse, which overwrites the SDK error handler. |
-| Same HALO diagnostic probe on Qwen3.6 | Server startup took 118.787 seconds. All 30 chat requests returned HTTP 500 because xgrammar could not import `normalize_tool_choice`; HALO exhausted the agent after 67.113 seconds with `EngineAgentExhaustedError`. |
+| Pre-fix 256-trace depth-1 HALO on Qwen3.8 with MTP3 | Server startup took 261.759 seconds. All 8 model requests returned HTTP 200, then the episode failed after 111.263 seconds with `UserError` caused by `ValidationError`. Source isolation identified the pinned HALO `call_subagent` `AgentAsToolInput` parse, which overwrote the SDK error handler. The local protocol workaround catches only that validation class and returns a constant retry result without retaining arguments or validation text. |
+| Post-fix 256-trace depth-1 HALO on Qwen3.8 with MTP3 | Server startup took 267.789 seconds. The canary cleared the old validation boundary with 13 HTTP 200 model requests, then encountered 20 repeated HTTP 400 responses and failed after 285.775 seconds with `EngineAgentExhaustedError`; no scored result was produced. |
+| Matched post-fix HALO canary on Qwen3.8 without MTP | Server startup took 245.576 seconds and the episode completed in 312.132 seconds over 19 model requests. It used 151,790 prompt tokens, of which 108,192 were cached (71.277%), and 2,656 generation tokens at 8.509 effective generation tokens/s. The response was valid JSON with family precision 1.0, recall 0.25, F1 0.4, count accuracy 0.041667, citation coverage 0.25, and citation precision 1.0. One subagent completed and the episode made 32 tool calls. |
+| Qwen3.6 diagnostic canary | Server startup took 118.787 seconds. All 30 chat requests returned HTTP 500 because xgrammar could not import `normalize_tool_choice`; HALO exhausted the agent after 67.113 seconds with `EngineAgentExhaustedError`. |
 
 The RLM failures show that upstream `max_tokens` counts cumulative input and
 output usage as repeated root history grows; it is not merely a per-response
@@ -102,12 +105,12 @@ output allowance. The new 262,144-token and 900-second limits add bounded
 headroom above both observed failure boundaries. They are corrected admission
 bounds, not evidence that a 128K episode now completes.
 
-Both HALO attempts used the `none` reasoning controls. Their failures are
-integration defects, not model-quality or throughput measurements, so neither
-produced a quality or TPS result. The diagnostic campaign exhausted cleanly,
-performed no third server restart, and verified cleanup. The full HALO campaign
-remains gated until the Qwen3.8 validation-recovery workaround and matched
-MTP-disabled fallback pass exact canaries.
+All HALO canaries used the `none` reasoning controls. The exact canary campaign
+completed cleanly and verified cleanup. At `n=1`, the no-MTP success validates
+transport and control plumbing, but its quality was weak despite valid
+structure and precise reported citations. Treat it as admission evidence, not
+a model-quality conclusion. The MTP3 and Qwen3.6 failures remain integration
+defects and produced no quality or TPS result.
 
 ### BABILong comparison boundary
 
@@ -138,42 +141,30 @@ each model response is capped at 1,024 tokens, and each episode is capped at
 600 seconds. Depth 0 forces one effective parallel slot and provides the
 non-recursive HALO control.
 
-The ordered serving profiles are:
-
-1. primary: `qwen38-27b-nvfp4-mtp3-halo`, derived from the eight-sequence
-   Qwen3.8 NVFP4+MTP3 throughput profile; and
-2. fallback: `qwen38-27b-nvfp4-halo`, using the same Qwen3.8 artifact,
-   revision, NVFP4 quantization, and eight-sequence serving geometry with MTP
-   disabled.
-
-Both profiles make `{"enable_thinking":false}` a server-side chat-template
+The sole admitted overnight serving profile is `qwen38-27b-nvfp4-halo`. It
+uses the Qwen3.8 NVFP4 artifact with eight-sequence serving geometry and MTP
+disabled. The profile makes `{"enable_thinking":false}` a server-side chat-template
 default as well as a request-body default. This matters because HALO's root and
 subagent calls use the OpenAI Agents SDK while its synthesis and compaction
 tools call Chat Completions directly. The campaign forces the Agents SDK to
 Chat Completions so all four paths use the locally validated vLLM surface. The
 plan records `reasoning_effort = "none"`; the pinned HALO model config omits the
-top-level API field, while both serving profiles enforce the equivalent Qwen
+top-level API field, while the serving profile enforces the equivalent Qwen
 control with the server-side `enable_thinking=false` default.
 
-Both selected Qwen3.8 profiles support the same graded effort values: `low`,
-`medium`, and `xhigh`; `high` is not supported. The current control remains
-`none`. Any later matched effort supplement is not admissible until the
-selected effort is verified on root, subagent, synthesis, and compaction
-requests; in particular, the direct compaction path must no longer be an open
-propagation gap. The current overnight matrix remains a thinking-off HALO
-control and does not mix effort levels.
+Qwen3.8 supports the graded effort values `low`, `medium`, and `xhigh`; `high`
+is not supported. The current overnight control remains `none` and does not mix
+effort levels. A separate later Qwen3.8 supplement may pair `low` versus
+`xhigh`, but only after the selected effort is verified on root, subagent,
+synthesis, and compaction requests; in particular, the direct compaction path
+must no longer be an open propagation gap.
 
-The profiles are failover choices over one model artifact, not an independent
-model panel. The runner tries Qwen3.8 with MTP3 first. If it cannot admit, or
-its first HALO case fails before any HALO case completes, it locks the campaign
-to the MTP-disabled Qwen3.8 profile and retries that case. This isolates
-serving-path and MTP sensitivity while holding model revision, quantization,
-and concurrency geometry fixed. After the first successful HALO case, the
-selected profile is fixed across failures and resumes. Every event retains its
-actual `profile_id`, and summaries group by both treatment and profile rather
-than combining mixed-profile observations. Qwen3.6 remains diagnostic-only:
-its pinned xgrammar stack cannot serve tool requests, so it is neither an
-overnight fallback nor an independent comparison model.
+There is no overnight failover or model-panel comparison. The matched Qwen3.8
+MTP3 profile is diagnostic-only until its repeated HTTP 400 boundary is fixed;
+its no-MTP pairing isolates serving-path and MTP sensitivity while holding
+model revision, quantization, and concurrency geometry fixed. Qwen3.6 is also
+diagnostic-only because its pinned xgrammar stack cannot serve tool requests.
+Every overnight HALO event therefore uses the sole admitted no-MTP profile.
 
 ### Synthetic Graphiti-like traces
 
@@ -210,7 +201,8 @@ exact cached artifacts and fail closed when any pin is absent:
 - Qwen3.8 NVFP4 revision
   `6128240ebaf4eaa7bad2b3d1c72c37d677c5f462` and image digest
   `sha256:4a2f33a884222f7049b983263ad9976f89452bb81affecf5b67d89ad35c1bc31`;
-- both HALO profiles reuse that exact Qwen3.8 artifact and image; and
+- the sole admitted HALO profile uses that exact Qwen3.8 artifact and image;
+  and
 - the exact cached BABILong Arrow files described above.
 
 SparkBench's repository-wide lock and unrelated-workload preflight still
@@ -274,12 +266,12 @@ protocol document contains pins and matrix dimensions, never captured prompts,
 completions, reasoning, tool payloads, request identifiers, credentials, or
 local run paths.
 
-## Failure, fallback, and resume rules
+## Failure and resume rules
 
 - A timed-out or failed case is journaled, its owned server is stopped, and the
   case may be attempted once more. Two failed attempts make it exhausted.
-- RLM restarts the same frozen serving profile. HALO may switch once from the
-  ordered primary to the frozen fallback before retrying.
+- RLM and HALO retry only their same frozen serving profiles; HALO has no
+  overnight profile failover.
 - Resume reloads the immutable plan and append-only journal, recovers only
   containers bearing the plan's exact run identity, skips completed or other
   terminal cases, and continues the first pending case.
@@ -298,8 +290,8 @@ local run paths.
   frozen phase deadline or reopen terminal cases. Its stop grace must cover the
   longest frozen startup timeout plus cleanup; a 90-second grace is invalid
   because the observed cold starts took as long as 279.914 seconds.
-- Server startup rejection, case failure, timeout, fallback selection,
-  exhaustion, deadline skip, recovery, and cleanup failure are distinct scalar
+- Server startup rejection, case failure, timeout, exhaustion, deadline skip,
+  recovery, and cleanup failure are distinct scalar
   journal events. Failed or partial work must not be reported as zero quality
   or zero throughput.
 

@@ -205,6 +205,61 @@ class LoopCaseConstructionTests(unittest.TestCase):
             _halo_profile_candidates(plan, primary_success_then_failure), ["primary"]
         )
 
+        single_plan = {"halo": {"model_profiles": ["only"]}}
+        self.assertEqual(_halo_profile_candidates(single_plan, []), ["only"])
+        self.assertEqual(
+            _halo_profile_candidates(
+                single_plan,
+                [
+                    {
+                        "event": "case_failed",
+                        "phase": "halo",
+                        "profile_id": "only",
+                    }
+                ],
+            ),
+            ["only"],
+        )
+
+    def test_manifest_accepts_one_or_two_halo_profiles_and_rejects_other_counts(
+        self,
+    ) -> None:
+        original = 'model_profiles = ["synthetic-halo", "synthetic-halo-fallback"]'
+        accepted = (
+            ["synthetic-halo"],
+            ["synthetic-halo", "synthetic-halo-fallback"],
+        )
+        for profiles in accepted:
+            with self.subTest(accepted=profiles):
+                with tempfile.TemporaryDirectory() as temporary:
+                    path = Path(temporary) / "campaign.toml"
+                    path.write_text(
+                        _minimal_campaign_toml().replace(
+                            original, f"model_profiles = {json.dumps(profiles)}"
+                        ),
+                        encoding="utf-8",
+                    )
+                    config = load_campaign_manifest(path)
+                    self.assertEqual(config["halo"]["model_profiles"], profiles)
+
+        rejected = (
+            ([], "non-empty unique string list"),
+            (["one", "two", "three"], "at most one fallback"),
+            (["duplicate", "duplicate"], "non-empty unique string list"),
+        )
+        for profiles, message in rejected:
+            with self.subTest(rejected=profiles):
+                with tempfile.TemporaryDirectory() as temporary:
+                    path = Path(temporary) / "campaign.toml"
+                    path.write_text(
+                        _minimal_campaign_toml().replace(
+                            original, f"model_profiles = {json.dumps(profiles)}"
+                        ),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(LoopCampaignError, message):
+                        load_campaign_manifest(path)
+
     def test_manifest_rejects_unfrozen_reasoning_controls(self) -> None:
         for old, new, message in (
             (
@@ -520,6 +575,39 @@ class ScalarResultTests(unittest.TestCase):
         self.assertEqual(response_result["error_http_status"], 503)
         self.assertNotIn("response", json.dumps(response_result))
         self.assertNotIn("private", json.dumps(response_result))
+
+    def test_safe_error_result_reads_allowlisted_scalars_from_intermediate_cause(
+        self,
+    ) -> None:
+        class BadRequestError(Exception):
+            code = "invalid_function_parameters"
+            status_code = 400
+            tokens_used = 257
+            token_limit = 256
+
+        try:
+            try:
+                try:
+                    raise ValueError("private root response")
+                except ValueError as cause:
+                    raise BadRequestError("private provider response") from cause
+            except BadRequestError as cause:
+                raise RuntimeError("private outer message") from cause
+        except RuntimeError as error:
+            result = _safe_error_result(error)
+
+        self.assertEqual(result["error_type"], "RuntimeError")
+        self.assertEqual(result["error_cause_type"], "ValueError")
+        self.assertEqual(result["error_code"], "invalid_function_parameters")
+        self.assertEqual(result["error_http_status"], 400)
+        self.assertEqual(result["error_tokens_used"], 257)
+        self.assertEqual(result["error_token_limit"], 256)
+        self.assertEqual(result["error_frame_file"], "test_loop_campaign.py")
+        self.assertEqual(result["error_cause_frame_file"], "test_loop_campaign.py")
+        serialized = json.dumps(result)
+        self.assertNotIn("private", serialized)
+        self.assertNotIn("message", serialized)
+        self.assertNotIn("response", serialized)
 
     def test_accepts_only_allowlisted_scalar_shapes(self) -> None:
         self.assertEqual(

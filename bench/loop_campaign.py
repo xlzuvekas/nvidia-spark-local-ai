@@ -343,8 +343,10 @@ def load_campaign_manifest(path: Path) -> dict[str, Any]:
             "halo.reasoning_effort must be none for the frozen control campaign"
         )
     halo_profiles = _string_list(halo["model_profiles"], name="halo.model_profiles")
-    if len(halo_profiles) != 2:
-        raise LoopCampaignError("HALO requires one primary and one fallback profile")
+    if len(halo_profiles) > 2:
+        raise LoopCampaignError(
+            "halo.model_profiles permits at most one fallback profile"
+        )
     _int_list(halo["trace_counts"], name="halo.trace_counts", minimum=1)
     _int_list(halo["seeds"], name="halo.seeds")
     depths = _int_list(halo["depths"], name="halo.depths")
@@ -1945,19 +1947,21 @@ def _safe_error_result(error: BaseException) -> dict[str, Any]:
         "error_type": type(error).__name__,
         **_error_frame_fields(error, prefix="error"),
     }
-    cause = error
-    seen: set[int] = set()
+    chain = [error]
+    seen = {id(error)}
     for _ in range(8):
-        seen.add(id(cause))
-        next_cause = cause.__cause__ or cause.__context__
+        current = chain[-1]
+        next_cause = current.__cause__ or current.__context__
         if next_cause is None or id(next_cause) in seen:
             break
-        cause = next_cause
+        chain.append(next_cause)
+        seen.add(id(next_cause))
+    cause = chain[-1]
     if cause is not error:
         result["error_cause_type"] = type(cause).__name__
         result.update(_error_frame_fields(cause, prefix="error_cause"))
 
-    for source in (error, cause):
+    for source in chain:
         for attribute, field in (
             ("tokens_used", "error_tokens_used"),
             ("token_limit", "error_token_limit"),
@@ -3065,11 +3069,13 @@ def _halo_profile_candidates(
         and event.get("profile_id") == ordered[0]
         for event in event_list
     )
-    if fallback_events or primary_failed:
-        selected = fallback_events[-1] if fallback_events else ordered[1]
+    if fallback_events:
+        selected = fallback_events[-1]
         if selected not in ordered[1:]:
             raise LoopCampaignError("HALO fallback journal identity is invalid")
         return [selected]
+    if primary_failed and len(ordered) > 1:
+        return [ordered[1]]
     return ordered
 
 

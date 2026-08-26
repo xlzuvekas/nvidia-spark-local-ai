@@ -249,7 +249,7 @@ class ManifestLoaderTests(unittest.TestCase):
             model = models[model_id]
             self.assertEqual(model.args[model.args.index("--kv-cache-dtype") + 1], "fp8")
 
-    def test_qwen38_halo_fallback_is_exact_thinking_off_no_mtp_clone(self) -> None:
+    def test_qwen38_halo_profile_is_exact_thinking_off_no_mtp_clone(self) -> None:
         models = load_models(ROOT / "manifests" / "models.toml")
         control = models["qwen38-27b-nvfp4-throughput"]
         fallback = models["qwen38-27b-nvfp4-halo"]
@@ -281,7 +281,7 @@ class ManifestLoaderTests(unittest.TestCase):
             campaign = tomllib.load(campaign_file)
         self.assertEqual(
             campaign["halo"]["model_profiles"],
-            ["qwen38-27b-nvfp4-mtp3-halo", "qwen38-27b-nvfp4-halo"],
+            ["qwen38-27b-nvfp4-halo"],
         )
 
     def test_phi4_multimodal_profile_is_pinned_and_does_not_overclaim(self) -> None:
