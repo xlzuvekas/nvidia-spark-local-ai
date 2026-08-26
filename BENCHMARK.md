@@ -166,6 +166,58 @@ decode rates are secondary when a server can bundle multiple tokens into one
 stream event. Client-TTFT prefill is an approximation unless the runtime reports
 an isolated prompt-evaluation duration.
 
+### Qwen3.8-Flash-Next day-zero GB10 protocol
+
+The 2026-08-26 local route pins `unsloth/Qwen3.8-Flash-Next-GGUF` revision
+`2c41bd2a0b3f51c503c11f1c7ed2e6bb34036beb`: three UD-IQ4_XS shards totaling
+93,682,584,224 bytes. It uses the unmerged `qwen4exp` llama.cpp revision
+`035e22731a7fd70b9854b3a2d64ec68e9b1a45d3`, binary digest
+`sha256:6b0e09f19768e1424eac29b27d6d7f5ca661a9f73b5b7a2ecba5e768af8a366a`,
+and profile `qwen38-flash-next-ud-iq4-xs-llamacpp-p8`. The profile allocates
+eight 32,768-token slots, offloads all layers, enables flash attention, uses
+F16 key/value cache, and disables thinking at both the server and request
+levels. This panel did not exercise MTP, multimodal input, a reasoning-effort
+sweep, prompt-cache controls, or context beyond the served 32K per slot.
+
+The first startup attempt with Q8_0 key/value cache aborted at the exact
+runtime's `qwen4exp` graph assertion
+`inp->self_k_rot == nullptr && inp->self_v_rot == nullptr`. Changing both cache
+types to F16 admitted the same pinned weights and runtime. This is a bounded
+workaround for that exact combination, not a general Q8_0 compatibility claim.
+
+The core run
+`20260826T165913Z-qwen38-flash-next-ud-iq4-xs-llamacpp-p8-core-b5a0f9ad`
+used `manifests/suites/core.toml` at clean harness revision `efabab7`. It reached
+terminal `completed`; its summary is `partial` only because the five D1024
+requests emitted 4,327 of 5,120 requested completion tokens, so that case's
+validation is false. All rates below are aggregate completed output tokens per
+case wall time; the quick and core rows retain different budgets and repetitions
+and are not matched estimates.
+
+| Run | Decode | C1 | C2 | C4 | C8 | Minimum `MemAvailable` | Live server swap |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Quick | D128 19.601 tok/s | — | 31.240 tok/s | 49.363 tok/s | — | 4.270 GiB | No new use observed |
+| Core | D256 20.193 tok/s | 19.860 tok/s | 19.782 tok/s | 51.927 tok/s | 71.709 tok/s | 4.011 GiB | At least 3.85 GiB during 16K prefill |
+
+The core validators passed the 16K needle 3/3, structured JSON 5/5, tool calls
+5/5, and exact answers 4/4. The live swap observation recovered after managed
+teardown; it does not isolate a performance effect. Reproduce the frozen path
+with:
+
+```bash
+python3 sparkbench.py fetch qwen38-flash-next-ud-iq4-xs-llamacpp-p8
+python3 sparkbench.py benchmark qwen38-flash-next-ud-iq4-xs-llamacpp-p8 \
+  --suite manifests/suites/core.toml
+```
+
+The ignored run artifacts have not been added to the tracked scalar archive.
+A full evidence refresh is currently blocked because the exporter does not
+support the new `loop-*` results topology, and a faithful refresh also requires
+the two original private Harbor lifecycle inputs. The existing evidence archive
+therefore remains the publication boundary. See the
+[day-zero GB10 report](docs/qwen38-flash-next-gb10-2026-08-26.md) for artifact
+hashes, smoke history, results, and comparison limits.
+
 ### Agentic tool-use protocol
 
 The `agentic-tools` suite is a bounded admission gate for multi-turn function

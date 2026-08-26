@@ -12,6 +12,7 @@ quality checks, and the provenance needed to interpret each number.
 | Which models complete deterministic multi-turn tool tasks? | [Agentic tool-use results: strict success, trace correctness, MTP, and Laguna](docs/agentic-tools-results-2026-08-17.md) |
 | How does Qwen3.6 perform on a strict two-hop long-context needle? | [Two-hop retrieval: Qwen3.6 baseline versus MTP2 through the 245,760-target tier](docs/multihop-long-context-results-2026-08-18.md) |
 | How fast are Qwen3.6 and Qwen3.8 under concurrency and 61K–246K inputs? | [Cache-off NVFP4+MTP3 throughput, wall time, TTFT, retries, and validation](docs/qwen36-qwen38-long-context-tps-2026-08-25.md) |
+| How does Qwen3.8-Flash-Next run on one Spark? | [Day-zero IQ4_XS llama.cpp throughput, validation, and memory-pressure results](docs/qwen38-flash-next-gb10-2026-08-26.md) |
 | What does native llama.cpp prompt-KV reuse change for Qwen3.6? | [Prefix-cache controls: 8K and 32K shared-prefix cold/warm observations](docs/qwen36-prefix-cache-results-2026-08-18.md) |
 | How did Qwen3-Coder-Next fare on terminal coding tasks? | [Harbor/Terminal-Bench-derived results: Qwen Code versus OpenCode](docs/harbor-terminal-results-2026-08-18.md) |
 | How are offline coding-agent harnesses compared? | [Qwen3-Coder-Next Harbor campaign protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign) |
@@ -35,6 +36,18 @@ explains how to create and verify both files.
 
 ## What the results say
 
+- On clean revision `efabab7`, the Qwen3.8-Flash-Next IQ4_XS llama.cpp core run
+  completed its terminal lifecycle and reported 20.193 aggregate output tok/s
+  at D256 and 19.860/19.782/51.927/71.709 tok/s at C1/C2/C4/C8. The 16K
+  needle passed 3/3, structured JSON 5/5, tool calling 5/5, and exact answers
+  4/4. Its summary is partial only because D1024 returned 4,327 of 5,120
+  requested completion tokens and failed validation. Runwide minimum available
+  memory was 4.011 GiB; the live server showed at least 3.85 GiB `VmSwap`
+  during 16K prefill and recovered after teardown. The shorter quick run had no
+  new swap use observed, reached 19.601/31.240/49.363 tok/s at D128/C2/C4, and
+  bottomed at 4.270 GiB available. These are different suite shapes, not a
+  matched swap comparison. See the
+  [day-zero report](docs/qwen38-flash-next-gb10-2026-08-26.md).
 - In the clean RLM/HALO continuation, all 106 planned cases reached an explicit
   terminal state, but only 40 completed and scored before the frozen cutoffs.
   Normal depth-1 RLM scored 2/24 and recorded no recursive subcall in any
@@ -117,6 +130,9 @@ geometries, slot counts, or validation states.
 
 ### Measured results
 
+- [Qwen3.8-Flash-Next day-zero GB10 results — 2026-08-26](docs/qwen38-flash-next-gb10-2026-08-26.md):
+  pinned IQ4_XS llama.cpp admission, quick and core throughput, bounded text
+  capability checks, and the observed unified-memory and swap boundary.
 - [RLM and HALO continuation results — 2026-08-26](docs/rlm-halo-continuation-2026-08-26.md):
   forced RLM compaction, BABILong-derived breadth, 20-turn HALO reliability,
   65K synthetic-trace retrieval, lifecycle overhead, and explicit limits on
