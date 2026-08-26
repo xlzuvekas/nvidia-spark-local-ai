@@ -183,6 +183,45 @@ shapes. Its zero accepted drafts are expected diagnostic evidence, not a model
 quality or speed result. Neither request timing is representative TPS, and the
 two timings must not be compared as a performance experiment.
 
+#### Clean SparkBench controls
+
+The two admissible controls were then rerun sequentially through SparkBench
+from clean harness revision
+`d50c75799dd00122c39f0d26b28f7344f67828c4`. Both runs used the exact image and
+fixture pins above, completed their terminal lifecycle, stopped the owned
+container, and exported only sanitized scalar evidence:
+
+| Control | Run | Applicable smoke result | First-request boundary |
+| --- | --- | --- | --- |
+| Real fixture, QSA disabled, no MTP | [`30d30d00`](../evidence/runs/20260826T190843Z-qwen38-flash-next-tiny-qsa-disabled-sglang-smoke-30d30d00/summary.json) | 118 prompt and 32 completion tokens; median TTFT `0.018570 s`, median end-to-end `0.157423 s`, client-estimated decode `223.258 tok/s` | TTFT `22.231822 s`, dominated by first-use compilation |
+| Dummy target and dummy `NEXTN`, QSA disabled | [`931e5c58`](../evidence/runs/20260826T190953Z-qwen38-flash-next-tiny-dummy-nextn-sglang-smoke-931e5c58/summary.json) | 117 prompt and 32 completion tokens; median TTFT `0.671786 s`, median end-to-end `0.897854 s`, client-estimated decode `137.127 tok/s` | TTFT `16.331661 s`, also a first-use path |
+
+These are one-request admission smokes, not a matched throughput comparison:
+the weights differ, the prompt-token counts differ, the model is a development
+fixture, and the speculative stream was emitted in one-token chunks. The
+OpenAI-compatible response and current SparkBench SGLang adapter did not expose
+native acceptance counters, so the exported `speculative_decoding` aggregate is
+`null`. The earlier direct `/generate` diagnostic exposed the synthetic
+15-proposed, 15-verified, 0-accepted counters; those counters must not be
+silently attributed to the clean smoke runs.
+
+#### Smallest credible QSA fix
+
+Read-only inspection of the exact image isolates the SM121 fallback. QSA's
+`_resolve_trtllm_sparse_decode()` admits only `is_sm100_supported()`. GB10 fails
+that guard; classic FlashAttention 2 is absent, so the resolver selects the
+installed FlashAttention 4 CuTe path that failed compilation. The generic
+`--attention-backend` option cannot override this because SGLang replaces it
+with `QwenSparseAttnBackend` for the hybrid GDN/QSA architecture.
+
+The installed FlashInfer `0.6.17` XQA implementation already admits compute
+capability major 12, page size 64, and QSA's supported head geometry. The
+smallest credible upstream experiment is therefore to admit
+`is_sm120_supported()` alongside the SM100 check and let FlashInfer's existing
+auto dispatch select XQA on SM120/SM121. This is a source-supported hypothesis,
+not a measured fix. It needs a resolver unit test, an SM12x packed-XQA parity
+test, and the native tiny QSA server smoke before the blocker can be closed.
+
 This path is promising because the measured image imported the relevant class,
 and the support-lineage source at PR commit `73a2552` contains a
 [`ModelOptNvFp4EmbeddingMethod`](https://github.com/sgl-project/sglang/blob/73a255206f916366c8d26d4022f82ddfb0ab558d/python/sglang/srt/layers/quantization/modelopt_quant.py#L633-L728)
@@ -347,8 +386,24 @@ and MTP all differ. It is a product target, not a backend-only causal control.
 
 ## Repository work after the runtime fixture passes
 
-SparkBench already supports vLLM concurrency and parses lifetime MTP counters,
-but it does not yet fail closed per case. Before a long campaign:
+SparkBench already supports vLLM concurrency and parses vLLM lifetime MTP
+counters, but the SGLang OpenAI path currently exports no corresponding
+acceptance aggregate and neither backend fails closed per case. Before a long
+campaign:
+
+- add a separate authenticated, non-streaming SGLang acceptance audit using
+  `return_meta_info=true`; validate and retain only proposed/accepted draft
+  counts, verify count, acceptance scalars, and the bounded histogram;
+- require `accepted <= proposed`, histogram steps equal verify count, histogram
+  accepted-token sum equal the reported accepted count, and proposed count
+  equal `verify_count * (configured_draft_tokens - 1)`;
+- optionally enable `/metrics` and retain `sglang:spec_verify_calls_total` only
+  as an activity cross-check. Its acceptance fields are interval gauges and it
+  has no cumulative proposed/accepted-token counters, so it cannot replace the
+  per-request audit;
+- keep streaming TPS measurements explicitly counter-unverified until exact
+  same-request streaming counters are available; SGLang rejects
+  `return_meta_info=true` for OpenAI streaming requests;
 
 - snapshot speculative counters after warmup and after each measured case;
 - derive bounded per-case deltas and reject missing/reset/inconsistent MTP
@@ -360,6 +415,7 @@ but it does not yet fail closed per case. Before a long campaign:
 - persist only sanitized scalar evidence—never prompts, completions, reasoning,
   tool payloads, request identifiers, local paths, or raw logs.
 
-No runnable native Flash-Next profile should be added to `models.toml` until a
-pinned artifact passes the synthetic loader, SM121 runtime, and memory-admission
-gates above.
+The manifest may retain the explicitly labeled tiny/dummy diagnostic controls,
+but no production or representative native Flash-Next profile should be added
+until a pinned full-quality artifact passes the packed loader, native QSA,
+SM121 runtime, and memory-admission gates above.

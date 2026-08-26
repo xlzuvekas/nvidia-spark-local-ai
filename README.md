@@ -44,10 +44,13 @@ explains how to create and verify both files.
   compilation. With QSA disabled, a pinned real 0.2B development checkpoint
   returned HTTP `200`; a separate dummy-weight `NEXTN` control reported 15
   proposed, 15 verified, and 0 accepted tokens. These establish bounded runtime
-  diagnostics only: the fixture omits MTP weights, its configuration needed two
-  local compatibility corrections, no timing is representative TPS or quality,
-  and the oversized full Radix checkpoint was not downloaded or attempted. See
-  the [native diagnostics and optimization plan](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md).
+  diagnostics only. Clean SparkBench reruns of the
+  [real-weight control](evidence/runs/20260826T190843Z-qwen38-flash-next-tiny-qsa-disabled-sglang-smoke-30d30d00/summary.json)
+  and [dummy `NEXTN` control](evidence/runs/20260826T190953Z-qwen38-flash-next-tiny-dummy-nextn-sglang-smoke-931e5c58/summary.json)
+  are tracked, but the fixture omits MTP weights, its configuration needed two
+  local compatibility corrections, and no timing is representative TPS or
+  quality. The oversized full Radix checkpoint was not downloaded or attempted.
+  See the [native diagnostics and optimization plan](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md).
 - On clean revision `efabab7`, the Qwen3.8-Flash-Next IQ4_XS llama.cpp core run
   completed its terminal lifecycle and reported 20.193 aggregate output tok/s
   at D256 and 19.860/19.782/51.927/71.709 tok/s at C1/C2/C4/C8. The 16K

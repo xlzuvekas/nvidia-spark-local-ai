@@ -260,6 +260,14 @@ drafts provide no acceleration evidence. Synthetic and tiny-fixture timing is
 not representative TPS, model quality, or a comparison between MTP and
 non-MTP serving.
 
+The controls were subsequently frozen as manifest profiles and rerun from
+clean harness revision `d50c75799dd00122c39f0d26b28f7344f67828c4`. The
+[real-weight QSA-disabled smoke](evidence/runs/20260826T190843Z-qwen38-flash-next-tiny-qsa-disabled-sglang-smoke-30d30d00/summary.json)
+and [dummy `NEXTN` smoke](evidence/runs/20260826T190953Z-qwen38-flash-next-tiny-dummy-nextn-sglang-smoke-931e5c58/summary.json)
+both completed and stopped their owned container. Their tracked timing remains
+admission-only: the controls have different weights and token counts, and the
+SGLang OpenAI path exported no speculative-acceptance aggregate.
+
 The 125.96 GiB Radix native checkpoint was not downloaded or attempted: its
 published payload already exceeds the Spark's 119.694 GiB total physical
 unified memory before runtime and cache overhead. See the
