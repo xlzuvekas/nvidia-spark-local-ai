@@ -121,6 +121,7 @@ class SGLangRuntimeTests(unittest.TestCase):
             "bf2b7c75870d3703730b6bd8f3bb93dc622c278d",
         )
         self.assertTrue(profile.sglang_ple_mmap)
+        self.assertEqual(profile.estimated_ram_gib, 102.0)
         self.assertEqual(len(profile.sglang_source_overlays), 2)
         self.assertTrue(
             all(
