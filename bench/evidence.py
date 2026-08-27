@@ -278,6 +278,10 @@ _LOOP_MODEL_SOURCE_FIELDS = frozenset(
 _LOOP_MODEL_SOURCE_FIELDS_WITH_PLE_CACHE = (
     _LOOP_MODEL_SOURCE_FIELDS | _SGLANG_PLE_CACHE_SOURCE_FIELDS
 )
+_LOOP_MODEL_LEGACY_SOURCE_FIELDS = _LOOP_MODEL_SOURCE_FIELDS - {
+    "sglang_ple_mmap",
+    "sglang_source_overlays",
+}
 _LOOP_CASE_FIELDS = frozenset(
     {
         "admission_status",
@@ -9105,6 +9109,7 @@ def _project_loop_model(value: Any, *, profile_id: str) -> dict[str, Any]:
         or not required <= set(value)
         or frozenset(value)
         not in (
+            _LOOP_MODEL_LEGACY_SOURCE_FIELDS,
             _LOOP_MODEL_SOURCE_FIELDS,
             _LOOP_MODEL_SOURCE_FIELDS_WITH_PLE_CACHE,
         )
@@ -10919,6 +10924,37 @@ def _export_harbor_campaign(
         "file": str(relative / "manifest.json"),
         "status": "complete",
     }
+
+
+def _reuse_existing_harbor_campaign(
+    evidence_root: Path, output_root: Path
+) -> dict[str, Any]:
+    relative = Path("campaigns") / HARBOR_CAMPAIGN_ID
+    directory = evidence_root / relative
+    bundle_hash = _verify_bundle(directory, evidence_root)
+    manifest = _load_json(directory / "manifest.json", evidence_root)
+    replicates = _load_json(directory / "replicates.json", evidence_root)
+    entry = {
+        "bundle_sha256": bundle_hash,
+        "campaign_id": HARBOR_CAMPAIGN_ID,
+        "evidence_kind": HARBOR_EVIDENCE_KIND,
+        "file": str(relative / "manifest.json"),
+        "status": "complete",
+    }
+    if not isinstance(manifest, dict):
+        raise EvidenceError("Harbor evidence manifest changed")
+    _verify_harbor_bundle(evidence_root, directory, entry, manifest)
+    regenerated_hash, _ = _write_bundle(
+        output_root,
+        relative,
+        {
+            "manifest.json": manifest,
+            "replicates.json": replicates,
+        },
+    )
+    if regenerated_hash != bundle_hash:
+        raise EvidenceError("Harbor evidence is not canonically reproducible")
+    return entry
 
 
 def _project_metric_mapping(
@@ -13177,8 +13213,13 @@ def _export_evidence_locked(
             )
             for root_name, campaign in loop_campaign_dirs
         )
+        existing_harbor = output_target / "campaigns" / HARBOR_CAMPAIGN_ID
         if harbor_results:
             campaigns.append(_export_harbor_campaign(harbor_results, temporary))
+        elif existing_harbor.is_dir():
+            campaigns.append(
+                _reuse_existing_harbor_campaign(output_target, temporary)
+            )
         campaigns.sort(key=lambda campaign: campaign["campaign_id"])
         standalone = [
             _export_content_battery(

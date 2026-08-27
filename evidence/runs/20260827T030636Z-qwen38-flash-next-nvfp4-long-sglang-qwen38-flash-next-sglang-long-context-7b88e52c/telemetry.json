@@ -1,0 +1,1 @@
+{"chunk_count":1,"chunks":["telemetry-0001.json"],"columns":["elapsed_s","gpu_error_present","gpu_util_pct","memory_util_pct","power_w","sm_clock_mhz","temperature_c","cached_bytes","memavailable_bytes","memfree_bytes","swapfree_bytes","swaptotal_bytes"],"sample_count":698,"schema_version":"sparkbench-evidence-v1","segment_count":5}

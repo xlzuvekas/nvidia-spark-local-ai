@@ -2088,6 +2088,46 @@ class EvidenceExportTests(unittest.TestCase):
         )
         self.assertEqual("staged_verified", staged["status"])
 
+    def test_harbor_bundle_is_preserved_without_private_inputs(self) -> None:
+        self.add_matrix_source()
+        first, second = self.harbor_results()
+        self.export(harbor_results=(first, second))
+        bundle = self.fixture.output / "campaigns" / HARBOR_CAMPAIGN_ID
+        original = {
+            path.name: path.read_bytes()
+            for path in bundle.iterdir()
+        }
+
+        self.fixture.change_aggregate(13.5)
+        refreshed = self.export(replace=True)
+
+        self.assertTrue(refreshed["changed"])
+        self.assertEqual(
+            original,
+            {path.name: path.read_bytes() for path in bundle.iterdir()},
+        )
+        index = json.loads(
+            (self.fixture.output / "index.json").read_text(encoding="utf-8")
+        )
+        self.assertIn(
+            HARBOR_CAMPAIGN_ID,
+            {campaign["campaign_id"] for campaign in index["campaigns"]},
+        )
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+
+    def test_harbor_carry_forward_revalidates_existing_bundle(self) -> None:
+        first, second = self.harbor_results()
+        self.export(harbor_results=(first, second))
+        bundle = self.fixture.output / "campaigns" / HARBOR_CAMPAIGN_ID
+        manifest_path = bundle / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["status"] = "partial"
+        EvidenceFixture.write_json(manifest_path, manifest)
+        self.refresh_campaign_checksums(HARBOR_CAMPAIGN_ID)
+
+        with self.assertRaisesRegex(EvidenceError, "Harbor evidence manifest changed"):
+            self.export(replace=True)
+
     def test_harbor_input_count_duplicates_and_pin_mismatch_fail_closed(self) -> None:
         first, second = self.harbor_results()
         with self.assertRaisesRegex(EvidenceError, "zero or exactly two"):
