@@ -99,13 +99,68 @@ _SGLANG_PLE_CACHE_SOURCE_FIELDS = frozenset(
         "sglang_ple_cache_payload_digest",
     }
 )
-_SGLANG_PLE_CACHE_RUNTIME_FIELDS = frozenset(
+_SGLANG_PLE_CACHE_RUNTIME_HASH_FIELDS = frozenset(
     {
         "sglang_ple_cache_marker_sha256",
-        "sglang_ple_cache_mode",
         "sglang_ple_cache_payload_sha256",
     }
 )
+_SGLANG_PROVENANCE_VERSION = 1
+_SGLANG_PROVENANCE_CORE_RUNTIME_FIELDS = frozenset(
+    {
+        "sglang_ple_cache_mode",
+        "sglang_ple_mmap",
+        "sglang_provenance_version",
+        "sglang_source_overlay_artifacts",
+    }
+)
+_SGLANG_PROVENANCE_RUNTIME_FIELDS = frozenset(
+    _SGLANG_PROVENANCE_CORE_RUNTIME_FIELDS
+    | _SGLANG_PLE_CACHE_RUNTIME_HASH_FIELDS
+)
+_SGLANG_PLE_CACHE_MODES = frozenset(
+    {"disabled", "legacy_unspecified", "readonly", "writable"}
+)
+
+# These bundles predate explicit SGLang PLE/overlay provenance.  Compatibility
+# is deliberately bound to their complete bundle digests: accepting arbitrary
+# v1 SGLang manifests without the new discriminator would make wholesale
+# removal of provenance indistinguishable from a legacy bundle.
+_LEGACY_SGLANG_PROVENANCE_BUNDLES = {
+    "20260816T163510Z-phi-4-multimodal-instruct-nvfp4-smoke-faa306b5": (
+        "898dc03f240e70d60b1ec19d3ca1ad40503813115f07427bf642f7d428f2a092"
+    ),
+    "20260816T163733Z-phi-4-multimodal-instruct-nvfp4-smoke-9adcae20": (
+        "101ade1d1887a9a7d00d0369667ae5d6fac1eae4388b6cc681ce5ef2fb6a9026"
+    ),
+    "20260816T164642Z-phi-4-multimodal-instruct-fp8-smoke-7d4c8353": (
+        "acdbba1789132e12def491e4ab740c2c4d59a82baee5f757a9bac24174e5fe3b"
+    ),
+    "20260816T164847Z-phi-4-multimodal-instruct-fp8-vision-eb08efc1": (
+        "4458afe96b3c2be28bb41cf0020dab0bb650b7dd69bf582d09b5387c7fcce7d6"
+    ),
+    "20260816T165046Z-phi-4-multimodal-instruct-fp8-quick-65e98f95": (
+        "b2b9bb81ee9f2dcaa3cfd8912b711b6448b80fe1c3acbb0995fe897ba7b7125e"
+    ),
+    "20260816T165332Z-phi-4-multimodal-instruct-fp8-reasoning-core-7a48a87e": (
+        "f8d4ec1f3a0bcd2390331aa5af32d7ed1fcc08b0b2d51a81d5d201851d3d417e"
+    ),
+    "20260816T174341Z-phi-4-multimodal-instruct-fp8-audio-audio-asr-56e2f4bb": (
+        "bae72ca5bf42998478ced7ec2a5b5e886bffa57d2595bf12bb39dec2aa586370"
+    ),
+    "20260817T065426Z-qwen38-27b-nvfp4-dspark-sglang-core-6b79826a": (
+        "eb16431841c91266685a93dbc4cd3c059c84a5f3cdfa24b01be6c6d4379fc263"
+    ),
+    "20260817T065612Z-qwen38-27b-nvfp4-dspark-sglang-core-6b79826a": (
+        "4ded70a72907dac2424b83c96a2c35f0b2a951ec17865932b6d4f5a23abb96fa"
+    ),
+    "20260826T190843Z-qwen38-flash-next-tiny-qsa-disabled-sglang-smoke-30d30d00": (
+        "1238b75f558e9cadecae3a514150ef8f7ebe8ff06397532cd299c52970d9482e"
+    ),
+    "20260826T190953Z-qwen38-flash-next-tiny-dummy-nextn-sglang-smoke-931e5c58": (
+        "a9abb5b45e7a0a86770d220910c8f3f563b78e16844d395169d122237849e432"
+    ),
+}
 
 _COLD_START_SAFETY_SCALARS = {
     "cold_start_swap_growth_exceeded_safety_limit": (
@@ -3122,6 +3177,17 @@ def _sglang_source_overlay_declarations(
     return sorted(declarations, key=lambda item: (item[1], item[2], item[0].as_posix()))
 
 
+def _project_sglang_source_overlay_artifacts(
+    model: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Project overlay identities without publishing either source path."""
+
+    return [
+        {"sha256": digest, "target": basename}
+        for _, basename, digest, _ in _sglang_source_overlay_declarations(model)
+    ]
+
+
 def _collect_artifacts(plan: dict[str, Any], summary: dict[str, Any] | None) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
     model = plan.get("model") if isinstance(plan.get("model"), dict) else {}
@@ -3198,13 +3264,13 @@ def _collect_artifacts(plan: dict[str, Any], summary: dict[str, Any] | None) -> 
             target=model.get("runtime_binary"),
         )
         add("container_image", model.get("image_digest"), target="container-image")
-        for index, (_, basename, digest, _) in enumerate(
-            _sglang_source_overlay_declarations(model), 1
+        for index, overlay in enumerate(
+            _project_sglang_source_overlay_artifacts(model), 1
         ):
             add(
                 f"sglang_source_overlay_{index}",
-                digest,
-                target=basename,
+                overlay["sha256"],
+                target=overlay["target"],
             )
 
     verification = plan.get("verification")
@@ -3290,55 +3356,142 @@ def _collect_artifacts(plan: dict[str, Any], summary: dict[str, Any] | None) -> 
     return [unique[key] for key in sorted(unique)]
 
 
-def _project_sglang_ple_cache(model: dict[str, Any]) -> dict[str, Any]:
-    source = {
-        key: model.get(key) for key in _SGLANG_PLE_CACHE_SOURCE_FIELDS
-    }
+def _project_sglang_provenance(model: dict[str, Any]) -> dict[str, Any]:
+    """Publish an explicit, non-downgradeable SGLang runtime state."""
+
+    overlays = _project_sglang_source_overlay_artifacts(model)
+    source = {key: model.get(key) for key in _SGLANG_PLE_CACHE_SOURCE_FIELDS}
     populated = {key for key, value in source.items() if value is not None}
-    if not populated:
+    backend = model.get("backend")
+    mmap_present = "sglang_ple_mmap" in model
+    mmap = model.get("sglang_ple_mmap")
+
+    if backend != "sglang":
+        if (
+            populated
+            or overlays
+            or (mmap_present and mmap is not None and mmap is not False)
+        ):
+            raise EvidenceError("SGLang provenance requires the sglang backend")
         return {}
+
+    if mmap_present and type(mmap) is not bool:
+        raise EvidenceError("runtime.sglang_ple_mmap must be boolean")
+    if not mmap_present:
+        mmap = None
+
+    result: dict[str, Any] = {
+        "sglang_ple_mmap": mmap,
+        "sglang_provenance_version": _SGLANG_PROVENANCE_VERSION,
+        "sglang_source_overlay_artifacts": overlays,
+    }
+    if not populated:
+        result["sglang_ple_cache_mode"] = (
+            "legacy_unspecified"
+            if mmap is None
+            else ("writable" if mmap else "disabled")
+        )
+        return result
     if populated != _SGLANG_PLE_CACHE_SOURCE_FIELDS:
         raise EvidenceError("SGLang PLE cache provenance must be all present or absent")
-    if model.get("backend") != "sglang" or model.get("sglang_ple_mmap") is not True:
+    if mmap is not True:
         raise EvidenceError("SGLang PLE cache provenance requires SGLang PLE mmap")
     if source["sglang_ple_cache_mode"] != "readonly":
         raise EvidenceError("SGLang PLE cache mode must be readonly")
-    return {
-        "sglang_ple_cache_marker_sha256": _sha256(
-            source["sglang_ple_cache_marker_digest"],
-            name="runtime.SGLang PLE cache marker",
-        ),
-        "sglang_ple_cache_mode": "readonly",
-        "sglang_ple_cache_payload_sha256": _sha256(
-            source["sglang_ple_cache_payload_digest"],
-            name="runtime.SGLang PLE cache payload",
-        ),
-    }
+    result.update(
+        {
+            "sglang_ple_cache_marker_sha256": _sha256(
+                source["sglang_ple_cache_marker_digest"],
+                name="runtime.SGLang PLE cache marker",
+            ),
+            "sglang_ple_cache_mode": "readonly",
+            "sglang_ple_cache_payload_sha256": _sha256(
+                source["sglang_ple_cache_payload_digest"],
+                name="runtime.SGLang PLE cache payload",
+            ),
+        }
+    )
+    return result
 
 
-def _validate_projected_sglang_ple_cache(
-    runtime: dict[str, Any], model: Any
-) -> None:
-    populated = _SGLANG_PLE_CACHE_RUNTIME_FIELDS & set(runtime)
-    if not populated:
-        return
-    if populated != _SGLANG_PLE_CACHE_RUNTIME_FIELDS:
-        raise EvidenceError("published SGLang PLE cache provenance is incomplete")
+def _validate_projected_sglang_overlay_artifacts(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise EvidenceError("published SGLang source overlays must be a list")
+    projected: list[dict[str, str]] = []
+    seen_targets: set[str] = set()
+    for index, artifact in enumerate(value, 1):
+        if not isinstance(artifact, dict) or set(artifact) != {"sha256", "target"}:
+            raise EvidenceError(
+                f"published SGLang source overlay {index} has an invalid schema"
+            )
+        digest = _sha256(
+            artifact.get("sha256"), name="published SGLang source overlay"
+        )
+        target = _safe_id(
+            artifact.get("target"), name="published SGLang source overlay target"
+        )
+        if not target.endswith(".py") or Path(target).name != target:
+            raise EvidenceError("published SGLang source overlay target changed")
+        if target in seen_targets:
+            raise EvidenceError("published SGLang source overlay target is duplicated")
+        seen_targets.add(target)
+        projected.append({"sha256": digest, "target": target})
+    if projected != sorted(
+        projected, key=lambda item: (item["target"], item["sha256"])
+    ):
+        raise EvidenceError("published SGLang source overlay order changed")
+    return projected
+
+
+def _validate_projected_sglang_provenance(
+    runtime: dict[str, Any], model: Any, *, allow_absent: bool = False
+) -> list[dict[str, str]]:
+    sglang_fields = {key for key in runtime if key.startswith("sglang_")}
+    if not sglang_fields:
+        if allow_absent:
+            return []
+        raise EvidenceError("published SGLang provenance is required")
+    if sglang_fields - _SGLANG_PROVENANCE_RUNTIME_FIELDS:
+        raise EvidenceError("published SGLang provenance has unknown fields")
+    if not _SGLANG_PROVENANCE_CORE_RUNTIME_FIELDS <= sglang_fields:
+        raise EvidenceError("published SGLang provenance is incomplete")
     if (
-        runtime.get("sglang_ple_cache_mode") != "readonly"
-        or runtime.get("sglang_ple_mmap") is not True
+        runtime.get("sglang_provenance_version") != _SGLANG_PROVENANCE_VERSION
+        or type(runtime.get("sglang_provenance_version")) is not int
         or runtime.get("backend") != "sglang"
         or not isinstance(model, dict)
         or model.get("backend") != "sglang"
     ):
+        raise EvidenceError("published SGLang provenance is inconsistent")
+
+    mode = runtime.get("sglang_ple_cache_mode")
+    mmap = runtime.get("sglang_ple_mmap")
+    hashes = _SGLANG_PLE_CACHE_RUNTIME_HASH_FIELDS & sglang_fields
+    if not isinstance(mode, str) or mode not in _SGLANG_PLE_CACHE_MODES:
+        raise EvidenceError("published SGLang PLE cache mode is invalid")
+    if mode == "legacy_unspecified":
+        valid_state = mmap is None and not hashes
+    elif mode == "disabled":
+        valid_state = mmap is False and not hashes
+    elif mode == "writable":
+        valid_state = mmap is True and not hashes
+    else:
+        if hashes != _SGLANG_PLE_CACHE_RUNTIME_HASH_FIELDS:
+            raise EvidenceError("published SGLang PLE cache provenance is incomplete")
+        valid_state = mmap is True
+    if not valid_state:
         raise EvidenceError("published SGLang PLE cache provenance is inconsistent")
-    _sha256(
-        runtime.get("sglang_ple_cache_marker_sha256"),
-        name="published SGLang PLE cache marker",
-    )
-    _sha256(
-        runtime.get("sglang_ple_cache_payload_sha256"),
-        name="published SGLang PLE cache payload",
+    if mode == "readonly":
+        _sha256(
+            runtime.get("sglang_ple_cache_marker_sha256"),
+            name="published SGLang PLE cache marker",
+        )
+        _sha256(
+            runtime.get("sglang_ple_cache_payload_sha256"),
+            name="published SGLang PLE cache payload",
+        )
+    return _validate_projected_sglang_overlay_artifacts(
+        runtime.get("sglang_source_overlay_artifacts")
     )
 
 
@@ -3358,11 +3511,7 @@ def _project_runtime(plan: dict[str, Any], summary: dict[str, Any] | None) -> di
         for key in ("runtime_revision", "recipe_revision"):
             if model.get(key) is not None:
                 result[key] = _revision(model[key], name=f"runtime.{key}")
-        if model.get("backend") == "sglang" and "sglang_ple_mmap" in model:
-            if not isinstance(model["sglang_ple_mmap"], bool):
-                raise EvidenceError("runtime.sglang_ple_mmap must be boolean")
-            result["sglang_ple_mmap"] = model["sglang_ple_mmap"]
-        result.update(_project_sglang_ple_cache(model))
+        result.update(_project_sglang_provenance(model))
     resolved = plan.get("resolved")
     if isinstance(resolved, dict) and isinstance(resolved.get("llamacpp"), dict):
         llama = resolved["llamacpp"]
@@ -7835,8 +7984,10 @@ def _validate_cold_start_safety_scalars(
                 raise EvidenceError("cold-start source scalar must be text")
             projected[key] = _cold_start_scalar(value, key=key)
         elif key == "ple_allocated_blocks":
-            if type(value) is not int:
-                raise EvidenceError("published PLE allocated blocks must be an integer")
+            if type(value) is not int or not 0 <= value <= 2**63 - 1:
+                raise EvidenceError(
+                    "published PLE allocated blocks exceed the supported range"
+                )
             projected[key] = value
         else:
             if type(value) is not float or not math.isfinite(value):
@@ -8960,8 +9111,8 @@ def _project_loop_model(value: Any, *, profile_id: str) -> dict[str, Any]:
         or value.get("id") != profile_id
     ):
         raise EvidenceError("loop model source schema changed")
-    _project_sglang_ple_cache(value)
     projected = _project_model({"model": value}, None)
+    projected.update(_project_sglang_provenance(value))
     projected["container_image"] = _safe_id(
         value.get("image"), name="loop model.container_image"
     )
@@ -11164,9 +11315,8 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     )
     run_id = _safe_id(entry["run_id"], name="run index ID")
     directory = root / "runs" / run_id
-    if _verify_bundle(directory, root) != _sha256(
-        entry["bundle_sha256"], name="run bundle"
-    ):
+    bundle_sha256 = _sha256(entry["bundle_sha256"], name="run bundle")
+    if _verify_bundle(directory, root) != bundle_sha256:
         raise EvidenceError(f"run bundle digest mismatch: {run_id}")
     expected_manifest = f"runs/{run_id}/manifest.json"
     if entry["file"] != expected_manifest:
@@ -11177,18 +11327,46 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     manifest_model = manifest.get("model")
     manifest_suite = manifest.get("suite")
     manifest_runtime = manifest.get("runtime")
-    if isinstance(manifest_runtime, dict) and "sglang_ple_mmap" in manifest_runtime:
-        if (
-            type(manifest_runtime["sglang_ple_mmap"]) is not bool
-            or not isinstance(manifest_model, dict)
-            or manifest_model.get("backend") != "sglang"
-            or manifest_runtime.get("backend") != "sglang"
-        ):
-            raise EvidenceError(f"SGLang PLE mmap provenance is invalid: {run_id}")
-    if isinstance(manifest_runtime, dict):
-        _validate_projected_sglang_ple_cache(manifest_runtime, manifest_model)
+    model_backend = (
+        manifest_model.get("backend") if isinstance(manifest_model, dict) else None
+    )
+    runtime_backend = (
+        manifest_runtime.get("backend")
+        if isinstance(manifest_runtime, dict)
+        else None
+    )
+    if (
+        model_backend == "sglang" or runtime_backend == "sglang"
+    ) and model_backend != runtime_backend:
+        raise EvidenceError(f"SGLang runtime provenance backend changed: {run_id}")
+    runtime_sglang_fields = (
+        {key for key in manifest_runtime if key.startswith("sglang_")}
+        if isinstance(manifest_runtime, dict)
+        else set()
+    )
+    legacy_sglang = (
+        model_backend == "sglang"
+        and not runtime_sglang_fields
+        and _LEGACY_SGLANG_PROVENANCE_BUNDLES.get(run_id) == bundle_sha256
+    )
+    projected_overlays: list[dict[str, str]] = []
+    if model_backend == "sglang":
+        if not isinstance(manifest_runtime, dict):
+            raise EvidenceError(f"SGLang runtime provenance is missing: {run_id}")
+        if legacy_sglang:
+            projected_overlays = []
+        else:
+            projected_overlays = _validate_projected_sglang_provenance(
+                manifest_runtime, manifest_model
+            )
+    elif runtime_sglang_fields:
+        raise EvidenceError(f"SGLang runtime provenance backend changed: {run_id}")
     manifest_artifacts = manifest.get("artifacts")
-    if isinstance(manifest_artifacts, list):
+    if not isinstance(manifest_artifacts, list):
+        if model_backend == "sglang":
+            raise EvidenceError(f"SGLang overlay artifacts are missing: {run_id}")
+        overlay_artifacts: list[Any] = []
+    else:
         overlay_artifacts = [
             artifact
             for artifact in manifest_artifacts
@@ -11196,22 +11374,16 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
             and isinstance(artifact.get("role"), str)
             and artifact["role"].startswith("sglang_source_overlay_")
         ]
-        for index, artifact in enumerate(overlay_artifacts, 1):
-            if set(artifact) != {"role", "sha256", "target"}:
-                raise EvidenceError(f"SGLang overlay artifact schema changed: {run_id}")
-            if artifact["role"] != f"sglang_source_overlay_{index}":
-                raise EvidenceError(f"SGLang overlay artifact order changed: {run_id}")
-            _sha256(artifact["sha256"], name="published SGLang source overlay")
-            target = _safe_id(
-                artifact["target"], name="published SGLang source overlay target"
-            )
-            if not target or not target.endswith(".py") or Path(target).name != target:
-                raise EvidenceError(f"SGLang overlay artifact target changed: {run_id}")
-        if overlay_artifacts and (
-            not isinstance(manifest_model, dict)
-            or manifest_model.get("backend") != "sglang"
-        ):
-            raise EvidenceError(f"SGLang overlay artifact backend changed: {run_id}")
+    expected_overlay_artifacts = [
+        {
+            "role": f"sglang_source_overlay_{index}",
+            "sha256": artifact["sha256"],
+            "target": artifact["target"],
+        }
+        for index, artifact in enumerate(projected_overlays, 1)
+    ]
+    if overlay_artifacts != expected_overlay_artifacts:
+        raise EvidenceError(f"SGLang overlay artifact binding changed: {run_id}")
     is_prefix_cache_manifest = (
         isinstance(manifest_model, dict)
         and manifest_model.get("prefix_cache_mode") is not None
@@ -11662,7 +11834,7 @@ def _validate_projected_loop_manifest(value: Any) -> dict[str, Any]:
         "tasks",
         "weight_file_count",
         "weight_size_bytes",
-    }
+    } | set(_SGLANG_PROVENANCE_RUNTIME_FIELDS)
     model_required = {
         "architecture",
         "backend",
@@ -11698,10 +11870,20 @@ def _validate_projected_loop_manifest(value: Any) -> dict[str, Any]:
         _sha256(
             model.get("container_image_sha256"), name="loop manifest model image"
         )
+        model_sglang_fields = _SGLANG_PROVENANCE_RUNTIME_FIELDS & set(model)
+        if model.get("backend") == "sglang":
+            _validate_projected_sglang_provenance(model, model)
+        elif model_sglang_fields:
+            raise EvidenceError("loop manifest SGLang provenance backend changed")
         base = {
             key: item
             for key, item in model.items()
-            if key not in {"container_image", "container_image_sha256"}
+            if key
+            not in {
+                "container_image",
+                "container_image_sha256",
+                *_SGLANG_PROVENANCE_RUNTIME_FIELDS,
+            }
         }
         if not _json_strict_equal(_project_model({"model": base}, None), base):
             raise EvidenceError("loop manifest model projection changed")
@@ -12707,18 +12889,15 @@ def _assert_source_tree(root: Path) -> tuple[int, int]:
 
 
 def _validate_runtime_overlay_tree(
-    results_root: Path, run_dirs: Sequence[Path]
+    results_root: Path,
+    run_dirs: Sequence[Path],
+    loop_dirs: Sequence[Path] = (),
 ) -> bool:
     """Bind the exact runtime-overlay tree to declarations in frozen plans."""
 
     declared: dict[Path, tuple[str, str, str]] = {}
-    for run_dir in run_dirs:
-        plan = _load_json(run_dir / "plan.json", results_root)
-        if not isinstance(plan, dict):
-            raise EvidenceError("plan must be an object")
-        model = plan.get("model")
-        if not isinstance(model, dict):
-            continue
+
+    def add_model(model: dict[str, Any]) -> None:
         for relative_path, basename, digest, container_path in (
             _sglang_source_overlay_declarations(model)
         ):
@@ -12729,6 +12908,29 @@ def _validate_runtime_overlay_tree(
                     "SGLang source overlay declarations conflict across frozen plans"
                 )
             declared[relative_path] = identity
+
+    for run_dir in run_dirs:
+        plan = _load_json(run_dir / "plan.json", results_root)
+        if not isinstance(plan, dict):
+            raise EvidenceError("plan must be an object")
+        model = plan.get("model")
+        if not isinstance(model, dict):
+            continue
+        add_model(model)
+
+    for loop_dir in loop_dirs:
+        plan = _load_json(loop_dir / "plan.json", results_root)
+        if not isinstance(plan, dict):
+            raise EvidenceError("loop plan must be an object")
+        models = plan.get("models")
+        if not isinstance(models, dict) or not models:
+            raise EvidenceError("loop plan models are missing")
+        for profile_id in sorted(models):
+            _safe_id(profile_id, name="loop plan model ID")
+            model = models[profile_id]
+            if not isinstance(model, dict):
+                raise EvidenceError("loop plan model must be an object")
+            add_model(model)
 
     overlay_root = results_root / "runtime-overlays"
     if not overlay_root.exists():
@@ -12904,7 +13106,11 @@ def _export_evidence_locked(
                 )
             }
         )
-        has_runtime_overlays = _validate_runtime_overlay_tree(results_root, run_dirs)
+        has_runtime_overlays = _validate_runtime_overlay_tree(
+            results_root,
+            run_dirs,
+            [path for _, path in loop_campaign_dirs],
+        )
         grouped_runs = _grouped_run_dirs(results_root)
         recognized_top = {
             ".sparkbench.lock",

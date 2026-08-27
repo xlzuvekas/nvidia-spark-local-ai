@@ -1261,6 +1261,21 @@ class EvidenceExportTests(unittest.TestCase):
         )
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertIs(manifest["runtime"]["sglang_ple_mmap"], True)
+        self.assertEqual("writable", manifest["runtime"]["sglang_ple_cache_mode"])
+        self.assertEqual(1, manifest["runtime"]["sglang_provenance_version"])
+        expected_overlays = [
+            {
+                "sha256": overlay["digest"].removeprefix("sha256:"),
+                "target": Path(overlay["host_path"]).name,
+            }
+            for overlay in sorted(
+                overlays, key=lambda value: Path(value["host_path"]).name
+            )
+        ]
+        self.assertEqual(
+            expected_overlays,
+            manifest["runtime"]["sglang_source_overlay_artifacts"],
+        )
         self.assertEqual(
             [
                 {
@@ -1284,6 +1299,83 @@ class EvidenceExportTests(unittest.TestCase):
         self.assertNotIn("sgl-workspace", serialized)
         self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
 
+    def test_sglang_provenance_cannot_be_wholly_removed(self) -> None:
+        self.fixture.add_sglang_runtime_overlays(readonly_ple_cache=True)
+        self.export()
+        manifest_path = (
+            self.fixture.output
+            / "runs"
+            / self.fixture.run_id
+            / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["runtime"] = {
+            key: value
+            for key, value in manifest["runtime"].items()
+            if not key.startswith("sglang_")
+        }
+        manifest["artifacts"] = [
+            artifact
+            for artifact in manifest["artifacts"]
+            if not artifact["role"].startswith("sglang_source_overlay_")
+        ]
+        self.fixture.write_json(manifest_path, manifest)
+        self.refresh_run_checksums(self.fixture.run_id)
+
+        with self.assertRaisesRegex(EvidenceError, "provenance is required"):
+            verify_evidence(self.fixture.output)
+
+        manifest["model"]["backend"] = "vllm"
+        self.fixture.write_json(manifest_path, manifest)
+        self.refresh_run_checksums(self.fixture.run_id)
+        with self.assertRaisesRegex(EvidenceError, "backend changed"):
+            verify_evidence(self.fixture.output)
+
+    def test_legacy_sglang_source_is_reexported_with_explicit_unknown_state(
+        self,
+    ) -> None:
+        plan_path = self.fixture.run_dir / "plan.json"
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["model"]["backend"] = "sglang"
+        self.fixture.write_json(plan_path, plan)
+
+        self.export()
+
+        manifest = json.loads(
+            (
+                self.fixture.output
+                / "runs"
+                / self.fixture.run_id
+                / "manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertIsNone(manifest["runtime"]["sglang_ple_mmap"])
+        self.assertEqual(
+            "legacy_unspecified",
+            manifest["runtime"]["sglang_ple_cache_mode"],
+        )
+        self.assertEqual(
+            [], manifest["runtime"]["sglang_source_overlay_artifacts"]
+        )
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+
+    def test_sglang_overlay_projection_is_bound_to_numbered_artifacts(self) -> None:
+        self.fixture.add_sglang_runtime_overlays(readonly_ple_cache=True)
+        self.export()
+        manifest_path = (
+            self.fixture.output
+            / "runs"
+            / self.fixture.run_id
+            / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["runtime"]["sglang_source_overlay_artifacts"].pop()
+        self.fixture.write_json(manifest_path, manifest)
+        self.refresh_run_checksums(self.fixture.run_id)
+
+        with self.assertRaisesRegex(EvidenceError, "artifact binding changed"):
+            verify_evidence(self.fixture.output)
+
     def test_readonly_sglang_ple_cache_provenance_is_atomic_and_typed(self) -> None:
         self.fixture.add_sglang_runtime_overlays(readonly_ple_cache=True)
 
@@ -1301,10 +1393,20 @@ class EvidenceExportTests(unittest.TestCase):
         self.assertEqual("c" * 64, runtime["sglang_ple_cache_marker_sha256"])
         self.assertEqual("d" * 64, runtime["sglang_ple_cache_payload_sha256"])
         self.assertIs(runtime["sglang_ple_mmap"], True)
+        self.assertEqual(1, runtime["sglang_provenance_version"])
+        self.assertEqual(2, len(runtime["sglang_source_overlay_artifacts"]))
         self.assertNotIn("sglang_ple_cache_marker_digest", runtime)
         self.assertNotIn("sglang_ple_cache_payload_digest", runtime)
         self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
 
+        malformed = json.loads(json.dumps(manifest))
+        malformed["runtime"]["sglang_ple_cache_mode"] = []
+        self.fixture.write_json(manifest_path, malformed)
+        self.refresh_run_checksums(self.fixture.run_id)
+        with self.assertRaisesRegex(EvidenceError, "cache mode is invalid"):
+            verify_evidence(self.fixture.output)
+
+        self.fixture.write_json(manifest_path, manifest)
         del runtime["sglang_ple_cache_payload_sha256"]
         self.fixture.write_json(manifest_path, manifest)
         self.refresh_run_checksums(self.fixture.run_id)
@@ -1481,6 +1583,47 @@ class EvidenceExportTests(unittest.TestCase):
         self.refresh_run_checksums(self.fixture.run_id)
         with self.assertRaisesRegex(EvidenceError, "finite float"):
             verify_evidence(self.fixture.output)
+
+    def test_published_ple_allocated_blocks_range_fails_closed(self) -> None:
+        summary_path = self.fixture.run_dir / "summary.json"
+        source_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        annotation = {
+            "evidence": [
+                "swap_growth_mib=4096.5",
+                "safety_limit_mib=512",
+                "memavailable_gib=27.25",
+                "memory_psi_full_avg10=3.5",
+                "ple_allocated_blocks=47",
+            ],
+            "measurement_valid": False,
+            "reason": "ple_materialization_swap_growth_exceeded_safety_limit",
+            "scope": "startup",
+            "timestamp": "2026-08-27T00:35:40.854+00:00",
+        }
+        source_summary["measurement_annotations"] = [annotation]
+        source_summary["startup_measurement_annotations"] = [annotation]
+        source_summary["startup_measurement_valid"] = False
+        self.fixture.write_json(summary_path, source_summary)
+        self.export()
+        published_path = (
+            self.fixture.output
+            / "runs"
+            / self.fixture.run_id
+            / "summary.json"
+        )
+
+        for invalid in (-1, 2**63):
+            with self.subTest(ple_allocated_blocks=invalid):
+                published = json.loads(
+                    published_path.read_text(encoding="utf-8")
+                )
+                published["aggregates"]["cold_start_safety_annotations"][0][
+                    "ple_allocated_blocks"
+                ] = invalid
+                self.fixture.write_json(published_path, published)
+                self.refresh_run_checksums(self.fixture.run_id)
+                with self.assertRaisesRegex(EvidenceError, "supported range"):
+                    verify_evidence(self.fixture.output)
 
     def test_memory_protocol_exports_exact_scalar_evidence_deterministically(
         self,

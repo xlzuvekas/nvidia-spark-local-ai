@@ -15,6 +15,7 @@ from bench.evidence import (
     SCHEMA_VERSION,
     _LOOP_MEASUREMENT_FIELDS,
     _export_loop_campaign,
+    _validate_runtime_overlay_tree,
     _verify_simple_bundle,
 )
 from bench.loop_campaign import (
@@ -69,6 +70,9 @@ def _model_record(profile: object) -> dict[str, object]:
     record["tasks"] = list(profile.tasks)
     record["args"] = list(profile.args)
     record["model_shards"] = [asdict(shard) for shard in profile.model_shards]
+    record["sglang_source_overlays"] = [
+        asdict(overlay) for overlay in profile.sglang_source_overlays
+    ]
     return record
 
 
@@ -155,6 +159,51 @@ def _fixture_plan(variant: str = "current_v2") -> dict[str, object]:
     if variant not in {"current_v2", "legacy_v2", "legacy_v1"}:
         raise AssertionError(f"unknown synthetic fixture variant: {variant}")
     return _rehash_plan(plan)
+
+
+def _add_readonly_sglang_provenance(
+    plan: dict[str, object], results: Path
+) -> tuple[str, list[dict[str, str]]]:
+    profile_id = str(plan["rlm"]["model_profile"])
+    model = plan["models"][profile_id]
+    overlay_dir = results / "runtime-overlays" / "synthetic-loop-sglang"
+    overlay_dir.mkdir(parents=True)
+    files = {
+        "qwen4_exp.py": (
+            "MODEL_KIND = 'synthetic-loop'\n",
+            "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py",
+        ),
+        "qwen_sparse_attn_backend.py": (
+            "BACKEND_KIND = 'synthetic-loop'\n",
+            "/sgl-workspace/sglang/python/sglang/srt/layers/attention/"
+            "qwen_sparse_attn_backend.py",
+        ),
+    }
+    overlays: list[dict[str, str]] = []
+    for basename, (source, container_path) in files.items():
+        path = overlay_dir / basename
+        path.write_text(source, encoding="utf-8")
+        overlays.append(
+            {
+                "container_path": container_path,
+                "digest": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+                "host_path": (
+                    "results/runtime-overlays/synthetic-loop-sglang/" + basename
+                ),
+            }
+        )
+    model.update(
+        {
+            "backend": "sglang",
+            "sglang_ple_cache_marker_digest": "sha256:" + "c" * 64,
+            "sglang_ple_cache_mode": "readonly",
+            "sglang_ple_cache_payload_digest": "sha256:" + "d" * 64,
+            "sglang_ple_mmap": True,
+            "sglang_source_overlays": overlays,
+        }
+    )
+    _rehash_plan(plan)
+    return profile_id, overlays
 
 
 def _materialize_source(
@@ -371,6 +420,97 @@ class LoopEvidenceTests(unittest.TestCase):
                     self.assertIsNotNone(
                         manifest["protocol"]["rlm_compaction_admission"]
                     )
+
+    def test_sglang_ple_and_overlay_provenance_survives_loop_projection(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            results = root / "results"
+            plan = _fixture_plan()
+            profile_id, overlays = _add_readonly_sglang_provenance(plan, results)
+            run_dir = _materialize_source(results, plan)
+            output = root / "evidence"
+
+            entry = _export_loop_campaign(
+                run_dir, results, output, source_group=SOURCE_GROUP
+            )
+
+            bundle = output / "campaigns" / run_dir.name
+            manifest_path = bundle / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            model = next(
+                value for value in manifest["models"] if value["id"] == profile_id
+            )
+            self.assertEqual(1, model["sglang_provenance_version"])
+            self.assertIs(model["sglang_ple_mmap"], True)
+            self.assertEqual("readonly", model["sglang_ple_cache_mode"])
+            self.assertEqual("c" * 64, model["sglang_ple_cache_marker_sha256"])
+            self.assertEqual("d" * 64, model["sglang_ple_cache_payload_sha256"])
+            self.assertEqual(
+                [
+                    {
+                        "sha256": overlay["digest"].removeprefix("sha256:"),
+                        "target": Path(overlay["host_path"]).name,
+                    }
+                    for overlay in sorted(
+                        overlays,
+                        key=lambda value: Path(value["host_path"]).name,
+                    )
+                ],
+                model["sglang_source_overlay_artifacts"],
+            )
+            rendered = manifest_path.read_text(encoding="utf-8")
+            self.assertNotIn("runtime-overlays", rendered)
+            self.assertNotIn("sgl-workspace", rendered)
+            _verify_simple_bundle(
+                output,
+                entry,
+                category="campaigns",
+                identity_key="campaign_id",
+            )
+
+            for key in tuple(model):
+                if key.startswith("sglang_"):
+                    del model[key]
+            _write_json(manifest_path, manifest)
+            _refresh_bundle_checksums(output, entry)
+            with self.assertRaisesRegex(EvidenceError, "provenance is required"):
+                _verify_simple_bundle(
+                    output,
+                    entry,
+                    category="campaigns",
+                    identity_key="campaign_id",
+                )
+
+    def test_overlay_tree_admits_loop_declared_runtime_overlays(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            results = root / "results"
+            plan = _fixture_plan()
+            _add_readonly_sglang_provenance(plan, results)
+            run_dir = _materialize_source(results, plan)
+
+            self.assertTrue(
+                _validate_runtime_overlay_tree(
+                    results,
+                    [],
+                    [run_dir],
+                )
+            )
+
+            overlay_dir = (
+                results / "runtime-overlays" / "synthetic-loop-sglang"
+            )
+            (overlay_dir / "undeclared.py").write_text(
+                "UNDECLARED = True\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(EvidenceError, "file set changed"):
+                _validate_runtime_overlay_tree(
+                    results,
+                    [],
+                    [run_dir],
+                )
 
     def test_completed_projection_is_scalar_verifiable_and_records_outcomes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
