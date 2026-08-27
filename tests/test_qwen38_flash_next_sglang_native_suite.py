@@ -3,7 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 import unittest
 
-from bench.manifest import load_suite
+from bench.manifest import (
+    ManifestError,
+    load_models,
+    load_suite,
+    validate_benchmark_selection,
+)
 from bench.runner import _estimated_context_tokens
 
 
@@ -86,6 +91,21 @@ class Qwen38FlashNextSglangNativeSuiteTests(unittest.TestCase):
 
                 estimated_tokens, _ = _estimated_context_tokens(case)
                 self.assertLess(estimated_tokens, 262144)
+
+    def test_long_profile_and_suite_must_travel_together(self) -> None:
+        models = load_models(ROOT / "manifests" / "models.toml")
+        native_suite = load_suite(SUITE_PATH)
+        long_suite = load_suite(LONG_SUITE_PATH)
+        throughput = models["qwen38-flash-next-nvfp4-mtp-sglang"]
+        long_context = models[
+            "qwen38-flash-next-nvfp4-mtp-long-sglang"
+        ]
+
+        validate_benchmark_selection(long_context, long_suite)
+        with self.assertRaisesRegex(ManifestError, "profile requires"):
+            validate_benchmark_selection(long_context, native_suite)
+        with self.assertRaisesRegex(ManifestError, "suite requires"):
+            validate_benchmark_selection(throughput, long_suite)
 
 
 if __name__ == "__main__":

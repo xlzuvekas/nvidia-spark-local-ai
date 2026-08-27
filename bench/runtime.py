@@ -1210,8 +1210,7 @@ def _readonly_sglang_ple_dir(
     """Admit the exact completed Qwen3.8 PLE cache without changing it."""
 
     exact_identity = (
-        str(getattr(model, "id", "") or "") == QWEN38_PLE_LAYOUT.model_id
-        and str(getattr(model, "source", "") or "") == QWEN38_PLE_LAYOUT.source
+        str(getattr(model, "source", "") or "") == QWEN38_PLE_LAYOUT.source
         and str(getattr(model, "revision", "") or "")
         == QWEN38_PLE_LAYOUT.revision
         and str(getattr(model, "recipe_source", "") or "")

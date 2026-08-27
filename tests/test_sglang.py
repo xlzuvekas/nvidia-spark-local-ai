@@ -34,6 +34,7 @@ from bench.runtime import (
     save_server_logs,
     start_server,
     start_sglang,
+    _readonly_sglang_ple_dir,
     _validate_readonly_sglang_ple_loader,
 )
 
@@ -197,6 +198,55 @@ class SGLangRuntimeTests(unittest.TestCase):
             ],
             "1",
         )
+
+    def test_readonly_ple_admission_allows_exact_profile_alias_only(self) -> None:
+        profiles = load_models(ROOT / "manifests" / "models.toml")
+        profile = profiles["qwen38-flash-next-nvfp4-mtp-long-sglang"]
+        overlays = tuple(
+            (
+                Path(overlay.host_path),
+                overlay.container_path,
+                overlay.digest,
+                overlay.host_path,
+            )
+            for overlay in profile.sglang_source_overlays
+        )
+        record = PLECacheRecord(
+            marker_sha256=profile.sglang_ple_cache_marker_digest.removeprefix(
+                "sha256:"
+            ),
+            payload_sha256=profile.sglang_ple_cache_payload_digest.removeprefix(
+                "sha256:"
+            ),
+            payload_size_bytes=51_200_245_760,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            temporary_home = Path(directory)
+            cache_root = temporary_home / ".cache" / "sparkbench" / "sglang"
+            cache = cache_root / "audited-ple"
+            cache.mkdir(parents=True)
+            with (
+                patch("bench.runtime.Path.home", return_value=temporary_home),
+                patch(
+                    "bench.runtime.qwen38_ple_cache_path", return_value=cache
+                ),
+                patch(
+                    "bench.runtime.validate_qwen38_ple_cache",
+                    return_value=record,
+                ),
+            ):
+                resolved, admitted = _readonly_sglang_ple_dir(profile, overlays)
+
+        self.assertEqual(resolved, cache)
+        self.assertEqual(admitted, record)
+        for field in ("source", "revision", "recipe_source", "recipe_revision"):
+            with self.subTest(field=field), self.assertRaisesRegex(
+                RuntimeErrorWithContext, "exact Qwen3.8 artifact"
+            ):
+                _readonly_sglang_ple_dir(
+                    replace(profile, **{field: "unexpected"}), overlays
+                )
 
     def test_manifest_rejects_unsafe_or_unprovenanced_sglang_overlays(
         self,

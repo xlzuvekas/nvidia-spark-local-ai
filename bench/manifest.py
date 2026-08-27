@@ -99,6 +99,8 @@ _TPS_SUITE_BY_PROFILE_ID = {
     for suite_id, profile_ids in _TPS_PROFILE_IDS_BY_SUITE.items()
     for profile_id in profile_ids
 }
+_FLASH_NEXT_LONG_PROFILE_ID = "qwen38-flash-next-nvfp4-mtp-long-sglang"
+_FLASH_NEXT_LONG_SUITE_ID = "qwen38-flash-next-sglang-long-context"
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -1519,6 +1521,18 @@ def validate_benchmark_selection(
         raise ManifestError(
             f"{context}: the {model.id!r} profile requires the "
             f"{tps_profile_suite!r} suite"
+        )
+    flash_next_long_profile = model_id == _FLASH_NEXT_LONG_PROFILE_ID
+    flash_next_long_suite = suite.id == _FLASH_NEXT_LONG_SUITE_ID
+    if flash_next_long_profile and not flash_next_long_suite:
+        raise ManifestError(
+            f"{context}: the {_FLASH_NEXT_LONG_PROFILE_ID!r} profile requires "
+            f"the {_FLASH_NEXT_LONG_SUITE_ID!r} suite"
+        )
+    if flash_next_long_suite and not flash_next_long_profile:
+        raise ManifestError(
+            f"{context}: the {_FLASH_NEXT_LONG_SUITE_ID!r} suite requires "
+            f"the {_FLASH_NEXT_LONG_PROFILE_ID!r} profile"
         )
     if suite.id == MEMORY_OPERATION_SUITE_ID:
         try:
