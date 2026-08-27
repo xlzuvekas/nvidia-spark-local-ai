@@ -1616,7 +1616,9 @@ def start_sglang(
         )
     else:
         command.extend(["serve", "--model-path", container_snapshot])
-    command.extend(["--api-key", api_key])
+    # Keep a leading '-' in the URL-safe random value from being parsed as a
+    # new option by SGLang's argparse CLI.
+    command.append(f"--api-key={api_key}")
     command.extend(str(argument) for argument in model.args)
     try:
         result = _run(command, check=False, timeout=60)

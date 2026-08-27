@@ -214,7 +214,7 @@ class SGLangRuntimeTests(unittest.TestCase):
                 patch("bench.runtime.wait_for_endpoint", return_value=2.5) as wait,
                 patch(
                     "bench.runtime.secrets.token_urlsafe",
-                    return_value="generic-ephemeral-key",
+                    return_value="-generic-ephemeral-key",
                 ),
                 patch(
                     "bench.runtime._run",
@@ -252,9 +252,8 @@ class SGLangRuntimeTests(unittest.TestCase):
             "HF_TOKEN_PATH=/tmp/sparkbench-hf/token-disabled", launch
         )
         self.assertIn("HF_HUB_DISABLE_IMPLICIT_TOKEN=1", launch)
-        self.assertEqual(
-            launch[launch.index("--api-key") + 1], "generic-ephemeral-key"
-        )
+        self.assertIn("--api-key=-generic-ephemeral-key", launch)
+        self.assertNotIn("-generic-ephemeral-key", launch)
         image_index = launch.index(model.resolved_image)
         self.assertEqual(
             launch[image_index + 1 : image_index + 4],
@@ -270,16 +269,16 @@ class SGLangRuntimeTests(unittest.TestCase):
         self.assertEqual(server.backend, "sglang")
         self.assertEqual(server.base_url, "http://127.0.0.1:30000/v1")
         self.assertEqual(
-            server.authorization, "Bearer generic-ephemeral-key"
+            server.authorization, "Bearer -generic-ephemeral-key"
         )
         wait.assert_called_once_with(
             server.base_url,
             1200.0,
             "container-id",
-            authorization="Bearer generic-ephemeral-key",
+            authorization="Bearer -generic-ephemeral-key",
             sensitive_values=(
-                "generic-ephemeral-key",
-                "Bearer generic-ephemeral-key",
+                "-generic-ephemeral-key",
+                "Bearer -generic-ephemeral-key",
             ),
         )
 
@@ -713,10 +712,8 @@ class SGLangRuntimeTests(unittest.TestCase):
                 and "/root/.cache/huggingface/hub/models--" in launch[index + 1]
             ]
             self.assertEqual(len(repository_mounts), 2)
-            self.assertEqual(
-                launch[launch.index("--api-key") + 1],
-                "dspark-ephemeral-key",
-            )
+            self.assertIn("--api-key=dspark-ephemeral-key", launch)
+            self.assertNotIn("dspark-ephemeral-key", launch)
             self.assertEqual(
                 server.authorization, "Bearer dspark-ephemeral-key"
             )
