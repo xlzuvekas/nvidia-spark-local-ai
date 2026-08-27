@@ -1991,11 +1991,11 @@ cache_dir = "user"
 max_context = 262144
 native_context = 262144
 startup_timeout_s = 1800
-# The pinned public recipe uses .85 and measured about 103 GiB resident. The
-# persistent read-only PLE plus per-shard cache eviction removes the duplicate
-# cold-load page cache; 105 GiB retains 2 GiB calibration margin before
-# SparkBench adds its separate 8 GiB launch reserve.
-estimated_ram_gib = 105.0
+# The pinned public recipe uses .85, but that auto-sized only 179,520 KV slots
+# on this GB10 and rejected a 245,859-token request. The measured pool cost
+# projects .87 beyond the native 262K context while preserving the launch
+# reserve; round the resulting observed footprint up for admission.
+estimated_ram_gib = 108.0
 endpoint = "http://127.0.0.1:30000/v1"
 sglang_source_overlays = [
   { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:0b513b4dc4f2394f6b1733bb0b74fa40ab59f4a04f6b33601350b2a606c67804" },
@@ -2017,10 +2017,11 @@ args = [
   "--reasoning-parser", "qwen3",
   "--tool-call-parser", "qwen3_coder",
   "--mamba-radix-cache-strategy", "extra_buffer",
-  # NEXTN consumes five recurrent-state slots per active request. The .85
-  # auto-solver found 19 on GB10, so pin the smallest cache that admits C4.
+  # NEXTN consumes five recurrent-state slots per active request. Pin the
+  # smallest recurrent cache that admits C4; .87 sizes the separate KV pool
+  # for the model's native 262K context on this GB10.
   "--max-mamba-cache-size", "20",
-  "--mem-fraction-static", "0.85",
+  "--mem-fraction-static", "0.87",
   "--context-length", "262144",
   "--chunked-prefill-size", "1024",
   "--max-running-requests", "4",

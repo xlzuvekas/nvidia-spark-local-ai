@@ -132,10 +132,10 @@ class SGLangRuntimeTests(unittest.TestCase):
             profile.sglang_ple_cache_payload_digest,
             "sha256:b070f9644adf93794d8a1030584ab705809387e64396a9327a68fa3a3a6666b3",
         )
-        self.assertEqual(profile.estimated_ram_gib, 105.0)
+        self.assertEqual(profile.estimated_ram_gib, 108.0)
         self.assertEqual(
             profile.args[profile.args.index("--mem-fraction-static") + 1],
-            "0.85",
+            "0.87",
         )
         self.assertEqual(
             profile.args[profile.args.index("--max-mamba-cache-size") + 1],
