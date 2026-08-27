@@ -1,8 +1,12 @@
-# Experimental SGLang QSA SM121 XQA route
+# Experimental SGLang SM121 XQA + persistent FP8 PLE route
 
-This directory preserves the exact two-line SGLang source patch used for the
-Qwen3.8-Flash-Next tiny-fixture diagnostic on DGX Spark. It is an experimental
-local route, not upstream SGLang support and not proof that the full model fits.
+This directory preserves the audited SGLang source changes used to serve the
+full Qwen3.8-Flash-Next Radix checkpoint on DGX Spark. The original two-line QSA
+change was first isolated with a tiny fixture; the full route additionally
+requires the persistent read-only FP8 PLE loader. Together they produced a
+measured full-checkpoint result. They remain an experimental local route, not
+upstream SGLang or general SM121 support, and the two-line QSA patch alone is
+not a full-model admission recipe.
 
 - Container image: `lmsysorg/sglang@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4`
 - Reported SGLang base: `d91c3682b0b429e4c70df63cd57f819588ce29b0`
@@ -60,6 +64,8 @@ cached Radix revision and its 128 FP8 shards, concatenates them in numeric
 an immutable payload plus deterministic completion marker. It can adopt an
 unmarked payload only after hashing all 51,200,245,760 bytes to
 `b070f9644adf93794d8a1030584ab705809387e64396a9327a68fa3a3a6666b3`.
+The deterministic completion marker is pinned by SHA-256
+`f0ef55e4e4dec9b6b936a42af4ca2eb9b2f24ced373b1e216f7a6d507b171665`.
 It never downloads or invokes Docker. If an exact payload belongs to another
 user, ownership of that one file must be corrected explicitly before rerunning;
 the command never changes ownership. `--verify-ple-cache` performs a full
@@ -71,11 +77,13 @@ applies to the vendored patchers.
 
 ## Bounded result
 
-With the patched file mounted read-only over the exact image, the resolver
-reported `flashinfer.decode.trtllm_batch_decode_with_kv_cache` on compute
-capability 12.1. The pinned real-weight development fixture
+### Historical tiny QSA control
+
+With the QSA file mounted read-only over the exact image, the resolver reported
+`flashinfer.decode.trtllm_batch_decode_with_kv_cache` on compute capability
+12.1. The pinned real-weight development fixture
 `inference-optimization/Qwen3.8-Flash-Next-0.2B-A0.2B` at revision
-`5fbd297b1529cfa7db2510896d1ad77d1bf41e44` then kept native QSA enabled and
+`5fbd297b1529cfa7db2510896d1ad77d1bf41e44` kept native QSA enabled and
 completed:
 
 - 4 prompt tokens to 8 completion tokens: HTTP `200`, client wall time
@@ -86,8 +94,44 @@ completed:
 The fixture remained BF16, GDN state remained FP32, linear attention used
 Triton, CUDA graphs were disabled, and tokenizer initialization was skipped.
 The output token IDs were discarded. These are manual admission diagnostics,
-not representative TPS, quality, kernel parity, MTP, packed-PLE loading, or
-full-checkpoint evidence. The full 125.96 GiB Radix checkpoint was not acquired.
+not representative TPS, quality, kernel parity, MTP, or full-checkpoint
+evidence.
+
+### Full checkpoint
+
+The persistent overlay pair subsequently admitted the exact 125.96 GiB Radix
+repository on one DGX Spark by leaving its 51,200,245,760-byte FP8 PLE payload
+on NVMe and mapping it read-only. The served composition was main-model NVFP4,
+trained BF16 `NEXTN`, and exact FP8 PLE; the PLE was not NVFP4.
+
+Run
+[`20e1283b`](../../evidence/runs/20260827T032027Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-20e1283b/summary.json)
+completed all 12 planned cases with evidence status `partial` because the
+bounded quality battery scored 3/4. Startup was 581.652 seconds, including
+420.36 seconds for the target and 83.86 seconds for trained MTP. Sampled
+`MemAvailable` stayed at or above 16.564 GiB and swap did not grow.
+
+| Case | Measured result |
+| --- | ---: |
+| D256 / fresh C1 | 28.504 / 27.413 tok/s |
+| Fresh C2 / C4 | 50.330 / 72.821 tok/s |
+| 8K / 32K prefill | 2,103.468 / 2,179.588 tok/s, client-TTFT approximation |
+| 8K / 32K repeated-word needle | Pass / pass |
+
+Periodic logs provided 30 draft-acceptance samples with mean accepted length
+2.956 and mean acceptance rate 0.653. Those observations prove draft activity,
+not MTP acceleration: there is no MTP-off control or authoritative per-run
+accepted/proposed-token aggregate.
+
+A separate repeated-word 131K needle case passed. The 245K lane did not: the
+0.85 pool was insufficient, 0.87 caused pressure, and the target-only/BF16-state
+246,272-token-cap run
+[`7b88e52c`](../../evidence/runs/20260827T030636Z-qwen38-flash-next-nvfp4-long-sglang-qwen38-flash-next-sglang-long-context-7b88e52c/summary.json)
+was aborted after sampled `MemAvailable` reached 0.046 GiB; the operator
+observed roughly 6.1 GiB swap growth and memory PSI full `avg10` 19.84. That
+profile is incompatible. All long prompts repeat one synthetic word, so the
+passes demonstrate serving mechanics and exact-key retention, not
+natural-document quality or worst-case cold/varied-token NVMe PLE cost.
 
 ## Validation still required
 
@@ -97,11 +141,16 @@ Before proposing this as supported behavior:
    missing-FlashInfer cases.
 2. Add an SM12x GPU parity test for page size 64, BF16, GQA, and sequence
    lengths crossing a page boundary against an independent reference.
-3. Repeat the native tiny QSA smoke through a pinned derived image rather than
-   a source-file bind mount.
-4. Run the packed PLE loader and real trained MTP acceptance gates before any
-   performance comparison.
+3. Repeat the full-checkpoint route through a pinned derived image rather than
+   source-file bind mounts.
+4. Add an authoritative SGLang accepted/proposed-token aggregate and matched
+   MTP-off/depth controls before attributing throughput to `NEXTN`.
+5. Treat NVFP4/I4 PLE as a future memory optimization: validate its packed
+   loader and fused gather against the measured exact-FP8 baseline.
+6. Do not retry 245K until projected and observed reserve close without swap or
+   PSI pressure.
 
 See the
 [native diagnostics and optimization plan](../../docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md)
-for the stock failure, clean controls, fit gate, and full-model boundaries.
+for the stock failure, clean controls, measured full-model result, and remaining
+optimization boundaries.

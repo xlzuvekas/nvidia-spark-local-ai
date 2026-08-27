@@ -1,38 +1,34 @@
-# Qwen3.8-Flash-Next native NVFP4/I4 + MTP diagnostics and plan — 2026-08-26
+# Qwen3.8-Flash-Next native SGLang result and MTP/PLE optimization — 2026-08-26
 
 ## Decision
 
 Keep the measured 87.249 GiB `UD-IQ4_XS` GGUF as a target-only local
-comparator. It is useful for bounded quality, wall-time, and throughput targets,
-but its converter omitted the MTP module, so it cannot answer whether native
-NVFP4/I4 plus MTP is faster.
+comparator. Its converter omitted MTP, so it cannot isolate native SGLang,
+ModelOpt NVFP4, PLE placement, or `NEXTN` effects.
 
-No released native CUDA checkpoint currently admits on one DGX Spark. The
-smallest complete candidate is the 125.96 GiB repository / approximately
-125.91 GiB tensor payload in
-[`RadixArk/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4/tree/7b719225242aacd3dbd3f9407468c2ee9a9d2594).
-The measured host exposes only 128,520,441,856 bytes, or 119.694 GiB, of total
-unified system memory. The checkpoint therefore exceeds physical memory before
-Python, CUDA, serving state, graphs, K/V cache, or the operating system are
-counted. Moving its PLE table from device to pinned host memory does not change
-that capacity result on Spark because both placements consume the same physical
-memory.
+The released
+[`RadixArk/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4/tree/7b719225242aacd3dbd3f9407468c2ee9a9d2594)
+checkpoint now admits and runs on one DGX Spark. The successful route does not
+make its approximately 125.91 GiB tensor payload resident: it keeps the main
+routed experts in NVFP4, keeps the trained `NEXTN` module in BF16, and maps the
+exact 51,200,245,760-byte FP8 PLE table read-only from NVMe. The PLE is FP8, not
+NVFP4, and the file mapping is private/read-only rather than a pinned host copy.
 
-The first credible native route is a derived, text-only ModelOpt checkpoint:
+The primary run
+[`20e1283b`](../evidence/runs/20260827T032027Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-20e1283b/summary.json)
+completed all 12 planned cases. Its evidence status is `partial` only because
+the bounded quality battery scored 3/4; JSON, tools, 8K and 32K needle cases,
+and all throughput cases completed. Aggregate output throughput was 28.504
+tok/s for D256, then 27.413, 50.330, and 72.821 tok/s at fresh C1, C2, and C4.
+The client-TTFT prefill approximations were 2,103.468 tok/s at 8K and 2,179.588
+tok/s at 32K.
 
-1. retain the Radix routed experts in NVFP4 W4A4;
-2. pack the 51B-parameter PLE table as NVFP4 and dequantize only gathered rows;
-3. retain the MTP non-expert path in BF16;
-4. try the MTP routed experts in BF16 first, then W4A16/NVFP4 only if the first
-   form cannot admit; and
-5. serve through the provisional SGLang Qwen4 path with native `NEXTN` MTP.
-
-This is still a build and benchmark plan for the full model, not a measured
-native Flash-Next performance result. The exact SGLang day-zero image and a
-pinned 0.2B development fixture were subsequently downloaded and exercised.
-The full Qwen, Radix, and Inferact native checkpoints were neither downloaded
-nor attempted because their published forms do not satisfy the one-Spark fit
-gate.
+This closes full-checkpoint admission, not every optimization question. A
+separate 131K repeated-word needle case passed, while 245K was pressure-unsafe.
+NVFP4/I4 PLE packing is therefore future memory/headroom optimization rather
+than the prerequisite for native admission. MTP acceleration is also not yet
+causally established: periodic logs observed draft activity, but there is no
+MTP-off control or authoritative per-run acceptance aggregate.
 
 ## Why PLE is the fit lever
 
@@ -59,29 +55,32 @@ metadata gives the following approximate storage split:
 | Other PLE tensors | BF16 | 0.061 GiB |
 
 The repository is larger than the sum of tensor payloads because it also
-contains safetensors headers and qualification files. These figures are for
-fit planning; the eventual derived artifact must publish exact file sizes and
-hashes.
+contains safetensors headers and qualification files. These figures remain fit
+estimates; the measured route separately binds the exact checkpoint revision,
+PLE byte count and hashes. Any future packed derivative must publish its own
+exact file sizes and hashes.
 
 ### Candidate PLE representations
 
 | PLE strategy | Estimated PLE storage/residency | Estimated text-only weight residency | Gross Spark headroom | Disposition |
 | --- | ---: | ---: | ---: | --- |
-| Current FP8 table | 47.684 GiB | about 125.1 GiB | negative | Reject before download as a serving target |
-| NVFP4, group 16 | about 26.82 GiB | about 104.2 GiB | about 15.5 GiB | First native build; existing reference gather to fuse and wire |
-| Row-scaled I4 | about 24.44 GiB | about 101.8 GiB | about 17.9 GiB | Secondary experiment; needs a new loader/kernel |
-| Exact file-backed FP8 | 47.684 GiB on NVMe, bounded rows resident | about 77.4 GiB plus staging/cache | about 42.3 GiB before staging | Best exact-memory design, more runtime engineering |
+| Fully resident FP8 table | 47.684 GiB | about 125.1 GiB | negative | Reject as a fully resident one-Spark layout |
+| Exact file-backed FP8 | 47.684 GiB on NVMe, demand-paged | about 77.4 GiB plus runtime/cache | about 42.3 GiB before runtime/cache | Implemented and measured native baseline |
+| NVFP4, group 16 | about 26.82 GiB | about 104.2 GiB if resident | about 15.5 GiB | Future capacity/locality optimization; existing reference gather to fuse and wire |
+| Row-scaled I4 | about 24.44 GiB | about 101.8 GiB if resident | about 17.9 GiB | Secondary future experiment; needs a new loader/kernel |
 | PLE omitted | none | about 77.4 GiB | about 42.3 GiB | Runtime/MTP smoke only; changes model semantics |
 
 The NVFP4 estimate includes packed 4-bit values and one FP8 block scale per 16
 values. It is approximately 2.4 GiB larger than a one-scale-per-row I4 design.
 SGLang already has a correctness-oriented ModelOpt unpack/dequant method for
-this representation, although Qwen4 does not wire it and the method is not yet
-a fused production PLE kernel. Extending that known layout is still a better
-first engineering trade than defining a second I4 format for a small additional
-saving.
+the NVFP4 representation, although Qwen4 does not wire it and the method is not
+yet a fused production PLE kernel. That is now an optimization path beyond the
+measured exact-FP8 baseline, not an admission dependency. Extending the known
+layout remains a better first packed-PLE experiment than defining a second I4
+format for a small additional saving.
 
-The 15.5 GiB gross headroom in the PLE-NVFP4/BF16-MTP form is still marginal.
+The estimated 15.5 GiB gross headroom in a fully resident
+PLE-NVFP4/BF16-MTP form would still be marginal.
 The MTP routed experts alone contain about 2.517B BF16 parameters, or 4.688
 GiB. Packing only those experts to group-16 NVFP4 reduces them to approximately
 1.318 GiB and puts the text-only weight estimate near 100.8 GiB, leaving about
@@ -114,7 +113,7 @@ two experimental dimensions in the first correctness run.
 | --- | --- | ---: | --- | --- |
 | Qwen BF16 | [`f5d0827`](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/tree/f5d08274bafd880402bd16f5e3e6c514136ec06c) | 335.28 GiB | BF16 MTP; BF16 PLE | Reject |
 | Qwen FP8 | [`bcd9f01`](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8/tree/bcd9f01ddc9cff2316eb84281bebcd5b058bddce) | 172.76 GiB indexed tensors | MTP retained; FP8 PLE | Reject |
-| Radix NVFP4 | [`7b71922`](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4/tree/7b719225242aacd3dbd3f9407468c2ee9a9d2594) | 125.96 GiB | Main routed experts NVFP4; BF16 MTP; FP8 PLE | Best derivation source, not directly admissible |
+| Radix NVFP4 | [`7b71922`](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4/tree/7b719225242aacd3dbd3f9407468c2ee9a9d2594) | 125.96 GiB | Main routed experts NVFP4; BF16 MTP; exact FP8 PLE mapped read-only | Admitted and measured through persistent NVMe PLE tiering |
 | Inferact NVFP4 | [`103a760`](https://huggingface.co/Inferact/Qwen3.8-Flash-Next-NVFP4/tree/103a7608316173ca6edd49929544244de7ffda70) | 170.19 GiB indexed tensors | Main and MTP routed experts NVFP4; 95.368 GiB BF16 PLE | Reject |
 | Unsloth GGUF | [`2c41bd2`](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/2c41bd2a0b3f51c503c11f1c7ed2e6bb34036beb/UD-IQ4_XS) | 87.249 GiB selected quant | Converter omitted MTP | Target-only comparator |
 
@@ -152,18 +151,18 @@ The immutable image passed a package, model-registration, and hardware import
 probe with SGLang `0.0.0.dev1+gd91c3682b`, PyTorch `2.13.0+cu130`, CUDA runtime
 `13.0`, FlashInfer `0.6.17`, and an NVIDIA GB10 reported as compute capability
 `[12, 1]`. The Qwen4 target, Qwen4 `NEXTN` draft, and ModelOpt NVFP4 embedding
-classes all imported. This proves the aarch64 package surface is present; it
-does not prove that the full checkpoint fits or that every native kernel works
-on SM121.
+classes all imported. This probe proved only that the aarch64 package surface
+was present; full-checkpoint admission was established later and still does not
+prove every native kernel on SM121.
 
 | Diagnostic | Measured result | Boundary |
 | --- | --- | --- |
 | ModelOpt NVFP4 embedding primitive | Pass; CUDA output matched an independent E2M1/block-scale reference with maximum absolute error `0` | Isolated embedding method, not the Qwen4 PLE loader or a fused production kernel |
 | FlashInfer GDN | BF16 failed on SM121; retaining FP32 for the GDN path was required | Conditional runtime pass, not a BF16 GDN support claim |
-| Native QSA | Fail during CuTe MLIR compilation on SM121 | QSA must be disabled or fixed before a representative native run |
+| Stock native QSA resolver | Fail during CuTe MLIR compilation on SM121 | The pinned SM121/XQA overlay below is required for the measured route |
 | Real tiny checkpoint, QSA-disabled semantic control | HTTP `200`; 4 prompt tokens to 8 completion tokens in `1.759583 s`; model load `1.71 s` | Bounded request/response and real-weight execution control only |
 | Dummy target plus `NEXTN` MTP | Both target and MTP loaded; HTTP `200` with 16 completion tokens in `0.338387 s`; 15 proposed, 15 verified, 0 accepted | Synthetic weights; proves draft execution and counters, not useful speculation |
-| Full Radix NVFP4 checkpoint | Not downloaded or attempted | Published payload already exceeds total physical unified memory |
+| Full Radix NVFP4 checkpoint | Admitted through exact read-only FP8 PLE tiering; all 12 primary cases completed | Main model NVFP4 + BF16 `NEXTN` + FP8 PLE, not an all-NVFP4 or fully resident result |
 
 Both server controls used the pinned
 [`inference-optimization/Qwen3.8-Flash-Next-0.2B-A0.2B`](https://huggingface.co/inference-optimization/Qwen3.8-Flash-Next-0.2B-A0.2B/tree/5fbd297b1529cfa7db2510896d1ad77d1bf41e44)
@@ -205,6 +204,68 @@ native acceptance counters, so the exported `speculative_decoding` aggregate is
 15-proposed, 15-verified, 0-accepted counters; those counters must not be
 silently attributed to the clean smoke runs.
 
+#### Full-checkpoint measured result
+
+The successful profile is
+`qwen38-flash-next-nvfp4-mtp-sglang` from `manifests/models.toml`. It binds:
+
+- Radix checkpoint revision
+  `7b719225242aacd3dbd3f9407468c2ee9a9d2594` and public recipe revision
+  `bf2b7c75870d3703730b6bd8f3bb93dc622c278d`;
+- image digest
+  `14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4`;
+- 51,200,245,760-byte PLE payload SHA-256
+  `b070f9644adf93794d8a1030584ab705809387e64396a9327a68fa3a3a6666b3`
+  and deterministic marker SHA-256
+  `f0ef55e4e4dec9b6b936a42af4ca2eb9b2f24ced373b1e216f7a6d507b171665`;
+- `qwen4_exp.py` overlay SHA-256
+  `0b513b4dc4f2394f6b1733bb0b74fa40ab59f4a04f6b33601350b2a606c67804`
+  and QSA overlay SHA-256
+  `e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75`.
+
+The measured server used TP1, ModelOpt FP4, Triton prefill, TRT-LLM MHA
+decode, 1,024-token chunked prefill, `mem-fraction-static=0.85`, four running
+requests, a 20-slot recurrent cache, and the official `NEXTN` depth-3 / top-k-1
+/ four-draft-token recipe. PLE mmap was explicit `readonly`; startup rejected
+nondefault checkpoint-loader modes and the runtime mount was read-only.
+
+Startup took 581.652 seconds: target loading accounted for 420.36 seconds and
+trained MTP loading for 83.86 seconds. Sampled available memory never fell
+below 16.564 GiB during the primary run and swap did not grow. The result table
+uses completed, validated output tokens over full case wall time:
+
+| Case | Result |
+| --- | ---: |
+| D256, C1 | 28.504 tok/s |
+| Fresh C1 | 27.413 tok/s |
+| Fresh C2 | 50.330 tok/s |
+| Fresh C4 | 72.821 tok/s |
+| Repeated-word 8K prefill | 2,103.468 tok/s, client-TTFT approximation |
+| Repeated-word 32K prefill | 2,179.588 tok/s, client-TTFT approximation |
+| 8K / 32K exact needle | Pass / pass |
+| Bounded quality | 3/4; code-reasoning item failed |
+
+The 8K and 32K prompts repeat one synthetic word. They demonstrate serving
+mechanics and exact-key retention, not natural-document quality, adversarial
+retrieval, or worst-case cold/varied-token NVMe PLE behavior.
+
+Periodic server logs contained 30 acceptance samples with mean accepted length
+2.956 and mean acceptance rate 0.653. They show that the trained draft was
+active, but they are not an authoritative run aggregate and do not establish a
+speedup. The current evidence has no same-run accepted/proposed-token aggregate
+and there is no MTP-off control.
+
+Long-context escalation established a narrower boundary. The 131K
+repeated-word needle completed and validated in
+[`7c25f743`](../evidence/runs/20260827T024144Z-qwen38-flash-next-nvfp4-mtp-long-sglang-qwen38-flash-next-sglang-long-context-7c25f743/summary.json),
+although that diagnostic was stopped before a terminal success. At 245K, the
+0.85 pool was insufficient; a 0.87 experiment created unacceptable pressure.
+The target-only BF16-state profile with a 246,272-token cap still aborted in
+[`7b88e52c`](../evidence/runs/20260827T030636Z-qwen38-flash-next-nvfp4-long-sglang-qwen38-flash-next-sglang-long-context-7b88e52c/summary.json):
+sampled `MemAvailable` reached 0.046 GiB, while the operator observed roughly
+6.1 GiB of swap growth and memory PSI full `avg10` of 19.84. That profile is
+retained as `incompatible`; 245K is not a supported one-Spark result.
+
 #### Smallest credible QSA fix
 
 Read-only inspection of the exact image isolates the SM121 fallback. QSA's
@@ -226,22 +287,25 @@ On compute capability 12.1, the resolver selected
 the real tiny fixture completed a 4-to-8-token request in `7.234597 s` including
 first-use compilation, then a warm 6-to-32-token request in `0.278661 s`; both
 returned HTTP `200`. This closes the observed CuTe blocker for this fixture,
-not for the full model. It still needs an SM12x packed-XQA parity test, a pinned
-derived-image rerun, and full-shape validation before an upstream support claim.
+and the same resolver route subsequently served the measured full checkpoint.
+That is local runtime evidence, not upstream SM121 support. An independent
+SM12x packed-XQA parity test and pinned derived-image rerun remain prerequisites
+for an upstream support claim.
 The exact source hashes, patch, and boundaries are preserved in the
 [experimental SGLang SM121 XQA guide](../patches/sglang/README.md).
 
-This path is promising because the measured image imported the relevant class,
+The remaining packed-PLE path is promising because the measured image imported
+the relevant class,
 and the support-lineage source at PR commit `73a2552` contains a
 [`ModelOptNvFp4EmbeddingMethod`](https://github.com/sgl-project/sglang/blob/73a255206f916366c8d26d4022f82ddfb0ab558d/python/sglang/srt/layers/quantization/modelopt_quant.py#L633-L728)
 that gathers packed NVFP4 embedding rows, expands their E2M1 values and group
 scales, and emits BF16. It currently uses PyTorch indexing and unpacking rather
-than a fused PLE kernel. The Qwen4 model separately overlaps its existing
-BF16/FP8 pinned-host PLE gather with the preceding layer; the packed NVFP4 path
-must be integrated with that scheduling rather than assumed to work already.
+than a fused PLE kernel. The measured overlay privately maps the exact FP8
+table and retains the existing overlapped gather schedule; the packed NVFP4
+path must integrate with that schedule rather than be assumed to work already.
 
-Four integration gaps must be fixed and tested before building a 100+ GiB
-artifact:
+Four integration gaps remain before replacing the measured exact-FP8 PLE with
+a packed NVFP4 PLE:
 
 1. Qwen4 constructs the PLE `VocabParallelEmbedding` without a quantization
    configuration or quantization prefix, so the existing ModelOpt NVFP4 method
@@ -258,13 +322,13 @@ artifact:
    constructed as W4A16/NVFP4. The BF16-MTP variant does not need this fourth
    change.
 
-Do not combine `--ple-offload-embedding` with the NVFP4 PLE build. The current
-pinned-host wrapper accepts only unquantized BF16 or FP8 tables, and on Spark a
-full pinned copy would consume the unified capacity the quantization is meant
-to save.
+Do not treat `--ple-offload-embedding` alone as the fit mechanism. The measured
+route depends on the digest-pinned persistent mmap overlay and read-only mount;
+the stock pinned-host wrapper would consume the unified capacity that tiering
+is meant to preserve. A future NVFP4 PLE requires its own packed loader/kernel.
 
-Native MTP uses the bundled head; no sidecar draft model is needed. The initial
-SGLang settings are:
+Native MTP uses the bundled head; no sidecar draft model is needed. The measured
+SGLang baseline used:
 
 ```text
 --speculative-algorithm NEXTN
@@ -275,8 +339,9 @@ SGLang settings are:
 
 The checkpoint contains one physical MTP layer. Steps 1/2/3 repeatedly apply
 that layer during speculation; they are not three separately trained heads.
-The measured sweep must also test steps 1 and 2 with the corresponding bounded
-draft tree, plus MTP off. Depth 3 is a recipe default, not an assumed winner.
+The follow-up sweep must test steps 1 and 2 with the corresponding bounded draft
+tree, plus MTP off. Loading trained MTP and observing periodic acceptance logs
+does not establish depth 3 as faster; it remains the recipe baseline.
 
 ### vLLM second
 
@@ -305,48 +370,41 @@ publishes FP8 TP4 plus MTP3 and has no native single-Spark NVFP4/I4 route.
 
 ## Build sequence
 
-1. **Complete the tiny format fixture.** The isolated group-16 NVFP4 embedding
-   primitive already matched the independent E2M1/block-scale reference with
-   zero maximum absolute error on SM121. Extend that control to dimension 160
-   and multiple PLE-style shards, then test duplicate IDs, first/last rows,
-   shard boundaries, and malformed/missing scales through the Qwen4 loader.
-2. **Qwen4 loader and kernel patch.** Pass the quantization configuration and
-   prefix into the PLE embedding, add sharded packed-weight and scale loading,
-   and fuse packed-U8 gather/dequant to BF16. Keep the existing BF16/FP8 path
-   unchanged. Add a full-shape metadata-only allocation check so a wrong dtype
-   cannot allocate a 95 GiB BF16 table.
-3. **Harden the runtime-only smoke.** The pinned tiny fixture proved text-only
-   real-weight execution with QSA disabled, and dummy weights proved Qwen4
-   `NEXTN` draft activity on SM121. Fix or explicitly route around the native
-   QSA CuTe MLIR failure, retain FP32 GDN, and automate both controls. These are
-   still architecture diagnostics, not model-quality or throughput results.
-4. **Stream the derivative.** Start from the pinned Radix checkpoint and
-   transform PLE shards one at a time; never load or dequantize the complete
-   table. Preserve all unmodified tensor bytes and record the source revision,
-   converter revision, per-file sizes, and SHA-256 digests. First retain BF16
-   MTP.
-5. **Bounded admission.** Load text-only, eager, cache-off, one request, and a
-   4K served context. Refuse swap and retain at least a measured runtime reserve
-   before increasing K/V allocation. The planning gate is at least 12 GiB of
-   projected reserve; after readiness require at least 12 GiB `MemAvailable`
-   and stop below 8 GiB. Then test 32K with BF16 K/V.
-6. **MTP proof.** Run MTP off and steps 1/2/3 in separate server lifetimes.
-   Require nonzero proposed tokens, internally consistent accepted-token
-   counters, and no content corruption before comparing throughput.
-7. **Only if needed, quantize MTP experts.** Add explicit serialized metadata
-   and W4A16/NVFP4 routed-expert loading. Preserve the remainder of MTP in BF16.
-   Reject the form if its accepted length or bounded quality loses more than
-   its wall-time gain.
-8. **Escalate context and concurrency.** Move through 16K, 32K, 64K, and 128K
-   in fresh lifetimes; attempt 262K only after the memory equation closes.
+The completed admission path was:
 
-The full 125.96 GiB artifact acquisition starts only after steps 1–3 pass. The
-exact image is already local, but the failed native QSA probe and incomplete
-Qwen4 PLE-loader fixture still justify deferring the oversized weight source.
+1. pin and acquire the exact Radix revision and aarch64 SGLang image;
+2. reproduce the SM121 QSA resolver overlay from the pinned public recipe;
+3. concatenate and verify all 128 FP8 PLE shards without constructing the
+   model, then bind the immutable payload and deterministic completion marker;
+4. add the audited persistent-cache loader overlay, mount the cache read-only,
+   and retain PLE `weight_scale` loading while skipping only the 128 table
+   copies;
+5. load the NVFP4 target and trained BF16 MTP under the bounded 0.85/C4 profile;
+6. complete the 12-case native suite, then escalate repeated-word context to
+   the validated 131K boundary.
+
+The next optimization sequence is deliberately narrower:
+
+1. **Authoritative MTP proof.** Capture bounded per-request proposed, verified,
+   and accepted-token aggregates; run MTP off and depths 1/2/3 in separate
+   lifetimes before attributing throughput to speculation.
+2. **Quality confirmation.** Investigate the failed code-reasoning item and run
+   a larger fixed battery without changing runtime settings.
+3. **Memory-safe context.** Treat 131K as the current upper validated boundary.
+   Do not rerun the incompatible 245K profile until the projected and observed
+   reserve close without swap or PSI pressure.
+4. **Packed PLE optimization.** Extend the zero-error group-16 primitive through
+   the Qwen4 shard loader and a fused packed gather. Compare resident NVFP4 PLE
+   and exact file-backed FP8 PLE for correctness, cold/warm locality, startup,
+   and headroom.
+5. **Only if justified, quantize MTP experts.** Preserve the non-expert MTP path
+   in BF16 and require acceptance/quality gains to exceed conversion risk.
 
 ## Optimization matrix after admission
 
 Change one axis at a time and restart the server between context tiers.
+The seed is the successful TP1, exact-FP8-PLE, BF16-MTP, depth-3, 0.85/C4
+profile above; it is a measured baseline, not a proven optimum.
 
 | Axis | Screening values | Rule |
 | --- | --- | --- |
@@ -354,7 +412,7 @@ Change one axis at a time and restart the server between context tiers.
 | FP4 backend | `auto`, then available cuDNN and CUTLASS candidates | Prove SM121 execution in eager mode first; pin the winner |
 | CUDA graph | eager, batch 1, then batch 2/4 | Do not diagnose a graph failure and a model failure together |
 | Chunked prefill | 1,024; 2,048; 4,096 | Official recipe's 4,096 is a candidate, not a GB10 optimum |
-| Context | 4K, 16K, 32K, 64K, 128K, then 262K | Fresh lifetime per tier; cross 32K explicitly |
+| Context | 8K, 32K, 64K, 128K; 245K held | Fresh lifetime per tier; do not retry 245K until the memory equation closes |
 | Concurrency | 1, 2, 4, 8 | Stop when memory, queueing, or per-request latency defeats aggregate gain |
 | K/V | BF16, then calibrated/validated FP8 | No NVFP4 K/V in the first matrix |
 | Prefix cache | off, then on for the winning MTP depth | Measure cold establishment and exact warm reuse separately |
@@ -379,21 +437,24 @@ A native result is publishable only when all applicable gates pass:
 - the exact artifact and aarch64 image revisions are immutable and hashed;
 - the served model loads without implicit download, swap growth, or unrelated
   GPU/container work;
-- PLE is present for quality runs and its packed gather matches the reference;
-- requested MTP produces nonzero draft activity and counter topology matches
-  the configured depth;
-- `0 <= accepted_tokens <= proposed_tokens`, with finite per-position rates;
+- PLE is present for quality runs; the exact-FP8 route binds payload and marker
+  digests, while any future packed route must also match the reference gather;
+- an MTP-configured result may be published as counter-unverified, but any MTP
+  speedup claim requires an MTP-off control plus authoritative proposed,
+  verified, and accepted-token aggregates;
+- where acceptance is claimed, `0 <= accepted_tokens <= proposed_tokens`, with
+  finite per-position rates;
 - deterministic chat, exact-answer, JSON, tool-call, retrieval, and streaming
   parity checks pass at the tested boundary;
 - the same reasoning, sampling, cache, context, and concurrency settings are
   used inside each causal comparison; and
-- the native form beats the GGUF target on effective TPS or offers a clearly
-  measured quality/context benefit that justifies lower speed.
+- conclusions distinguish measured admission/performance from causal backend,
+  MTP, precision, or PLE-placement comparisons.
 
 The GGUF comparison remains descriptive: quantization, runtime, PLE precision,
 and MTP all differ. It is a product target, not a backend-only causal control.
 
-## Repository work after the runtime fixture passes
+## Repository work after full-checkpoint admission
 
 SparkBench already supports vLLM concurrency and parses vLLM lifetime MTP
 counters, but the SGLang OpenAI path currently exports no corresponding
@@ -424,7 +485,8 @@ campaign:
 - persist only sanitized scalar evidence—never prompts, completions, reasoning,
   tool payloads, request identifiers, local paths, or raw logs.
 
-The manifest may retain the explicitly labeled tiny/dummy diagnostic controls,
-but no production or representative native Flash-Next profile should be added
-until a pinned full-quality artifact passes the packed loader, native QSA,
-SM121 runtime, and memory-admission gates above.
+The manifest now retains both the explicitly labeled tiny/dummy diagnostics and
+the measured exploratory full-checkpoint profile. Keep the latter pinned to its
+exact FP8 PLE payload/marker and overlay digests. It must not be relabeled as
+upstream-supported or MTP-accelerated until the SM121 parity and authoritative
+acceptance controls above pass; the 245K profile remains incompatible.

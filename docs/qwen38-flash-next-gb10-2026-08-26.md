@@ -2,10 +2,39 @@
 
 ## Result
 
-Qwen3.8-Flash-Next runs on one 128 GB DGX Spark through the provisional
-llama.cpp path when the 87.249 GiB Unsloth `UD-IQ4_XS` GGUF uses F16 K/V
-cache. The same artifact and runtime aborted during graph construction with
-Q8_0 K/V. This is an exact-commit compatibility result, not a general claim
+The full released Qwen3.8-Flash-Next language stack now runs on one 128 GB DGX
+Spark through SGLang with its Radix main model in NVFP4, its 51B-parameter PLE
+table retained exactly in FP8 but mapped read-only from NVMe, and its trained
+NEXTN module retained in BF16. The terminal native run completed all 12 planned
+cases and delivered 28.504 aggregate output tok/s at D256, 27.413 at C1,
+50.330 at C2, and 72.821 at C4. Its 8K/32K client-TTFT prefill proxies were
+2,103.468/2,179.588 tok/s, and both exact-key needles passed 3/3. The lifecycle
+was `completed` but the publication status was `partial` solely because the
+synthetic exact-answer battery passed 3/4.
+
+This is not an all-NVFP4 deployment. In particular, the PLE is the released
+FP8 table, not an NVFP4 conversion, and the NEXTN module is BF16. The PLE mmap
+avoids making the 47.684 GiB table permanently resident, but its pages still
+consume unified-memory page cache when touched. The measured synthetic prompts
+repeat one word and therefore do not establish cold or varied-token PLE cost.
+SGLang's OpenAI path exposed no authoritative accepted/proposed-token aggregate,
+and no matched MTP-off full-model run completed, so the result does not quantify
+MTP acceleration.
+
+The primary native lifecycle started in 581.652 seconds and retained at least
+16.564 GiB sampled host `MemAvailable` with no sampled swap growth. That safe
+operating claim ends at the measured 32K tier. Two independent 131K C1 needles
+passed, but 245K was unsafe: the `.85` C4/MTP allocation rejected it at a
+179,514-token pool boundary; `.87` entered severe memory pressure; and the
+bounded target-only 245K diagnostic was stopped at 0.046 GiB sampled
+`MemAvailable` after the operator observed about 6.1 GiB of swap use and PSI
+memory `avg10` of 19.84. The target-only long profile is retained as
+`incompatible`, not as a serving recipe.
+
+The earlier provisional llama.cpp path remains a useful target-only comparator.
+It runs the 87.249 GiB Unsloth `UD-IQ4_XS` GGUF with F16 K/V, but the converter
+omitted MTP. The same artifact and runtime aborted during graph construction
+with Q8_0 K/V. This is an exact-commit compatibility result, not a general claim
 that every Q8 cache implementation is incompatible with the architecture.
 
 The clean eight-slot quick run completed all seven cases. It delivered 19.601
@@ -15,7 +44,7 @@ and passed all bounded 16K retrieval, JSON, tool-call, and exact-answer checks.
 It was terminal but `partial` because the D1024 case produced 4,327 of the
 required 5,120 completion tokens, so SparkBench suppressed that case's rate.
 
-The deployment is close to the memory ceiling. The quick run reached 4.270
+The llama.cpp deployment is close to the memory ceiling. The quick run reached 4.270
 GiB minimum sampled `MemAvailable` without new swap use. During the core run,
 minimum sampled `MemAvailable` reached 4.011 GiB and a live process diagnostic
 observed at least 3.85 GiB of `llama-server` `VmSwap` after the 16K prefill
@@ -26,10 +55,23 @@ bounded-admission result.
 ## Tested configuration
 
 The measured host was one aarch64 DGX Spark / GB10 with 125,508,244 KiB of
-unified system memory. Both successful profiles used full GPU offload, CUDA
-flash attention, an 8,192-token batch, a 512-token microbatch, Jinja chat
-templating, F16 K/V, and no automatic fit adjustment. Thinking was disabled in
-both the server and request template. Temperature was zero.
+unified system memory. The native SGLang and provisional llama.cpp deployments
+were text-only, used temperature zero, and disabled thinking in the request
+template. They otherwise differed materially.
+
+| Deployment | Main model | PLE | MTP | Serving geometry | Measured scope |
+| --- | --- | --- | --- | --- | --- |
+| Native SGLang | released Radix ModelOpt NVFP4 | released FP8, 51,200,245,760-byte read-only NVMe mmap | released BF16 NEXTN, steps 3 / top-k 1 / four draft tokens | max running 4; 20 recurrent-state slots; `.85` static fraction; 262,144 declared context | D256, C1/C2/C4, 8K/32K prefill and needles |
+| Provisional llama.cpp | Unsloth `UD-IQ4_XS` GGUF | GGUF-converted representation | omitted by converter | eight slots, each 32,768 context; F16 K/V | target-only D256, C1/C2/C4/C8 and bounded context |
+
+The native path used Triton prefill attention, the pinned SM121 TRT-LLM/XQA
+decode overlay, `modelopt_fp4`, 1,024-token chunked prefill, and the exact
+released Radix snapshot. The completed PLE file and marker were mounted
+read-only. This is one SGLang configuration, not a backend A/B experiment.
+
+Both successful llama.cpp profiles used full GPU offload, CUDA flash attention,
+an 8,192-token batch, a 512-token microbatch, Jinja chat templating, F16 K/V,
+and no automatic fit adjustment.
 
 | Profile | Slots | Context per slot | Aggregate allocation | Purpose |
 | --- | ---: | ---: | ---: | --- |
@@ -47,6 +89,52 @@ allocation also does not establish a successful 262K single request.
 Aggregate output throughput divides all completion tokens by full measured
 case wall time. The per-request decode rate is a client streaming estimate
 after first emission; TTFT includes prompt work and queueing.
+
+### Native SGLang full-model suite
+
+| Case | Requests | Aggregate output | Median per-request decode | Median TTFT | Median E2E |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| D256 / C1 | 3 | **28.504 tok/s** | 29.764 tok/s | 0.336 s | 8.904 s |
+| C1 | 3 | **27.413 tok/s** | 28.898 tok/s | 0.420 s | 9.257 s |
+| C2 | 6 | **50.330 tok/s** | 27.481 tok/s | 0.442 s | 9.820 s |
+| C4 | 12 | **72.821 tok/s** | 20.112 tok/s | 0.432 s | 13.414 s |
+
+C4 delivered 2.66 times C1 aggregate throughput while median per-request
+decode fell by 30.4%. All four throughput cases were measurement-valid. The
+run's 874.043-second managed journal includes the 581.652-second server startup,
+the first-use request, all 12 cases, and clean shutdown.
+
+The native prefill figures are client-observed TTFT proxies, not engine prompt
+counters:
+
+| Repetition target | Actual prompt tokens/request | Median TTFT | Client-TTFT proxy |
+| ---: | ---: | ---: | ---: |
+| 8,192 | 8,261 | 3.927 s | **2,103.468 tok/s** |
+| 32,768 | 32,835 | 15.065 s | **2,179.588 tok/s** |
+
+### Fair local GGUF comparison
+
+The closest descriptive comparator uses the same nominal D256 and C1/C2/C4
+shapes from the llama.cpp core run. The native run used three repetitions per
+shape while the llama.cpp core used five. Both requested 256 output tokens per
+request, but runtime, artifact, quantization, cache, PLE, MTP, and memory state
+all differ.
+
+| Shape | Native SGLang | llama.cpp GGUF | Descriptive ratio |
+| --- | ---: | ---: | ---: |
+| D256 | 28.504 tok/s | 20.193 tok/s | 1.41x |
+| C1 | 27.413 tok/s | 19.860 tok/s | 1.38x |
+| C2 | 50.330 tok/s | 19.782 tok/s | 2.54x* |
+| C4 | 72.821 tok/s | 51.927 tok/s | 1.40x |
+| 8K prefill proxy | 2,103.468 tok/s | 674.500 tok/s | 3.12x |
+
+The 8K prefill prompts were especially close in realized size: 24,783 total
+native prompt tokens across three requests versus 24,786 for llama.cpp. The
+llama.cpp C2 value is an outlier that failed to improve on C1 in its
+memory-pressured core lifecycle, so the 2.54x ratio is not a stable scaling
+claim. Excluding that discontinuity, native D256/C1/C4 aggregate throughput was
+1.38-1.41 times the GGUF comparator. None of these ratios isolates SGLang,
+NVFP4, FP8 PLE, or NEXTN, and none is authoritative evidence of MTP speedup.
 
 ### Clean quick suite
 
@@ -98,6 +186,29 @@ The planned 32K prefill was skipped because its estimated 32,909-token request
 exceeded the 32,768-token per-slot limit.
 
 ## Bounded validation
+
+### Native SGLang
+
+| Check | Outcome | Boundary |
+| --- | --- | --- |
+| Chat smoke | 1/1 pass | 32-token bounded generation |
+| Strict JSON smoke | 1/1 pass | one fixed structured-output fixture |
+| Tool-call smoke | 1/1 pass | one fixed tool fixture |
+| Synthetic exact answers | 3/4 pass | caused the otherwise completed run to publish as `partial` |
+| 8K needle | 3/3 pass | repeated-word exact-key fixture |
+| 32K needle | 3/3 pass | repeated-word exact-key fixture; safe primary-run boundary |
+| 131K needle, C4/MTP profile | 1/1 pass | 131,171 prompt tokens; 67.419-second TTFT |
+| 131K needle, C1/MTP profile | 1/1 pass | 131,169 prompt tokens; 72.285-second TTFT |
+| 245K needle | no publishable pass | rejected or operator-stopped at the memory/swap safety boundary |
+
+The two 131K successes are bounded retrieval observations, not a supported
+131K serving envelope. They came from aborted lifecycles whose subsequent 245K
+case either could not enter the KV pool or was stopped. The declared 262,144
+model context is therefore a model/runtime maximum, not a safe one-Spark
+allocation. The 245K target-only diagnostic is negative safety evidence even
+though it removed NEXTN and capped the requested KV allocation.
+
+### Provisional llama.cpp
 
 | Check | Outcome | Boundary |
 | --- | --- | --- |
@@ -170,6 +281,43 @@ different llama.cpp revision.
 
 ## Artifact and runtime pins
 
+### Native SGLang
+
+The native model is the released
+[`RadixArk/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4/tree/7b719225242aacd3dbd3f9407468c2ee9a9d2594)
+snapshot at revision `7b719225242aacd3dbd3f9407468c2ee9a9d2594`: 206
+weight files and 135,195,303,851 indexed weight bytes (125.910 GiB). No model
+tensor was requantized for the measured run. The main routed experts use the
+checkpoint's ModelOpt NVFP4 representation, the complete PLE table remains
+FP8, and the embedded NEXTN tensors remain BF16.
+
+The 51,200,245,760-byte PLE table was materialized offline into one exact
+file-backed mmap, then admitted read-only. Its payload SHA-256 is
+`b070f9644adf93794d8a1030584ab705809387e64396a9327a68fa3a3a6666b3`; the
+completed-layout marker SHA-256 is
+`f0ef55e4e4dec9b6b936a42af4ca2eb9b2f24ced373b1e216f7a6d507b171665`.
+Startup checks the immutable marker, payload size and pinned payload identity;
+the full payload was hashed when it was built and during explicit verification,
+not on every server start.
+
+The aarch64 runtime image is
+`lmsysorg/sglang@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4`.
+The public recipe is
+[`hashd1ve/qwen38-flash-next-one-dgx-spark`](https://huggingface.co/hashd1ve/qwen38-flash-next-one-dgx-spark/tree/bf2b7c75870d3703730b6bd8f3bb93dc622c278d)
+at `bf2b7c75870d3703730b6bd8f3bb93dc622c278d`. Two generated, read-only
+runtime overlays are pinned independently:
+
+| Overlay | SHA-256 | Purpose |
+| --- | --- | --- |
+| `qwen4_exp.py` | `0b513b4dc4f2394f6b1733bb0b74fa40ab59f4a04f6b33601350b2a606c67804` | persistent read-only PLE mmap loader |
+| `qwen_sparse_attn_backend.py` | `e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75` | SM121 QSA decode routing |
+
+The primary run used clean harness revision
+`717b17c3150072f6cbc8d0cc5861c489af92d8bd`. These pins reproduce the exact
+measured stack; they do not claim tagged upstream GB10 support.
+
+### Provisional llama.cpp
+
 The measured artifact is the immutable
 [Unsloth UD-IQ4_XS listing](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/2c41bd2a0b3f51c503c11f1c7ed2e6bb34036beb/UD-IQ4_XS),
 revision `2c41bd2a0b3f51c503c11f1c7ed2e6bb34036beb`.
@@ -202,9 +350,11 @@ is 172.782 GiB, so neither admits on one Spark.
 - The [SGLang cookbook](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.8-Flash-Next)
   has no GB10 lane. Its NVIDIA BF16/FP8 cells use TP4, its AMD BF16/FP8 cells
   use TP8, and NVFP4 TP1 is limited to B200/B300/GB300. The recipe selects the
-  community `RadixArk/Qwen3.8-Flash-Next-NVFP4` artifact, which is 125.91 GiB
-  before runtime and K/V—still beyond Spark's approximately 119.7 GiB
-  OS-visible memory.
+  same 125.91 GiB community `RadixArk/Qwen3.8-Flash-Next-NVFP4` artifact tested
+  here. It cannot be resident in Spark's approximately 119.7 GiB OS-visible
+  memory as published. The local run admitted it by retaining the exact
+  47.684 GiB FP8 PLE on NVMe and demand-paging it through the pinned overlay;
+  that is a measured local extension, not a cookbook GB10 lane.
 - The [vLLM recipe](https://recipes.vllm.ai/Qwen/Qwen3.8-Flash-Next) requires a
   dedicated image and selects the community
   `Inferact/Qwen3.8-Flash-Next-NVFP4` artifact for its NVFP4 lane. It declares
@@ -214,13 +364,14 @@ is 172.782 GiB, so neither admits on one Spark.
   publishes a TP4 FP8 + MTP3 launch. It has no single-Spark recipe.
 
 Those recipes are useful datacenter references, but they are not alternative
-measurements in this report. The smaller target-only GGUF is the only tested
-single-Spark path, and its lack of MTP makes its TPS a different deployment.
-The follow-on
+measurements in this report. The file-backed-PLE SGLang result is the only
+measured full-model/MTP single-Spark path here; the smaller target-only GGUF is
+a different deployment. The earlier
 [native NVFP4/I4 + MTP plan](qwen38-flash-next-native-mtp-optimization-2026-08-26.md)
-identifies PLE quantization as the fit lever, records the provisional runtime
-gaps, and defines the admission and optimization ladder without treating this
-GGUF as an MTP implementation.
+identified PLE capacity as the fit lever and proposed quantization. The final
+experiment instead preserved the released FP8 PLE exactly on NVMe. It closes
+bounded admission and throughput through 32K, but the 245K pressure result
+still rules out treating the native context maximum as a safe Spark envelope.
 
 ## GLM-5.3-Flash disposition
 
@@ -243,11 +394,28 @@ valid long-context Spark benchmark.
 
 ## Reproduce
 
-Fetch once, then run without implicit downloads. The runtime binary must exist
-at the profile path and match its recorded SHA-256.
+Fetch once, then run without implicit downloads. For the native path, prepare
+the two digest-pinned overlays from the cached image and materialize and verify
+the exact PLE file before launching the server:
 
 ```bash
 python3 sparkbench.py inventory --sizes
+python3 sparkbench.py fetch qwen38-flash-next-nvfp4-mtp-sglang
+python3 -m bench.sglang_overlay_prepare
+python3 -m bench.sglang_overlay_prepare --materialize-ple
+python3 -m bench.sglang_overlay_prepare --verify-ple-cache
+python3 sparkbench.py benchmark qwen38-flash-next-nvfp4-mtp-sglang \
+  --suite manifests/suites/qwen38_flash_next_sglang_native.toml
+```
+
+Do not reproduce the incompatible 245K target-only profile as a normal
+benchmark. It crossed the stop boundary and is retained only so the negative
+configuration remains auditable.
+
+For llama.cpp, the runtime binary must exist at the profile path and match its
+recorded SHA-256:
+
+```bash
 python3 sparkbench.py fetch qwen38-flash-next-ud-iq4-xs-llamacpp
 python3 sparkbench.py benchmark qwen38-flash-next-ud-iq4-xs-llamacpp \
   --suite manifests/suites/smoke.toml
@@ -262,6 +430,30 @@ one. Run one inference configuration at a time and preserve loopback serving.
 
 ## Run and publication ledger
 
+### Native persistent-PLE attempts
+
+This sequence includes the initial writable mmap prototypes and every
+subsequent verified-read-only attempt. Every row came from a clean harness
+worktree; aborted rows remain negative or diagnostic evidence, not measurements
+silently merged into the final run.
+
+| Run ID | Harness | Geometry | Terminal state | Evidence interpretation |
+| --- | --- | --- | --- | --- |
+| [`20260827T002718Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-b879c795`](../evidence/runs/20260827T002718Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-b879c795/manifest.json) | `ef764bc3` | writable PLE mmap, `.79`, MTP3/C4 | startup operator-abort; 0 cases | first persistent-mmap load attempt only |
+| [`20260827T003820Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-245ea9e3`](../evidence/runs/20260827T003820Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-245ea9e3/manifest.json) | `a46b7004` | writable PLE mmap plus checkpoint cache drop, `.79`, MTP3/C4 | startup operator-abort; 0 cases | load/cache diagnostic only |
+| [`20260827T012359Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-005c4fd6`](../evidence/runs/20260827T012359Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-005c4fd6/manifest.json) | `cc687c66` | verified read-only PLE, `.79`, MTP3/C4 | startup abort; 0 cases | API-key argument admission failure |
+| [`20260827T012647Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-005c4fd6`](../evidence/runs/20260827T012647Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-005c4fd6/manifest.json) | `20bbd957` | verified read-only PLE, `.79`, MTP3/C4 | startup abort; 0 cases | default recurrent cache admitted zero requests; five state slots are required per request |
+| [`20260827T013808Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-fa899717`](../evidence/runs/20260827T013808Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-fa899717/manifest.json) | `d386b478` | verified read-only PLE, `.85`, MTP3/C4 | operator-abort after 5/14 cases | first full-model bounded request passes; incomplete throughput run |
+| [`20260827T015017Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-a06b138a`](../evidence/runs/20260827T015017Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-a06b138a/manifest.json) | `67e00627` | `.85`, 20 recurrent slots, MTP3/C4 | abort after 13/14 cases | 131K pass; 245K rejected at 179,514-token pool limit |
+| [`20260827T020849Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-8f0a58d7`](../evidence/runs/20260827T020849Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-8f0a58d7/manifest.json) | `8ed2df2c` | planned `.87`, 20 recurrent slots, MTP3/C4 | preflight abort; 0 cases | 116.0 GiB model-plus-reserve estimate exceeded 114.9 GiB available |
+| [`20260827T020950Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-c80757e7`](../evidence/runs/20260827T020950Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-c80757e7/manifest.json) | `08fc7430` | `.87`, 20 recurrent slots, MTP3/C4 | operator-abort after 13/14 cases | 131K pass; 245K entered unsafe memory/swap pressure |
+| [`20260827T024144Z-qwen38-flash-next-nvfp4-mtp-long-sglang-qwen38-flash-next-sglang-long-context-7c25f743`](../evidence/runs/20260827T024144Z-qwen38-flash-next-nvfp4-mtp-long-sglang-qwen38-flash-next-sglang-long-context-7c25f743/manifest.json) | `d2f7aca7` | `.85`, five recurrent slots, MTP3/C1 | operator-abort after 1/2 cases | independent 131K pass, 72.285-second TTFT; no 245K result |
+| [`20260827T025734Z-qwen38-flash-next-nvfp4-long-sglang-qwen38-flash-next-sglang-long-context-b8e9080e`](../evidence/runs/20260827T025734Z-qwen38-flash-next-nvfp4-long-sglang-qwen38-flash-next-sglang-long-context-b8e9080e/manifest.json) | `a14b3aee` | target-only `.85`, one recurrent slot, C1 | startup abort; 0 cases | one slot was below the five-slot request floor |
+| [`20260827T030636Z-qwen38-flash-next-nvfp4-long-sglang-qwen38-flash-next-sglang-long-context-7b88e52c`](../evidence/runs/20260827T030636Z-qwen38-flash-next-nvfp4-long-sglang-qwen38-flash-next-sglang-long-context-7b88e52c/manifest.json) | `d0e53f45` | target-only `.85`, five BF16 recurrent slots, 246,272-token cap, C1 | safety abort during only case | 0.046 GiB sampled minimum; about 6.1 GiB observed swap and PSI memory `avg10` 19.84; profile retired |
+| [`20260827T032027Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-20e1283b`](../evidence/runs/20260827T032027Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-20e1283b/manifest.json) | `717b17c3` | `.85`, 20 recurrent slots, MTP3/C4; 8K/32K cap | `completed` / `partial`; 12/12 cases | primary safe bounded run; only publication failure was exact answers 3/4 |
+
+### Provisional llama.cpp attempts
+
 | Run ID | Revision | K/V | Terminal state | Published interpretation |
 | --- | --- | --- | --- | --- |
 | `20260826T163638Z-qwen38-flash-next-ud-iq4-xs-llamacpp-smoke-b76517fb` | `c52212f` clean | Q8_0 | aborted before readiness | exact negative compatibility result |
@@ -272,14 +464,18 @@ one. Run one inference configuration at a time and preserve loopback serving.
 Raw run records remain ignored. They contain captured content and local
 runtime details and must not be committed.
 
-The four published attempt-scoped scalar bundles are the
+The final native [scalar summary](../evidence/runs/20260827T032027Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-20e1283b/summary.json)
+and the target-only [245K safety summary](../evidence/runs/20260827T030636Z-qwen38-flash-next-nvfp4-long-sglang-qwen38-flash-next-sglang-long-context-7b88e52c/summary.json)
+contain no captured prompts or completions. The four published llama.cpp
+attempt-scoped scalar bundles are the
 [Q8_0 startup failure](../evidence/runs/20260826T163638Z-qwen38-flash-next-ud-iq4-xs-llamacpp-smoke-b76517fb/manifest.json),
 [F16 P1 smoke](../evidence/runs/20260826T164557Z-qwen38-flash-next-ud-iq4-xs-llamacpp-smoke-92c5cd3c/manifest.json),
 [F16 P8 quick](../evidence/runs/20260826T165220Z-qwen38-flash-next-ud-iq4-xs-llamacpp-p8-quick-37477295/manifest.json),
 and [F16 P8 core](../evidence/runs/20260826T165913Z-qwen38-flash-next-ud-iq4-xs-llamacpp-p8-core-b5a0f9ad/manifest.json)
 bundles. The full exporter recognizes the prior `loop-*` topology, and the
-two exact private Harbor lifecycle inputs needed to preserve the historical
-campaign are available locally for explicit use during refresh. Neither raw
-source is copied into Git. A complete deterministic re-export with both inputs
-and normal archive verification passed, and a second export reported no change;
-no hand-selected or hand-merged archive is valid.
+two exact private Harbor lifecycle inputs remain outside Git. After validating
+its canonical schema and checksums, the exporter carried the already-sanitized
+Harbor campaign forward without reopening those inputs. At this publication
+cutoff the deterministic archive contains 1,736 files and indexes 268 run
+bundles. Normal archive verification passed, and a second complete export
+reported no change; no hand-selected or hand-merged archive is valid.

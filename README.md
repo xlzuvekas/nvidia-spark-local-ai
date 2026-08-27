@@ -12,8 +12,8 @@ quality checks, and the provenance needed to interpret each number.
 | Which models complete deterministic multi-turn tool tasks? | [Agentic tool-use results: strict success, trace correctness, MTP, and Laguna](docs/agentic-tools-results-2026-08-17.md) |
 | How does Qwen3.6 perform on a strict two-hop long-context needle? | [Two-hop retrieval: Qwen3.6 baseline versus MTP2 through the 245,760-target tier](docs/multihop-long-context-results-2026-08-18.md) |
 | How fast are Qwen3.6 and Qwen3.8 under concurrency and 61K–246K inputs? | [Cache-off NVFP4+MTP3 throughput, wall time, TTFT, retries, and validation](docs/qwen36-qwen38-long-context-tps-2026-08-25.md) |
-| How does Qwen3.8-Flash-Next run on one Spark? | [Day-zero IQ4_XS llama.cpp throughput, validation, and memory-pressure results](docs/qwen38-flash-next-gb10-2026-08-26.md) |
-| Does SGLang's native Flash-Next path run on GB10, and how could it fit? | [Measured day-zero diagnostics, PLE fit math, runtime gaps, and derived-checkpoint plan](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md) |
+| How does Qwen3.8-Flash-Next run on one Spark? | [Native Radix SGLang and IQ4_XS llama.cpp throughput, validation, and memory boundaries](docs/qwen38-flash-next-gb10-2026-08-26.md) |
+| Does SGLang's native Flash-Next path run on GB10, and how does it fit? | [Measured NVFP4+MTP result, read-only NVMe PLE mechanics, exact pins, and long-context limit](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md) |
 | What does native llama.cpp prompt-KV reuse change for Qwen3.6? | [Prefix-cache controls: 8K and 32K shared-prefix cold/warm observations](docs/qwen36-prefix-cache-results-2026-08-18.md) |
 | How did Qwen3-Coder-Next fare on terminal coding tasks? | [Harbor/Terminal-Bench-derived results: Qwen Code versus OpenCode](docs/harbor-terminal-results-2026-08-18.md) |
 | How are offline coding-agent harnesses compared? | [Qwen3-Coder-Next Harbor campaign protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign) |
@@ -33,26 +33,36 @@ data. Its [human-readable map](evidence/README.md) and
 [machine-readable index](evidence/index.json) account for complete, partial,
 aborted, and nonterminal attempts without publishing raw payloads. The
 [evidence publication section](BENCHMARK.md#publishing-sanitized-evidence)
-explains how to create and verify both files.
+explains how to create and verify both files. The current refresh contains
+1,736 files covering 268 run bundles.
 
 ## What the results say
 
-- The exact SGLang Flash-Next aarch64 image imports its Qwen4 target, `NEXTN`,
-  and ModelOpt NVFP4 paths on GB10/SM121. Its isolated NVFP4 embedding method
-  matched an independent reference with maximum absolute error `0`, but BF16
-  FlashInfer GDN required FP32 and native QSA failed during CuTe MLIR
-  compilation. An [experimental two-line SM121 XQA route](patches/sglang/README.md)
-  subsequently completed native-QSA 4-to-8 and 6-to-32-token fixture requests.
-  With QSA disabled, the pinned real 0.2B development checkpoint also returned
-  HTTP `200`; a separate dummy-weight `NEXTN` control reported 15 proposed, 15
-  verified, and 0 accepted tokens. These establish bounded runtime diagnostics
-  only. Clean SparkBench reruns of the
-  [real-weight control](evidence/runs/20260826T190843Z-qwen38-flash-next-tiny-qsa-disabled-sglang-smoke-30d30d00/summary.json)
-  and [dummy `NEXTN` control](evidence/runs/20260826T190953Z-qwen38-flash-next-tiny-dummy-nextn-sglang-smoke-931e5c58/summary.json)
-  are tracked, but the fixture omits MTP weights, its configuration needed two
-  local compatibility corrections, and no timing is representative TPS or
-  quality. The oversized full Radix checkpoint was not downloaded or attempted.
-  See the [native diagnostics and optimization plan](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md).
+- The full Radix Qwen3.8-Flash-Next checkpoint now completes a native SGLang
+  panel on one Spark. The [primary run](evidence/runs/20260827T032027Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-20e1283b/summary.json)
+  used ModelOpt NVFP4 main weights, the source FP8 PLE through a digest-pinned
+  read-only NVMe mmap, and the trained BF16 `NEXTN` head. It reached 28.504
+  aggregate output tok/s at D256 and 27.413/50.330/72.821 tok/s at fresh
+  C1/C2/C4. Its repeated-word 8K/32K prefill proxies were
+  2,103.468/2,179.588 prompt tok/s, and both exact-key needles passed 3/3.
+  Startup took 581.652 s, the first measured request had 14.552 s TTFT, no swap
+  growth was observed, and minimum available memory across cases was 16.564
+  GiB. The lifecycle completed; the scalar summary is `partial` only because
+  the synthetic quality case scored 3/4 after one code-reasoning miss. Thirty
+  periodic server-log samples had mean accepted length 2.956 and mean
+  acceptance rate 0.653, but they are neither a lifetime/case aggregate nor an
+  MTP-off causal comparison. See the
+  [native result and exact pins](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md).
+- The same native MTP route passed the repeated-word 131K exact-key case in two
+  runs, including [one with 72.285 s TTFT](evidence/runs/20260827T024144Z-qwen38-flash-next-nvfp4-mtp-long-sglang-qwen38-flash-next-sglang-long-context-7c25f743/summary.json).
+  It did not safely admit the 245K case: the MTP pool rejected the request at
+  the `0.85` allocation, `0.87` was pressure-unsafe, and the capped target-only
+  BF16-state profile safety-aborted at 0.046 GiB available. That last operator
+  observation also saw about 6.1 GiB of new swap and memory-PSI full `avg10`
+  19.84; it is not a sanitized aggregate. The retained 245K profile is marked
+  incompatible. These repeated-word cases measure serving capacity and
+  exact-key retention, not natural-document understanding or cold/varied-token
+  NVMe-PLE cost.
 - On clean revision `efabab7`, the Qwen3.8-Flash-Next IQ4_XS llama.cpp core run
   completed its terminal lifecycle and reported 20.193 aggregate output tok/s
   at D256 and 19.860/19.782/51.927/71.709 tok/s at C1/C2/C4/C8. The 16K
@@ -147,10 +157,10 @@ geometries, slot counts, or validation states.
 
 ### Measured results
 
-- [Qwen3.8-Flash-Next native SGLang diagnostics and optimization plan — 2026-08-26](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md):
-  exact aarch64 image and package imports, isolated NVFP4 embedding correctness,
-  SM121 GDN/QSA boundaries, tiny real-weight serving, synthetic `NEXTN` draft
-  counters, and the still-unattempted full-model fit route.
+- [Qwen3.8-Flash-Next native SGLang result and optimization record — 2026-08-26](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md):
+  full Radix NVFP4 admission with read-only NVMe PLE and trained `NEXTN`, native
+  C1-C4 and 8K/32K measurements, 131K admission, the incompatible 245K boundary,
+  and the earlier isolated kernel and tiny-model diagnostics.
 - [Qwen3.8-Flash-Next day-zero GB10 results — 2026-08-26](docs/qwen38-flash-next-gb10-2026-08-26.md):
   pinned IQ4_XS llama.cpp admission, quick and core throughput, bounded text
   capability checks, and the observed unified-memory and swap boundary.
@@ -208,7 +218,7 @@ geometries, slot counts, or validation states.
 - [RLM and HALO overnight campaign protocol](docs/rlm-halo-overnight-2026-08-25.md)
 - [Nemotron diffusion direct-run guide](docs/nemotron-diffusion-direct.md)
 - [Experimental NInfer SM121a patch and reproduction notes](patches/ninfer/README.md)
-- [Experimental SGLang QSA SM121 XQA patch and diagnostics](patches/sglang/README.md)
+- [SGLang SM121 QSA and persistent read-only PLE patch guide](patches/sglang/README.md)
 
 ## Reproduce the original Qwen3.8 path
 
@@ -311,9 +321,11 @@ python3 sparkbench.py verify-evidence evidence --staged
 ```
 
 The exporter fails closed on unknown schemas and unsafe source files. It keeps
-measurements, validation outcomes, telemetry, terminal state, and reproducible
-artifact/runtime pins while excluding captured inputs or outputs, reasoning,
-tool payloads, request identifiers, local paths, logs, media, and credentials.
+measurements, validation outcomes, telemetry, terminal state, reproducible
+artifact/runtime pins, typed safety annotations, and path-free source-overlay
+and read-only PLE-cache digests while excluding captured inputs or outputs,
+reasoning, tool payloads, request identifiers, local paths, logs, media, and
+credentials.
 See the [publication policy](BENCHMARK.md#publishing-sanitized-evidence) before
 committing a refreshed archive.
 

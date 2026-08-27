@@ -214,15 +214,19 @@ The evidence exporter treats each `loop-*` attempt as its own strict scalar
 campaign bundle and excludes its prompts, completions, traces, reasoning,
 request identifiers, local paths, and raw logs. The two exact private Harbor
 lifecycle records needed to reproduce the historical Harbor bundle are retained
-locally and must be supplied explicitly during a full refresh; they are inputs,
-not tracked artifacts. The tracked archive publishes the four Flash Next
-attempts under [`evidence/runs/`](evidence/runs/), including the
-[core bundle](evidence/runs/20260826T165913Z-qwen38-flash-next-ud-iq4-xs-llamacpp-p8-core-b5a0f9ad/manifest.json).
-The complete refresh verifies deterministically with both Harbor inputs. See the
+locally and are inputs, not tracked artifacts. A first export requires both;
+subsequent refreshes may carry the existing canonical Harbor bundle forward only
+after its schema and checksums verify. The current tracked refresh contains
+1,736 files and 268 run bundles. It publishes the four day-zero llama.cpp Flash
+Next attempts under
+[`evidence/runs/`](evidence/runs/), including the
+[core bundle](evidence/runs/20260826T165913Z-qwen38-flash-next-ud-iq4-xs-llamacpp-p8-core-b5a0f9ad/manifest.json),
+as well as the later native SGLang attempts described below. The complete
+refresh verifies deterministically without reopening private inputs. See the
 [day-zero GB10 report](docs/qwen38-flash-next-gb10-2026-08-26.md) for artifact
 hashes, smoke history, results, and comparison limits.
 
-### Qwen3.8-Flash-Next SGLang day-zero diagnostics
+### Qwen3.8-Flash-Next native SGLang protocol and results
 
 The native runtime probe pins the Linux aarch64 image
 `lmsysorg/sglang:qwen38flashnext@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4`.
@@ -233,6 +237,98 @@ build commit. The import control measured SGLang `0.0.0.dev1+gd91c3682b`,
 PyTorch `2.13.0+cu130`, CUDA runtime `13.0`, FlashInfer `0.6.17`, and an NVIDIA
 GB10 at compute capability `[12, 1]`. Qwen4 target, `NEXTN`, and ModelOpt NVFP4
 embedding symbols imported successfully.
+
+#### Full Radix NVFP4 + read-only PLE result
+
+The completed native profile pins `RadixArk/Qwen3.8-Flash-Next-NVFP4` revision
+`7b719225242aacd3dbd3f9407468c2ee9a9d2594`: 206 weight files totaling
+135,195,303,851 bytes. It uses ModelOpt NVFP4 for the main MoE weights, keeps
+the source PLE in FP8, and loads the trained `NEXTN` head in BF16. The
+51,200,245,760-byte PLE payload is materialized once on NVMe, mounted read-only,
+and mapped without copying it into anonymous memory; this is not an NVFP4 PLE
+claim.
+
+The exact runtime and derived-artifact pins are:
+
+- image
+  `lmsysorg/sglang:qwen38flashnext@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4`;
+- public recipe revision
+  `bf2b7c75870d3703730b6bd8f3bb93dc622c278d`;
+- `qwen4_exp.py` overlay SHA-256
+  `0b513b4dc4f2394f6b1733bb0b74fa40ab59f4a04f6b33601350b2a606c67804`
+  and `qwen_sparse_attn_backend.py` overlay SHA-256
+  `e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75`;
+- read-only PLE payload SHA-256
+  `b070f9644adf93794d8a1030584ab705809387e64396a9327a68fa3a3a6666b3`
+  and completion-marker SHA-256
+  `f0ef55e4e4dec9b6b936a42af4ca2eb9b2f24ced373b1e216f7a6d507b171665`.
+
+Run
+[`20260827T032027Z-...-20e1283b`](evidence/runs/20260827T032027Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-20e1283b/manifest.json)
+ran on the DGX Spark/GB10 at clean harness revision
+`717b17c3150072f6cbc8d0cc5861c489af92d8bd` and completed all 12 cases in
+one managed server lifecycle. Its summary status is `partial` only because the
+synthetic exact-answer validator scored 3/4: the `code_reasoning` item failed
+while arithmetic, instruction following, and logic passed. JSON and tool-call
+smokes passed, as did all three 8K and all three 32K exact-key needle requests.
+
+All decode rates below are aggregate completed output tokens divided by case
+wall time. Prefill is the client-TTFT approximation, not a runtime-isolated
+kernel measurement. The llama.cpp values come from the clean day-zero core run,
+except its 8K prefill proxy, which comes from the clean quick run; the C2 value
+is a visible discontinuity/outlier. This is a descriptive cross-runtime view,
+not an MTP-off causal arm: runtime, quantization, PLE placement, suite shape,
+and speculative decoding all differ.
+
+| Metric | Native SGLang NVFP4 + MTP | IQ4_XS llama.cpp |
+| --- | ---: | ---: |
+| D256 aggregate output | 28.504 tok/s | 20.193 tok/s |
+| Fresh C1 aggregate output | 27.413 tok/s | 19.860 tok/s |
+| Fresh C2 aggregate output | 50.330 tok/s | 19.782 tok/s (outlier) |
+| Fresh C4 aggregate output | 72.821 tok/s | 51.927 tok/s |
+| Repeated-word 8K prefill proxy | 2,103.468 prompt tok/s | 674.500 prompt tok/s |
+| Repeated-word 32K prefill proxy | 2,179.588 prompt tok/s | — |
+
+Native startup took 581.652 seconds. Server-log timing attributed 420.36 seconds
+to target-weight loading and 83.86 seconds to MTP loading; those components do
+not account for every startup phase. The first measured request had 14.552
+seconds TTFT. No swap growth was observed during the completed run, and the
+minimum available memory sampled across measured cases was 16.564 GiB.
+
+Thirty periodic server-log samples had mean accepted length 2.956 and mean
+acceptance rate 0.653. They are sparse observations, not an authoritative
+lifetime or case aggregate, and without an otherwise matched MTP-off run they
+do not identify MTP's throughput contribution.
+
+The repeated-word 131K exact-key case passed twice: once in
+[`a06b138a`](evidence/runs/20260827T015017Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-a06b138a/summary.json)
+and once in [`7c25f743`](evidence/runs/20260827T024144Z-qwen38-flash-next-nvfp4-mtp-long-sglang-qwen38-flash-next-sglang-long-context-7c25f743/summary.json),
+where its TTFT was 72.285 seconds. The 245K case is not compatible with this
+one-Spark profile. The MTP route could not reserve its request pool at the
+pressure-safe `0.85` allocation, while `0.87` was pressure-unsafe. A capped
+target-only/BF16-state attempt
+[`7b88e52c`](evidence/runs/20260827T030636Z-qwen38-flash-next-nvfp4-long-sglang-qwen38-flash-next-sglang-long-context-7b88e52c/manifest.json)
+was safety-aborted at 0.046 GiB available. The operator also observed about 6.1
+GiB of new swap and memory-PSI full `avg10` 19.84 in that attempt; those two
+values are operational observations, not sanitized case aggregates. The exact
+245K diagnostic is retained with support status `incompatible` and must not be
+served. All 8K-131K prompts repeat one synthetic word, so they test serving
+mechanics and exact-key retention rather than natural-document understanding or
+cold/varied-token NVMe-PLE cost.
+
+Prepare and verify the exact offline overlays and PLE payload before freezing a
+run, then use the native suite:
+
+```bash
+python3 prepare_sglang_overlays.py
+python3 prepare_sglang_overlays.py --materialize-ple
+python3 prepare_sglang_overlays.py --verify-ple-cache
+python3 sparkbench.py fetch qwen38-flash-next-nvfp4-mtp-sglang
+python3 sparkbench.py benchmark qwen38-flash-next-nvfp4-mtp-sglang \
+  --suite manifests/suites/qwen38_flash_next_sglang_native.toml
+```
+
+#### Retained day-zero diagnostics
 
 The isolated CUDA NVFP4 embedding primitive matched an independent
 E2M1/block-scale reference with maximum absolute error `0`. That is a primitive
@@ -271,14 +367,13 @@ SGLang OpenAI path exported no speculative-acceptance aggregate.
 A later manual diagnostic admitted SM121 to the existing FlashInfer paged
 decode resolver. The [exact two-line patch](patches/sglang/README.md) selected
 the installed XQA-capable wrapper and completed native-QSA 4-to-8 and warm
-6-to-32-token requests on the tiny fixture. This is a bounded kernel-routing
-result, not a clean SparkBench run, full-model admission, or throughput claim.
-
-The 125.96 GiB Radix native checkpoint was not downloaded or attempted: its
-published payload already exceeds the Spark's 119.694 GiB total physical
-unified memory before runtime and cache overhead. See the
-[native diagnostics and optimization plan](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md)
-for fit math, integration gaps, and the bounded next steps.
+6-to-32-token requests on the tiny fixture. That observation remains a bounded
+kernel-routing result, not representative throughput. The same overlay lineage,
+extended with the persistent read-only PLE loader, underlies the full run above;
+it is digest-pinned local derived support, not evidence of upstream SGLang
+support. See the
+[native result and optimization record](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md)
+for the fit mechanism, integration history, and comparison limits.
 
 ### Agentic tool-use protocol
 
@@ -886,12 +981,21 @@ python3 sparkbench.py verify-evidence evidence
 python3 sparkbench.py verify-evidence evidence --staged
 ```
 
+The first Harbor campaign export requires its two owner-private lifecycle
+inputs. Later full refreshes may omit them: the exporter carries the existing
+sanitized Harbor bundle forward only after its exact schema and checksums pass,
+and fails rather than preserving a malformed or noncanonical bundle.
+
 The intended archive entry points are `evidence/README.md` for people and
 `evidence/index.json` for tools. Run bundles retain scalar request measurements,
 case aggregates, validation booleans and bounded categories, lifecycle state,
 compact numeric telemetry, and reproducibility pins such as artifact hashes,
-runtime revisions, image digests, hardware, and harness revision. Campaign and
-matrix bundles retain only their explicitly supported scalar schemas.
+runtime revisions, image digests, hardware, and harness revision. For supported
+SGLang runs, path-free source-overlay basenames and hashes plus the all-or-none
+read-only PLE mmap mode, marker digest, and payload digest are retained. The two
+known startup-safety failure annotations are projected only through their
+strictly typed scalar schemas. Campaign and matrix bundles retain only their
+explicitly supported scalar schemas.
 
 The exporter must fail closed. Unknown fields or schema versions, malformed or
 non-finite numbers, duplicate JSON keys, unsafe file types or links, unexpected
