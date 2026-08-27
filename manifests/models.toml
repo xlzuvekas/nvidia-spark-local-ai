@@ -2035,8 +2035,8 @@ args = [
 
 [[models]]
 id = "qwen38-flash-next-nvfp4-long-sglang"
-description = "Pinned one-DGX-Spark Qwen3.8-Flash-Next NVFP4 target-only 245K lane with five BF16 recurrent-state slots and a completed read-only persistent PLE cache."
-support_status = "exploratory"
+description = "Pressure-unsafe one-DGX-Spark Qwen3.8-Flash-Next NVFP4 target-only 245K diagnostic retained with its exact bounded configuration; do not serve this profile."
+support_status = "incompatible"
 backend = "sglang"
 recipe_source = "hashd1ve/qwen38-flash-next-one-dgx-spark"
 recipe_revision = "bf2b7c75870d3703730b6bd8f3bb93dc622c278d"

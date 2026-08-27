@@ -179,6 +179,7 @@ class SGLangRuntimeTests(unittest.TestCase):
                     getattr(long_context, field), getattr(throughput, field)
                 )
         self.assertEqual(long_context.tasks, ("chat",))
+        self.assertEqual(long_context.support_status, "incompatible")
         self.assertEqual(long_context.architecture, "moe+qsa+gdn")
         self.assertEqual(long_context.quantization, "nvfp4+ple-fp8")
         self.assertEqual(long_context.estimated_ram_gib, 101.0)
