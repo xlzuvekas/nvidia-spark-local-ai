@@ -99,7 +99,7 @@ _TPS_SUITE_BY_PROFILE_ID = {
     for suite_id, profile_ids in _TPS_PROFILE_IDS_BY_SUITE.items()
     for profile_id in profile_ids
 }
-_FLASH_NEXT_LONG_PROFILE_ID = "qwen38-flash-next-nvfp4-mtp-long-sglang"
+_FLASH_NEXT_LONG_PROFILE_ID = "qwen38-flash-next-nvfp4-long-sglang"
 _FLASH_NEXT_LONG_SUITE_ID = "qwen38-flash-next-sglang-long-context"
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")

@@ -158,11 +158,11 @@ class SGLangRuntimeTests(unittest.TestCase):
             },
         )
 
-    def test_flash_next_long_profile_reuses_pins_with_c1_state_budget(self) -> None:
+    def test_flash_next_long_profile_reuses_pins_with_target_only_budget(self) -> None:
         profiles = load_models(ROOT / "manifests" / "models.toml")
         throughput = profiles["qwen38-flash-next-nvfp4-mtp-sglang"]
         long_context = profiles[
-            "qwen38-flash-next-nvfp4-mtp-long-sglang"
+            "qwen38-flash-next-nvfp4-long-sglang"
         ]
 
         for field in (
@@ -179,12 +179,14 @@ class SGLangRuntimeTests(unittest.TestCase):
                     getattr(long_context, field), getattr(throughput, field)
                 )
         self.assertEqual(long_context.tasks, ("chat",))
-        self.assertEqual(long_context.estimated_ram_gib, 102.0)
+        self.assertEqual(long_context.architecture, "moe+qsa+gdn")
+        self.assertEqual(long_context.quantization, "nvfp4+ple-fp8")
+        self.assertEqual(long_context.estimated_ram_gib, 100.0)
         self.assertEqual(
             long_context.args[
                 long_context.args.index("--max-mamba-cache-size") + 1
             ],
-            "5",
+            "1",
         )
         self.assertEqual(
             long_context.args[
@@ -198,10 +200,18 @@ class SGLangRuntimeTests(unittest.TestCase):
             ],
             "1",
         )
+        self.assertEqual(
+            long_context.args[
+                long_context.args.index("--max-total-tokens") + 1
+            ],
+            "246272",
+        )
+        self.assertNotIn("--speculative-algorithm", long_context.args)
+        self.assertNotIn("--speculative-num-draft-tokens", long_context.args)
 
     def test_readonly_ple_admission_allows_exact_profile_alias_only(self) -> None:
         profiles = load_models(ROOT / "manifests" / "models.toml")
-        profile = profiles["qwen38-flash-next-nvfp4-mtp-long-sglang"]
+        profile = profiles["qwen38-flash-next-nvfp4-long-sglang"]
         overlays = tuple(
             (
                 Path(overlay.host_path),

@@ -2,20 +2,7 @@ schema_version = 1
 
 [suite]
 id = "qwen38-flash-next-sglang-long-context"
-description = "Single-request SGLang native near-window mechanics pass. The 131K and 240K inputs repeat one synthetic word, so they measure exact-key retention and serving capacity rather than natural-document understanding or cold/varied-token NVMe-PLE cost."
-
-# These near-window cases remain serial and un-warmed so each performs one
-# isolated retrieval without multiplying the live KV or recurrent-state demand.
-[[cases]]
-id = "long-context-needle-131072-c1"
-kind = "capability"
-requires = ["chat"]
-warmups = 0
-repetitions = 1
-max_output_tokens = 32
-temperature = 0.0
-concurrency = 1
-prompt_repetitions = 131072
+description = "Isolated target-only SGLang native 245K mechanics pass. The input repeats one synthetic word, so it measures exact-key retention and serving capacity rather than natural-document understanding or cold/varied-token NVMe-PLE cost."
 
 [[cases]]
 id = "long-context-needle-245760-c1"

@@ -80,17 +80,14 @@ class Qwen38FlashNextSglangNativeSuiteTests(unittest.TestCase):
 
         self.assertEqual(suite.id, "qwen38-flash-next-sglang-long-context")
         self.assertIn("NVMe-PLE", suite.description)
-        self.assertEqual(len(cases), 2)
-        for target in (131072, 245760):
-            case = cases[f"long-context-needle-{target}-c1"]
-            with self.subTest(case=case.id):
-                self.assertEqual(case.kind, "capability")
-                self.assertEqual(case.repetitions, 1)
-                self.assertEqual(case.warmups, 0)
-                self.assertEqual(case.concurrency, 1)
-
-                estimated_tokens, _ = _estimated_context_tokens(case)
-                self.assertLess(estimated_tokens, 262144)
+        self.assertEqual(set(cases), {"long-context-needle-245760-c1"})
+        case = cases["long-context-needle-245760-c1"]
+        self.assertEqual(case.kind, "capability")
+        self.assertEqual(case.repetitions, 1)
+        self.assertEqual(case.warmups, 0)
+        self.assertEqual(case.concurrency, 1)
+        estimated_tokens, _ = _estimated_context_tokens(case)
+        self.assertLess(estimated_tokens, 262144)
 
     def test_long_profile_and_suite_must_travel_together(self) -> None:
         models = load_models(ROOT / "manifests" / "models.toml")
@@ -98,7 +95,7 @@ class Qwen38FlashNextSglangNativeSuiteTests(unittest.TestCase):
         long_suite = load_suite(LONG_SUITE_PATH)
         throughput = models["qwen38-flash-next-nvfp4-mtp-sglang"]
         long_context = models[
-            "qwen38-flash-next-nvfp4-mtp-long-sglang"
+            "qwen38-flash-next-nvfp4-long-sglang"
         ]
 
         validate_benchmark_selection(long_context, long_suite)
