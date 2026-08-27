@@ -379,6 +379,30 @@ python3 sparkbench.py benchmark qwen38-flash-next-nvfp4-mtp-sglang \
   --suite manifests/suites/qwen38_flash_next_sglang_native.toml
 ```
 
+#### Matched PLE/depth replication and quality v2
+
+The follow-up protocol uses the separate ablation-capable overlay pair produced
+by `prepare_sglang_overlays.py --prepare-ple-ablation`. Mapped controls retain
+the exact read-only FP8 PLE payload. Omitted arms use a canonical sentinel that
+removes the pinned PLE layer and skips exactly its 138 checkpoint tensors; they
+have different model semantics and must remain labeled as an ablation.
+
+Performance arms hold `extra_buffer_lazy`, 32 recurrent states, a 32,768-token
+pool, 4,096-token context, decode graphs 1-8, thinking off, and C1/C2/C4/C8
+constant. Depths one and two run in ABBA lifetime order to two replicates each;
+mapped depth three and omitted depth three then form the PLE comparison. The
+dedicated `ple-study-*` cases use model-independent prompt tags so profile arms
+receive identical prompt text without changing any frozen legacy case.
+
+The quality-v2 suite is separate: mapped and omitted depth-three profiles use
+thinking on, `reasoning_effort=low`, temperature zero, C1, a 512-token cap, and
+two repetitions of all four exact-answer items. Protocol v2 keeps timestamped
+request IDs out of the prompt. Passing requires 8/8 under the original strict
+validator; answer keys, retry policy, and partial-run semantics are unchanged.
+See the
+[frozen PLE/depth study](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md)
+for exact order, pins, safety gates, and interpretation limits.
+
 #### Retained day-zero diagnostics
 
 The isolated CUDA NVFP4 embedding primitive matched an independent
@@ -1054,7 +1078,9 @@ case aggregates, validation booleans and bounded categories, lifecycle state,
 compact numeric telemetry, and reproducibility pins such as artifact hashes,
 runtime revisions, image digests, hardware, and harness revision. For supported
 SGLang runs, path-free source-overlay basenames and hashes plus the all-or-none
-read-only PLE mmap mode, marker digest, and payload digest are retained. The two
+read-only PLE mmap mode, marker digest, and payload digest are retained. PLE-study
+bundles additionally retain a versioned boolean omission dimension, with mapped
+controls bound to `false` and semantic-ablation arms bound to `true`. The two
 known startup-safety failure annotations are projected only through their
 strictly typed scalar schemas. Campaign and matrix bundles retain only their
 explicitly supported scalar schemas.

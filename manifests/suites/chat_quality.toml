@@ -5,7 +5,7 @@ id = "chat-quality"
 description = "Four embedded deterministic exact-answer smoke checks across arithmetic, logic, instruction following, and static code reasoning; model output is never executed, and the score is not a broad quality claim."
 
 [[cases]]
-id = "synthetic-exact-answer"
+id = "synthetic-exact-answer-v2"
 kind = "quality"
 requires = ["chat"]
 warmups = 0

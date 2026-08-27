@@ -75,6 +75,30 @@ and maps it with `shared=False` while still loading the PLE `weight_scale`.
 The upstream [MIT license](https://github.com/hashd1ve/qwen38-flash-next-one-dgx-spark/blob/bf2b7c75870d3703730b6bd8f3bb93dc622c278d/LICENSE)
 applies to the vendored patchers.
 
+### Explicit PLE omission ablation
+
+`python3 prepare_sglang_overlays.py --prepare-ple-ablation` builds a separate
+overlay pair for matched mapped-versus-omitted experiments. Its `qwen4_exp.py`
+applies `qwen38-ple-omission-ablation.py` after the mmap and persistent-cache
+patchers and is pinned as
+`bcdc2c86aa59784ffe27d53c8d214e56b6aa45c02b1d5841fd956d1f006d6030`.
+The QSA overlay remains
+`e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75`.
+
+The mapped control uses this same ablation-capable source with the sentinel
+absent, so its model graph and exact read-only FP8 PLE payload are unchanged.
+The omitted arm requires the single canonical model override
+`{"sparkbench_omit_ple":true}`. It verifies the pinned `[2]` PLE-layer layout,
+constructs no PLE module, and skips exactly the 138 checkpoint tensors under
+`model.language_model.layers.1.ple`: 128 table shards and ten auxiliary
+tensors. Any missing, duplicate, or unexpected PLE tensor fails startup.
+
+This is a semantic ablation, not a storage or serving optimization. It removes
+trained model parameters and therefore cannot be treated as equivalent to
+mapped PLE without a separate quality result. Manifest, runtime, and evidence
+admission bind the omitted label to the exact model revision, recipe revision,
+two-file overlay pair, embedded draft, and absence of a PLE cache or mount.
+
 ## Bounded result
 
 ### Historical tiny QSA control

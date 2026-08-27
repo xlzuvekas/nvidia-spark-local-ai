@@ -331,6 +331,139 @@ class SGLangRuntimeTests(unittest.TestCase):
         self.assertEqual(lazy.estimated_ram_gib, 104.5)
         self.assertEqual(lazy.support_status, "exploratory")
 
+    def test_ple_ablation_profiles_hold_lazy_geometry_constant(self) -> None:
+        profiles = load_models(ROOT / "manifests" / "models.toml")
+        mapped = {
+            depth: profiles[
+                f"qwen38-flash-next-nvfp4-mtp{depth}-c8-lazy-"
+                "ple-mapped-sglang"
+            ]
+            for depth in (1, 2, 3)
+        }
+        omitted = profiles[
+            "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-omitted-sglang"
+        ]
+        expected_overlay_digests = {
+            "sha256:bcdc2c86aa59784ffe27d53c8d214e56b6aa45c02b1d5841fd956d1f006d6030",
+            "sha256:e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75",
+        }
+        constant_flags = {
+            "--mamba-radix-cache-strategy": "extra_buffer_lazy",
+            "--max-mamba-cache-size": "32",
+            "--mem-fraction-static": "0.85",
+            "--max-total-tokens": "32768",
+            "--context-length": "4096",
+            "--chunked-prefill-size": "1024",
+            "--max-prefill-tokens": "4096",
+            "--max-running-requests": "8",
+        }
+
+        for depth, profile in mapped.items():
+            with self.subTest(depth=depth):
+                self.assertFalse(profile.sglang_ple_omitted)
+                self.assertTrue(profile.sglang_ple_mmap)
+                self.assertEqual(profile.sglang_ple_cache_mode, "readonly")
+                self.assertEqual(
+                    {overlay.digest for overlay in profile.sglang_source_overlays},
+                    expected_overlay_digests,
+                )
+                for flag, expected in constant_flags.items():
+                    self.assertEqual(
+                        profile.args[profile.args.index(flag) + 1], expected
+                    )
+                self.assertEqual(
+                    profile.args[
+                        profile.args.index("--speculative-num-steps") + 1
+                    ],
+                    str(depth),
+                )
+                self.assertEqual(
+                    profile.args[
+                        profile.args.index("--speculative-num-draft-tokens") + 1
+                    ],
+                    str(depth + 1),
+                )
+                graph_index = profile.args.index("--cuda-graph-bs-decode")
+                self.assertEqual(
+                    profile.args[graph_index + 1 : graph_index + 9],
+                    tuple(str(index) for index in range(1, 9)),
+                )
+
+        control = mapped[3]
+        self.assertTrue(omitted.sglang_ple_omitted)
+        self.assertFalse(omitted.sglang_ple_mmap)
+        self.assertIsNone(omitted.sglang_ple_cache_mode)
+        self.assertEqual(
+            omitted.sglang_source_overlays, control.sglang_source_overlays
+        )
+        for flag, expected in constant_flags.items():
+            self.assertEqual(omitted.args[omitted.args.index(flag) + 1], expected)
+        self.assertNotIn("--ple-offload-embedding", omitted.args)
+        override_index = omitted.args.index("--json-model-override-args")
+        self.assertEqual(
+            omitted.args[override_index + 1], '{"sparkbench_omit_ple":true}'
+        )
+
+        mapped_quality = profiles[
+            "qwen38-flash-next-nvfp4-mtp3-quality-v2-ple-mapped-sglang"
+        ]
+        omitted_quality = profiles[
+            "qwen38-flash-next-nvfp4-mtp3-quality-v2-ple-omitted-sglang"
+        ]
+        expected_body = (
+            '{"chat_template_kwargs":{"enable_thinking":true,'
+            '"reasoning_effort":"low"}}'
+        )
+        self.assertEqual(mapped_quality.request_body_json, expected_body)
+        self.assertEqual(omitted_quality.request_body_json, expected_body)
+
+    def test_manifest_rejects_ambiguous_ple_omission(self) -> None:
+        profile = load_models(ROOT / "manifests" / "models.toml")[
+            "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-omitted-sglang"
+        ]
+        with self.assertRaisesRegex(ManifestError, "requires.*omitted=true"):
+            validate_model(replace(profile, sglang_ple_omitted=False))
+        with self.assertRaisesRegex(ManifestError, "no other model overrides"):
+            validate_model(
+                replace(
+                    profile,
+                    args=profile.args
+                    + ("--json-model-override-args", '{"foo":"bar"}'),
+                )
+            )
+        with self.assertRaisesRegex(ManifestError, "forbids PLE mmap"):
+            validate_model(replace(profile, sglang_ple_mmap=True))
+        with self.assertRaisesRegex(ManifestError, "exact.*overlays"):
+            validate_model(
+                replace(
+                    profile,
+                    sglang_source_overlays=profile.sglang_source_overlays[1:],
+                )
+            )
+        with self.assertRaisesRegex(ManifestError, "exact Qwen3.8"):
+            validate_model(replace(profile, revision="0" * 40))
+        with self.assertRaisesRegex(ManifestError, "embedded draft"):
+            validate_model(
+                replace(
+                    profile,
+                    draft_source="RadixArk/Qwen3.8-27B-DSpark",
+                    draft_revision="0" * 40,
+                )
+            )
+
+        override_index = profile.args.index("--json-model-override-args")
+        whitespace_args = list(profile.args)
+        whitespace_args[override_index + 1] = '{"sparkbench_omit_ple": true}'
+        with self.assertRaisesRegex(ManifestError, "canonical"):
+            validate_model(replace(profile, args=tuple(whitespace_args)))
+        inline_args = (
+            profile.args[:override_index]
+            + ('--json-model-override-args={"sparkbench_omit_ple":true}',)
+            + profile.args[override_index + 2 :]
+        )
+        with self.assertRaisesRegex(ManifestError, "canonical"):
+            validate_model(replace(profile, args=inline_args))
+
     def test_flash_next_long_profile_reuses_pins_with_target_only_budget(self) -> None:
         profiles = load_models(ROOT / "manifests" / "models.toml")
         throughput = profiles["qwen38-flash-next-nvfp4-mtp-sglang"]
@@ -392,6 +525,9 @@ class SGLangRuntimeTests(unittest.TestCase):
     def test_readonly_ple_admission_allows_exact_profile_alias_only(self) -> None:
         profiles = load_models(ROOT / "manifests" / "models.toml")
         profile = profiles["qwen38-flash-next-nvfp4-long-sglang"]
+        ablation_profile = profiles[
+            "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-mapped-sglang"
+        ]
         overlays = tuple(
             (
                 Path(overlay.host_path),
@@ -400,6 +536,15 @@ class SGLangRuntimeTests(unittest.TestCase):
                 overlay.host_path,
             )
             for overlay in profile.sglang_source_overlays
+        )
+        ablation_overlays = tuple(
+            (
+                Path(overlay.host_path),
+                overlay.container_path,
+                overlay.digest,
+                overlay.host_path,
+            )
+            for overlay in ablation_profile.sglang_source_overlays
         )
         record = PLECacheRecord(
             marker_sha256=profile.sglang_ple_cache_marker_digest.removeprefix(
@@ -427,9 +572,28 @@ class SGLangRuntimeTests(unittest.TestCase):
                 ),
             ):
                 resolved, admitted = _readonly_sglang_ple_dir(profile, overlays)
+                ablation_resolved, ablation_admitted = _readonly_sglang_ple_dir(
+                    ablation_profile, ablation_overlays
+                )
 
         self.assertEqual(resolved, cache)
         self.assertEqual(admitted, record)
+        self.assertEqual(ablation_resolved, cache)
+        self.assertEqual(ablation_admitted, record)
+        invalid_overlays = list(ablation_overlays)
+        host, target, _digest, relative = invalid_overlays[1]
+        invalid_overlays[1] = (
+            host,
+            target,
+            "sha256:" + "0" * 64,
+            relative,
+        )
+        with self.assertRaisesRegex(
+            RuntimeErrorWithContext, "exact persistent-cache"
+        ):
+            _readonly_sglang_ple_dir(
+                ablation_profile, tuple(invalid_overlays)
+            )
         for field in ("source", "revision", "recipe_source", "recipe_revision"):
             with self.subTest(field=field), self.assertRaisesRegex(
                 RuntimeErrorWithContext, "exact Qwen3.8 artifact"
@@ -541,7 +705,7 @@ class SGLangRuntimeTests(unittest.TestCase):
             "HF_TOKEN_PATH=/tmp/sparkbench-hf/token-disabled", launch
         )
         self.assertIn("HF_HUB_DISABLE_IMPLICIT_TOKEN=1", launch)
-        self.assertIn("--api-key=-generic-ephemeral-key", launch)
+        self.assertIn("--api-key=" + "-generic-ephemeral-key", launch)
         self.assertNotIn("-generic-ephemeral-key", launch)
         image_index = launch.index(model.resolved_image)
         self.assertEqual(
@@ -558,16 +722,16 @@ class SGLangRuntimeTests(unittest.TestCase):
         self.assertEqual(server.backend, "sglang")
         self.assertEqual(server.base_url, "http://127.0.0.1:30000/v1")
         self.assertEqual(
-            server.authorization, "Bearer -generic-ephemeral-key"
+            server.authorization, "Bearer " + "-generic-ephemeral-key"
         )
         wait.assert_called_once_with(
             server.base_url,
             1200.0,
             "container-id",
-            authorization="Bearer -generic-ephemeral-key",
+            authorization="Bearer " + "-generic-ephemeral-key",
             sensitive_values=(
                 "-generic-ephemeral-key",
-                "Bearer -generic-ephemeral-key",
+                "Bearer " + "-generic-ephemeral-key",
             ),
         )
 
@@ -675,6 +839,128 @@ class SGLangRuntimeTests(unittest.TestCase):
             serialized = json.dumps(server.native_provenance)
             self.assertNotIn(str(workspace), serialized)
             self.assertIn(digest(model_overlay), serialized)
+
+    def test_ple_omission_launch_has_no_ple_backing_and_is_fail_closed(self) -> None:
+        profile = replace(
+            load_models(ROOT / "manifests" / "models.toml")[
+                "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-omitted-sglang"
+            ],
+            cache_dir="project",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            snapshot = (
+                workspace
+                / "data"
+                / "huggingface"
+                / "hub"
+                / "models--RadixArk--Qwen3.8-Flash-Next-NVFP4"
+                / "snapshots"
+                / str(profile.revision)
+            )
+            snapshot.mkdir(parents=True)
+            overlay_root = workspace / "synthetic-overlays"
+            overlay_root.mkdir()
+            resolved_overlays = tuple(
+                (
+                    overlay_root / Path(overlay.host_path).name,
+                    overlay.container_path,
+                    overlay.digest,
+                    overlay.host_path,
+                )
+                for overlay in profile.sglang_source_overlays
+            )
+            model = SimpleNamespace(
+                **asdict(profile),
+                resolved_image=profile.image,
+                run_identity="run-ple-omitted",
+            )
+
+            with (
+                patch("bench.runtime._existing_container", return_value=None),
+                patch("bench.runtime._port_is_free", return_value=True),
+                patch(
+                    "bench.runtime._resolve_sglang_source_overlays",
+                    return_value=resolved_overlays,
+                ),
+                patch("bench.runtime.wait_for_endpoint", return_value=3.0),
+                patch(
+                    "bench.runtime.secrets.token_urlsafe",
+                    return_value="omitted-ephemeral-key",
+                ),
+                patch(
+                    "bench.runtime._run",
+                    return_value=_completed(stdout="omitted-container\n"),
+                ) as run,
+            ):
+                server = start_sglang(model, workspace=workspace)
+
+            launch = run.call_args.args[0]
+            serialized_launch = " ".join(launch)
+            override_index = launch.index("--json-model-override-args")
+            self.assertEqual(
+                launch[override_index + 1], '{"sparkbench_omit_ple":true}'
+            )
+            self.assertNotIn("--ple-offload-embedding", launch)
+            self.assertNotIn("SGLANG_QWEN4_PLE_", serialized_launch)
+            self.assertNotIn(":/ple:", serialized_launch)
+            assert server.native_provenance is not None
+            self.assertIs(server.native_provenance["sglang_ple_omitted"], True)
+            self.assertIs(server.native_provenance["sglang_ple_mmap"], False)
+            self.assertIsNone(server.native_provenance["sglang_ple_cache_mode"])
+            self.assertIsNone(
+                server.native_provenance["sglang_ple_cache_marker_digest"]
+            )
+            self.assertIsNone(
+                server.native_provenance["sglang_ple_cache_payload_digest"]
+            )
+
+            invalid_models = (
+                SimpleNamespace(**{**vars(model), "sglang_ple_omitted": "true"}),
+                SimpleNamespace(**{**vars(model), "sglang_ple_mmap": True}),
+                SimpleNamespace(
+                    **{
+                        **vars(model),
+                        "args": tuple(model.args) + ("--ple-offload-embedding",),
+                    }
+                ),
+                SimpleNamespace(
+                    **{
+                        **vars(model),
+                        "args": tuple(model.args)
+                        + ("--json-model-override-args",),
+                    }
+                ),
+            )
+            for index, invalid in enumerate(invalid_models):
+                with (
+                    self.subTest(index=index),
+                    patch("bench.runtime._existing_container", return_value=None),
+                    patch("bench.runtime._port_is_free", return_value=True),
+                    patch(
+                        "bench.runtime._resolve_sglang_source_overlays",
+                        return_value=resolved_overlays,
+                    ),
+                    patch("bench.runtime._run") as invalid_run,
+                    self.assertRaises(RuntimeErrorWithContext),
+                ):
+                    start_sglang(invalid, workspace=workspace)
+                invalid_run.assert_not_called()
+
+            with (
+                patch("bench.runtime._existing_container", return_value=None),
+                patch("bench.runtime._port_is_free", return_value=True),
+                patch(
+                    "bench.runtime._resolve_sglang_source_overlays",
+                    return_value=resolved_overlays[1:],
+                ),
+                patch("bench.runtime._run") as invalid_run,
+                self.assertRaisesRegex(
+                    RuntimeErrorWithContext, "exact ablation-capable"
+                ),
+            ):
+                start_sglang(model, workspace=workspace)
+            invalid_run.assert_not_called()
 
     def test_explicit_readonly_ple_cache_is_verified_and_mounted_ro(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1001,10 +1287,10 @@ class SGLangRuntimeTests(unittest.TestCase):
                 and "/root/.cache/huggingface/hub/models--" in launch[index + 1]
             ]
             self.assertEqual(len(repository_mounts), 2)
-            self.assertIn("--api-key=dspark-ephemeral-key", launch)
+            self.assertIn("--api-key=" + "dspark-ephemeral-key", launch)
             self.assertNotIn("dspark-ephemeral-key", launch)
             self.assertEqual(
-                server.authorization, "Bearer dspark-ephemeral-key"
+                server.authorization, "Bearer " + "dspark-ephemeral-key"
             )
             key_path = server_log.parent / "api-key"
             self.assertEqual(key_path.read_text(), "dspark-ephemeral-key\n")
@@ -1013,10 +1299,10 @@ class SGLangRuntimeTests(unittest.TestCase):
                 server.base_url,
                 1800.0,
                 "dspark-container",
-                authorization="Bearer dspark-ephemeral-key",
+                authorization="Bearer " + "dspark-ephemeral-key",
                 sensitive_values=(
                     "dspark-ephemeral-key",
-                    "Bearer dspark-ephemeral-key",
+                    "Bearer " + "dspark-ephemeral-key",
                 ),
             )
             compile_cache = (

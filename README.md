@@ -15,6 +15,7 @@ quality checks, and the provenance needed to interpret each number.
 | How does Qwen3.8-Flash-Next run on one Spark? | [Native Radix SGLang and IQ4_XS llama.cpp throughput, validation, and memory boundaries](docs/qwen38-flash-next-gb10-2026-08-26.md) |
 | Does SGLang's native Flash-Next path run on GB10, and how does it fit? | [Measured NVFP4+MTP result, read-only NVMe PLE mechanics, exact pins, and long-context limit](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md) |
 | What did the first day of GB10 community work add? | [Primary-source review of the one-Spark vLLM mmap patch, upstream status, and dual-Spark SGLang report](docs/qwen38-flash-next-gb10-day-one-2026-08-27.md) |
+| How are PLE mapping, PLE omission, and NEXTN depths being compared? | [Matched lazy-C8 PLE/depth protocol and quality-clean exact-answer v2 gate](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md) |
 | What does native llama.cpp prompt-KV reuse change for Qwen3.6? | [Prefix-cache controls: 8K and 32K shared-prefix cold/warm observations](docs/qwen36-prefix-cache-results-2026-08-18.md) |
 | How did Qwen3-Coder-Next fare on terminal coding tasks? | [Harbor/Terminal-Bench-derived results: Qwen Code versus OpenCode](docs/harbor-terminal-results-2026-08-18.md) |
 | How are offline coding-agent harnesses compared? | [Qwen3-Coder-Next Harbor campaign protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign) |

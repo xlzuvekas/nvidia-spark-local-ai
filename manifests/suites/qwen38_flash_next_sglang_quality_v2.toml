@@ -1,0 +1,16 @@
+schema_version = 1
+
+[suite]
+id = "qwen38-flash-next-sglang-quality-v2"
+description = "Strict version-two exact-answer gate with stable prompt variants, two complete repetitions, thinking enabled at profile-pinned low effort, and no retry or majority scoring."
+
+[[cases]]
+id = "synthetic-exact-answer-v2"
+kind = "quality"
+requires = ["chat"]
+warmups = 0
+repetitions = 2
+max_output_tokens = 512
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0

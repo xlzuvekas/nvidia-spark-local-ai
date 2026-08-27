@@ -753,7 +753,7 @@ class ManifestLoaderTests(unittest.TestCase):
 
         self.assertEqual(len(suite.cases), 1)
         case = suite.cases[0]
-        self.assertEqual(case.id, "synthetic-exact-answer")
+        self.assertEqual(case.id, "synthetic-exact-answer-v2")
         self.assertEqual(case.kind, "quality")
         self.assertEqual(case.requires, ("chat",))
         self.assertEqual(case.temperature, 0.0)

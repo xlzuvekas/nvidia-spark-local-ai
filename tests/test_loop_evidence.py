@@ -15,6 +15,8 @@ from bench.evidence import (
     SCHEMA_VERSION,
     _LOOP_MEASUREMENT_FIELDS,
     _export_loop_campaign,
+    _project_loop_model,
+    _validate_projected_sglang_provenance,
     _validate_runtime_overlay_tree,
     _verify_simple_bundle,
 )
@@ -136,6 +138,16 @@ def _fixture_plan(variant: str = "current_v2") -> dict[str, object]:
     }
     if variant in {"legacy_v2", "legacy_v1"}:
         plan.pop("rlm_compaction_admission")
+        for model in models.values():
+            for field in (
+                "sglang_ple_cache_marker_digest",
+                "sglang_ple_cache_mode",
+                "sglang_ple_cache_payload_digest",
+                "sglang_ple_mmap",
+                "sglang_ple_omitted",
+                "sglang_source_overlays",
+            ):
+                model.pop(field, None)
         for key in ("compaction", "compaction_threshold_pct"):
             rlm.pop(key)
         for case in selected_cases:
@@ -421,6 +433,59 @@ class LoopEvidenceTests(unittest.TestCase):
                         manifest["protocol"]["rlm_compaction_admission"]
                     )
 
+    def test_pre_omission_loop_model_schemas_remain_exportable(self) -> None:
+        for include_cache_fields in (False, True):
+            with (
+                self.subTest(include_cache_fields=include_cache_fields),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                results = root / "results"
+                plan = _fixture_plan()
+                for model in plan["models"].values():
+                    model.pop("sglang_ple_omitted")
+                    if not include_cache_fields:
+                        for field in (
+                            "sglang_ple_cache_marker_digest",
+                            "sglang_ple_cache_mode",
+                            "sglang_ple_cache_payload_digest",
+                        ):
+                            model.pop(field)
+                _rehash_plan(plan)
+                run_dir = _materialize_source(results, plan)
+
+                entry = _export_loop_campaign(
+                    run_dir,
+                    results,
+                    root / "evidence",
+                    source_group=SOURCE_GROUP,
+                )
+
+                self.assertEqual(entry["status"], "planned")
+
+    def test_ple_study_recipe_revision_survives_loop_projection(self) -> None:
+        profiles = load_models(MODELS)
+        profile_ids = (
+            "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-mapped-sglang",
+            "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-omitted-sglang",
+        )
+        for profile_id in profile_ids:
+            with self.subTest(profile_id=profile_id):
+                projected = _project_loop_model(
+                    _model_record(profiles[profile_id]), profile_id=profile_id
+                )
+                self.assertEqual(
+                    "bf2b7c75870d3703730b6bd8f3bb93dc622c278d",
+                    projected["recipe_revision"],
+                )
+                _validate_projected_sglang_provenance(projected, projected)
+
+                projected.pop("recipe_revision")
+                with self.assertRaisesRegex(
+                    EvidenceError, "recipe identity changed"
+                ):
+                    _validate_projected_sglang_provenance(projected, projected)
+
     def test_sglang_ple_and_overlay_provenance_survives_loop_projection(
         self,
     ) -> None:
@@ -442,7 +507,8 @@ class LoopEvidenceTests(unittest.TestCase):
             model = next(
                 value for value in manifest["models"] if value["id"] == profile_id
             )
-            self.assertEqual(1, model["sglang_provenance_version"])
+            self.assertEqual(2, model["sglang_provenance_version"])
+            self.assertIs(model["sglang_ple_omitted"], False)
             self.assertIs(model["sglang_ple_mmap"], True)
             self.assertEqual("readonly", model["sglang_ple_cache_mode"])
             self.assertEqual("c" * 64, model["sglang_ple_cache_marker_sha256"])

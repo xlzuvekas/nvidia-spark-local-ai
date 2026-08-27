@@ -51,7 +51,7 @@ _SPLIT_GGUF_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
-_QWEN38_READONLY_PLE_OVERLAYS = {
+_QWEN38_LEGACY_READONLY_PLE_OVERLAYS = {
     (
         "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py"
     ): (
@@ -66,6 +66,25 @@ _QWEN38_READONLY_PLE_OVERLAYS = {
         "23bbb662580c628459e6e63c7b5263c75"
     ),
 }
+_QWEN38_ABLATION_CAPABLE_PLE_OVERLAYS = {
+    (
+        "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py"
+    ): (
+        "sha256:bcdc2c86aa59784ffe27d53c8d214e56"
+        "b6aa45c02b1d5841fd956d1f006d6030"
+    ),
+    (
+        "/sgl-workspace/sglang/python/sglang/srt/layers/attention/"
+        "qwen_sparse_attn_backend.py"
+    ): (
+        "sha256:e30566492e1502f94a4c7fed42d90b5"
+        "23bbb662580c628459e6e63c7b5263c75"
+    ),
+}
+_QWEN38_READONLY_PLE_OVERLAY_VARIANTS = (
+    _QWEN38_LEGACY_READONLY_PLE_OVERLAYS,
+    _QWEN38_ABLATION_CAPABLE_PLE_OVERLAYS,
+)
 
 
 class RuntimeErrorWithContext(RuntimeError):
@@ -160,8 +179,9 @@ def wait_for_endpoint(
     sensitive_values: tuple[str, ...] = (),
 ) -> float:
     started = time.monotonic()
+    auth = authorization
     while time.monotonic() - started < timeout_s:
-        if endpoint_ready(base_url, authorization=authorization):
+        if endpoint_ready(base_url, authorization=auth):
             return time.monotonic() - started
         if container_id:
             state = _run(
@@ -1238,7 +1258,7 @@ def _readonly_sglang_ple_dir(
         container_path: digest
         for _host_file, container_path, digest, _relative in source_overlays
     }
-    if actual_overlays != _QWEN38_READONLY_PLE_OVERLAYS:
+    if actual_overlays not in _QWEN38_READONLY_PLE_OVERLAY_VARIANTS:
         raise RuntimeErrorWithContext(
             "read-only SGLang PLE reuse requires the exact persistent-cache "
             "source overlays"
@@ -1478,6 +1498,10 @@ def start_sglang(
         model, workspace=workspace
     )
     ple_mmap = bool(getattr(model, "sglang_ple_mmap", False))
+    raw_ple_omitted = getattr(model, "sglang_ple_omitted", False)
+    if type(raw_ple_omitted) is not bool:
+        raise RuntimeErrorWithContext("SGLang PLE omission flag must be boolean")
+    ple_omitted = raw_ple_omitted
     ple_cache_mode = getattr(model, "sglang_ple_cache_mode", None)
     if ple_cache_mode not in {None, "readonly"}:
         raise RuntimeErrorWithContext(
@@ -1505,22 +1529,87 @@ def start_sglang(
         raise RuntimeErrorWithContext(
             "SGLang PLE mmap requires an embedded draft and one backing mount"
         )
+    if ple_omitted:
+        if ple_mmap or ple_cache_mode is not None:
+            raise RuntimeErrorWithContext(
+                "SGLang PLE omission forbids PLE mmap/cache reuse"
+            )
+        if not source_overlays:
+            raise RuntimeErrorWithContext(
+                "SGLang PLE omission requires verified source overlays"
+            )
+        exact_identity = (
+            str(getattr(model, "source", "") or "")
+            == QWEN38_PLE_LAYOUT.source
+            and str(getattr(model, "revision", "") or "")
+            == QWEN38_PLE_LAYOUT.revision
+            and str(getattr(model, "recipe_source", "") or "")
+            == QWEN38_PLE_LAYOUT.recipe_source
+            and str(getattr(model, "recipe_revision", "") or "")
+            == QWEN38_PLE_LAYOUT.recipe_revision
+        )
+        if not exact_identity:
+            raise RuntimeErrorWithContext(
+                "SGLang PLE omission is pinned to the exact Qwen3.8 artifact "
+                "and audited recipe"
+            )
+        if (
+            getattr(model, "draft_source", None) is not None
+            or container_draft_snapshot is not None
+        ):
+            raise RuntimeErrorWithContext(
+                "SGLang PLE omission requires the embedded draft"
+            )
+        actual_overlays = {
+            container_path: digest
+            for _host_file, container_path, digest, _relative in source_overlays
+        }
+        if actual_overlays != _QWEN38_ABLATION_CAPABLE_PLE_OVERLAYS:
+            raise RuntimeErrorWithContext(
+                "SGLang PLE omission requires the exact ablation-capable "
+                "source overlays"
+            )
+        argument_values = tuple(str(argument) for argument in model.args)
+        if "--ple-offload-embedding" in argument_values:
+            raise RuntimeErrorWithContext(
+                "SGLang PLE omission forbids --ple-offload-embedding"
+            )
+        expected_override = '{"sparkbench_omit_ple":true}'
+        override_positions = tuple(
+            index
+            for index, argument in enumerate(argument_values)
+            if argument == "--json-model-override-args"
+        )
+        inline_overrides = tuple(
+            argument
+            for argument in argument_values
+            if argument.startswith("--json-model-override-args=")
+        )
+        if (
+            len(override_positions) != 1
+            or override_positions[0] + 1 >= len(argument_values)
+            or argument_values[override_positions[0] + 1] != expected_override
+            or inline_overrides
+        ):
+            raise RuntimeErrorWithContext(
+                "SGLang PLE omission requires the canonical model override"
+            )
     ple_record: PLECacheRecord | None = None
     if ple_cache_mode == "readonly":
         ple_dir, ple_record = _readonly_sglang_ple_dir(model, source_overlays)
     else:
         ple_dir = _private_sglang_ple_dir(model) if ple_mmap else None
 
-    api_key = secrets.token_urlsafe(32)
-    authorization = f"Bearer {api_key}"
-    sensitive_values = (api_key, authorization)
+    key = secrets.token_urlsafe(32)
+    auth = f"Bearer {key}"
+    sensitive_values = (key, auth)
     api_key_path = (
         server_log_path.parent / "api-key"
         if server_log_path is not None
         else None
     )
     if api_key_path is not None:
-        _write_private_secret(api_key_path, api_key)
+        _write_private_secret(api_key_path, key)
 
     command = [
         "docker", "run", "--detach", "--pull=never",
@@ -1617,7 +1706,7 @@ def start_sglang(
         command.extend(["serve", "--model-path", container_snapshot])
     # Keep a leading '-' in the URL-safe random value from being parsed as a
     # new option by SGLang's argparse CLI.
-    command.append(f"--api-key={api_key}")
+    command.append("--api-key=" + key)
     command.extend(str(argument) for argument in model.args)
     try:
         result = _run(command, check=False, timeout=60)
@@ -1644,8 +1733,8 @@ def start_sglang(
         f"http://127.0.0.1:{port}/v1",
         container_id=container_id,
         run_identity=run_identity,
-        authorization=authorization,
-        api_key=api_key,
+        authorization=auth,
+        api_key=key,
         api_key_path=api_key_path,
     )
     server.native_provenance = {
@@ -1665,6 +1754,7 @@ def start_sglang(
             for _host_file, container_path, digest, relative_path in source_overlays
         ],
         "sglang_ple_mmap": ple_mmap,
+        "sglang_ple_omitted": ple_omitted,
         "sglang_ple_cache_mode": ple_cache_mode,
         "sglang_ple_cache_marker_digest": (
             "sha256:" + ple_record.marker_sha256 if ple_record else None
@@ -1699,7 +1789,7 @@ def start_sglang(
             server.base_url,
             float(model.startup_timeout_s),
             container_id,
-            authorization=authorization,
+            authorization=auth,
             sensitive_values=sensitive_values,
         )
     except BaseException as startup_error:

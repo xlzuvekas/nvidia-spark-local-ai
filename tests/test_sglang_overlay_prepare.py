@@ -25,6 +25,18 @@ class VocabParallelEmbedding:
     pass
 
 
+class Qwen3VLForConditionalGeneration:
+    pass
+
+
+class Logger:
+    def warning(self, message):
+        pass
+
+
+logger = Logger()
+
+
 class Qwen4ExpPinnedHostEmbedding(VocabParallelEmbedding):
     def load(self, source_weight):
         cpu_weight = nn.Parameter(
@@ -62,7 +74,10 @@ class Qwen4Exp:
         loaded_buffers: Set[str] = set()
         loaded_shard_params: Set[str] = set()
         skipped_visual_count = 0
+
         for name, loaded_weight in weights:
+            if "rotary_emb.inv_freq" in name:
+                continue
             if load_qwen4_exp_ple_shard(name, loaded_weight):
                 continue
         loaded_params.update(loaded_buffers)
@@ -71,6 +86,20 @@ class Qwen4Exp:
         if skipped_visual_count > 0:
             pass
         return loaded_params
+
+
+class Qwen4ExpForConditionalGeneration(Qwen3VLForConditionalGeneration):
+    def __init__(
+        self,
+        config,
+        quant_config=None,
+        prefix="",
+        language_model_cls=None,
+    ) -> None:
+        super().__init__(config, quant_config, prefix, language_model_cls)
+        rope_config = getattr(self.config, "rope_parameters", None) or getattr(
+            self.config, "rope_scaling", {}
+        )
 '''
 
 QSA_SOURCE = '''def _resolve_trtllm_sparse_decode():
@@ -94,7 +123,9 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _fixture_specs() -> tuple[prepare.OverlaySpec, ...]:
+def _fixture_specs(
+    source_specs: tuple[prepare.OverlaySpec, ...] | None = None,
+) -> tuple[prepare.OverlaySpec, ...]:
     sources = {
         "qwen4_exp.py": PLE_SOURCE,
         "qwen_sparse_attn_backend.py": QSA_SOURCE,
@@ -102,12 +133,14 @@ def _fixture_specs() -> tuple[prepare.OverlaySpec, ...]:
     specs: list[prepare.OverlaySpec] = []
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        for spec in prepare.MODULE_OVERLAYS:
+        for spec in source_specs or prepare.MODULE_OVERLAYS:
             source = root / spec.output_name
             source.write_text(sources[spec.output_name], encoding="utf-8")
             patcher_names = [spec.patcher_name]
             if spec.post_patcher_name is not None:
                 patcher_names.append(spec.post_patcher_name)
+            if spec.final_patcher_name is not None:
+                patcher_names.append(spec.final_patcher_name)
             for patcher_name in patcher_names:
                 result = subprocess.run(
                     [
@@ -195,8 +228,12 @@ class SGLangOverlayPreparationTests(unittest.TestCase):
                 "bf47f244406e149a3c7fe51d42d326d6"
                 "3a008733d55868b51a73112052e3bcdf"
             ),
+            "qwen38-ple-omission-ablation.py": (
+                "cf4a28f2ca7cfc87acdb01602993367e"
+                "b214a19caa66b8c9ca3bfd2a4e227fdd"
+            ),
         }
-        for spec in prepare.MODULE_OVERLAYS:
+        for spec in (*prepare.MODULE_OVERLAYS, *prepare.PLE_ABLATION_OVERLAYS):
             patcher = prepare.PATCHER_ROOT / spec.patcher_name
             self.assertEqual(_sha256(patcher), expected[spec.patcher_name])
             self.assertEqual(spec.patcher_sha256, expected[spec.patcher_name])
@@ -208,6 +245,15 @@ class SGLangOverlayPreparationTests(unittest.TestCase):
                 self.assertEqual(
                     spec.post_patcher_sha256,
                     expected[spec.post_patcher_name],
+                )
+            if spec.final_patcher_name is not None:
+                final_patcher = prepare.PATCHER_ROOT / spec.final_patcher_name
+                self.assertEqual(
+                    _sha256(final_patcher), expected[spec.final_patcher_name]
+                )
+                self.assertEqual(
+                    spec.final_patcher_sha256,
+                    expected[spec.final_patcher_name],
                 )
         self.assertEqual(
             {spec.output_name: spec.output_sha256 for spec in prepare.MODULE_OVERLAYS},
@@ -222,6 +268,44 @@ class SGLangOverlayPreparationTests(unittest.TestCase):
                 ),
             },
         )
+        self.assertEqual(
+            {
+                spec.output_name: spec.output_sha256
+                for spec in prepare.PLE_ABLATION_OVERLAYS
+            },
+            {
+                "qwen4_exp.py": (
+                    "bcdc2c86aa59784ffe27d53c8d214e56"
+                    "b6aa45c02b1d5841fd956d1f006d6030"
+                ),
+                "qwen_sparse_attn_backend.py": (
+                    "e30566492e1502f94a4c7fed42d90b5"
+                    "23bbb662580c628459e6e63c7b5263c75"
+                ),
+            },
+        )
+
+    def test_prepares_fail_closed_ple_ablation_variant(self) -> None:
+        specs = _fixture_specs(prepare.PLE_ABLATION_OVERLAYS)
+        fake = FakeDocker(specs)
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with (
+                patch.object(prepare, "PLE_ABLATION_OVERLAYS", specs),
+                patch.object(prepare, "_docker", side_effect=fake),
+            ):
+                target = prepare.prepare_ple_ablation_overlays(workspace)
+
+            self.assertEqual(
+                target,
+                workspace
+                / "results/runtime-overlays/"
+                "qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1",
+            )
+            source = (target / "qwen4_exp.py").read_text(encoding="utf-8")
+            self.assertIn("sparkbench_omit_ple", source)
+            self.assertIn("ple_omitted_checkpoint_weights", source)
+            self.assertIn("expected_ple_weights", source)
 
     def test_prepares_with_offline_cpu_only_docker_and_is_idempotent(
         self,

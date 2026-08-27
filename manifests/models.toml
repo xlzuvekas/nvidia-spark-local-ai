@@ -2474,6 +2474,384 @@ args = [
 ]
 
 [[models]]
+id = "qwen38-flash-next-nvfp4-mtp1-c8-lazy-ple-mapped-sglang"
+description = "Matched PLE/depth study arm: Qwen3.8-Flash-Next NVFP4 with read-only mapped FP8 PLE, NEXTN depth one, and the bounded C8 lazy-state geometry."
+support_status = "exploratory"
+backend = "sglang"
+recipe_source = "hashd1ve/qwen38-flash-next-one-dgx-spark"
+recipe_revision = "bf2b7c75870d3703730b6bd8f3bb93dc622c278d"
+source = "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+revision = "7b719225242aacd3dbd3f9407468c2ee9a9d2594"
+weight_file_count = 206
+weight_size_bytes = 135195303851
+served_name = "qwen38-flash-next-nvfp4-mtp1-c8-lazy-ple-mapped"
+tasks = ["chat"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "moe+qsa+gdn+nextn"
+quantization = "nvfp4+ple-fp8-mapped+nextn-bf16"
+lifecycle = "docker"
+image = "lmsysorg/sglang@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+image_digest = "sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+cache_dir = "user"
+max_context = 4096
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 104.5
+endpoint = "http://127.0.0.1:30000/v1"
+sglang_source_overlays = [
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:bcdc2c86aa59784ffe27d53c8d214e56b6aa45c02b1d5841fd956d1f006d6030" },
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1/qwen_sparse_attn_backend.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py", digest = "sha256:e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75" },
+]
+sglang_ple_mmap = true
+sglang_ple_cache_mode = "readonly"
+sglang_ple_cache_marker_digest = "sha256:f0ef55e4e4dec9b6b936a42af4ca2eb9b2f24ced373b1e216f7a6d507b171665"
+sglang_ple_cache_payload_digest = "sha256:b070f9644adf93794d8a1030584ab705809387e64396a9327a68fa3a3a6666b3"
+args = [
+  "--served-model-name", "qwen38-flash-next-nvfp4-mtp1-c8-lazy-ple-mapped",
+  "--tp-size", "1",
+  "--prefill-attention-backend", "triton",
+  "--decode-attention-backend", "trtllm_mha",
+  "--quantization", "modelopt_fp4",
+  "--ple-offload-embedding",
+  "--weight-loader-drop-cache-after-load",
+  "--language-only",
+  "--reasoning-parser", "qwen3",
+  "--mamba-radix-cache-strategy", "extra_buffer_lazy",
+  "--max-mamba-cache-size", "32",
+  "--mem-fraction-static", "0.85",
+  "--max-total-tokens", "32768",
+  "--context-length", "4096",
+  "--chunked-prefill-size", "1024",
+  "--max-prefill-tokens", "4096",
+  "--max-running-requests", "8",
+  "--cuda-graph-backend-decode", "full",
+  "--cuda-graph-bs-decode", "1", "2", "3", "4", "5", "6", "7", "8",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--enable-metrics",
+  "--speculative-algorithm", "NEXTN",
+  "--speculative-num-steps", "1",
+  "--speculative-eagle-topk", "1",
+  "--speculative-num-draft-tokens", "2",
+  "--speculative-draft-model-quantization", "unquant",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]
+
+[[models]]
+id = "qwen38-flash-next-nvfp4-mtp2-c8-lazy-ple-mapped-sglang"
+description = "Matched PLE/depth study arm: Qwen3.8-Flash-Next NVFP4 with read-only mapped FP8 PLE, NEXTN depth two, and the bounded C8 lazy-state geometry."
+support_status = "exploratory"
+backend = "sglang"
+recipe_source = "hashd1ve/qwen38-flash-next-one-dgx-spark"
+recipe_revision = "bf2b7c75870d3703730b6bd8f3bb93dc622c278d"
+source = "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+revision = "7b719225242aacd3dbd3f9407468c2ee9a9d2594"
+weight_file_count = 206
+weight_size_bytes = 135195303851
+served_name = "qwen38-flash-next-nvfp4-mtp2-c8-lazy-ple-mapped"
+tasks = ["chat"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "moe+qsa+gdn+nextn"
+quantization = "nvfp4+ple-fp8-mapped+nextn-bf16"
+lifecycle = "docker"
+image = "lmsysorg/sglang@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+image_digest = "sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+cache_dir = "user"
+max_context = 4096
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 104.5
+endpoint = "http://127.0.0.1:30000/v1"
+sglang_source_overlays = [
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:bcdc2c86aa59784ffe27d53c8d214e56b6aa45c02b1d5841fd956d1f006d6030" },
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1/qwen_sparse_attn_backend.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py", digest = "sha256:e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75" },
+]
+sglang_ple_mmap = true
+sglang_ple_cache_mode = "readonly"
+sglang_ple_cache_marker_digest = "sha256:f0ef55e4e4dec9b6b936a42af4ca2eb9b2f24ced373b1e216f7a6d507b171665"
+sglang_ple_cache_payload_digest = "sha256:b070f9644adf93794d8a1030584ab705809387e64396a9327a68fa3a3a6666b3"
+args = [
+  "--served-model-name", "qwen38-flash-next-nvfp4-mtp2-c8-lazy-ple-mapped",
+  "--tp-size", "1",
+  "--prefill-attention-backend", "triton",
+  "--decode-attention-backend", "trtllm_mha",
+  "--quantization", "modelopt_fp4",
+  "--ple-offload-embedding",
+  "--weight-loader-drop-cache-after-load",
+  "--language-only",
+  "--reasoning-parser", "qwen3",
+  "--mamba-radix-cache-strategy", "extra_buffer_lazy",
+  "--max-mamba-cache-size", "32",
+  "--mem-fraction-static", "0.85",
+  "--max-total-tokens", "32768",
+  "--context-length", "4096",
+  "--chunked-prefill-size", "1024",
+  "--max-prefill-tokens", "4096",
+  "--max-running-requests", "8",
+  "--cuda-graph-backend-decode", "full",
+  "--cuda-graph-bs-decode", "1", "2", "3", "4", "5", "6", "7", "8",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--enable-metrics",
+  "--speculative-algorithm", "NEXTN",
+  "--speculative-num-steps", "2",
+  "--speculative-eagle-topk", "1",
+  "--speculative-num-draft-tokens", "3",
+  "--speculative-draft-model-quantization", "unquant",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]
+
+[[models]]
+id = "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-mapped-sglang"
+description = "Matched PLE/depth study arm: Qwen3.8-Flash-Next NVFP4 with read-only mapped FP8 PLE, NEXTN depth three, and the bounded C8 lazy-state geometry."
+support_status = "exploratory"
+backend = "sglang"
+recipe_source = "hashd1ve/qwen38-flash-next-one-dgx-spark"
+recipe_revision = "bf2b7c75870d3703730b6bd8f3bb93dc622c278d"
+source = "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+revision = "7b719225242aacd3dbd3f9407468c2ee9a9d2594"
+weight_file_count = 206
+weight_size_bytes = 135195303851
+served_name = "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-mapped"
+tasks = ["chat"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "moe+qsa+gdn+nextn"
+quantization = "nvfp4+ple-fp8-mapped+nextn-bf16"
+lifecycle = "docker"
+image = "lmsysorg/sglang@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+image_digest = "sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+cache_dir = "user"
+max_context = 4096
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 104.5
+endpoint = "http://127.0.0.1:30000/v1"
+sglang_source_overlays = [
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:bcdc2c86aa59784ffe27d53c8d214e56b6aa45c02b1d5841fd956d1f006d6030" },
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1/qwen_sparse_attn_backend.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py", digest = "sha256:e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75" },
+]
+sglang_ple_mmap = true
+sglang_ple_cache_mode = "readonly"
+sglang_ple_cache_marker_digest = "sha256:f0ef55e4e4dec9b6b936a42af4ca2eb9b2f24ced373b1e216f7a6d507b171665"
+sglang_ple_cache_payload_digest = "sha256:b070f9644adf93794d8a1030584ab705809387e64396a9327a68fa3a3a6666b3"
+args = [
+  "--served-model-name", "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-mapped",
+  "--tp-size", "1",
+  "--prefill-attention-backend", "triton",
+  "--decode-attention-backend", "trtllm_mha",
+  "--quantization", "modelopt_fp4",
+  "--ple-offload-embedding",
+  "--weight-loader-drop-cache-after-load",
+  "--language-only",
+  "--reasoning-parser", "qwen3",
+  "--mamba-radix-cache-strategy", "extra_buffer_lazy",
+  "--max-mamba-cache-size", "32",
+  "--mem-fraction-static", "0.85",
+  "--max-total-tokens", "32768",
+  "--context-length", "4096",
+  "--chunked-prefill-size", "1024",
+  "--max-prefill-tokens", "4096",
+  "--max-running-requests", "8",
+  "--cuda-graph-backend-decode", "full",
+  "--cuda-graph-bs-decode", "1", "2", "3", "4", "5", "6", "7", "8",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--enable-metrics",
+  "--speculative-algorithm", "NEXTN",
+  "--speculative-num-steps", "3",
+  "--speculative-eagle-topk", "1",
+  "--speculative-num-draft-tokens", "4",
+  "--speculative-draft-model-quantization", "unquant",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]
+
+[[models]]
+id = "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-omitted-sglang"
+description = "Semantic ablation only: Qwen3.8-Flash-Next NVFP4 with the trained PLE layer explicitly omitted, NEXTN depth three, and the same bounded C8 lazy-state geometry as the mapped arm."
+support_status = "exploratory"
+backend = "sglang"
+recipe_source = "hashd1ve/qwen38-flash-next-one-dgx-spark"
+recipe_revision = "bf2b7c75870d3703730b6bd8f3bb93dc622c278d"
+source = "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+revision = "7b719225242aacd3dbd3f9407468c2ee9a9d2594"
+weight_file_count = 206
+weight_size_bytes = 135195303851
+served_name = "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-omitted"
+tasks = ["chat"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "moe+qsa+gdn+nextn+ple-ablation"
+quantization = "nvfp4+ple-omitted-ablation+nextn-bf16"
+lifecycle = "docker"
+image = "lmsysorg/sglang@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+image_digest = "sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+cache_dir = "user"
+max_context = 4096
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 95.0
+endpoint = "http://127.0.0.1:30000/v1"
+sglang_source_overlays = [
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:bcdc2c86aa59784ffe27d53c8d214e56b6aa45c02b1d5841fd956d1f006d6030" },
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1/qwen_sparse_attn_backend.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py", digest = "sha256:e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75" },
+]
+sglang_ple_omitted = true
+args = [
+  "--served-model-name", "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-omitted",
+  "--tp-size", "1",
+  "--prefill-attention-backend", "triton",
+  "--decode-attention-backend", "trtllm_mha",
+  "--quantization", "modelopt_fp4",
+  "--json-model-override-args", '{"sparkbench_omit_ple":true}',
+  "--weight-loader-drop-cache-after-load",
+  "--language-only",
+  "--reasoning-parser", "qwen3",
+  "--mamba-radix-cache-strategy", "extra_buffer_lazy",
+  "--max-mamba-cache-size", "32",
+  "--mem-fraction-static", "0.85",
+  "--max-total-tokens", "32768",
+  "--context-length", "4096",
+  "--chunked-prefill-size", "1024",
+  "--max-prefill-tokens", "4096",
+  "--max-running-requests", "8",
+  "--cuda-graph-backend-decode", "full",
+  "--cuda-graph-bs-decode", "1", "2", "3", "4", "5", "6", "7", "8",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--enable-metrics",
+  "--speculative-algorithm", "NEXTN",
+  "--speculative-num-steps", "3",
+  "--speculative-eagle-topk", "1",
+  "--speculative-num-draft-tokens", "4",
+  "--speculative-draft-model-quantization", "unquant",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]
+
+[[models]]
+id = "qwen38-flash-next-nvfp4-mtp3-quality-v2-ple-mapped-sglang"
+description = "Quality-clean mapped-PLE control using the matched depth-three lazy geometry with thinking enabled at pinned low reasoning effort."
+support_status = "exploratory"
+backend = "sglang"
+recipe_source = "hashd1ve/qwen38-flash-next-one-dgx-spark"
+recipe_revision = "bf2b7c75870d3703730b6bd8f3bb93dc622c278d"
+source = "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+revision = "7b719225242aacd3dbd3f9407468c2ee9a9d2594"
+weight_file_count = 206
+weight_size_bytes = 135195303851
+served_name = "qwen38-flash-next-nvfp4-mtp3-quality-v2-ple-mapped"
+tasks = ["chat", "thinking"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":true,"reasoning_effort":"low"}}'
+architecture = "moe+qsa+gdn+nextn"
+quantization = "nvfp4+ple-fp8-mapped+nextn-bf16"
+lifecycle = "docker"
+image = "lmsysorg/sglang@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+image_digest = "sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+cache_dir = "user"
+max_context = 4096
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 104.5
+endpoint = "http://127.0.0.1:30000/v1"
+sglang_source_overlays = [
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:bcdc2c86aa59784ffe27d53c8d214e56b6aa45c02b1d5841fd956d1f006d6030" },
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1/qwen_sparse_attn_backend.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py", digest = "sha256:e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75" },
+]
+sglang_ple_mmap = true
+sglang_ple_cache_mode = "readonly"
+sglang_ple_cache_marker_digest = "sha256:f0ef55e4e4dec9b6b936a42af4ca2eb9b2f24ced373b1e216f7a6d507b171665"
+sglang_ple_cache_payload_digest = "sha256:b070f9644adf93794d8a1030584ab705809387e64396a9327a68fa3a3a6666b3"
+args = [
+  "--served-model-name", "qwen38-flash-next-nvfp4-mtp3-quality-v2-ple-mapped",
+  "--tp-size", "1",
+  "--prefill-attention-backend", "triton",
+  "--decode-attention-backend", "trtllm_mha",
+  "--quantization", "modelopt_fp4",
+  "--ple-offload-embedding",
+  "--weight-loader-drop-cache-after-load",
+  "--language-only",
+  "--reasoning-parser", "qwen3",
+  "--mamba-radix-cache-strategy", "extra_buffer_lazy",
+  "--max-mamba-cache-size", "32",
+  "--mem-fraction-static", "0.85",
+  "--max-total-tokens", "32768",
+  "--context-length", "4096",
+  "--chunked-prefill-size", "1024",
+  "--max-prefill-tokens", "4096",
+  "--max-running-requests", "8",
+  "--cuda-graph-backend-decode", "full",
+  "--cuda-graph-bs-decode", "1", "2", "3", "4", "5", "6", "7", "8",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--enable-metrics",
+  "--speculative-algorithm", "NEXTN",
+  "--speculative-num-steps", "3",
+  "--speculative-eagle-topk", "1",
+  "--speculative-num-draft-tokens", "4",
+  "--speculative-draft-model-quantization", "unquant",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]
+
+[[models]]
+id = "qwen38-flash-next-nvfp4-mtp3-quality-v2-ple-omitted-sglang"
+description = "Quality-clean semantic ablation using the matched depth-three lazy geometry, explicit PLE omission, and thinking enabled at pinned low reasoning effort."
+support_status = "exploratory"
+backend = "sglang"
+recipe_source = "hashd1ve/qwen38-flash-next-one-dgx-spark"
+recipe_revision = "bf2b7c75870d3703730b6bd8f3bb93dc622c278d"
+source = "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+revision = "7b719225242aacd3dbd3f9407468c2ee9a9d2594"
+weight_file_count = 206
+weight_size_bytes = 135195303851
+served_name = "qwen38-flash-next-nvfp4-mtp3-quality-v2-ple-omitted"
+tasks = ["chat", "thinking"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":true,"reasoning_effort":"low"}}'
+architecture = "moe+qsa+gdn+nextn+ple-ablation"
+quantization = "nvfp4+ple-omitted-ablation+nextn-bf16"
+lifecycle = "docker"
+image = "lmsysorg/sglang@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+image_digest = "sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+cache_dir = "user"
+max_context = 4096
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 95.0
+endpoint = "http://127.0.0.1:30000/v1"
+sglang_source_overlays = [
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:bcdc2c86aa59784ffe27d53c8d214e56b6aa45c02b1d5841fd956d1f006d6030" },
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1/qwen_sparse_attn_backend.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py", digest = "sha256:e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75" },
+]
+sglang_ple_omitted = true
+args = [
+  "--served-model-name", "qwen38-flash-next-nvfp4-mtp3-quality-v2-ple-omitted",
+  "--tp-size", "1",
+  "--prefill-attention-backend", "triton",
+  "--decode-attention-backend", "trtllm_mha",
+  "--quantization", "modelopt_fp4",
+  "--json-model-override-args", '{"sparkbench_omit_ple":true}',
+  "--weight-loader-drop-cache-after-load",
+  "--language-only",
+  "--reasoning-parser", "qwen3",
+  "--mamba-radix-cache-strategy", "extra_buffer_lazy",
+  "--max-mamba-cache-size", "32",
+  "--mem-fraction-static", "0.85",
+  "--max-total-tokens", "32768",
+  "--context-length", "4096",
+  "--chunked-prefill-size", "1024",
+  "--max-prefill-tokens", "4096",
+  "--max-running-requests", "8",
+  "--cuda-graph-backend-decode", "full",
+  "--cuda-graph-bs-decode", "1", "2", "3", "4", "5", "6", "7", "8",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--enable-metrics",
+  "--speculative-algorithm", "NEXTN",
+  "--speculative-num-steps", "3",
+  "--speculative-eagle-topk", "1",
+  "--speculative-num-draft-tokens", "4",
+  "--speculative-draft-model-quantization", "unquant",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]
+
+[[models]]
 id = "qwen38-flash-next-nvfp4-long-sglang"
 description = "Pressure-unsafe one-DGX-Spark Qwen3.8-Flash-Next NVFP4 target-only 245K diagnostic retained with its exact bounded configuration; do not serve this profile."
 support_status = "incompatible"

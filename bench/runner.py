@@ -1119,13 +1119,27 @@ def _multimodal_rerank_inputs(
     )
 
 
-def _quality_prompt(item: QualityItem, nonce: str) -> str:
+def _quality_prompt(
+    item: QualityItem, nonce: str, *, protocol_version: int = 2
+) -> str:
+    if protocol_version == 1:
+        header = f"Benchmark exact-answer item {item.id}; nonce {nonce}."
+    elif protocol_version == 2:
+        header = (
+            f"Benchmark exact-answer protocol v2; item {item.id}; "
+            f"variant {nonce}."
+        )
+    else:
+        raise ValueError(f"unsupported quality protocol version: {protocol_version}")
     return (
-        f"Benchmark exact-answer item {item.id}; nonce {nonce}.\n"
-        f"{item.question}\n"
+        f"{header}\n{item.question}\n"
         "Return one line exactly in the form `FINAL: <answer>`. "
         "Do not include an explanation."
     )
+
+
+def _uses_matched_prompt_protocol(case: SimpleNamespace) -> bool:
+    return str(case.id).startswith("ple-study-")
 
 
 def _extract_quality_answer(content: str) -> tuple[str | None, str | None]:
@@ -1289,8 +1303,17 @@ def _estimated_context_tokens(case: SimpleNamespace) -> tuple[int, str]:
             "memory_operation_fixed_prompt_plus_json_output_margin",
         )
     if str(case.kind) == "quality":
+        quality_protocol_version = (
+            2 if str(case.id) == "synthetic-exact-answer-v2" else 1
+        )
         prompt_words = max(
-            len(_quality_prompt(item, "context-estimate").split())
+            len(
+                _quality_prompt(
+                    item,
+                    "context-estimate",
+                    protocol_version=quality_protocol_version,
+                ).split()
+            )
             for item in _QUALITY_ITEMS
         )
         return prompt_words + output_tokens + 128, "quality_prompt_words_plus_margin"
@@ -1446,6 +1469,7 @@ def _quality_request_arguments(
     case: SimpleNamespace,
     item: QualityItem,
     request_id: str,
+    prompt_tag: str,
 ) -> dict[str, Any]:
     arguments = _request_arguments(
         server=server,
@@ -1453,7 +1477,14 @@ def _quality_request_arguments(
         case=case,
         request_id=request_id,
     )
-    arguments["prompt"] = _quality_prompt(item, request_id)
+    if str(case.id) == "synthetic-exact-answer-v2":
+        arguments["prompt"] = _quality_prompt(
+            item, prompt_tag, protocol_version=2
+        )
+    else:
+        arguments["prompt"] = _quality_prompt(
+            item, request_id, protocol_version=1
+        )
     return arguments
 
 
@@ -1708,10 +1739,15 @@ def _run_warmups(server: Any, model: SimpleNamespace, case: SimpleNamespace) -> 
                     case=case,
                     item=item,
                     request_id=request_id,
+                    prompt_tag=f"warmup-{index}",
                 )
             )
             continue
-        request_id = f"warmup-{case.case_id}-{index}-{time.time_ns()}"
+        request_id = (
+            f"warmup-{case.id}-{index}"
+            if _uses_matched_prompt_protocol(case)
+            else f"warmup-{case.case_id}-{index}-{time.time_ns()}"
+        )
         if _is_multimodal_embedding_case(case):
             multimodal_embedding_request(
                 **_multimodal_embedding_request_arguments(
@@ -2005,6 +2041,7 @@ def _execute_case(
                                 case=case,
                                 item=item,
                                 request_id=request_id,
+                                prompt_tag=f"r{repetition}",
                             )
                         )
                     batch_results, batch_s = concurrent_chat_requests(
@@ -2079,7 +2116,14 @@ def _execute_case(
                         server=server,
                         model=model,
                         case=case,
-                        request_id=f"{case.case_id}-r{repetition}-w{worker}-{time.time_ns()}",
+                        request_id=(
+                            f"{case.id}-r{repetition}-w{worker}"
+                            if _uses_matched_prompt_protocol(case)
+                            else (
+                                f"{case.case_id}-r{repetition}-w{worker}-"
+                                f"{time.time_ns()}"
+                            )
+                        ),
                     )
                     for worker in range(int(case.concurrency))
                 ]
@@ -3015,10 +3059,11 @@ def execute_plan(
                         raise SGLangSpeculativeAuditError(
                             "SGLang chat-template arguments must be an object"
                         )
+                    auth = getattr(server, "authorization", None)
                     spec_decode_metrics = request_sglang_speculative_audit(
                         base_url=server.base_url,
                         model=str(model.served_name),
-                        authorization=getattr(server, "authorization", None),
+                        authorization=auth,
                         expected_depth=nextn_depth,
                         chat_template_kwargs=chat_template_kwargs,
                     )

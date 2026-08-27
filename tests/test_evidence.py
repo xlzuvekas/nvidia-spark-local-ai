@@ -1458,6 +1458,226 @@ class EvidenceExportTests(unittest.TestCase):
         with self.assertRaisesRegex(EvidenceError, "provenance is incomplete"):
             verify_evidence(self.fixture.output)
 
+    def test_explicit_mapped_ple_control_uses_v2_omission_dimension(self) -> None:
+        overlays = self.fixture.add_sglang_runtime_overlays(
+            readonly_ple_cache=True
+        )
+        exact_overlay_digests = {
+            "qwen4_exp.py": (
+                "sha256:bcdc2c86aa59784ffe27d53c8d214e56"
+                "b6aa45c02b1d5841fd956d1f006d6030"
+            ),
+            "qwen_sparse_attn_backend.py": (
+                "sha256:e30566492e1502f94a4c7fed42d90b5"
+                "23bbb662580c628459e6e63c7b5263c75"
+            ),
+        }
+        for overlay in overlays:
+            overlay["digest"] = exact_overlay_digests[
+                Path(overlay["host_path"]).name
+            ]
+        plan_path = self.fixture.run_dir / "plan.json"
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["model"].update(
+            {
+                "quantization": "nvfp4+ple-fp8-mapped+nextn-bf16",
+                "recipe_revision": "bf2b7c75870d3703730b6bd8f3bb93dc622c278d",
+                "recipe_source": "hashd1ve/qwen38-flash-next-one-dgx-spark",
+                "revision": "7b719225242aacd3dbd3f9407468c2ee9a9d2594",
+                "sglang_ple_cache_marker_digest": (
+                    "sha256:f0ef55e4e4dec9b6b936a42af4ca2e"
+                    "b9b2f24ced373b1e216f7a6d507b171665"
+                ),
+                "sglang_ple_cache_payload_digest": (
+                    "sha256:b070f9644adf93794d8a1030584ab705"
+                    "809387e64396a9327a68fa3a3a6666b3"
+                ),
+                "sglang_ple_omitted": False,
+                "sglang_source_overlays": overlays,
+                "source": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+            }
+        )
+        self.fixture.write_json(plan_path, plan)
+
+        with patch(
+            "bench.evidence._validate_runtime_overlay_tree", return_value=True
+        ):
+            self.export()
+
+        manifest_path = (
+            self.fixture.output
+            / "runs"
+            / self.fixture.run_id
+            / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        runtime = manifest["runtime"]
+        self.assertEqual(2, runtime["sglang_provenance_version"])
+        self.assertIs(runtime["sglang_ple_omitted"], False)
+        self.assertEqual("readonly", runtime["sglang_ple_cache_mode"])
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+
+        pristine = json.loads(json.dumps(manifest))
+        runtime.pop("sglang_ple_omitted")
+        runtime["sglang_provenance_version"] = 1
+        self.fixture.write_json(manifest_path, manifest)
+        self.refresh_run_checksums(self.fixture.run_id)
+        with self.assertRaisesRegex(EvidenceError, "lost its explicit"):
+            verify_evidence(self.fixture.output)
+
+        manifest = json.loads(json.dumps(pristine))
+        manifest["runtime"].pop("recipe_revision")
+        self.fixture.write_json(manifest_path, manifest)
+        self.refresh_run_checksums(self.fixture.run_id)
+        with self.assertRaisesRegex(EvidenceError, "recipe identity changed"):
+            verify_evidence(self.fixture.output)
+
+    def test_omitted_sglang_ple_ablation_is_explicit_and_verifiable(self) -> None:
+        overlays = self.fixture.add_sglang_runtime_overlays()
+        exact_overlay_digests = {
+            "qwen4_exp.py": (
+                "sha256:bcdc2c86aa59784ffe27d53c8d214e56"
+                "b6aa45c02b1d5841fd956d1f006d6030"
+            ),
+            "qwen_sparse_attn_backend.py": (
+                "sha256:e30566492e1502f94a4c7fed42d90b5"
+                "23bbb662580c628459e6e63c7b5263c75"
+            ),
+        }
+        for overlay in overlays:
+            overlay["digest"] = exact_overlay_digests[
+                Path(overlay["host_path"]).name
+            ]
+        plan_path = self.fixture.run_dir / "plan.json"
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["model"].update(
+            {
+                "quantization": "nvfp4+ple-omitted-ablation+nextn-bf16",
+                "recipe_revision": "bf2b7c75870d3703730b6bd8f3bb93dc622c278d",
+                "recipe_source": "hashd1ve/qwen38-flash-next-one-dgx-spark",
+                "revision": "7b719225242aacd3dbd3f9407468c2ee9a9d2594",
+                "sglang_ple_mmap": False,
+                "sglang_ple_omitted": True,
+                "sglang_source_overlays": overlays,
+                "source": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+            }
+        )
+        self.fixture.write_json(plan_path, plan)
+
+        with patch(
+            "bench.evidence._validate_runtime_overlay_tree", return_value=True
+        ):
+            self.export()
+
+        manifest_path = (
+            self.fixture.output
+            / "runs"
+            / self.fixture.run_id
+            / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        runtime = manifest["runtime"]
+        self.assertEqual("disabled", runtime["sglang_ple_cache_mode"])
+        self.assertIs(runtime["sglang_ple_mmap"], False)
+        self.assertIs(runtime["sglang_ple_omitted"], True)
+        self.assertEqual(2, runtime["sglang_provenance_version"])
+        self.assertEqual(2, len(runtime["sglang_source_overlay_artifacts"]))
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+
+        pristine = json.loads(json.dumps(manifest))
+        runtime["sglang_ple_omitted"] = False
+        self.fixture.write_json(manifest_path, manifest)
+        self.refresh_run_checksums(self.fixture.run_id)
+        with self.assertRaisesRegex(EvidenceError, "flag and model label disagree"):
+            verify_evidence(self.fixture.output)
+
+        manifest = json.loads(json.dumps(pristine))
+        manifest["runtime"].pop("recipe_revision")
+        self.fixture.write_json(manifest_path, manifest)
+        self.refresh_run_checksums(self.fixture.run_id)
+        with self.assertRaisesRegex(EvidenceError, "recipe identity changed"):
+            verify_evidence(self.fixture.output)
+
+    def test_omitted_sglang_ple_source_requires_typed_exclusive_state(self) -> None:
+        overlays = self.fixture.add_sglang_runtime_overlays()
+        exact_overlay_digests = {
+            "qwen4_exp.py": (
+                "sha256:bcdc2c86aa59784ffe27d53c8d214e56"
+                "b6aa45c02b1d5841fd956d1f006d6030"
+            ),
+            "qwen_sparse_attn_backend.py": (
+                "sha256:e30566492e1502f94a4c7fed42d90b5"
+                "23bbb662580c628459e6e63c7b5263c75"
+            ),
+        }
+        for overlay in overlays:
+            overlay["digest"] = exact_overlay_digests[
+                Path(overlay["host_path"]).name
+            ]
+        plan_path = self.fixture.run_dir / "plan.json"
+        original = json.loads(plan_path.read_text(encoding="utf-8"))
+        original["model"].update(
+            {
+                "quantization": "nvfp4+ple-omitted-ablation+nextn-bf16",
+                "recipe_revision": "bf2b7c75870d3703730b6bd8f3bb93dc622c278d",
+                "recipe_source": "hashd1ve/qwen38-flash-next-one-dgx-spark",
+                "revision": "7b719225242aacd3dbd3f9407468c2ee9a9d2594",
+                "sglang_source_overlays": overlays,
+                "source": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+            }
+        )
+        mutations = (
+            lambda model: model.update(
+                {"sglang_ple_mmap": True, "sglang_ple_omitted": True}
+            ),
+            lambda model: model.update(
+                {"sglang_ple_mmap": False, "sglang_ple_omitted": "true"}
+            ),
+            lambda model: model.update(
+                {
+                    "sglang_ple_mmap": False,
+                    "sglang_ple_omitted": True,
+                    "sglang_source_overlays": [],
+                }
+            ),
+            lambda model: model.update(
+                {
+                    "quantization": "nvfp4+ple-fp8-mapped+nextn-bf16",
+                    "sglang_ple_mmap": False,
+                    "sglang_ple_omitted": True,
+                }
+            ),
+            lambda model: model.update(
+                {
+                    "sglang_ple_mmap": False,
+                    "sglang_ple_omitted": True,
+                    "source": "example/not-qwen38",
+                }
+            ),
+            lambda model: model.update(
+                {
+                    "sglang_ple_mmap": False,
+                    "sglang_ple_omitted": True,
+                    "sglang_source_overlays": overlays[1:],
+                }
+            ),
+        )
+        self.assertEqual(2, len(overlays))
+        for index, mutate in enumerate(mutations, 1):
+            with self.subTest(index=index):
+                plan = json.loads(json.dumps(original))
+                mutate(plan["model"])
+                self.fixture.write_json(plan_path, plan)
+                output = Path(self.temporary.name) / f"evidence-omitted-invalid-{index}"
+                with (
+                    patch(
+                        "bench.evidence._validate_runtime_overlay_tree",
+                        return_value=True,
+                    ),
+                    self.assertRaises(EvidenceError),
+                ):
+                    self.export(output=output)
+
     def test_readonly_sglang_ple_cache_source_requires_exact_complete_pins(
         self,
     ) -> None:

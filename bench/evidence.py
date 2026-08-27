@@ -112,7 +112,8 @@ _SGLANG_PLE_CACHE_RUNTIME_HASH_FIELDS = frozenset(
     }
 )
 _SGLANG_PROVENANCE_VERSION = 1
-_SGLANG_PROVENANCE_CORE_RUNTIME_FIELDS = frozenset(
+_SGLANG_PROVENANCE_CURRENT_VERSION = 2
+_SGLANG_PROVENANCE_V1_RUNTIME_FIELDS = frozenset(
     {
         "sglang_ple_cache_mode",
         "sglang_ple_mmap",
@@ -120,13 +121,53 @@ _SGLANG_PROVENANCE_CORE_RUNTIME_FIELDS = frozenset(
         "sglang_source_overlay_artifacts",
     }
 )
+_SGLANG_PROVENANCE_V2_RUNTIME_FIELDS = frozenset(
+    _SGLANG_PROVENANCE_V1_RUNTIME_FIELDS | {"sglang_ple_omitted"}
+)
 _SGLANG_PROVENANCE_RUNTIME_FIELDS = frozenset(
-    _SGLANG_PROVENANCE_CORE_RUNTIME_FIELDS
+    _SGLANG_PROVENANCE_V2_RUNTIME_FIELDS
     | _SGLANG_PLE_CACHE_RUNTIME_HASH_FIELDS
 )
 _SGLANG_PLE_CACHE_MODES = frozenset(
-    {"disabled", "legacy_unspecified", "readonly", "writable"}
+    {
+        "disabled",
+        "legacy_unspecified",
+        "readonly",
+        "writable",
+    }
 )
+_QWEN38_PLE_OMISSION_IDENTITY = {
+    "source": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+    "revision": "7b719225242aacd3dbd3f9407468c2ee9a9d2594",
+    "recipe_source": "hashd1ve/qwen38-flash-next-one-dgx-spark",
+    "recipe_revision": "bf2b7c75870d3703730b6bd8f3bb93dc622c278d",
+}
+_QWEN38_PLE_OMISSION_ARTIFACTS = [
+    {
+        "sha256": (
+            "bcdc2c86aa59784ffe27d53c8d214e56"
+            "b6aa45c02b1d5841fd956d1f006d6030"
+        ),
+        "target": "qwen4_exp.py",
+    },
+    {
+        "sha256": (
+            "e30566492e1502f94a4c7fed42d90b5"
+            "23bbb662580c628459e6e63c7b5263c75"
+        ),
+        "target": "qwen_sparse_attn_backend.py",
+    },
+]
+_QWEN38_PLE_STUDY_CACHE = {
+    "sglang_ple_cache_marker_digest": (
+        "sha256:f0ef55e4e4dec9b6b936a42af4ca2e"
+        "b9b2f24ced373b1e216f7a6d507b171665"
+    ),
+    "sglang_ple_cache_payload_digest": (
+        "sha256:b070f9644adf93794d8a1030584ab705"
+        "809387e64396a9327a68fa3a3a6666b3"
+    ),
+}
 
 # These bundles predate explicit SGLang PLE/overlay provenance.  Compatibility
 # is deliberately bound to their complete bundle digests: accepting arbitrary
@@ -272,6 +313,7 @@ _LOOP_MODEL_SOURCE_FIELDS = frozenset(
         "served_name",
         "sglang_allow_hf_metadata_probe",
         "sglang_ple_mmap",
+        "sglang_ple_omitted",
         "sglang_source_overlays",
         "source",
         "startup_timeout_s",
@@ -284,8 +326,15 @@ _LOOP_MODEL_SOURCE_FIELDS = frozenset(
 _LOOP_MODEL_SOURCE_FIELDS_WITH_PLE_CACHE = (
     _LOOP_MODEL_SOURCE_FIELDS | _SGLANG_PLE_CACHE_SOURCE_FIELDS
 )
+_LOOP_MODEL_PRE_OMISSION_SOURCE_FIELDS = _LOOP_MODEL_SOURCE_FIELDS - {
+    "sglang_ple_omitted"
+}
+_LOOP_MODEL_PRE_OMISSION_SOURCE_FIELDS_WITH_PLE_CACHE = (
+    _LOOP_MODEL_PRE_OMISSION_SOURCE_FIELDS | _SGLANG_PLE_CACHE_SOURCE_FIELDS
+)
 _LOOP_MODEL_LEGACY_SOURCE_FIELDS = _LOOP_MODEL_SOURCE_FIELDS - {
     "sglang_ple_mmap",
+    "sglang_ple_omitted",
     "sglang_source_overlays",
 }
 _LOOP_CASE_FIELDS = frozenset(
@@ -3377,12 +3426,15 @@ def _project_sglang_provenance(model: dict[str, Any]) -> dict[str, Any]:
     backend = model.get("backend")
     mmap_present = "sglang_ple_mmap" in model
     mmap = model.get("sglang_ple_mmap")
+    omitted_present = "sglang_ple_omitted" in model
+    omitted = model.get("sglang_ple_omitted")
 
     if backend != "sglang":
         if (
             populated
             or overlays
             or (mmap_present and mmap is not None and mmap is not False)
+            or (omitted_present and omitted is not False)
         ):
             raise EvidenceError("SGLang provenance requires the sglang backend")
         return {}
@@ -3391,12 +3443,76 @@ def _project_sglang_provenance(model: dict[str, Any]) -> dict[str, Any]:
         raise EvidenceError("runtime.sglang_ple_mmap must be boolean")
     if not mmap_present:
         mmap = None
+    if omitted_present and type(omitted) is not bool:
+        raise EvidenceError("runtime.sglang_ple_omitted must be boolean")
+    if not omitted_present:
+        omitted = False
+    omission_labeled = (
+        isinstance(model.get("quantization"), str)
+        and "ple-omitted" in model["quantization"]
+    )
+    mapped_labeled = (
+        isinstance(model.get("quantization"), str)
+        and "ple-fp8-mapped" in model["quantization"]
+    )
+    if bool(omitted) != omission_labeled:
+        raise EvidenceError(
+            "SGLang PLE omission flag and quantization label disagree"
+        )
+    if omitted and (mmap is not False or populated or not overlays):
+        raise EvidenceError(
+            "SGLang PLE omission requires mmap=false, no cache, and overlays"
+        )
+    if omitted:
+        for key, expected in _QWEN38_PLE_OMISSION_IDENTITY.items():
+            if model.get(key) != expected:
+                raise EvidenceError(
+                    "SGLang PLE omission artifact/recipe identity changed"
+                )
+        if overlays != _QWEN38_PLE_OMISSION_ARTIFACTS:
+            raise EvidenceError(
+                "SGLang PLE omission overlay identities changed"
+            )
+    if mapped_labeled:
+        if not omitted_present or omitted:
+            raise EvidenceError(
+                "SGLang mapped-PLE study label requires an explicit false "
+                "omission flag"
+            )
+        if (
+            mmap is not True
+            or populated != _SGLANG_PLE_CACHE_SOURCE_FIELDS
+            or source["sglang_ple_cache_mode"] != "readonly"
+        ):
+            raise EvidenceError(
+                "SGLang mapped-PLE study requires exact read-only cache state"
+            )
+        for key, expected in _QWEN38_PLE_OMISSION_IDENTITY.items():
+            if model.get(key) != expected:
+                raise EvidenceError(
+                    "SGLang mapped-PLE study artifact/recipe identity changed"
+                )
+        if overlays != _QWEN38_PLE_OMISSION_ARTIFACTS:
+            raise EvidenceError(
+                "SGLang mapped-PLE study overlay identities changed"
+            )
+        for key, expected in _QWEN38_PLE_STUDY_CACHE.items():
+            if model.get(key) != expected:
+                raise EvidenceError(
+                    "SGLang mapped-PLE study cache identity changed"
+                )
 
     result: dict[str, Any] = {
         "sglang_ple_mmap": mmap,
-        "sglang_provenance_version": _SGLANG_PROVENANCE_VERSION,
+        "sglang_provenance_version": (
+            _SGLANG_PROVENANCE_CURRENT_VERSION
+            if omitted_present
+            else _SGLANG_PROVENANCE_VERSION
+        ),
         "sglang_source_overlay_artifacts": overlays,
     }
+    if omitted_present:
+        result["sglang_ple_omitted"] = omitted
     if not populated:
         result["sglang_ple_cache_mode"] = (
             "legacy_unspecified"
@@ -3465,12 +3581,23 @@ def _validate_projected_sglang_provenance(
         raise EvidenceError("published SGLang provenance is required")
     if sglang_fields - _SGLANG_PROVENANCE_RUNTIME_FIELDS:
         raise EvidenceError("published SGLang provenance has unknown fields")
-    if not _SGLANG_PROVENANCE_CORE_RUNTIME_FIELDS <= sglang_fields:
+    version = runtime.get("sglang_provenance_version")
+    if type(version) is not int or version not in {
+        _SGLANG_PROVENANCE_VERSION,
+        _SGLANG_PROVENANCE_CURRENT_VERSION,
+    }:
+        raise EvidenceError("published SGLang provenance version is invalid")
+    required_fields = (
+        _SGLANG_PROVENANCE_V2_RUNTIME_FIELDS
+        if version == _SGLANG_PROVENANCE_CURRENT_VERSION
+        else _SGLANG_PROVENANCE_V1_RUNTIME_FIELDS
+    )
+    if not required_fields <= sglang_fields:
         raise EvidenceError("published SGLang provenance is incomplete")
+    if version == _SGLANG_PROVENANCE_VERSION and "sglang_ple_omitted" in runtime:
+        raise EvidenceError("published SGLang v1 provenance contains v2 fields")
     if (
-        runtime.get("sglang_provenance_version") != _SGLANG_PROVENANCE_VERSION
-        or type(runtime.get("sglang_provenance_version")) is not int
-        or runtime.get("backend") != "sglang"
+        runtime.get("backend") != "sglang"
         or not isinstance(model, dict)
         or model.get("backend") != "sglang"
     ):
@@ -3478,6 +3605,27 @@ def _validate_projected_sglang_provenance(
 
     mode = runtime.get("sglang_ple_cache_mode")
     mmap = runtime.get("sglang_ple_mmap")
+    omitted = runtime.get("sglang_ple_omitted", False)
+    if type(omitted) is not bool:
+        raise EvidenceError("published SGLang PLE omission flag must be boolean")
+    omission_labeled = (
+        isinstance(model.get("quantization"), str)
+        and "ple-omitted" in model["quantization"]
+    )
+    mapped_labeled = (
+        isinstance(model.get("quantization"), str)
+        and "ple-fp8-mapped" in model["quantization"]
+    )
+    if omitted != omission_labeled:
+        raise EvidenceError(
+            "published SGLang PLE omission flag and model label disagree"
+        )
+    if mapped_labeled and (
+        version != _SGLANG_PROVENANCE_CURRENT_VERSION or omitted
+    ):
+        raise EvidenceError(
+            "published mapped-PLE study lost its explicit omission dimension"
+        )
     hashes = _SGLANG_PLE_CACHE_RUNTIME_HASH_FIELDS & sglang_fields
     if not isinstance(mode, str) or mode not in _SGLANG_PLE_CACHE_MODES:
         raise EvidenceError("published SGLang PLE cache mode is invalid")
@@ -3502,9 +3650,48 @@ def _validate_projected_sglang_provenance(
             runtime.get("sglang_ple_cache_payload_sha256"),
             name="published SGLang PLE cache payload",
         )
-    return _validate_projected_sglang_overlay_artifacts(
+    overlays = _validate_projected_sglang_overlay_artifacts(
         runtime.get("sglang_source_overlay_artifacts")
     )
+    if omitted or mapped_labeled:
+        expected_mode = "disabled" if omitted else "readonly"
+        if mode != expected_mode or overlays != _QWEN38_PLE_OMISSION_ARTIFACTS:
+            raise EvidenceError(
+                "published SGLang PLE-study state or overlays changed"
+            )
+        if (
+            model.get("source") != _QWEN38_PLE_OMISSION_IDENTITY["source"]
+            or model.get("revision")
+            != _QWEN38_PLE_OMISSION_IDENTITY["revision"]
+        ):
+            raise EvidenceError(
+                "published SGLang PLE-study artifact identity changed"
+            )
+        if runtime.get("recipe_revision") != _QWEN38_PLE_OMISSION_IDENTITY[
+            "recipe_revision"
+        ]:
+            raise EvidenceError(
+                "published SGLang PLE-study recipe identity changed"
+            )
+    if mapped_labeled:
+        if mmap is not True:
+            raise EvidenceError(
+                "published mapped-PLE study lost its read-only mapping"
+            )
+        if (
+            runtime.get("sglang_ple_cache_marker_sha256")
+            != _QWEN38_PLE_STUDY_CACHE[
+                "sglang_ple_cache_marker_digest"
+            ].removeprefix("sha256:")
+            or runtime.get("sglang_ple_cache_payload_sha256")
+            != _QWEN38_PLE_STUDY_CACHE[
+                "sglang_ple_cache_payload_digest"
+            ].removeprefix("sha256:")
+        ):
+            raise EvidenceError(
+                "published mapped-PLE study cache identity changed"
+            )
+    return overlays
 
 
 def _project_runtime(plan: dict[str, Any], summary: dict[str, Any] | None) -> dict[str, Any]:
@@ -9268,6 +9455,8 @@ def _project_loop_model(value: Any, *, profile_id: str) -> dict[str, Any]:
         or frozenset(value)
         not in (
             _LOOP_MODEL_LEGACY_SOURCE_FIELDS,
+            _LOOP_MODEL_PRE_OMISSION_SOURCE_FIELDS,
+            _LOOP_MODEL_PRE_OMISSION_SOURCE_FIELDS_WITH_PLE_CACHE,
             _LOOP_MODEL_SOURCE_FIELDS,
             _LOOP_MODEL_SOURCE_FIELDS_WITH_PLE_CACHE,
         )
@@ -9276,6 +9465,10 @@ def _project_loop_model(value: Any, *, profile_id: str) -> dict[str, Any]:
         raise EvidenceError("loop model source schema changed")
     projected = _project_model({"model": value}, None)
     projected.update(_project_sglang_provenance(value))
+    if value.get("recipe_revision") is not None:
+        projected["recipe_revision"] = _revision(
+            value["recipe_revision"], name="loop model.recipe_revision"
+        )
     projected["container_image"] = _safe_id(
         value.get("image"), name="loop model.container_image"
     )
@@ -12052,6 +12245,7 @@ def _validate_projected_loop_manifest(value: Any) -> dict[str, Any]:
         "native_context",
         "prefix_cache_mode",
         "quantization",
+        "recipe_revision",
         "revision",
         "runtime_parallel",
         "source",
@@ -12108,6 +12302,7 @@ def _validate_projected_loop_manifest(value: Any) -> dict[str, Any]:
             not in {
                 "container_image",
                 "container_image_sha256",
+                "recipe_revision",
                 *_SGLANG_PROVENANCE_RUNTIME_FIELDS,
             }
         }

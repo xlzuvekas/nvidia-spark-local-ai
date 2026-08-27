@@ -29,6 +29,25 @@ from .prefix_cache_protocol import (
 
 
 SCHEMA_VERSION = 1
+_QWEN38_PLE_ABLATION_IDENTITY = (
+    "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+    "7b719225242aacd3dbd3f9407468c2ee9a9d2594",
+    "hashd1ve/qwen38-flash-next-one-dgx-spark",
+    "bf2b7c75870d3703730b6bd8f3bb93dc622c278d",
+)
+_QWEN38_PLE_ABLATION_OVERLAYS = {
+    "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py": (
+        "sha256:bcdc2c86aa59784ffe27d53c8d214e56"
+        "b6aa45c02b1d5841fd956d1f006d6030"
+    ),
+    (
+        "/sgl-workspace/sglang/python/sglang/srt/layers/attention/"
+        "qwen_sparse_attn_backend.py"
+    ): (
+        "sha256:e30566492e1502f94a4c7fed42d90b5"
+        "23bbb662580c628459e6e63c7b5263c75"
+    ),
+}
 KNOWN_TASKS = frozenset(
     {
         "audio",
@@ -101,6 +120,27 @@ _TPS_SUITE_BY_PROFILE_ID = {
 }
 _FLASH_NEXT_LONG_PROFILE_ID = "qwen38-flash-next-nvfp4-long-sglang"
 _FLASH_NEXT_LONG_SUITE_ID = "qwen38-flash-next-sglang-long-context"
+_PLE_STUDY_PROFILE_IDS_BY_SUITE = {
+    "qwen38-flash-next-sglang-ple-depth-c8": frozenset(
+        {
+            "qwen38-flash-next-nvfp4-mtp1-c8-lazy-ple-mapped-sglang",
+            "qwen38-flash-next-nvfp4-mtp2-c8-lazy-ple-mapped-sglang",
+            "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-mapped-sglang",
+            "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-omitted-sglang",
+        }
+    ),
+    "qwen38-flash-next-sglang-quality-v2": frozenset(
+        {
+            "qwen38-flash-next-nvfp4-mtp3-quality-v2-ple-mapped-sglang",
+            "qwen38-flash-next-nvfp4-mtp3-quality-v2-ple-omitted-sglang",
+        }
+    ),
+}
+_PLE_STUDY_SUITE_BY_PROFILE_ID = {
+    profile_id: suite_id
+    for suite_id, profile_ids in _PLE_STUDY_PROFILE_IDS_BY_SUITE.items()
+    for profile_id in profile_ids
+}
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -257,6 +297,7 @@ _MODEL_KEYS = frozenset(
         "sglang_allow_hf_metadata_probe",
         "sglang_source_overlays",
         "sglang_ple_mmap",
+        "sglang_ple_omitted",
         "sglang_ple_cache_mode",
         "sglang_ple_cache_marker_digest",
         "sglang_ple_cache_payload_digest",
@@ -358,6 +399,7 @@ class ModelSpec:
     sglang_allow_hf_metadata_probe: bool = False
     sglang_source_overlays: tuple[SGLangSourceOverlay, ...] = ()
     sglang_ple_mmap: bool = False
+    sglang_ple_omitted: bool = False
     sglang_ple_cache_mode: str | None = None
     sglang_ple_cache_marker_digest: str | None = None
     sglang_ple_cache_payload_digest: str | None = None
@@ -486,6 +528,9 @@ def load_models(path: str | Path) -> dict[str, ModelSpec]:
             ),
             sglang_ple_mmap=_optional_bool(
                 row, "sglang_ple_mmap", context, default=False
+            ),
+            sglang_ple_omitted=_optional_bool(
+                row, "sglang_ple_omitted", context, default=False
             ),
             sglang_ple_cache_mode=_optional_string(
                 row, "sglang_ple_cache_mode", context
@@ -761,6 +806,7 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
     if (
         model.sglang_source_overlays
         or model.sglang_ple_mmap
+        or model.sglang_ple_omitted
         or model.sglang_ple_cache_mode is not None
     ) and (
         model.backend != "sglang"
@@ -871,6 +917,110 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
         raise ManifestError(
             f"{context}.sglang_ple_mmap requires an embedded draft and a "
             "single PLE backing mount"
+        )
+    omission_override_values: list[object] = []
+    for index, argument in enumerate(model.args):
+        if argument == "--json-model-override-args":
+            if index + 1 >= len(model.args):
+                raise ManifestError(
+                    f"{context}.args leaves --json-model-override-args without a value"
+                )
+            try:
+                omission_override_values.append(json.loads(model.args[index + 1]))
+            except json.JSONDecodeError as error:
+                raise ManifestError(
+                    f"{context}.args has invalid --json-model-override-args JSON"
+                ) from error
+        elif argument.startswith("--json-model-override-args="):
+            try:
+                omission_override_values.append(
+                    json.loads(argument.split("=", 1)[1])
+                )
+            except json.JSONDecodeError as error:
+                raise ManifestError(
+                    f"{context}.args has invalid --json-model-override-args JSON"
+                ) from error
+    omission_sentinels = [
+        value
+        for value in omission_override_values
+        if isinstance(value, dict) and "sparkbench_omit_ple" in value
+    ]
+    if model.sglang_ple_omitted:
+        if model.sglang_ple_mmap or model.sglang_ple_cache_mode is not None:
+            raise ManifestError(
+                f"{context}.sglang_ple_omitted forbids PLE mmap/cache reuse"
+            )
+        if any(
+            value is not None
+            for value in (
+                model.sglang_ple_cache_marker_digest,
+                model.sglang_ple_cache_payload_digest,
+            )
+        ):
+            raise ManifestError(
+                f"{context}.sglang_ple_omitted forbids PLE cache digests"
+            )
+        if not model.sglang_source_overlays:
+            raise ManifestError(
+                f"{context}.sglang_ple_omitted requires digest-pinned overlays"
+            )
+        if (
+            model.source,
+            model.revision,
+            model.recipe_source,
+            model.recipe_revision,
+        ) != _QWEN38_PLE_ABLATION_IDENTITY:
+            raise ManifestError(
+                f"{context}.sglang_ple_omitted is pinned to the exact Qwen3.8 "
+                "artifact and audited recipe"
+            )
+        if model.draft_source is not None:
+            raise ManifestError(
+                f"{context}.sglang_ple_omitted requires the embedded draft"
+            )
+        actual_omission_overlays = {
+            overlay.container_path: overlay.digest
+            for overlay in model.sglang_source_overlays
+        }
+        if actual_omission_overlays != _QWEN38_PLE_ABLATION_OVERLAYS:
+            raise ManifestError(
+                f"{context}.sglang_ple_omitted requires the exact "
+                "ablation-capable overlays"
+            )
+        if "--ple-offload-embedding" in model.args:
+            raise ManifestError(
+                f"{context}.sglang_ple_omitted forbids --ple-offload-embedding"
+            )
+        canonical_override_pairs = tuple(
+            tuple(model.args[index : index + 2])
+            for index, argument in enumerate(model.args[:-1])
+            if argument == "--json-model-override-args"
+        )
+        inline_overrides = tuple(
+            argument
+            for argument in model.args
+            if argument.startswith("--json-model-override-args=")
+        )
+        if (
+            omission_override_values != [{"sparkbench_omit_ple": True}]
+            or canonical_override_pairs
+            != (("--json-model-override-args", '{"sparkbench_omit_ple":true}'),)
+            or inline_overrides
+        ):
+            raise ManifestError(
+                f"{context}.sglang_ple_omitted requires exactly one canonical "
+                "sparkbench_omit_ple=true model override and no other model "
+                "overrides"
+            )
+        if "ple-omitted" not in (model.quantization or ""):
+            raise ManifestError(
+                f"{context}.sglang_ple_omitted requires an explicit "
+                "ple-omitted quantization label"
+            )
+    elif omission_sentinels:
+        raise ManifestError(
+            f"{context}.sparkbench_omit_ple override requires "
+            "sglang_ple_omitted=true"
         )
     ple_cache_pins = (
         model.sglang_ple_cache_marker_digest,
@@ -1533,6 +1683,21 @@ def validate_benchmark_selection(
         raise ManifestError(
             f"{context}: the {_FLASH_NEXT_LONG_SUITE_ID!r} suite requires "
             f"the {_FLASH_NEXT_LONG_PROFILE_ID!r} profile"
+        )
+    ple_study_suite_profiles = _PLE_STUDY_PROFILE_IDS_BY_SUITE.get(suite.id)
+    ple_study_profile_suite = _PLE_STUDY_SUITE_BY_PROFILE_ID.get(model_id)
+    if (
+        ple_study_suite_profiles is not None
+        and model_id not in ple_study_suite_profiles
+    ):
+        raise ManifestError(
+            f"{context}: the {suite.id!r} suite requires one of its exact "
+            "PLE-study profiles"
+        )
+    if ple_study_profile_suite is not None and suite.id != ple_study_profile_suite:
+        raise ManifestError(
+            f"{context}: the {model.id!r} profile requires the "
+            f"{ple_study_profile_suite!r} suite"
         )
     if suite.id == MEMORY_OPERATION_SUITE_ID:
         try:

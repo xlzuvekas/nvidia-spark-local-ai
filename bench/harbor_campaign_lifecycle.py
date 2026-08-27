@@ -815,6 +815,7 @@ def _cross_validate_model(campaign: CampaignSpec, model: Any) -> None:
         "sglang_allow_hf_metadata_probe": False,
         "sglang_source_overlays": (),
         "sglang_ple_mmap": False,
+        "sglang_ple_omitted": False,
         "sglang_ple_cache_mode": None,
         "sglang_ple_cache_marker_digest": None,
         "sglang_ple_cache_payload_digest": None,

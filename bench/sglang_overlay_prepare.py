@@ -36,6 +36,10 @@ PINNED_IMAGE = (
 OUTPUT_RELATIVE = Path(
     "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-v1"
 )
+PLE_ABLATION_OUTPUT_RELATIVE = Path(
+    "results/runtime-overlays/"
+    "qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1"
+)
 PATCHER_ROOT = REPOSITORY_ROOT / "patches" / "sglang"
 MODULE_PATH_MARKER = "SPARKBENCH_SGLANG_MODULE_PATHS="
 CONTAINER_ID = re.compile(r"[0-9a-f]{12,64}")
@@ -55,6 +59,8 @@ class OverlaySpec:
     output_sha256: str
     post_patcher_name: str | None = None
     post_patcher_sha256: str | None = None
+    final_patcher_name: str | None = None
+    final_patcher_sha256: str | None = None
 
 
 MODULE_OVERLAYS = (
@@ -98,6 +104,36 @@ MODULE_OVERLAYS = (
             "23bbb662580c628459e6e63c7b5263c75"
         ),
     ),
+)
+
+PLE_ABLATION_OVERLAYS = (
+    OverlaySpec(
+        module="sglang.srt.models.qwen4_exp",
+        container_path=(
+            "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py"
+        ),
+        output_name="qwen4_exp.py",
+        patcher_name="bf2b7c75-ple_mmap.py",
+        patcher_sha256=(
+            "eeabdde061631c9b606d4ccc7371ff8f"
+            "b01c6cc034dfe6bad1e4f29a8aa21555"
+        ),
+        output_sha256=(
+            "bcdc2c86aa59784ffe27d53c8d214e56"
+            "b6aa45c02b1d5841fd956d1f006d6030"
+        ),
+        post_patcher_name="qwen38-persistent-ple-cache.py",
+        post_patcher_sha256=(
+            "bf47f244406e149a3c7fe51d42d326d6"
+            "3a008733d55868b51a73112052e3bcdf"
+        ),
+        final_patcher_name="qwen38-ple-omission-ablation.py",
+        final_patcher_sha256=(
+            "cf4a28f2ca7cfc87acdb01602993367e"
+            "b214a19caa66b8c9ca3bfd2a4e227fdd"
+        ),
+    ),
+    MODULE_OVERLAYS[1],
 )
 
 
@@ -176,6 +212,14 @@ def _verify_patchers(specs: Sequence[OverlaySpec]) -> None:
                 )
             patchers += (
                 (spec.post_patcher_name, spec.post_patcher_sha256),
+            )
+        if spec.final_patcher_name is not None:
+            if spec.final_patcher_sha256 is None:
+                raise OverlayPreparationError(
+                    "final patcher name is missing its pinned digest"
+                )
+            patchers += (
+                (spec.final_patcher_name, spec.final_patcher_sha256),
             )
         for patcher_name, expected_digest in patchers:
             patcher = PATCHER_ROOT / patcher_name
@@ -399,6 +443,8 @@ def _apply_patcher(source: Path, spec: OverlaySpec) -> None:
     patcher_names = [spec.patcher_name]
     if spec.post_patcher_name is not None:
         patcher_names.append(spec.post_patcher_name)
+    if spec.final_patcher_name is not None:
+        patcher_names.append(spec.final_patcher_name)
     for patcher_name in patcher_names:
         patcher = PATCHER_ROOT / patcher_name
         try:
@@ -466,6 +512,18 @@ def _verify_ast(source: Path, spec: OverlaySpec) -> None:
             raise OverlayPreparationError(
                 "PLE overlay failed structural verification"
             )
+        ablation_markers = (
+            "sparkbench_omit_ple",
+            "ple_omitted_checkpoint_weights",
+            "expected_ple_weights",
+            "omitted PLE checkpoint tensor set mismatch",
+        )
+        if spec.final_patcher_name is not None and any(
+            marker not in text for marker in ablation_markers
+        ):
+            raise OverlayPreparationError(
+                "PLE omission ablation overlay failed structural verification"
+            )
     elif spec.output_name == "qwen_sparse_attn_backend.py":
         if (
             "from sglang.srt.utils import "
@@ -523,14 +581,13 @@ def _write_outputs(
     _verify_patched_sources(target, specs)
 
 
-def prepare_overlays(workspace: Path = REPOSITORY_ROOT) -> Path:
-    """Reproduce the two ignored overlays, or verify an exact existing pair."""
-
-    specs = MODULE_OVERLAYS
+def _prepare_overlay_variant(
+    *, workspace: Path, specs: Sequence[OverlaySpec], output_relative: Path
+) -> Path:
     _verify_cached_image()
     _verify_patchers(specs)
     output_parent = _checked_output_parent(workspace)
-    target = output_parent / OUTPUT_RELATIVE.name
+    target = output_parent / output_relative.name
     if _existing_output_is_complete(target, specs):
         return target
 
@@ -545,6 +602,26 @@ def prepare_overlays(workspace: Path = REPOSITORY_ROOT) -> Path:
         _verify_patched_sources(staging, specs)
         _write_outputs(staging, target, specs)
     return target
+
+
+def prepare_overlays(workspace: Path = REPOSITORY_ROOT) -> Path:
+    """Reproduce the two mapped-PLE overlays, or verify an exact existing pair."""
+
+    return _prepare_overlay_variant(
+        workspace=workspace,
+        specs=MODULE_OVERLAYS,
+        output_relative=OUTPUT_RELATIVE,
+    )
+
+
+def prepare_ple_ablation_overlays(workspace: Path = REPOSITORY_ROOT) -> Path:
+    """Prepare overlays that support explicit mapped and omitted PLE arms."""
+
+    return _prepare_overlay_variant(
+        workspace=workspace,
+        specs=PLE_ABLATION_OVERLAYS,
+        output_relative=PLE_ABLATION_OUTPUT_RELATIVE,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -564,6 +641,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--verify-ple-cache",
         action="store_true",
         help="fully hash and verify an existing completed PLE cache",
+    )
+    actions.add_argument(
+        "--prepare-ple-ablation",
+        action="store_true",
+        help=(
+            "prepare the pinned overlay pair supporting matched mapped/omitted "
+            "PLE experiments"
+        ),
     )
     args = parser.parse_args(argv)
     if args.materialize_ple:
@@ -589,6 +674,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "verified: persistent PLE cache "
             f"sha256:{record.payload_sha256}"
         )
+        return 0
+    if args.prepare_ple_ablation:
+        try:
+            target = prepare_ple_ablation_overlays()
+        except OverlayPreparationError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        print(f"prepared: {target.relative_to(REPOSITORY_ROOT)}")
         return 0
     try:
         target = prepare_overlays()

@@ -200,7 +200,7 @@ prompt_repetitions = 32
 
 # Exact-answer scoring, like needle retrieval, reads final content only.
 [[cases]]
-id = "synthetic-exact-answer"
+id = "synthetic-exact-answer-v2"
 kind = "quality"
 requires = ["chat"]
 warmups = 0

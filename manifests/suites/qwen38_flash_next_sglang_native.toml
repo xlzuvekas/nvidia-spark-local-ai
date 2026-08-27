@@ -38,7 +38,7 @@ concurrency = 1
 prompt_repetitions = 0
 
 [[cases]]
-id = "synthetic-exact-answer"
+id = "synthetic-exact-answer-v2"
 kind = "quality"
 requires = ["chat"]
 warmups = 0

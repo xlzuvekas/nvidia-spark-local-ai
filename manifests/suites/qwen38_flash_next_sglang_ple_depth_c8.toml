@@ -1,0 +1,60 @@
+schema_version = 1
+
+[suite]
+id = "qwen38-flash-next-sglang-ple-depth-c8"
+description = "Matched thinking-off Qwen3.8-Flash-Next D256 C1-C8 pass for NEXTN depths one through three and the explicitly labeled PLE omission ablation; every profile must use the same 4K lazy-buffer geometry."
+
+[[cases]]
+id = "ple-study-decode-256-c1-v1"
+kind = "decode"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "ple-study-fresh-short-c1-v1"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "ple-study-fresh-short-c2-v1"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 2
+prompt_repetitions = 0
+
+[[cases]]
+id = "ple-study-fresh-short-c4-v1"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 4
+prompt_repetitions = 0
+
+[[cases]]
+id = "ple-study-fresh-short-c8-v1"
+kind = "concurrency"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 8
+prompt_repetitions = 0
