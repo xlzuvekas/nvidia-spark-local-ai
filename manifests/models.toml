@@ -1994,8 +1994,9 @@ startup_timeout_s = 1800
 # The pinned public recipe uses .85, but that auto-sized only 179,520 KV slots
 # on this GB10 and rejected a 245,859-token request. The measured pool cost
 # projects .87 beyond the native 262K context while preserving the launch
-# reserve; round the resulting observed footprint up for admission.
-estimated_ram_gib = 108.0
+# reserve; retain a measured calibration margin without exceeding the GB10's
+# 114.9 GiB clean-host availability plus SparkBench's separate 8 GiB reserve.
+estimated_ram_gib = 106.5
 endpoint = "http://127.0.0.1:30000/v1"
 sglang_source_overlays = [
   { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:0b513b4dc4f2394f6b1733bb0b74fa40ab59f4a04f6b33601350b2a606c67804" },
