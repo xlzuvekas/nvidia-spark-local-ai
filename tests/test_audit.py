@@ -400,6 +400,86 @@ class MatrixAuditTests(unittest.TestCase):
         self.assertEqual(index["runs"][0]["status"], "failed")
         self.assertEqual(index["runs"][0]["error_type"], "RuntimeError")
 
+    def test_matrix_serializes_run_directory_relative_to_matrix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            results = Path(directory)
+            model = SimpleNamespace(
+                id="fixture-model",
+                backend="vllm",
+                support_status="spark_vllm_matrix",
+                tasks=("chat",),
+            )
+            suite = SimpleNamespace(id="quick")
+            availability = {model.id: SimpleNamespace(available=True)}
+
+            def create_plan(*, results_root: Path, **kwargs: object) -> Path:
+                run_dir = results_root / "fixture-run"
+                run_dir.mkdir()
+                return run_dir
+
+            args = argparse.Namespace(
+                models=Path("models.toml"),
+                suite=Path("suite.toml"),
+                results=results,
+                backend=None,
+                task=None,
+                match="*",
+                limit=None,
+                plan_only=True,
+                allow_download=False,
+                fail_fast=False,
+            )
+            with (
+                patch("sparkbench.load_models", return_value={model.id: model}),
+                patch("sparkbench.load_suite", return_value=suite),
+                patch("sparkbench._inventory"),
+                patch(
+                    "sparkbench.assess_model_availability",
+                    return_value=availability,
+                ),
+                patch("sparkbench.create_plan", side_effect=create_plan),
+                redirect_stdout(io.StringIO()),
+            ):
+                status = command_matrix(args)
+
+            index_path = next((results / "matrices").glob("*/matrix.json"))
+            index = json.loads(index_path.read_text())
+
+        self.assertEqual(status, 0)
+        self.assertEqual(index["runs"][0]["run_dir"], "fixture-run")
+
+    def test_audit_accepts_legacy_workspace_relative_run_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            matrix_parent = Path(directory) / "results" / "matrices"
+            matrix_parent.mkdir(parents=True)
+            fixture = MatrixFixture(matrix_parent)
+            legacy_run_dir = (
+                Path("results")
+                / "matrices"
+                / fixture.matrix_dir.name
+                / fixture.run_dir.name
+            )
+            fixture.index["runs"][0]["run_dir"] = str(legacy_run_dir)  # type: ignore[index]
+            fixture.summary["run_dir"] = str(legacy_run_dir)
+            fixture.write()
+
+            report = audit_matrix(fixture.matrix_dir)
+
+        self.assertTrue(report["ok"], report["errors"])
+        self.assertEqual(report["runs"][0]["run_dir"], str(fixture.run_dir.resolve()))
+
+    def test_audit_rejects_run_directory_outside_matrix(self) -> None:
+        outside_run_dir = self.fixture.matrix_dir.parent / "outside-run"
+        outside_run_dir.mkdir()
+        self.fixture.index["runs"][0]["run_dir"] = str(outside_run_dir)  # type: ignore[index]
+        self.fixture.write()
+
+        report = audit_matrix(self.fixture.matrix_dir)
+        codes = {issue["code"] for issue in report["errors"]}
+
+        self.assertFalse(report["ok"])
+        self.assertIn("run_directory_outside_matrix", codes)
+
     def test_malformed_jsonl_record_and_torn_tail_are_structural_errors(self) -> None:
         with (self.fixture.run_dir / "events.jsonl").open("a") as stream:
             stream.write("not-json")

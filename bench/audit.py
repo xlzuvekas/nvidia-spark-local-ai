@@ -21,6 +21,36 @@ _CASE_OUTCOMES = {
 _CASE_EVENTS = _CASE_OUTCOMES | {"case_start", "request_complete"}
 
 
+def _resolve_matrix_run_reference(raw: str, matrix_root: Path) -> Path:
+    """Resolve a run reference without consulting the process working directory."""
+
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return candidate.resolve()
+
+    matrix_relative = (matrix_root / candidate).resolve()
+    if matrix_relative.is_dir():
+        return matrix_relative
+
+    # Older matrix writers serialized the complete path assembled from a
+    # relative --results argument (for example
+    # results/matrices/<matrix>/<run>). Recover only that exact suffix shape,
+    # without resolving its discarded prefix against the current directory.
+    parts = candidate.parts
+    is_legacy_reference = (
+        len(parts) >= 3
+        and parts[-3] == "matrices"
+        and parts[-2] == matrix_root.name
+        and all(part not in {"", ".", ".."} for part in parts)
+    )
+    if is_legacy_reference:
+        legacy_run_dir = (matrix_root / parts[-1]).resolve()
+        if legacy_run_dir.parent == matrix_root and legacy_run_dir.is_dir():
+            return legacy_run_dir
+
+    return matrix_relative
+
+
 def _content_hash(value: Any, length: int = 16) -> str:
     canonical = json.dumps(
         value, sort_keys=True, separators=(",", ":"), default=str
@@ -634,6 +664,7 @@ def _audit_summary(
     plan: dict[str, Any],
     entry: dict[str, Any],
     run_dir: Path,
+    matrix_root: Path,
     add_issue: IssueAdder,
     run: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -697,7 +728,12 @@ def _audit_summary(
                     )
 
     summary_run_dir = summary.get("run_dir")
-    if not isinstance(summary_run_dir, str) or Path(summary_run_dir).resolve() != run_dir:
+    resolved_summary_run_dir = (
+        _resolve_matrix_run_reference(summary_run_dir, matrix_root)
+        if isinstance(summary_run_dir, str) and summary_run_dir
+        else None
+    )
+    if resolved_summary_run_dir != run_dir:
         add_issue(
             "summary_run_directory_mismatch",
             "summary run_dir does not identify its indexed run directory",
@@ -1039,8 +1075,7 @@ def audit_matrix(matrix_dir: Path) -> dict[str, Any]:
             )
             run_report["ok"] = False
             continue
-        candidate = Path(raw_run_dir)
-        run_dir = (candidate if candidate.is_absolute() else root / candidate).resolve()
+        run_dir = _resolve_matrix_run_reference(raw_run_dir, root)
         run_report["run_dir"] = str(run_dir)
         try:
             run_dir.relative_to(root)
@@ -1101,6 +1136,7 @@ def audit_matrix(matrix_dir: Path) -> dict[str, Any]:
                 plan=plan,
                 entry=entry,
                 run_dir=run_dir,
+                matrix_root=root,
                 add_issue=add_issue,
                 run=run_report,
             )

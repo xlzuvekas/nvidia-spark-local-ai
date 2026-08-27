@@ -277,7 +277,7 @@ def command_matrix(args: argparse.Namespace) -> int:
         validate_benchmark_selection(model, suite, context="matrix selection")
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    matrix_dir = args.results / "matrices" / f"{stamp}-{suite.id}"
+    matrix_dir = (args.results / "matrices" / f"{stamp}-{suite.id}").resolve()
     matrix_dir.mkdir(parents=True, exist_ok=False)
     index: dict[str, object] = {
         "created_at": utc_now(),
@@ -289,16 +289,28 @@ def command_matrix(args: argparse.Namespace) -> int:
     write_json(index_path, index)
     failures = 0
     for model in selected:
-        run_dir = create_plan(
+        created_run_dir = create_plan(
             model=model,
             suite=suite,
             results_root=matrix_dir,
             models_path=args.models,
             suite_path=args.suite,
         )
+        run_dir = created_run_dir.resolve()
+        try:
+            relative_run_dir = run_dir.relative_to(matrix_dir)
+        except ValueError as error:
+            raise RuntimeError(
+                f"matrix run directory resolves outside {matrix_dir}: {run_dir}"
+            ) from error
+        if len(relative_run_dir.parts) != 1:
+            raise RuntimeError(
+                "matrix run directory must be an immediate child of "
+                f"{matrix_dir}: {run_dir}"
+            )
         entry: dict[str, object] = {
             "model": model.id,
-            "run_dir": str(run_dir),
+            "run_dir": relative_run_dir.as_posix(),
             "status": "planned" if args.plan_only else "running",
         }
         index["runs"].append(entry)  # type: ignore[union-attr]
