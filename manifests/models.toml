@@ -1991,12 +1991,10 @@ cache_dir = "user"
 max_context = 262144
 native_context = 262144
 startup_timeout_s = 1800
-# The pinned public recipe uses .85, but that auto-sized only 179,520 KV slots
-# on this GB10 and rejected a 245,859-token request. The measured pool cost
-# projects .87 beyond the native 262K context while preserving the launch
-# reserve; retain a measured calibration margin without exceeding the GB10's
-# 114.9 GiB clean-host availability plus SparkBench's separate 8 GiB reserve.
-estimated_ram_gib = 106.5
+# The pinned public recipe's .85 allocation is pressure-safe for the C4
+# throughput lane. Its four-request recurrent cache leaves 179,520 KV slots,
+# so near-window C1 requests use the separate long-context profile below.
+estimated_ram_gib = 105.0
 endpoint = "http://127.0.0.1:30000/v1"
 sglang_source_overlays = [
   { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:0b513b4dc4f2394f6b1733bb0b74fa40ab59f4a04f6b33601350b2a606c67804" },
@@ -2019,13 +2017,75 @@ args = [
   "--tool-call-parser", "qwen3_coder",
   "--mamba-radix-cache-strategy", "extra_buffer",
   # NEXTN consumes five recurrent-state slots per active request. Pin the
-  # smallest recurrent cache that admits C4; .87 sizes the separate KV pool
-  # for the model's native 262K context on this GB10.
+  # smallest recurrent cache that admits C4.
   "--max-mamba-cache-size", "20",
-  "--mem-fraction-static", "0.87",
+  "--mem-fraction-static", "0.85",
   "--context-length", "262144",
   "--chunked-prefill-size", "1024",
   "--max-running-requests", "4",
+  "--enable-metrics",
+  "--speculative-algorithm", "NEXTN",
+  "--speculative-num-steps", "3",
+  "--speculative-eagle-topk", "1",
+  "--speculative-num-draft-tokens", "4",
+  "--speculative-draft-model-quantization", "unquant",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]
+
+[[models]]
+id = "qwen38-flash-next-nvfp4-mtp-long-sglang"
+description = "Pinned one-DGX-Spark Qwen3.8-Flash-Next NVFP4 C1 near-window lane with trained NEXTN and a completed read-only persistent PLE cache."
+support_status = "exploratory"
+backend = "sglang"
+recipe_source = "hashd1ve/qwen38-flash-next-one-dgx-spark"
+recipe_revision = "bf2b7c75870d3703730b6bd8f3bb93dc622c278d"
+source = "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+revision = "7b719225242aacd3dbd3f9407468c2ee9a9d2594"
+weight_file_count = 206
+weight_size_bytes = 135195303851
+served_name = "qwen38-flash-next-nvfp4-mtp-long"
+tasks = ["chat"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "moe+qsa+gdn+nextn"
+quantization = "nvfp4+ple-fp8+nextn-bf16"
+lifecycle = "docker"
+image = "lmsysorg/sglang@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+image_digest = "sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+cache_dir = "user"
+max_context = 262144
+native_context = 262144
+startup_timeout_s = 1800
+# Five recurrent slots save about 3.3 GB versus the C4 lane. At .85 that
+# budget moves to KV capacity while keeping the same conservative launch
+# envelope; this lane must remain single-request.
+estimated_ram_gib = 102.0
+endpoint = "http://127.0.0.1:30000/v1"
+sglang_source_overlays = [
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:0b513b4dc4f2394f6b1733bb0b74fa40ab59f4a04f6b33601350b2a606c67804" },
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-v1/qwen_sparse_attn_backend.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py", digest = "sha256:e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75" },
+]
+sglang_ple_mmap = true
+sglang_ple_cache_mode = "readonly"
+sglang_ple_cache_marker_digest = "sha256:f0ef55e4e4dec9b6b936a42af4ca2eb9b2f24ced373b1e216f7a6d507b171665"
+sglang_ple_cache_payload_digest = "sha256:b070f9644adf93794d8a1030584ab705809387e64396a9327a68fa3a3a6666b3"
+args = [
+  "--served-model-name", "qwen38-flash-next-nvfp4-mtp-long",
+  "--tp-size", "1",
+  "--prefill-attention-backend", "triton",
+  "--decode-attention-backend", "trtllm_mha",
+  "--quantization", "modelopt_fp4",
+  "--ple-offload-embedding",
+  "--weight-loader-drop-cache-after-load",
+  "--language-only",
+  "--reasoning-parser", "qwen3",
+  "--tool-call-parser", "qwen3_coder",
+  "--mamba-radix-cache-strategy", "extra_buffer",
+  "--max-mamba-cache-size", "5",
+  "--mem-fraction-static", "0.85",
+  "--context-length", "262144",
+  "--chunked-prefill-size", "1024",
+  "--max-running-requests", "1",
   "--enable-metrics",
   "--speculative-algorithm", "NEXTN",
   "--speculative-num-steps", "3",

@@ -132,10 +132,10 @@ class SGLangRuntimeTests(unittest.TestCase):
             profile.sglang_ple_cache_payload_digest,
             "sha256:b070f9644adf93794d8a1030584ab705809387e64396a9327a68fa3a3a6666b3",
         )
-        self.assertEqual(profile.estimated_ram_gib, 106.5)
+        self.assertEqual(profile.estimated_ram_gib, 105.0)
         self.assertEqual(
             profile.args[profile.args.index("--mem-fraction-static") + 1],
-            "0.87",
+            "0.85",
         )
         self.assertEqual(
             profile.args[profile.args.index("--max-mamba-cache-size") + 1],
@@ -155,6 +155,47 @@ class SGLangRuntimeTests(unittest.TestCase):
                 "sha256:0b513b4dc4f2394f6b1733bb0b74fa40ab59f4a04f6b33601350b2a606c67804",
                 "sha256:e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75",
             },
+        )
+
+    def test_flash_next_long_profile_reuses_pins_with_c1_state_budget(self) -> None:
+        profiles = load_models(ROOT / "manifests" / "models.toml")
+        throughput = profiles["qwen38-flash-next-nvfp4-mtp-sglang"]
+        long_context = profiles[
+            "qwen38-flash-next-nvfp4-mtp-long-sglang"
+        ]
+
+        for field in (
+            "source",
+            "revision",
+            "image_digest",
+            "recipe_revision",
+            "sglang_ple_cache_marker_digest",
+            "sglang_ple_cache_payload_digest",
+            "sglang_source_overlays",
+        ):
+            with self.subTest(field=field):
+                self.assertEqual(
+                    getattr(long_context, field), getattr(throughput, field)
+                )
+        self.assertEqual(long_context.tasks, ("chat",))
+        self.assertEqual(long_context.estimated_ram_gib, 102.0)
+        self.assertEqual(
+            long_context.args[
+                long_context.args.index("--max-mamba-cache-size") + 1
+            ],
+            "5",
+        )
+        self.assertEqual(
+            long_context.args[
+                long_context.args.index("--mem-fraction-static") + 1
+            ],
+            "0.85",
+        )
+        self.assertEqual(
+            long_context.args[
+                long_context.args.index("--max-running-requests") + 1
+            ],
+            "1",
         )
 
     def test_manifest_rejects_unsafe_or_unprovenanced_sglang_overlays(

@@ -14,6 +14,12 @@ SUITE_PATH = (
     / "suites"
     / "qwen38_flash_next_sglang_native.toml"
 )
+LONG_SUITE_PATH = (
+    ROOT
+    / "manifests"
+    / "suites"
+    / "qwen38_flash_next_sglang_long_context.toml"
+)
 
 
 class Qwen38FlashNextSglangNativeSuiteTests(unittest.TestCase):
@@ -23,7 +29,7 @@ class Qwen38FlashNextSglangNativeSuiteTests(unittest.TestCase):
 
         self.assertEqual(suite.id, "qwen38-flash-next-sglang-native")
         self.assertIn("NVMe-PLE", suite.description)
-        self.assertEqual(len(cases), 14)
+        self.assertEqual(len(cases), 12)
         self.assertNotIn("cache", {case.kind for case in cases.values()})
         self.assertEqual(cases["chat-smoke"].kind, "decode")
         self.assertEqual(cases["json-smoke"].requires, ("chat", "json"))
@@ -56,6 +62,21 @@ class Qwen38FlashNextSglangNativeSuiteTests(unittest.TestCase):
                 self.assertEqual(needle.concurrency, 1)
 
         for target in (131072, 245760):
+            self.assertNotIn(f"long-context-needle-{target}-c1", cases)
+
+        for case in cases.values():
+            with self.subTest(context_estimate=case.id):
+                estimated_tokens, _ = _estimated_context_tokens(case)
+                self.assertLess(estimated_tokens, 262144)
+
+    def test_long_suite_is_single_request_and_within_native_window(self) -> None:
+        suite = load_suite(LONG_SUITE_PATH)
+        cases = {case.id: case for case in suite.cases}
+
+        self.assertEqual(suite.id, "qwen38-flash-next-sglang-long-context")
+        self.assertIn("NVMe-PLE", suite.description)
+        self.assertEqual(len(cases), 2)
+        for target in (131072, 245760):
             case = cases[f"long-context-needle-{target}-c1"]
             with self.subTest(case=case.id):
                 self.assertEqual(case.kind, "capability")
@@ -63,8 +84,6 @@ class Qwen38FlashNextSglangNativeSuiteTests(unittest.TestCase):
                 self.assertEqual(case.warmups, 0)
                 self.assertEqual(case.concurrency, 1)
 
-        for case in cases.values():
-            with self.subTest(context_estimate=case.id):
                 estimated_tokens, _ = _estimated_context_tokens(case)
                 self.assertLess(estimated_tokens, 262144)
 
