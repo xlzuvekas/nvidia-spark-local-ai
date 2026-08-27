@@ -273,7 +273,7 @@ class SGLangRuntimeTests(unittest.TestCase):
             with self.subTest(mtp2_field=field):
                 self.assertEqual(getattr(mtp2, field), getattr(c8, field))
         mtp2_expected_flags = {
-            "--max-mamba-cache-size": "32",
+            "--max-mamba-cache-size": "40",
             "--max-total-tokens": "32768",
             "--max-running-requests": "8",
             "--speculative-num-steps": "2",
@@ -290,7 +290,7 @@ class SGLangRuntimeTests(unittest.TestCase):
             mtp2.args[mtp2_graph_index + 1 : mtp2_graph_index + 9],
             tuple(str(index) for index in range(1, 9)),
         )
-        self.assertEqual(mtp2.estimated_ram_gib, 103.5)
+        self.assertEqual(mtp2.estimated_ram_gib, 105.0)
 
     def test_flash_next_long_profile_reuses_pins_with_target_only_budget(self) -> None:
         profiles = load_models(ROOT / "manifests" / "models.toml")

@@ -2362,9 +2362,9 @@ cache_dir = "user"
 max_context = 4096
 native_context = 262144
 startup_timeout_s = 1800
-# Depth two needs four recurrent-state slots per request, so C8 requires 32
-# slots rather than the rejected depth-three allocation's 40.
-estimated_ram_gib = 103.5
+# With overlap and the extra-buffer strategy, SGLang reserves five recurrent-
+# state slots per request independent of MTP depth, so true C8 requires 40.
+estimated_ram_gib = 105.0
 endpoint = "http://127.0.0.1:30000/v1"
 sglang_source_overlays = [
   { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:0b513b4dc4f2394f6b1733bb0b74fa40ab59f4a04f6b33601350b2a606c67804" },
@@ -2386,7 +2386,7 @@ args = [
   "--reasoning-parser", "qwen3",
   "--tool-call-parser", "qwen3_coder",
   "--mamba-radix-cache-strategy", "extra_buffer",
-  "--max-mamba-cache-size", "32",
+  "--max-mamba-cache-size", "40",
   "--mem-fraction-static", "0.85",
   "--max-total-tokens", "32768",
   "--context-length", "4096",
