@@ -122,6 +122,7 @@ class SGLangRuntimeTests(unittest.TestCase):
         )
         self.assertTrue(profile.sglang_ple_mmap)
         self.assertEqual(profile.estimated_ram_gib, 102.0)
+        self.assertIn("--weight-loader-drop-cache-after-load", profile.args)
         self.assertEqual(len(profile.sglang_source_overlays), 2)
         self.assertTrue(
             all(

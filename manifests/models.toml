@@ -2008,6 +2008,7 @@ args = [
   "--decode-attention-backend", "trtllm_mha",
   "--quantization", "modelopt_fp4",
   "--ple-offload-embedding",
+  "--weight-loader-drop-cache-after-load",
   "--language-only",
   "--reasoning-parser", "qwen3",
   "--tool-call-parser", "qwen3_coder",
