@@ -2297,7 +2297,7 @@ native_context = 262144
 startup_timeout_s = 1800
 # Eight NEXTN requests need forty recurrent-state slots. The 32K total-token
 # cap keeps this lane isolated from the separate long-context allocation.
-estimated_ram_gib = 106.0
+estimated_ram_gib = 105.0
 endpoint = "http://127.0.0.1:30000/v1"
 sglang_source_overlays = [
   { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:0b513b4dc4f2394f6b1733bb0b74fa40ab59f4a04f6b33601350b2a606c67804" },

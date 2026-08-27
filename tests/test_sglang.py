@@ -256,6 +256,7 @@ class SGLangRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(c8.max_context, 4096)
         self.assertEqual(c8.native_context, 262144)
+        self.assertEqual(c8.estimated_ram_gib, 105.0)
 
     def test_flash_next_long_profile_reuses_pins_with_target_only_budget(self) -> None:
         profiles = load_models(ROOT / "manifests" / "models.toml")
