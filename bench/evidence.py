@@ -681,6 +681,7 @@ _KNOWN_EVENTS = {
     "server_kept",
     "server_ready",
     "server_stopped",
+    "sglang_spec_decode_metrics_snapshot",
     "vllm_spec_decode_metrics_snapshot",
     "worker_cleanup",
     "worker_start",

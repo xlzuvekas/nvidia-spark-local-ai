@@ -29,6 +29,10 @@ from .prefix_cache_protocol import (
     prefix_cache_conditions,
     prefix_cache_steps,
 )
+from .sglang_metrics import (
+    aggregate_sglang_speculative_audits,
+    sglang_nextn_depth,
+)
 from .vllm_metrics import aggregate_vllm_spec_decode_metrics
 
 
@@ -382,6 +386,11 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         if mtp_requested or dflash_requested
         else None
     )
+    sglang_depth = (
+        sglang_nextn_depth(planned_model.get("args") or ())
+        if planned_model.get("backend") == "sglang"
+        else None
+    )
     annotations = measurement_annotations(events)
     startup_annotations = [
         annotation
@@ -419,13 +428,25 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
             "configured_max_draft_tokens": speculative_depth,
             "proposal_depth": proposal_depth,
         }
-    speculative_decoding = llamacpp_speculative_decoding or (
-        aggregate_vllm_spec_decode_metrics(
+    sglang_speculative_decoding = aggregate_sglang_speculative_audits(
+        (
             event["metrics"]
             for event in events
-            if event.get("event") == "vllm_spec_decode_metrics_snapshot"
+            if event.get("event") == "sglang_spec_decode_metrics_snapshot"
             and isinstance(event.get("metrics"), dict)
-        )
+        ),
+        expected_depth=sglang_depth,
+    )
+    vllm_speculative_decoding = aggregate_vllm_spec_decode_metrics(
+        event["metrics"]
+        for event in events
+        if event.get("event") == "vllm_spec_decode_metrics_snapshot"
+        and isinstance(event.get("metrics"), dict)
+    )
+    speculative_decoding = (
+        llamacpp_speculative_decoding
+        or sglang_speculative_decoding
+        or vllm_speculative_decoding
     )
     llamacpp_mtp_evidence = assess_llamacpp_mtp_evidence(
         events,

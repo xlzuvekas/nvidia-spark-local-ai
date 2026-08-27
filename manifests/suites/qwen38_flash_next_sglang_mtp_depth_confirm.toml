@@ -1,0 +1,16 @@
+schema_version = 1
+
+[suite]
+id = "qwen38-flash-next-sglang-mtp-depth-confirm"
+description = "Reverse-order twenty-repetition D256 confirmation of the Qwen3.8-Flash-Next SGLang MTP winner against target-only serving."
+
+[[cases]]
+id = "decode-256"
+kind = "decode"
+requires = ["chat"]
+warmups = 2
+repetitions = 20
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0

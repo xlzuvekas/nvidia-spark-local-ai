@@ -158,6 +158,105 @@ class SGLangRuntimeTests(unittest.TestCase):
             },
         )
 
+    def test_flash_next_mtp_depth_profiles_hold_allocation_constant(self) -> None:
+        profiles = load_models(ROOT / "manifests" / "models.toml")
+        baseline = profiles["qwen38-flash-next-nvfp4-mtp-sglang"]
+
+        for depth in range(4):
+            profile = profiles[
+                f"qwen38-flash-next-nvfp4-mtp-depth{depth}-sglang"
+            ]
+            with self.subTest(depth=depth):
+                for field in (
+                    "source",
+                    "revision",
+                    "image_digest",
+                    "recipe_revision",
+                    "sglang_ple_cache_marker_digest",
+                    "sglang_ple_cache_payload_digest",
+                    "sglang_source_overlays",
+                ):
+                    self.assertEqual(
+                        getattr(profile, field), getattr(baseline, field)
+                    )
+                self.assertEqual(
+                    profile.args[profile.args.index("--max-total-tokens") + 1],
+                    "183616",
+                )
+                self.assertEqual(
+                    profile.args[
+                        profile.args.index("--max-mamba-cache-size") + 1
+                    ],
+                    "20",
+                )
+                self.assertEqual(
+                    profile.args[
+                        profile.args.index("--max-running-requests") + 1
+                    ],
+                    "4",
+                )
+                if depth == 0:
+                    self.assertNotIn("--speculative-algorithm", profile.args)
+                    self.assertNotIn(
+                        "--speculative-num-draft-tokens", profile.args
+                    )
+                else:
+                    self.assertEqual(
+                        profile.args[
+                            profile.args.index("--speculative-num-steps") + 1
+                        ],
+                        str(depth),
+                    )
+                    self.assertEqual(
+                        profile.args[
+                            profile.args.index(
+                                "--speculative-num-draft-tokens"
+                            )
+                            + 1
+                        ],
+                        str(depth + 1),
+                    )
+
+    def test_flash_next_c8_profile_bounds_short_context_allocation(self) -> None:
+        profiles = load_models(ROOT / "manifests" / "models.toml")
+        baseline = profiles["qwen38-flash-next-nvfp4-mtp-sglang"]
+        c8 = profiles["qwen38-flash-next-nvfp4-mtp-c8-sglang"]
+
+        for field in (
+            "source",
+            "revision",
+            "image_digest",
+            "recipe_revision",
+            "sglang_ple_cache_marker_digest",
+            "sglang_ple_cache_payload_digest",
+            "sglang_source_overlays",
+        ):
+            with self.subTest(field=field):
+                self.assertEqual(getattr(c8, field), getattr(baseline, field))
+
+        expected_flags = {
+            "--max-mamba-cache-size": "40",
+            "--max-total-tokens": "32768",
+            "--context-length": "4096",
+            "--max-prefill-tokens": "4096",
+            "--max-running-requests": "8",
+            "--cuda-graph-backend-decode": "full",
+            "--cuda-graph-backend-prefill": "disabled",
+            "--speculative-num-steps": "3",
+            "--speculative-num-draft-tokens": "4",
+        }
+        for flag, expected in expected_flags.items():
+            with self.subTest(flag=flag):
+                self.assertEqual(c8.args[c8.args.index(flag) + 1], expected)
+
+        graph_bs_index = c8.args.index("--cuda-graph-bs-decode")
+        self.assertEqual(
+            c8.args[graph_bs_index + 1 : graph_bs_index + 9],
+            tuple(str(index) for index in range(1, 9)),
+        )
+        self.assertEqual(c8.max_context, 4096)
+        self.assertEqual(c8.native_context, 262144)
+
     def test_flash_next_long_profile_reuses_pins_with_target_only_budget(self) -> None:
         profiles = load_models(ROOT / "manifests" / "models.toml")
         throughput = profiles["qwen38-flash-next-nvfp4-mtp-sglang"]

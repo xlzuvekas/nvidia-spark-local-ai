@@ -86,6 +86,11 @@ from .runtime import (
     start_server,
     validate_llamacpp_artifacts,
 )
+from .sglang_metrics import (
+    SGLangSpeculativeAuditError,
+    request_sglang_speculative_audit,
+    sglang_nextn_depth,
+)
 from .telemetry import TelemetrySampler
 from .vllm_metrics import snapshot_vllm_spec_decode_metrics
 
@@ -2979,6 +2984,51 @@ def execute_plan(
                     except Exception:
                         if not continue_on_error:
                             raise
+                nextn_depth = (
+                    sglang_nextn_depth(getattr(model, "args", ()))
+                    if server.backend == "sglang"
+                    else None
+                )
+                if nextn_depth is not None:
+                    failure_stage = "sglang_speculative_acceptance_audit"
+                    telemetry.set_phase("sglang_speculative_acceptance_audit")
+                    if (
+                        not getattr(server, "container_id", None)
+                        or getattr(server, "run_identity", None)
+                        != str(model.run_identity)
+                    ):
+                        raise SGLangSpeculativeAuditError(
+                            "Managed SGLang NEXTN server ownership is unavailable"
+                        )
+                    request_body_json = getattr(model, "request_body_json", None)
+                    extra_body = (
+                        json.loads(request_body_json) if request_body_json else {}
+                    )
+                    if not isinstance(extra_body, dict):
+                        raise SGLangSpeculativeAuditError(
+                            "SGLang profile request body must be an object"
+                        )
+                    chat_template_kwargs = extra_body.get("chat_template_kwargs")
+                    if chat_template_kwargs is not None and not isinstance(
+                        chat_template_kwargs, dict
+                    ):
+                        raise SGLangSpeculativeAuditError(
+                            "SGLang chat-template arguments must be an object"
+                        )
+                    spec_decode_metrics = request_sglang_speculative_audit(
+                        base_url=server.base_url,
+                        model=str(model.served_name),
+                        authorization=getattr(server, "authorization", None),
+                        expected_depth=nextn_depth,
+                        chat_template_kwargs=chat_template_kwargs,
+                    )
+                    journal.append(
+                        {
+                            "event": "sglang_spec_decode_metrics_snapshot",
+                            "backend": server.backend,
+                            "metrics": spec_decode_metrics,
+                        }
+                    )
             except BaseException as error:
                 primary_error = error
                 _record_run_aborted(journal, error, stage=failure_stage)

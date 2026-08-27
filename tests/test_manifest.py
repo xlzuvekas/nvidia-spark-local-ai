@@ -49,6 +49,24 @@ class ManifestLoaderTests(unittest.TestCase):
         multimodal_rerank = load_suite(
             ROOT / "manifests" / "suites" / "multimodal_rerank.toml"
         )
+        mtp_depth = load_suite(
+            ROOT
+            / "manifests"
+            / "suites"
+            / "qwen38_flash_next_sglang_mtp_depth.toml"
+        )
+        mtp_depth_confirm = load_suite(
+            ROOT
+            / "manifests"
+            / "suites"
+            / "qwen38_flash_next_sglang_mtp_depth_confirm.toml"
+        )
+        c8 = load_suite(
+            ROOT
+            / "manifests"
+            / "suites"
+            / "qwen38_flash_next_sglang_c8.toml"
+        )
 
         self.assertGreaterEqual(len(models), 1)
         self.assertEqual(smoke.id, "smoke")
@@ -59,6 +77,24 @@ class ManifestLoaderTests(unittest.TestCase):
         self.assertEqual(capabilities.id, "capabilities")
         self.assertEqual(chat_quality.id, "chat-quality")
         self.assertEqual(multimodal_rerank.id, "multimodal-rerank")
+        self.assertEqual(mtp_depth.id, "qwen38-flash-next-sglang-mtp-depth")
+        self.assertEqual(len(mtp_depth.cases), 1)
+        self.assertEqual(mtp_depth.cases[0].warmups, 2)
+        self.assertEqual(mtp_depth.cases[0].repetitions, 5)
+        self.assertEqual(mtp_depth.cases[0].max_output_tokens, 256)
+        self.assertEqual(
+            mtp_depth_confirm.id,
+            "qwen38-flash-next-sglang-mtp-depth-confirm",
+        )
+        self.assertEqual(mtp_depth_confirm.cases[0].warmups, 2)
+        self.assertEqual(mtp_depth_confirm.cases[0].repetitions, 20)
+        self.assertEqual(mtp_depth_confirm.cases[0].max_output_tokens, 256)
+        self.assertEqual(c8.id, "qwen38-flash-next-sglang-c8")
+        self.assertEqual(
+            [case.concurrency for case in c8.cases],
+            [1, 1, 1, 2, 4, 8],
+        )
+        self.assertTrue(all(case.prompt_repetitions == 0 for case in c8.cases))
         self.assertEqual(
             multimodal_rerank.cases[0].requires, ("rerank", "vision")
         )
