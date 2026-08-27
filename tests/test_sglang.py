@@ -291,6 +291,45 @@ class SGLangRuntimeTests(unittest.TestCase):
             tuple(str(index) for index in range(1, 9)),
         )
         self.assertEqual(mtp2.estimated_ram_gib, 105.0)
+        self.assertEqual(mtp2.support_status, "incompatible")
+
+        lazy = profiles[
+            "qwen38-flash-next-nvfp4-mtp2-c8-lazy-sglang"
+        ]
+        for field in (
+            "source",
+            "revision",
+            "image_digest",
+            "recipe_revision",
+            "sglang_ple_cache_marker_digest",
+            "sglang_ple_cache_payload_digest",
+            "sglang_source_overlays",
+            "max_context",
+            "native_context",
+        ):
+            with self.subTest(lazy_field=field):
+                self.assertEqual(getattr(lazy, field), getattr(c8, field))
+        lazy_expected_flags = {
+            "--mamba-radix-cache-strategy": "extra_buffer_lazy",
+            "--max-mamba-cache-size": "32",
+            "--max-total-tokens": "32768",
+            "--max-running-requests": "8",
+            "--speculative-num-steps": "2",
+            "--speculative-num-draft-tokens": "3",
+        }
+        for flag, expected in lazy_expected_flags.items():
+            with self.subTest(lazy_flag=flag):
+                self.assertEqual(
+                    lazy.args[lazy.args.index(flag) + 1],
+                    expected,
+                )
+        lazy_graph_index = lazy.args.index("--cuda-graph-bs-decode")
+        self.assertEqual(
+            lazy.args[lazy_graph_index + 1 : lazy_graph_index + 9],
+            tuple(str(index) for index in range(1, 9)),
+        )
+        self.assertEqual(lazy.estimated_ram_gib, 104.5)
+        self.assertEqual(lazy.support_status, "exploratory")
 
     def test_flash_next_long_profile_reuses_pins_with_target_only_budget(self) -> None:
         profiles = load_models(ROOT / "manifests" / "models.toml")

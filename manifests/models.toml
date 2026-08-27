@@ -2341,8 +2341,8 @@ args = [
 
 [[models]]
 id = "qwen38-flash-next-nvfp4-mtp2-c8-sglang"
-description = "Pinned one-DGX-Spark Qwen3.8-Flash-Next NVFP4 NEXTN depth-two C8 allocation with explicit decode graphs and a short-context token cap."
-support_status = "exploratory"
+description = "Pressure-unsafe one-DGX-Spark Qwen3.8-Flash-Next NVFP4 NEXTN depth-two 40-slot C8 diagnostic; retained to reproduce the frozen swap-gate rejection, not for serving."
+support_status = "incompatible"
 backend = "sglang"
 recipe_source = "hashd1ve/qwen38-flash-next-one-dgx-spark"
 recipe_revision = "bf2b7c75870d3703730b6bd8f3bb93dc622c278d"
@@ -2387,6 +2387,73 @@ args = [
   "--tool-call-parser", "qwen3_coder",
   "--mamba-radix-cache-strategy", "extra_buffer",
   "--max-mamba-cache-size", "40",
+  "--mem-fraction-static", "0.85",
+  "--max-total-tokens", "32768",
+  "--context-length", "4096",
+  "--chunked-prefill-size", "1024",
+  "--max-prefill-tokens", "4096",
+  "--max-running-requests", "8",
+  "--cuda-graph-backend-decode", "full",
+  "--cuda-graph-bs-decode", "1", "2", "3", "4", "5", "6", "7", "8",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--enable-metrics",
+  "--speculative-algorithm", "NEXTN",
+  "--speculative-num-steps", "2",
+  "--speculative-eagle-topk", "1",
+  "--speculative-num-draft-tokens", "3",
+  "--speculative-draft-model-quantization", "unquant",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]
+
+[[models]]
+id = "qwen38-flash-next-nvfp4-mtp2-c8-lazy-sglang"
+description = "Pinned one-DGX-Spark Qwen3.8-Flash-Next NVFP4 NEXTN depth-two C8 allocation using SGLang's four-slot lazy extra-buffer strategy, explicit decode graphs, and a short-context token cap."
+support_status = "exploratory"
+backend = "sglang"
+recipe_source = "hashd1ve/qwen38-flash-next-one-dgx-spark"
+recipe_revision = "bf2b7c75870d3703730b6bd8f3bb93dc622c278d"
+source = "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+revision = "7b719225242aacd3dbd3f9407468c2ee9a9d2594"
+weight_file_count = 206
+weight_size_bytes = 135195303851
+served_name = "qwen38-flash-next-nvfp4-mtp2-c8-lazy"
+tasks = ["chat", "json", "thinking", "tools"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "moe+qsa+gdn+nextn"
+quantization = "nvfp4+ple-fp8+nextn-bf16"
+lifecycle = "docker"
+image = "lmsysorg/sglang@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+image_digest = "sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
+cache_dir = "user"
+max_context = 4096
+native_context = 262144
+startup_timeout_s = 1800
+# With overlap and extra_buffer_lazy, SGLang reserves four recurrent-state
+# slots per request, so the 32-slot pool admits true C8.
+estimated_ram_gib = 104.5
+endpoint = "http://127.0.0.1:30000/v1"
+sglang_source_overlays = [
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:0b513b4dc4f2394f6b1733bb0b74fa40ab59f4a04f6b33601350b2a606c67804" },
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-v1/qwen_sparse_attn_backend.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py", digest = "sha256:e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75" },
+]
+sglang_ple_mmap = true
+sglang_ple_cache_mode = "readonly"
+sglang_ple_cache_marker_digest = "sha256:f0ef55e4e4dec9b6b936a42af4ca2eb9b2f24ced373b1e216f7a6d507b171665"
+sglang_ple_cache_payload_digest = "sha256:b070f9644adf93794d8a1030584ab705809387e64396a9327a68fa3a3a6666b3"
+args = [
+  "--served-model-name", "qwen38-flash-next-nvfp4-mtp2-c8-lazy",
+  "--tp-size", "1",
+  "--prefill-attention-backend", "triton",
+  "--decode-attention-backend", "trtllm_mha",
+  "--quantization", "modelopt_fp4",
+  "--ple-offload-embedding",
+  "--weight-loader-drop-cache-after-load",
+  "--language-only",
+  "--reasoning-parser", "qwen3",
+  "--tool-call-parser", "qwen3_coder",
+  "--mamba-radix-cache-strategy", "extra_buffer_lazy",
+  "--max-mamba-cache-size", "32",
   "--mem-fraction-static", "0.85",
   "--max-total-tokens", "32768",
   "--context-length", "4096",
