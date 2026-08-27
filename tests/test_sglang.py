@@ -137,6 +137,10 @@ class SGLangRuntimeTests(unittest.TestCase):
             profile.args[profile.args.index("--mem-fraction-static") + 1],
             "0.85",
         )
+        self.assertEqual(
+            profile.args[profile.args.index("--max-mamba-cache-size") + 1],
+            "20",
+        )
         self.assertIn("--weight-loader-drop-cache-after-load", profile.args)
         self.assertEqual(len(profile.sglang_source_overlays), 2)
         self.assertTrue(

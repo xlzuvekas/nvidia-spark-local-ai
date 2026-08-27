@@ -2017,6 +2017,9 @@ args = [
   "--reasoning-parser", "qwen3",
   "--tool-call-parser", "qwen3_coder",
   "--mamba-radix-cache-strategy", "extra_buffer",
+  # NEXTN consumes five recurrent-state slots per active request. The .85
+  # auto-solver found 19 on GB10, so pin the smallest cache that admits C4.
+  "--max-mamba-cache-size", "20",
   "--mem-fraction-static", "0.85",
   "--context-length", "262144",
   "--chunked-prefill-size", "1024",
