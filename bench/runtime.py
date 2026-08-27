@@ -18,6 +18,15 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
+from bench.qwen38_ple_cache import (
+    PINNED_LAYOUT as QWEN38_PLE_LAYOUT,
+    PLECacheError,
+    PLECacheRecord,
+    default_cache_path as qwen38_ple_cache_path,
+    expected_marker_sha256 as qwen38_ple_marker_sha256,
+    validate_ple_cache as validate_qwen38_ple_cache,
+)
+
 
 MANAGED_LABEL = "ai.sparkbench.managed=true"
 VLLM_CONTAINER_NAME = "sparkbench-vllm"
@@ -42,6 +51,21 @@ _SPLIT_GGUF_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+_QWEN38_READONLY_PLE_OVERLAYS = {
+    (
+        "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py"
+    ): (
+        "sha256:0b513b4dc4f2394f6b1733bb0b74fa40"
+        "ab59f4a04f6b33601350b2a606c67804"
+    ),
+    (
+        "/sgl-workspace/sglang/python/sglang/srt/layers/attention/"
+        "qwen_sparse_attn_backend.py"
+    ): (
+        "sha256:e30566492e1502f94a4c7fed42d90b5"
+        "23bbb662580c628459e6e63c7b5263c75"
+    ),
+}
 
 
 class RuntimeErrorWithContext(RuntimeError):
@@ -1138,6 +1162,114 @@ def _private_sglang_ple_dir(model: Any) -> Path:
     return ple_dir
 
 
+def _sglang_argument_value(
+    arguments: tuple[str, ...], option: str
+) -> tuple[str, ...]:
+    values: list[str] = []
+    for index, argument in enumerate(arguments):
+        if argument == option:
+            if index + 1 >= len(arguments) or arguments[index + 1].startswith("--"):
+                raise RuntimeErrorWithContext(
+                    f"SGLang option {option} is missing its value"
+                )
+            values.append(arguments[index + 1])
+        elif argument.startswith(option + "="):
+            values.append(argument.partition("=")[2])
+    return tuple(values)
+
+
+def _validate_readonly_sglang_ple_loader(model: Any) -> None:
+    arguments = tuple(str(argument) for argument in getattr(model, "args", ()))
+    if arguments.count("--ple-offload-embedding") != 1:
+        raise RuntimeErrorWithContext(
+            "read-only SGLang PLE reuse requires --ple-offload-embedding"
+        )
+    load_formats = _sglang_argument_value(arguments, "--load-format")
+    if len(load_formats) > 1 or any(value != "auto" for value in load_formats):
+        raise RuntimeErrorWithContext(
+            "read-only SGLang PLE reuse requires load_format=auto; "
+            "fastsafetensors is incompatible"
+        )
+    for incompatible in (
+        "--weight-loader-disable-mmap",
+        "--weight-loader-prefetch-checkpoints",
+    ):
+        if any(
+            argument == incompatible or argument.startswith(incompatible + "=")
+            for argument in arguments
+        ):
+            raise RuntimeErrorWithContext(
+                "read-only SGLang PLE reuse is incompatible with " + incompatible
+            )
+
+
+def _readonly_sglang_ple_dir(
+    model: Any,
+    source_overlays: tuple[tuple[Path, str, str, str], ...],
+) -> tuple[Path, PLECacheRecord]:
+    """Admit the exact completed Qwen3.8 PLE cache without changing it."""
+
+    exact_identity = (
+        str(getattr(model, "id", "") or "") == QWEN38_PLE_LAYOUT.model_id
+        and str(getattr(model, "source", "") or "") == QWEN38_PLE_LAYOUT.source
+        and str(getattr(model, "revision", "") or "")
+        == QWEN38_PLE_LAYOUT.revision
+        and str(getattr(model, "recipe_source", "") or "")
+        == QWEN38_PLE_LAYOUT.recipe_source
+        and str(getattr(model, "recipe_revision", "") or "")
+        == QWEN38_PLE_LAYOUT.recipe_revision
+    )
+    if not exact_identity:
+        raise RuntimeErrorWithContext(
+            "read-only SGLang PLE reuse is pinned to the exact Qwen3.8 "
+            "artifact and audited recipe"
+        )
+    expected_marker = "sha256:" + qwen38_ple_marker_sha256()
+    expected_payload = "sha256:" + QWEN38_PLE_LAYOUT.payload_sha256
+    if (
+        getattr(model, "sglang_ple_cache_marker_digest", None) != expected_marker
+        or getattr(model, "sglang_ple_cache_payload_digest", None)
+        != expected_payload
+    ):
+        raise RuntimeErrorWithContext(
+            "read-only SGLang PLE cache marker/payload pins do not match "
+            "the audited layout"
+        )
+    actual_overlays = {
+        container_path: digest
+        for _host_file, container_path, digest, _relative in source_overlays
+    }
+    if actual_overlays != _QWEN38_READONLY_PLE_OVERLAYS:
+        raise RuntimeErrorWithContext(
+            "read-only SGLang PLE reuse requires the exact persistent-cache "
+            "source overlays"
+        )
+    _validate_readonly_sglang_ple_loader(model)
+
+    try:
+        cache_root = (
+            Path.home() / ".cache" / "sparkbench" / "sglang"
+        ).resolve(strict=True)
+        cache = qwen38_ple_cache_path(home=Path.home())
+        resolved = cache.resolve(strict=True)
+        resolved.relative_to(cache_root)
+        record = validate_qwen38_ple_cache(
+            resolved, layout=QWEN38_PLE_LAYOUT, verify_payload=False
+        )
+    except (OSError, ValueError, PLECacheError) as error:
+        raise RuntimeErrorWithContext(
+            f"read-only SGLang PLE cache admission failed: {error}"
+        ) from error
+    if (
+        "sha256:" + record.marker_sha256 != expected_marker
+        or "sha256:" + record.payload_sha256 != expected_payload
+    ):
+        raise RuntimeErrorWithContext(
+            "read-only SGLang PLE cache validation returned unexpected pins"
+        )
+    return resolved, record
+
+
 def start_vllm(
     model: Any,
     *,
@@ -1347,15 +1479,38 @@ def start_sglang(
         model, workspace=workspace
     )
     ple_mmap = bool(getattr(model, "sglang_ple_mmap", False))
+    ple_cache_mode = getattr(model, "sglang_ple_cache_mode", None)
+    if ple_cache_mode not in {None, "readonly"}:
+        raise RuntimeErrorWithContext(
+            "SGLang PLE cache mode must be absent or 'readonly'"
+        )
+    if ple_cache_mode is not None and not ple_mmap:
+        raise RuntimeErrorWithContext(
+            "SGLang PLE cache mode requires sglang_ple_mmap"
+        )
+    if ple_cache_mode is None and any(
+        getattr(model, field, None) is not None
+        for field in (
+            "sglang_ple_cache_marker_digest",
+            "sglang_ple_cache_payload_digest",
+        )
+    ):
+        raise RuntimeErrorWithContext(
+            "SGLang PLE cache pins require an explicit cache mode"
+        )
     if ple_mmap and not source_overlays:
         raise RuntimeErrorWithContext(
             "SGLang PLE mmap requires verified source overlays"
         )
     if ple_mmap and container_draft_snapshot is not None:
         raise RuntimeErrorWithContext(
-            "SGLang PLE mmap requires an embedded draft and one writable mount"
+            "SGLang PLE mmap requires an embedded draft and one backing mount"
         )
-    ple_dir = _private_sglang_ple_dir(model) if ple_mmap else None
+    ple_record: PLECacheRecord | None = None
+    if ple_cache_mode == "readonly":
+        ple_dir, ple_record = _readonly_sglang_ple_dir(model, source_overlays)
+    else:
+        ple_dir = _private_sglang_ple_dir(model) if ple_mmap else None
 
     api_key = secrets.token_urlsafe(32)
     authorization = f"Bearer {api_key}"
@@ -1417,10 +1572,26 @@ def start_sglang(
     if ple_dir is not None:
         command.extend(
             [
-                "--volume", f"{ple_dir}:/ple:rw",
-                "--env", "SGLANG_QWEN4_PLE_MMAP_DIR=/ple",
+                "--volume",
+                f"{ple_dir}:/ple:{'ro' if ple_cache_mode == 'readonly' else 'rw'}",
+                "--env",
+                "SGLANG_QWEN4_PLE_MMAP_DIR=/ple",
             ]
         )
+        if ple_cache_mode == "readonly":
+            assert ple_record is not None
+            command.extend(
+                [
+                    "--env",
+                    "SGLANG_QWEN4_PLE_CACHE_MODE=readonly",
+                    "--env",
+                    "SGLANG_QWEN4_PLE_CACHE_LOADER_CONTRACT="
+                    "auto-mmap-no-prefetch",
+                    "--env",
+                    "SGLANG_QWEN4_PLE_CACHE_MARKER_SHA256="
+                    + ple_record.marker_sha256,
+                ]
+            )
     if compile_cache is not None:
         command.extend(
             [
@@ -1493,9 +1664,18 @@ def start_sglang(
             for _host_file, container_path, digest, relative_path in source_overlays
         ],
         "sglang_ple_mmap": ple_mmap,
+        "sglang_ple_cache_mode": ple_cache_mode,
+        "sglang_ple_cache_marker_digest": (
+            "sha256:" + ple_record.marker_sha256 if ple_record else None
+        ),
+        "sglang_ple_cache_payload_digest": (
+            "sha256:" + ple_record.payload_sha256 if ple_record else None
+        ),
         "sglang_ple_container_dir": "/ple" if ple_mmap else None,
         "sglang_ple_backing_policy": (
-            "private_runtime_cache" if ple_mmap else None
+            "verified_persistent_readonly"
+            if ple_cache_mode == "readonly"
+            else "private_runtime_cache" if ple_mmap else None
         ),
         "sglang_allow_hf_metadata_probe": metadata_probe,
         "hf_network_policy": (

@@ -13,7 +13,7 @@ from unittest.mock import patch
 from bench import sglang_overlay_prepare as prepare
 
 
-PLE_SOURCE = '''import torch
+PLE_SOURCE = r'''import torch
 
 
 class nn:
@@ -37,6 +37,40 @@ class Qwen4ExpPinnedHostEmbedding(VocabParallelEmbedding):
             requires_grad=False,
         )
         return cpu_weight
+
+
+class Qwen4Exp:
+    def load_weights(self, weights):
+        def load_qwen4_exp_ple_shard(name, loaded_weight):
+            import re
+
+            match = re.search(r"\.ngram_embedding\.shard_(\d+)\.weight$", name)
+            shard_idx = int(match.group(1))
+            mod_prefix = "model.layers.1.ple.ple_embedding"
+            ple_mod = ple_modules.get(mod_prefix)
+            emb = ple_mod.ngram_embedding
+            if (
+                loaded_weight.dtype == torch.float8_e4m3fn
+                and emb.weight.dtype != torch.float8_e4m3fn
+            ):
+                pass
+            return True
+
+        ple_modules = {}
+        ple_num_sync_shards = 128
+        loaded_params: Set[str] = set()
+        loaded_buffers: Set[str] = set()
+        loaded_shard_params: Set[str] = set()
+        skipped_visual_count = 0
+        for name, loaded_weight in weights:
+            if load_qwen4_exp_ple_shard(name, loaded_weight):
+                continue
+        loaded_params.update(loaded_buffers)
+        loaded_params.update(loaded_shard_params)
+
+        if skipped_visual_count > 0:
+            pass
+        return loaded_params
 '''
 
 QSA_SOURCE = '''def _resolve_trtllm_sparse_decode():
@@ -71,18 +105,22 @@ def _fixture_specs() -> tuple[prepare.OverlaySpec, ...]:
         for spec in prepare.MODULE_OVERLAYS:
             source = root / spec.output_name
             source.write_text(sources[spec.output_name], encoding="utf-8")
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(prepare.PATCHER_ROOT / spec.patcher_name),
-                    str(source),
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                raise AssertionError(result.stdout + result.stderr)
+            patcher_names = [spec.patcher_name]
+            if spec.post_patcher_name is not None:
+                patcher_names.append(spec.post_patcher_name)
+            for patcher_name in patcher_names:
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(prepare.PATCHER_ROOT / patcher_name),
+                        str(source),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    raise AssertionError(result.stdout + result.stderr)
             specs.append(replace(spec, output_sha256=_sha256(source)))
     return tuple(specs)
 
@@ -153,17 +191,30 @@ class SGLangOverlayPreparationTests(unittest.TestCase):
                 "f60ccb9f9e350a43155a1a7a20d154b"
                 "e0b7e93c29dacb3db95d397ba910090b2"
             ),
+            "qwen38-persistent-ple-cache.py": (
+                "bf47f244406e149a3c7fe51d42d326d6"
+                "3a008733d55868b51a73112052e3bcdf"
+            ),
         }
         for spec in prepare.MODULE_OVERLAYS:
             patcher = prepare.PATCHER_ROOT / spec.patcher_name
             self.assertEqual(_sha256(patcher), expected[spec.patcher_name])
             self.assertEqual(spec.patcher_sha256, expected[spec.patcher_name])
+            if spec.post_patcher_name is not None:
+                post_patcher = prepare.PATCHER_ROOT / spec.post_patcher_name
+                self.assertEqual(
+                    _sha256(post_patcher), expected[spec.post_patcher_name]
+                )
+                self.assertEqual(
+                    spec.post_patcher_sha256,
+                    expected[spec.post_patcher_name],
+                )
         self.assertEqual(
             {spec.output_name: spec.output_sha256 for spec in prepare.MODULE_OVERLAYS},
             {
                 "qwen4_exp.py": (
-                    "c687bf96b8adb980eaf3a1db2ad4a7c"
-                    "00b558537865d91674c0e1b43f4ae1d71"
+                    "0b513b4dc4f2394f6b1733bb0b74fa40"
+                    "ab59f4a04f6b33601350b2a606c67804"
                 ),
                 "qwen_sparse_attn_backend.py": (
                     "e30566492e1502f94a4c7fed42d90b5"
@@ -188,7 +239,7 @@ class SGLangOverlayPreparationTests(unittest.TestCase):
                     target,
                     workspace
                     / "results/runtime-overlays/"
-                    "qwen38-flash-next-bf2b7c75",
+                    "qwen38-flash-next-bf2b7c75-persistent-ple-v1",
                 )
                 self.assertEqual(
                     {entry.name for entry in target.iterdir()},
@@ -224,7 +275,7 @@ class SGLangOverlayPreparationTests(unittest.TestCase):
             target = (
                 workspace
                 / "results/runtime-overlays/"
-                "qwen38-flash-next-bf2b7c75"
+                "qwen38-flash-next-bf2b7c75-persistent-ple-v1"
             )
             target.mkdir(parents=True)
             for spec in specs:

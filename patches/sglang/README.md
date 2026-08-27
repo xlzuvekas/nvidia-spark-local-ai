@@ -39,11 +39,33 @@ The two vendored patchers are byte-for-byte copies from
 - [`ple_mmap.py`](https://github.com/hashd1ve/qwen38-flash-next-one-dgx-spark/blob/bf2b7c75870d3703730b6bd8f3bb93dc622c278d/patches/ple_mmap.py), vendored as `bf2b7c75-ple_mmap.py`, SHA-256 `eeabdde061631c9b606d4ccc7371ff8fb01c6cc034dfe6bad1e4f29a8aa21555`;
 - [`qsa_trtllm_sm120.py`](https://github.com/hashd1ve/qwen38-flash-next-one-dgx-spark/blob/bf2b7c75870d3703730b6bd8f3bb93dc622c278d/patches/qsa_trtllm_sm120.py), vendored as `bf2b7c75-qsa_trtllm_sm120.py`, SHA-256 `f60ccb9f9e350a43155a1a7a20d154be0b7e93c29dacb3db95d397ba910090b2`.
 
-The expected generated files are
+The retained legacy generated files are
 `results/runtime-overlays/qwen38-flash-next-bf2b7c75/qwen4_exp.py`
 (`c687bf96b8adb980eaf3a1db2ad4a7c00b558537865d91674c0e1b43f4ae1d71`)
 and `qwen_sparse_attn_backend.py`
 (`e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75`).
+That exact pair is retained for already-frozen writable-mmap plans. The current
+profile uses the separate
+`results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-v1`
+target. Its `qwen4_exp.py` additionally applies
+`qwen38-persistent-ple-cache.py` (SHA-256
+`bf47f244406e149a3c7fe51d42d326d63a008733d55868b51a73112052e3bcdf`)
+and is pinned as
+`0b513b4dc4f2394f6b1733bb0b74fa40ab59f4a04f6b33601350b2a606c67804`;
+the QSA file is byte-identical to the old pair.
+
+`python3 prepare_sglang_overlays.py --materialize-ple` validates the exact
+cached Radix revision and its 128 FP8 shards, concatenates them in numeric
+`shard_0` through `shard_127` order without constructing the model, and commits
+an immutable payload plus deterministic completion marker. It can adopt an
+unmarked payload only after hashing all 51,200,245,760 bytes to
+`b070f9644adf93794d8a1030584ab705809387e64396a9327a68fa3a3a6666b3`.
+It never downloads or invokes Docker. If an exact payload belongs to another
+user, ownership of that one file must be corrected explicitly before rerunning;
+the command never changes ownership. `--verify-ple-cache` performs a full
+offline recheck. The explicit `readonly` profile mode then validates the marker,
+rejects incompatible SGLang weight-loader modes, mounts the cache read-only,
+and maps it with `shared=False` while still loading the PLE `weight_scale`.
 The upstream [MIT license](https://github.com/hashd1ve/qwen38-flash-next-one-dgx-spark/blob/bf2b7c75870d3703730b6bd8f3bb93dc622c278d/LICENSE)
 applies to the vendored patchers.
 

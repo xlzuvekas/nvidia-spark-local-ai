@@ -25,6 +25,7 @@ from bench.manifest import (
     validate_model,
 )
 from bench.runner import _recover_pending_lifecycle, _request_arguments
+from bench.qwen38_ple_cache import PLECacheRecord
 from bench.runtime import (
     ManagedServer,
     RuntimeErrorWithContext,
@@ -33,6 +34,7 @@ from bench.runtime import (
     save_server_logs,
     start_server,
     start_sglang,
+    _validate_readonly_sglang_ple_loader,
 )
 
 
@@ -121,6 +123,15 @@ class SGLangRuntimeTests(unittest.TestCase):
             "bf2b7c75870d3703730b6bd8f3bb93dc622c278d",
         )
         self.assertTrue(profile.sglang_ple_mmap)
+        self.assertEqual(profile.sglang_ple_cache_mode, "readonly")
+        self.assertEqual(
+            profile.sglang_ple_cache_marker_digest,
+            "sha256:f0ef55e4e4dec9b6b936a42af4ca2eb9b2f24ced373b1e216f7a6d507b171665",
+        )
+        self.assertEqual(
+            profile.sglang_ple_cache_payload_digest,
+            "sha256:b070f9644adf93794d8a1030584ab705809387e64396a9327a68fa3a3a6666b3",
+        )
         self.assertEqual(profile.estimated_ram_gib, 102.0)
         self.assertIn("--weight-loader-drop-cache-after-load", profile.args)
         self.assertEqual(len(profile.sglang_source_overlays), 2)
@@ -133,7 +144,7 @@ class SGLangRuntimeTests(unittest.TestCase):
         self.assertEqual(
             {overlay.digest for overlay in profile.sglang_source_overlays},
             {
-                "sha256:c687bf96b8adb980eaf3a1db2ad4a7c00b558537865d91674c0e1b43f4ae1d71",
+                "sha256:0b513b4dc4f2394f6b1733bb0b74fa40ab59f4a04f6b33601350b2a606c67804",
                 "sha256:e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75",
             },
         )
@@ -174,6 +185,14 @@ class SGLangRuntimeTests(unittest.TestCase):
                     recipe_revision=None,
                 )
             )
+        with self.assertRaisesRegex(ManifestError, "explicit.*cache_mode"):
+            validate_model(replace(profile, sglang_ple_cache_mode=None))
+        with self.assertRaisesRegex(ManifestError, "must be 'readonly'"):
+            validate_model(
+                replace(profile, sglang_ple_cache_mode="automatic")
+            )
+        with self.assertRaisesRegex(ManifestError, "sglang_ple_mmap=true"):
+            validate_model(replace(profile, sglang_ple_mmap=False))
 
     def test_launch_is_offline_digest_pinned_and_snapshot_exact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -368,6 +387,123 @@ class SGLangRuntimeTests(unittest.TestCase):
             serialized = json.dumps(server.native_provenance)
             self.assertNotIn(str(workspace), serialized)
             self.assertIn(digest(model_overlay), serialized)
+
+    def test_explicit_readonly_ple_cache_is_verified_and_mounted_ro(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            profile = load_models(ROOT / "manifests" / "models.toml")[
+                "qwen38-flash-next-nvfp4-mtp-sglang"
+            ]
+            model = SimpleNamespace(
+                **asdict(replace(profile, cache_dir="project")),
+                resolved_image=profile.image,
+                run_identity="readonly-ple-run",
+            )
+            snapshot = (
+                workspace
+                / "data"
+                / "huggingface"
+                / "hub"
+                / "models--RadixArk--Qwen3.8-Flash-Next-NVFP4"
+                / "snapshots"
+                / model.revision
+            )
+            snapshot.mkdir(parents=True)
+            ple_dir = workspace / "completed-ple"
+            ple_dir.mkdir()
+            record = PLECacheRecord(
+                marker_sha256=model.sglang_ple_cache_marker_digest.removeprefix(
+                    "sha256:"
+                ),
+                payload_sha256=model.sglang_ple_cache_payload_digest.removeprefix(
+                    "sha256:"
+                ),
+                payload_size_bytes=51_200_245_760,
+            )
+            resolved_overlays = tuple(
+                (
+                    workspace / Path(overlay.host_path).name,
+                    overlay.container_path,
+                    overlay.digest,
+                    overlay.host_path,
+                )
+                for overlay in profile.sglang_source_overlays
+            )
+            with (
+                patch("bench.runtime._existing_container", return_value=None),
+                patch("bench.runtime._port_is_free", return_value=True),
+                patch(
+                    "bench.runtime._resolve_sglang_source_overlays",
+                    return_value=resolved_overlays,
+                ),
+                patch(
+                    "bench.runtime._readonly_sglang_ple_dir",
+                    return_value=(ple_dir, record),
+                ) as admit,
+                patch("bench.runtime.wait_for_endpoint", return_value=1.0),
+                patch(
+                    "bench.runtime.secrets.token_urlsafe",
+                    return_value="readonly-ephemeral-key",
+                ),
+                patch(
+                    "bench.runtime._run",
+                    return_value=_completed(stdout="readonly-container\n"),
+                ) as run,
+            ):
+                server = start_sglang(model, workspace=workspace)
+
+            admit.assert_called_once_with(model, resolved_overlays)
+            launch = run.call_args.args[0]
+            self.assertIn(f"{ple_dir}:/ple:ro", launch)
+            self.assertNotIn(f"{ple_dir}:/ple:rw", launch)
+            self.assertIn("SGLANG_QWEN4_PLE_CACHE_MODE=readonly", launch)
+            self.assertIn(
+                "SGLANG_QWEN4_PLE_CACHE_LOADER_CONTRACT="
+                "auto-mmap-no-prefetch",
+                launch,
+            )
+            self.assertIn(
+                "SGLANG_QWEN4_PLE_CACHE_MARKER_SHA256="
+                + record.marker_sha256,
+                launch,
+            )
+            assert server.native_provenance is not None
+            self.assertEqual(
+                server.native_provenance["sglang_ple_backing_policy"],
+                "verified_persistent_readonly",
+            )
+            self.assertEqual(
+                server.native_provenance["sglang_ple_cache_payload_digest"],
+                model.sglang_ple_cache_payload_digest,
+            )
+
+    def test_readonly_ple_rejects_nondefault_weight_loader_modes(self) -> None:
+        good = SimpleNamespace(args=["--ple-offload-embedding"])
+        _validate_readonly_sglang_ple_loader(good)
+        _validate_readonly_sglang_ple_loader(
+            SimpleNamespace(
+                args=["--ple-offload-embedding", "--load-format=auto"]
+            )
+        )
+        incompatible = (
+            ["--ple-offload-embedding", "--load-format", "fastsafetensors"],
+            ["--ple-offload-embedding", "--weight-loader-disable-mmap"],
+            [
+                "--ple-offload-embedding",
+                "--weight-loader-prefetch-checkpoints",
+            ],
+        )
+        for arguments in incompatible:
+            with self.subTest(arguments=arguments), self.assertRaises(
+                RuntimeErrorWithContext
+            ):
+                _validate_readonly_sglang_ple_loader(
+                    SimpleNamespace(args=arguments)
+                )
+        with self.assertRaisesRegex(
+            RuntimeErrorWithContext, "ple-offload-embedding"
+        ):
+            _validate_readonly_sglang_ple_loader(SimpleNamespace(args=[]))
 
     def test_source_overlay_digest_mismatch_fails_before_docker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

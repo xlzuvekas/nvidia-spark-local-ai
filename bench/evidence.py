@@ -16,7 +16,7 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import stat
@@ -84,6 +84,51 @@ TELEMETRY_COLUMNS = (
     "swapfree_bytes",
     "swaptotal_bytes",
 )
+
+_SGLANG_SOURCE_OVERLAY_FIELDS = frozenset(
+    {"container_path", "digest", "host_path"}
+)
+_SGLANG_SOURCE_OVERLAY_HOST_PREFIX = ("results", "runtime-overlays")
+_SGLANG_SOURCE_OVERLAY_CONTAINER_ROOT = PurePosixPath(
+    "/sgl-workspace/sglang/python/sglang"
+)
+_SGLANG_PLE_CACHE_SOURCE_FIELDS = frozenset(
+    {
+        "sglang_ple_cache_marker_digest",
+        "sglang_ple_cache_mode",
+        "sglang_ple_cache_payload_digest",
+    }
+)
+_SGLANG_PLE_CACHE_RUNTIME_FIELDS = frozenset(
+    {
+        "sglang_ple_cache_marker_sha256",
+        "sglang_ple_cache_mode",
+        "sglang_ple_cache_payload_sha256",
+    }
+)
+
+_COLD_START_SAFETY_SCALARS = {
+    "cold_start_swap_growth_exceeded_safety_limit": (
+        "swap_growth_mib",
+        "safety_limit_mib",
+        "memavailable_gib",
+        "memory_psi_full_avg10",
+    ),
+    "ple_materialization_swap_growth_exceeded_safety_limit": (
+        "swap_growth_mib",
+        "safety_limit_mib",
+        "memavailable_gib",
+        "memory_psi_full_avg10",
+        "ple_allocated_blocks",
+    ),
+}
+_COLD_START_SOURCE_ANNOTATION_FIELDS = frozenset(
+    {"evidence", "measurement_valid", "reason", "scope", "timestamp"}
+)
+_COLD_START_DECIMAL_RE = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?\Z")
+_COLD_START_INTEGER_RE = re.compile(r"(?:0|[1-9][0-9]*)\Z")
+_COLD_START_MAX_MEMORY_MIB = 1024.0 * 1024.0
+_COLD_START_MAX_MEMORY_GIB = 1024.0 * 1024.0
 
 
 class EvidenceError(RuntimeError):
@@ -174,6 +219,9 @@ _LOOP_MODEL_SOURCE_FIELDS = frozenset(
         "weight_file_count",
         "weight_size_bytes",
     }
+)
+_LOOP_MODEL_SOURCE_FIELDS_WITH_PLE_CACHE = (
+    _LOOP_MODEL_SOURCE_FIELDS | _SGLANG_PLE_CACHE_SOURCE_FIELDS
 )
 _LOOP_CASE_FIELDS = frozenset(
     {
@@ -2986,6 +3034,94 @@ def _artifact_target(value: Any, *, fallback: str) -> str:
     return fallback
 
 
+def _sglang_source_overlay_declarations(
+    model: dict[str, Any],
+) -> list[tuple[Path, str, str, str]]:
+    """Return plan-bound overlays without exposing either source path.
+
+    The returned tuple is ``(results-relative path, basename, digest,
+    container path)``.  Both paths are validated here, while callers publish
+    only the basename and digest.
+    """
+
+    raw_overlays = model.get("sglang_source_overlays")
+    if raw_overlays is None:
+        return []
+    if not isinstance(raw_overlays, list):
+        raise EvidenceError("SGLang source overlays must be a list")
+    if raw_overlays and model.get("backend") != "sglang":
+        raise EvidenceError("SGLang source overlays require the sglang backend")
+
+    declarations: list[tuple[Path, str, str, str]] = []
+    seen_host_paths: set[Path] = set()
+    seen_container_paths: set[str] = set()
+    seen_basenames: set[str] = set()
+    for index, overlay in enumerate(raw_overlays, 1):
+        if not isinstance(overlay, dict) or set(overlay) != _SGLANG_SOURCE_OVERLAY_FIELDS:
+            raise EvidenceError(
+                f"SGLang source overlay {index} does not match its exact schema"
+            )
+        host_value = overlay.get("host_path")
+        container_value = overlay.get("container_path")
+        if not isinstance(host_value, str) or not isinstance(container_value, str):
+            raise EvidenceError("SGLang source overlay paths must be text")
+
+        host_path = PurePosixPath(host_value)
+        host_parts = host_path.parts
+        if (
+            host_path.is_absolute()
+            or host_path.as_posix() != host_value
+            or len(host_parts) != 4
+            or host_parts[:2] != _SGLANG_SOURCE_OVERLAY_HOST_PREFIX
+            or any(part in {"", ".", ".."} for part in host_parts)
+        ):
+            raise EvidenceError("SGLang source overlay has an unsafe host path")
+        recipe = _safe_id(host_parts[2], name="SGLang source overlay recipe")
+        basename = _safe_id(host_parts[3], name="SGLang source overlay basename")
+        if not recipe or not basename or not basename.endswith(".py"):
+            raise EvidenceError("SGLang source overlay must identify one Python file")
+
+        container_path = PurePosixPath(container_value)
+        try:
+            container_relative = container_path.relative_to(
+                _SGLANG_SOURCE_OVERLAY_CONTAINER_ROOT
+            )
+        except ValueError as error:
+            raise EvidenceError(
+                "SGLang source overlay container path is outside the source tree"
+            ) from error
+        if (
+            not container_path.is_absolute()
+            or container_path.as_posix() != container_value
+            or any(part in {"", ".", ".."} for part in container_relative.parts)
+            or container_path.name != basename
+        ):
+            raise EvidenceError("SGLang source overlay has an unsafe container path")
+
+        relative_path = Path(*host_parts[1:])
+        if relative_path in seen_host_paths:
+            raise EvidenceError("SGLang source overlay host path is duplicated")
+        if container_value in seen_container_paths:
+            raise EvidenceError("SGLang source overlay container path is duplicated")
+        if basename in seen_basenames:
+            raise EvidenceError("SGLang source overlay basename is duplicated")
+        seen_host_paths.add(relative_path)
+        seen_container_paths.add(container_value)
+        seen_basenames.add(basename)
+        declarations.append(
+            (
+                relative_path,
+                basename,
+                _sha256(
+                    overlay.get("digest"),
+                    name=f"SGLang source overlay {index}",
+                ),
+                container_value,
+            )
+        )
+    return sorted(declarations, key=lambda item: (item[1], item[2], item[0].as_posix()))
+
+
 def _collect_artifacts(plan: dict[str, Any], summary: dict[str, Any] | None) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
     model = plan.get("model") if isinstance(plan.get("model"), dict) else {}
@@ -3062,6 +3198,14 @@ def _collect_artifacts(plan: dict[str, Any], summary: dict[str, Any] | None) -> 
             target=model.get("runtime_binary"),
         )
         add("container_image", model.get("image_digest"), target="container-image")
+        for index, (_, basename, digest, _) in enumerate(
+            _sglang_source_overlay_declarations(model), 1
+        ):
+            add(
+                f"sglang_source_overlay_{index}",
+                digest,
+                target=basename,
+            )
 
     verification = plan.get("verification")
     if not isinstance(verification, dict) and summary:
@@ -3146,6 +3290,58 @@ def _collect_artifacts(plan: dict[str, Any], summary: dict[str, Any] | None) -> 
     return [unique[key] for key in sorted(unique)]
 
 
+def _project_sglang_ple_cache(model: dict[str, Any]) -> dict[str, Any]:
+    source = {
+        key: model.get(key) for key in _SGLANG_PLE_CACHE_SOURCE_FIELDS
+    }
+    populated = {key for key, value in source.items() if value is not None}
+    if not populated:
+        return {}
+    if populated != _SGLANG_PLE_CACHE_SOURCE_FIELDS:
+        raise EvidenceError("SGLang PLE cache provenance must be all present or absent")
+    if model.get("backend") != "sglang" or model.get("sglang_ple_mmap") is not True:
+        raise EvidenceError("SGLang PLE cache provenance requires SGLang PLE mmap")
+    if source["sglang_ple_cache_mode"] != "readonly":
+        raise EvidenceError("SGLang PLE cache mode must be readonly")
+    return {
+        "sglang_ple_cache_marker_sha256": _sha256(
+            source["sglang_ple_cache_marker_digest"],
+            name="runtime.SGLang PLE cache marker",
+        ),
+        "sglang_ple_cache_mode": "readonly",
+        "sglang_ple_cache_payload_sha256": _sha256(
+            source["sglang_ple_cache_payload_digest"],
+            name="runtime.SGLang PLE cache payload",
+        ),
+    }
+
+
+def _validate_projected_sglang_ple_cache(
+    runtime: dict[str, Any], model: Any
+) -> None:
+    populated = _SGLANG_PLE_CACHE_RUNTIME_FIELDS & set(runtime)
+    if not populated:
+        return
+    if populated != _SGLANG_PLE_CACHE_RUNTIME_FIELDS:
+        raise EvidenceError("published SGLang PLE cache provenance is incomplete")
+    if (
+        runtime.get("sglang_ple_cache_mode") != "readonly"
+        or runtime.get("sglang_ple_mmap") is not True
+        or runtime.get("backend") != "sglang"
+        or not isinstance(model, dict)
+        or model.get("backend") != "sglang"
+    ):
+        raise EvidenceError("published SGLang PLE cache provenance is inconsistent")
+    _sha256(
+        runtime.get("sglang_ple_cache_marker_sha256"),
+        name="published SGLang PLE cache marker",
+    )
+    _sha256(
+        runtime.get("sglang_ple_cache_payload_sha256"),
+        name="published SGLang PLE cache payload",
+    )
+
+
 def _project_runtime(plan: dict[str, Any], summary: dict[str, Any] | None) -> dict[str, Any]:
     model = plan.get("model") if isinstance(plan.get("model"), dict) else {}
     result: dict[str, Any] = {}
@@ -3162,6 +3358,11 @@ def _project_runtime(plan: dict[str, Any], summary: dict[str, Any] | None) -> di
         for key in ("runtime_revision", "recipe_revision"):
             if model.get(key) is not None:
                 result[key] = _revision(model[key], name=f"runtime.{key}")
+        if model.get("backend") == "sglang" and "sglang_ple_mmap" in model:
+            if not isinstance(model["sglang_ple_mmap"], bool):
+                raise EvidenceError("runtime.sglang_ple_mmap must be boolean")
+            result["sglang_ple_mmap"] = model["sglang_ple_mmap"]
+        result.update(_project_sglang_ple_cache(model))
     resolved = plan.get("resolved")
     if isinstance(resolved, dict) and isinstance(resolved.get("llamacpp"), dict):
         llama = resolved["llamacpp"]
@@ -7596,6 +7797,165 @@ def _safe_summary_tree(value: Any, *, name: str, depth: int = 0) -> Any:
     raise EvidenceError(f"unsupported aggregate at {name}")
 
 
+def _cold_start_scalar(value: str, *, key: str) -> int | float:
+    if len(value) > 32:
+        raise EvidenceError(f"cold-start safety scalar is too long: {key}")
+    if key == "ple_allocated_blocks":
+        if not _COLD_START_INTEGER_RE.fullmatch(value):
+            raise EvidenceError("PLE allocated blocks must be an unsigned integer")
+        try:
+            result = int(value)
+        except ValueError as error:
+            raise EvidenceError("PLE allocated blocks are invalid") from error
+        if result > 2**63 - 1:
+            raise EvidenceError("PLE allocated blocks exceed the supported range")
+        return result
+    if not _COLD_START_DECIMAL_RE.fullmatch(value):
+        raise EvidenceError(f"cold-start safety scalar has invalid syntax: {key}")
+    try:
+        result = float(value)
+    except ValueError as error:
+        raise EvidenceError(f"cold-start safety scalar is invalid: {key}") from error
+    if not math.isfinite(result):
+        raise EvidenceError(f"cold-start safety scalar is not finite: {key}")
+    return result
+
+
+def _validate_cold_start_safety_scalars(
+    values: dict[str, Any], *, reason: str, source: bool
+) -> dict[str, Any]:
+    fields = _COLD_START_SAFETY_SCALARS[reason]
+    if set(values) != set(fields):
+        raise EvidenceError("cold-start safety annotation scalar set changed")
+    projected: dict[str, Any] = {}
+    for key in fields:
+        value = values[key]
+        if source:
+            if not isinstance(value, str):
+                raise EvidenceError("cold-start source scalar must be text")
+            projected[key] = _cold_start_scalar(value, key=key)
+        elif key == "ple_allocated_blocks":
+            if type(value) is not int:
+                raise EvidenceError("published PLE allocated blocks must be an integer")
+            projected[key] = value
+        else:
+            if type(value) is not float or not math.isfinite(value):
+                raise EvidenceError("published cold-start scalar must be a finite float")
+            projected[key] = value
+
+    swap_growth = float(projected["swap_growth_mib"])
+    safety_limit = float(projected["safety_limit_mib"])
+    memavailable = float(projected["memavailable_gib"])
+    psi = float(projected["memory_psi_full_avg10"])
+    if (
+        safety_limit <= 0
+        or safety_limit > _COLD_START_MAX_MEMORY_MIB
+        or swap_growth <= safety_limit
+        or swap_growth > _COLD_START_MAX_MEMORY_MIB
+        or memavailable < 0
+        or memavailable > _COLD_START_MAX_MEMORY_GIB
+        or psi < 0
+        or psi > 100
+    ):
+        raise EvidenceError("cold-start safety scalars are outside supported ranges")
+    return projected
+
+
+def _project_cold_start_safety_annotation(
+    value: Any, *, source: bool
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise EvidenceError("cold-start safety annotation must be an object")
+    reason = value.get("reason")
+    if reason not in _COLD_START_SAFETY_SCALARS:
+        raise EvidenceError("cold-start safety annotation reason changed")
+    assert isinstance(reason, str)
+
+    if source:
+        if set(value) != _COLD_START_SOURCE_ANNOTATION_FIELDS:
+            raise EvidenceError("cold-start source annotation schema changed")
+        if value.get("scope") != "startup" or value.get("measurement_valid") is not False:
+            raise EvidenceError("cold-start source annotation classification changed")
+        timestamp = _parse_timestamp(
+            value.get("timestamp"), name="cold-start source annotation timestamp"
+        )
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise EvidenceError("cold-start source annotation timestamp lacks a timezone")
+        evidence = value.get("evidence")
+        fields = _COLD_START_SAFETY_SCALARS[reason]
+        if not isinstance(evidence, list) or len(evidence) != len(fields):
+            raise EvidenceError("cold-start source annotation evidence changed")
+        raw_scalars: dict[str, str] = {}
+        for item in evidence:
+            if not isinstance(item, str) or item.count("=") != 1:
+                raise EvidenceError("cold-start source evidence syntax changed")
+            key, scalar = item.split("=", 1)
+            if key not in fields or key in raw_scalars:
+                raise EvidenceError("cold-start source evidence keys changed")
+            raw_scalars[key] = scalar
+        scalars = _validate_cold_start_safety_scalars(
+            raw_scalars, reason=reason, source=True
+        )
+    else:
+        expected_fields = {"reason", *_COLD_START_SAFETY_SCALARS[reason]}
+        if set(value) != expected_fields:
+            raise EvidenceError("published cold-start annotation schema changed")
+        scalars = _validate_cold_start_safety_scalars(
+            {key: value[key] for key in _COLD_START_SAFETY_SCALARS[reason]},
+            reason=reason,
+            source=False,
+        )
+    return {"reason": reason, **scalars}
+
+
+def _project_cold_start_safety_annotations(
+    summary: dict[str, Any], *, source: bool
+) -> list[dict[str, Any]]:
+    if not source:
+        annotations = summary.get("cold_start_safety_annotations")
+        if not isinstance(annotations, list) or not annotations:
+            raise EvidenceError("published cold-start annotations must be a nonempty list")
+        projected = [
+            _project_cold_start_safety_annotation(annotation, source=False)
+            for annotation in annotations
+        ]
+        identities = [_canonical(annotation) for annotation in projected]
+        if len(identities) != len(set(identities)):
+            raise EvidenceError("published cold-start annotations are duplicated")
+        ordered = sorted(projected, key=lambda annotation: annotation["reason"])
+        if not _json_strict_equal(ordered, annotations):
+            raise EvidenceError("published cold-start annotation order changed")
+        return ordered
+
+    by_summary_field: dict[str, list[dict[str, Any]]] = {}
+    for field in ("measurement_annotations", "startup_measurement_annotations"):
+        raw_annotations = summary.get(field)
+        if raw_annotations is None:
+            continue
+        if not isinstance(raw_annotations, list):
+            raise EvidenceError(f"{field} must be a list")
+        projected: list[dict[str, Any]] = []
+        for annotation in raw_annotations:
+            reason = annotation.get("reason") if isinstance(annotation, dict) else None
+            if reason not in _COLD_START_SAFETY_SCALARS:
+                continue
+            projected.append(
+                _project_cold_start_safety_annotation(annotation, source=True)
+            )
+        identities = [_canonical(annotation) for annotation in projected]
+        if len(identities) != len(set(identities)):
+            raise EvidenceError("cold-start source annotations are duplicated")
+        by_summary_field[field] = sorted(
+            projected, key=lambda annotation: annotation["reason"]
+        )
+
+    measurement = by_summary_field.get("measurement_annotations", [])
+    startup = by_summary_field.get("startup_measurement_annotations")
+    if startup is not None and measurement != startup:
+        raise EvidenceError("cold-start annotations disagree across summary fields")
+    return startup if startup is not None else measurement
+
+
 def _project_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
     if summary is None:
         return {}
@@ -7715,6 +8075,11 @@ def _project_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
             if not isinstance(annotations, list):
                 raise EvidenceError(f"{key} must be a list")
             result[f"{key}_count"] = len(annotations)
+    cold_start_annotations = _project_cold_start_safety_annotations(
+        summary, source=True
+    )
+    if cold_start_annotations:
+        result["cold_start_safety_annotations"] = cold_start_annotations
     dropped_types: dict[str, tuple[type, ...]] = {
         "artifact_verification": (dict,),
         "artifacts": (dict,),
@@ -8587,10 +8952,15 @@ def _project_loop_model(value: Any, *, profile_id: str) -> dict[str, Any]:
     if (
         not isinstance(value, dict)
         or not required <= set(value)
-        or set(value) != _LOOP_MODEL_SOURCE_FIELDS
+        or frozenset(value)
+        not in (
+            _LOOP_MODEL_SOURCE_FIELDS,
+            _LOOP_MODEL_SOURCE_FIELDS_WITH_PLE_CACHE,
+        )
         or value.get("id") != profile_id
     ):
         raise EvidenceError("loop model source schema changed")
+    _project_sglang_ple_cache(value)
     projected = _project_model({"model": value}, None)
     projected["container_image"] = _safe_id(
         value.get("image"), name="loop model.container_image"
@@ -10806,6 +11176,42 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
         raise EvidenceError(f"run manifest schema mismatch: {run_id}")
     manifest_model = manifest.get("model")
     manifest_suite = manifest.get("suite")
+    manifest_runtime = manifest.get("runtime")
+    if isinstance(manifest_runtime, dict) and "sglang_ple_mmap" in manifest_runtime:
+        if (
+            type(manifest_runtime["sglang_ple_mmap"]) is not bool
+            or not isinstance(manifest_model, dict)
+            or manifest_model.get("backend") != "sglang"
+            or manifest_runtime.get("backend") != "sglang"
+        ):
+            raise EvidenceError(f"SGLang PLE mmap provenance is invalid: {run_id}")
+    if isinstance(manifest_runtime, dict):
+        _validate_projected_sglang_ple_cache(manifest_runtime, manifest_model)
+    manifest_artifacts = manifest.get("artifacts")
+    if isinstance(manifest_artifacts, list):
+        overlay_artifacts = [
+            artifact
+            for artifact in manifest_artifacts
+            if isinstance(artifact, dict)
+            and isinstance(artifact.get("role"), str)
+            and artifact["role"].startswith("sglang_source_overlay_")
+        ]
+        for index, artifact in enumerate(overlay_artifacts, 1):
+            if set(artifact) != {"role", "sha256", "target"}:
+                raise EvidenceError(f"SGLang overlay artifact schema changed: {run_id}")
+            if artifact["role"] != f"sglang_source_overlay_{index}":
+                raise EvidenceError(f"SGLang overlay artifact order changed: {run_id}")
+            _sha256(artifact["sha256"], name="published SGLang source overlay")
+            target = _safe_id(
+                artifact["target"], name="published SGLang source overlay target"
+            )
+            if not target or not target.endswith(".py") or Path(target).name != target:
+                raise EvidenceError(f"SGLang overlay artifact target changed: {run_id}")
+        if overlay_artifacts and (
+            not isinstance(manifest_model, dict)
+            or manifest_model.get("backend") != "sglang"
+        ):
+            raise EvidenceError(f"SGLang overlay artifact backend changed: {run_id}")
     is_prefix_cache_manifest = (
         isinstance(manifest_model, dict)
         and manifest_model.get("prefix_cache_mode") is not None
@@ -10907,6 +11313,8 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     aggregates = summary["aggregates"]
     if not isinstance(aggregates, dict):
         raise EvidenceError(f"run aggregates must be an object: {run_id}")
+    if "cold_start_safety_annotations" in aggregates:
+        _project_cold_start_safety_annotations(aggregates, source=False)
     if memory_suite is not None:
         aggregates = _project_memory_summary_document(aggregates, source=False)
         if manifest.get("status") != aggregates.get("status"):
@@ -12298,6 +12706,97 @@ def _assert_source_tree(root: Path) -> tuple[int, int]:
     return count, size
 
 
+def _validate_runtime_overlay_tree(
+    results_root: Path, run_dirs: Sequence[Path]
+) -> bool:
+    """Bind the exact runtime-overlay tree to declarations in frozen plans."""
+
+    declared: dict[Path, tuple[str, str, str]] = {}
+    for run_dir in run_dirs:
+        plan = _load_json(run_dir / "plan.json", results_root)
+        if not isinstance(plan, dict):
+            raise EvidenceError("plan must be an object")
+        model = plan.get("model")
+        if not isinstance(model, dict):
+            continue
+        for relative_path, basename, digest, container_path in (
+            _sglang_source_overlay_declarations(model)
+        ):
+            identity = (basename, digest, container_path)
+            previous = declared.get(relative_path)
+            if previous is not None and previous != identity:
+                raise EvidenceError(
+                    "SGLang source overlay declarations conflict across frozen plans"
+                )
+            declared[relative_path] = identity
+
+    overlay_root = results_root / "runtime-overlays"
+    if not overlay_root.exists():
+        if declared:
+            raise EvidenceError("a frozen SGLang source overlay is missing")
+        return False
+    metadata = overlay_root.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise EvidenceError("runtime-overlays must be a real directory")
+    if not declared:
+        raise EvidenceError("runtime-overlays contains no plan-declared files")
+
+    actual_files: set[Path] = set()
+    actual_directories: set[Path] = {Path("runtime-overlays")}
+    for directory, directories, files in os.walk(overlay_root, followlinks=False):
+        base = Path(directory)
+        for name in directories:
+            path = base / name
+            child_metadata = path.lstat()
+            if not stat.S_ISDIR(child_metadata.st_mode) or stat.S_ISLNK(
+                child_metadata.st_mode
+            ):
+                raise EvidenceError("runtime-overlays contains an unsafe directory")
+            actual_directories.add(path.relative_to(results_root))
+        for name in files:
+            path = base / name
+            file_metadata = path.lstat()
+            if (
+                not stat.S_ISREG(file_metadata.st_mode)
+                or file_metadata.st_nlink != 1
+            ):
+                raise EvidenceError("runtime-overlays contains an unsafe file")
+            actual_files.add(path.relative_to(results_root))
+
+    expected_files = set(declared)
+    if actual_files != expected_files:
+        undeclared = sorted(
+            path.as_posix() for path in actual_files - expected_files
+        )
+        missing = sorted(path.as_posix() for path in expected_files - actual_files)
+        raise EvidenceError(
+            "runtime-overlays file set changed; "
+            f"undeclared={undeclared!r}, missing={missing!r}"
+        )
+    expected_directories = {Path("runtime-overlays")}
+    for relative_path in expected_files:
+        parent = relative_path.parent
+        while parent != Path("."):
+            expected_directories.add(parent)
+            if parent == Path("runtime-overlays"):
+                break
+            parent = parent.parent
+    if actual_directories != expected_directories:
+        raise EvidenceError("runtime-overlays directory topology changed")
+
+    for relative_path, (_, expected_digest, _) in sorted(declared.items()):
+        source = _secure_read(
+            results_root / relative_path,
+            results_root,
+            maximum=MAX_SOURCE_JSON_BYTES,
+        ).encode("utf-8")
+        if _hash_bytes(source) != expected_digest:
+            raise EvidenceError(
+                f"runtime overlay digest mismatch: {relative_path.name}"
+            )
+    return True
+
+
 def _grouped_run_dirs(results_root: Path) -> dict[str, set[Path]]:
     """Validate and enumerate the narrowly allowlisted grouped-run layouts."""
 
@@ -12405,6 +12904,7 @@ def _export_evidence_locked(
                 )
             }
         )
+        has_runtime_overlays = _validate_runtime_overlay_tree(results_root, run_dirs)
         grouped_runs = _grouped_run_dirs(results_root)
         recognized_top = {
             ".sparkbench.lock",
@@ -12416,6 +12916,8 @@ def _export_evidence_locked(
             "ninfer-qwen38-nvfp4-sm121a-20260817T200147Z",
             "upstream-bench-matrix-dspark-sglang-20260817.json",
         }
+        if has_runtime_overlays:
+            recognized_top.add("runtime-overlays")
         for run_dir in run_dirs:
             relative_run = run_dir.relative_to(results_root)
             if len(relative_run.parts) == 1:

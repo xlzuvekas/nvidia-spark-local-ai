@@ -255,6 +255,9 @@ _MODEL_KEYS = frozenset(
         "sglang_allow_hf_metadata_probe",
         "sglang_source_overlays",
         "sglang_ple_mmap",
+        "sglang_ple_cache_mode",
+        "sglang_ple_cache_marker_digest",
+        "sglang_ple_cache_payload_digest",
         "recipe_source",
         "recipe_revision",
         "request_body_json",
@@ -353,6 +356,9 @@ class ModelSpec:
     sglang_allow_hf_metadata_probe: bool = False
     sglang_source_overlays: tuple[SGLangSourceOverlay, ...] = ()
     sglang_ple_mmap: bool = False
+    sglang_ple_cache_mode: str | None = None
+    sglang_ple_cache_marker_digest: str | None = None
+    sglang_ple_cache_payload_digest: str | None = None
     recipe_source: str | None = None
     recipe_revision: str | None = None
     request_body_json: str | None = None
@@ -478,6 +484,15 @@ def load_models(path: str | Path) -> dict[str, ModelSpec]:
             ),
             sglang_ple_mmap=_optional_bool(
                 row, "sglang_ple_mmap", context, default=False
+            ),
+            sglang_ple_cache_mode=_optional_string(
+                row, "sglang_ple_cache_mode", context
+            ),
+            sglang_ple_cache_marker_digest=_optional_string(
+                row, "sglang_ple_cache_marker_digest", context
+            ),
+            sglang_ple_cache_payload_digest=_optional_string(
+                row, "sglang_ple_cache_payload_digest", context
             ),
             recipe_source=_optional_string(row, "recipe_source", context),
             recipe_revision=_optional_string(row, "recipe_revision", context),
@@ -741,7 +756,11 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
             f"{context}.sglang_allow_hf_metadata_probe requires an sglang "
             "draft snapshot"
         )
-    if (model.sglang_source_overlays or model.sglang_ple_mmap) and (
+    if (
+        model.sglang_source_overlays
+        or model.sglang_ple_mmap
+        or model.sglang_ple_cache_mode is not None
+    ) and (
         model.backend != "sglang"
     ):
         raise ManifestError(
@@ -849,7 +868,33 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
     if model.sglang_ple_mmap and model.draft_source is not None:
         raise ManifestError(
             f"{context}.sglang_ple_mmap requires an embedded draft and a "
-            "single writable backing mount"
+            "single PLE backing mount"
+        )
+    ple_cache_pins = (
+        model.sglang_ple_cache_marker_digest,
+        model.sglang_ple_cache_payload_digest,
+    )
+    if model.sglang_ple_cache_mode is None:
+        if any(value is not None for value in ple_cache_pins):
+            raise ManifestError(
+                f"{context}.sglang_ple_cache_* digests require an explicit "
+                "sglang_ple_cache_mode"
+            )
+    elif model.sglang_ple_cache_mode != "readonly":
+        raise ManifestError(
+            f"{context}.sglang_ple_cache_mode must be 'readonly' when set"
+        )
+    elif not model.sglang_ple_mmap:
+        raise ManifestError(
+            f"{context}.sglang_ple_cache_mode requires sglang_ple_mmap=true"
+        )
+    elif not all(
+        isinstance(value, str) and _DIGEST_PATTERN.fullmatch(value)
+        for value in ple_cache_pins
+    ):
+        raise ManifestError(
+            f"{context}.sglang_ple_cache_mode requires exact marker and "
+            "payload sha256 digests"
         )
     recipe_fields = (model.recipe_source, model.recipe_revision)
     if any(value is not None for value in recipe_fields) and not all(

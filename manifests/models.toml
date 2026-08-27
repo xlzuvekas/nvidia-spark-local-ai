@@ -1970,7 +1970,7 @@ args = [
 
 [[models]]
 id = "qwen38-flash-next-nvfp4-mtp-sglang"
-description = "Pinned one-DGX-Spark Qwen3.8-Flash-Next NVFP4 recipe with digest-verified SGLang SM121 QSA and file-backed PLE source overlays."
+description = "Pinned one-DGX-Spark Qwen3.8-Flash-Next NVFP4 recipe with digest-verified SGLang SM121 QSA and a completed read-only persistent PLE cache."
 support_status = "exploratory"
 backend = "sglang"
 recipe_source = "hashd1ve/qwen38-flash-next-one-dgx-spark"
@@ -1997,10 +1997,13 @@ startup_timeout_s = 1800
 estimated_ram_gib = 102.0
 endpoint = "http://127.0.0.1:30000/v1"
 sglang_source_overlays = [
-  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:c687bf96b8adb980eaf3a1db2ad4a7c00b558537865d91674c0e1b43f4ae1d71" },
-  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75/qwen_sparse_attn_backend.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py", digest = "sha256:e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75" },
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:0b513b4dc4f2394f6b1733bb0b74fa40ab59f4a04f6b33601350b2a606c67804" },
+  { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-v1/qwen_sparse_attn_backend.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py", digest = "sha256:e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75" },
 ]
 sglang_ple_mmap = true
+sglang_ple_cache_mode = "readonly"
+sglang_ple_cache_marker_digest = "sha256:f0ef55e4e4dec9b6b936a42af4ca2eb9b2f24ced373b1e216f7a6d507b171665"
+sglang_ple_cache_payload_digest = "sha256:b070f9644adf93794d8a1030584ab705809387e64396a9327a68fa3a3a6666b3"
 args = [
   "--served-model-name", "qwen38-flash-next-nvfp4-mtp",
   "--tp-size", "1",

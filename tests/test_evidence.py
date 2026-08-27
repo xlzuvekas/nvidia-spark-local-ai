@@ -942,6 +942,58 @@ class EvidenceFixture:
     def change_aggregate(self, value: float) -> None:
         self._write_standalone_results(aggregate_tps=value)
 
+    def add_sglang_runtime_overlays(
+        self, *, readonly_ple_cache: bool = False
+    ) -> list[dict[str, str]]:
+        overlay_dir = (
+            self.results / "runtime-overlays" / "synthetic-sglang-recipe"
+        )
+        overlay_dir.mkdir(parents=True)
+        files = {
+            "qwen4_exp.py": (
+                "from typing import Final\nMODEL_KIND: Final = 'synthetic'\n",
+                "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py",
+            ),
+            "qwen_sparse_attn_backend.py": (
+                "from typing import Final\nBACKEND_KIND: Final = 'synthetic'\n",
+                "/sgl-workspace/sglang/python/sglang/srt/layers/attention/"
+                "qwen_sparse_attn_backend.py",
+            ),
+        }
+        overlays: list[dict[str, str]] = []
+        for basename, (source, container_path) in files.items():
+            path = overlay_dir / basename
+            path.write_text(source, encoding="utf-8")
+            overlays.append(
+                {
+                    "container_path": container_path,
+                    "digest": f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
+                    "host_path": (
+                        "results/runtime-overlays/synthetic-sglang-recipe/"
+                        f"{basename}"
+                    ),
+                }
+            )
+        plan_path = self.run_dir / "plan.json"
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["model"].update(
+            {
+                "backend": "sglang",
+                "sglang_ple_mmap": True,
+                "sglang_source_overlays": overlays,
+            }
+        )
+        if readonly_ple_cache:
+            plan["model"].update(
+                {
+                    "sglang_ple_cache_marker_digest": "sha256:" + "c" * 64,
+                    "sglang_ple_cache_mode": "readonly",
+                    "sglang_ple_cache_payload_digest": "sha256:" + "d" * 64,
+                }
+            )
+        self.write_json(plan_path, plan)
+        return overlays
+
 
 def json_keys(value: object) -> set[str]:
     if isinstance(value, dict):
@@ -1193,6 +1245,242 @@ class EvidenceExportTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, all_keys)
         self.assertFalse(any(key.endswith("_path") for key in all_keys))
+
+    def test_sglang_runtime_overlays_export_only_pinned_basenames_and_hashes(
+        self,
+    ) -> None:
+        overlays = self.fixture.add_sglang_runtime_overlays()
+
+        self.export()
+
+        manifest_path = (
+            self.fixture.output
+            / "runs"
+            / self.fixture.run_id
+            / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertIs(manifest["runtime"]["sglang_ple_mmap"], True)
+        self.assertEqual(
+            [
+                {
+                    "role": f"sglang_source_overlay_{index}",
+                    "sha256": overlay["digest"].removeprefix("sha256:"),
+                    "target": Path(overlay["host_path"]).name,
+                }
+                for index, overlay in enumerate(
+                    sorted(overlays, key=lambda value: Path(value["host_path"]).name),
+                    1,
+                )
+            ],
+            [
+                artifact
+                for artifact in manifest["artifacts"]
+                if artifact["role"].startswith("sglang_source_overlay_")
+            ],
+        )
+        serialized = manifest_path.read_text(encoding="utf-8")
+        self.assertNotIn("runtime-overlays", serialized)
+        self.assertNotIn("sgl-workspace", serialized)
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+
+    def test_readonly_sglang_ple_cache_provenance_is_atomic_and_typed(self) -> None:
+        self.fixture.add_sglang_runtime_overlays(readonly_ple_cache=True)
+
+        self.export()
+
+        manifest_path = (
+            self.fixture.output
+            / "runs"
+            / self.fixture.run_id
+            / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        runtime = manifest["runtime"]
+        self.assertEqual("readonly", runtime["sglang_ple_cache_mode"])
+        self.assertEqual("c" * 64, runtime["sglang_ple_cache_marker_sha256"])
+        self.assertEqual("d" * 64, runtime["sglang_ple_cache_payload_sha256"])
+        self.assertIs(runtime["sglang_ple_mmap"], True)
+        self.assertNotIn("sglang_ple_cache_marker_digest", runtime)
+        self.assertNotIn("sglang_ple_cache_payload_digest", runtime)
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+
+        del runtime["sglang_ple_cache_payload_sha256"]
+        self.fixture.write_json(manifest_path, manifest)
+        self.refresh_run_checksums(self.fixture.run_id)
+        with self.assertRaisesRegex(EvidenceError, "provenance is incomplete"):
+            verify_evidence(self.fixture.output)
+
+    def test_readonly_sglang_ple_cache_source_requires_exact_complete_pins(
+        self,
+    ) -> None:
+        self.fixture.add_sglang_runtime_overlays(readonly_ple_cache=True)
+        plan_path = self.fixture.run_dir / "plan.json"
+        original = json.loads(plan_path.read_text(encoding="utf-8"))
+        mutations = (
+            (
+                "missing_payload",
+                lambda model: model.pop("sglang_ple_cache_payload_digest"),
+            ),
+            (
+                "wrong_mode",
+                lambda model: model.__setitem__(
+                    "sglang_ple_cache_mode", "readwrite"
+                ),
+            ),
+            (
+                "mmap_disabled",
+                lambda model: model.__setitem__("sglang_ple_mmap", False),
+            ),
+            (
+                "invalid_marker",
+                lambda model: model.__setitem__(
+                    "sglang_ple_cache_marker_digest", "sha256:not-a-digest"
+                ),
+            ),
+        )
+        for index, (name, mutate) in enumerate(mutations, 1):
+            with self.subTest(name=name):
+                plan = json.loads(json.dumps(original))
+                mutate(plan["model"])
+                self.fixture.write_json(plan_path, plan)
+                output = Path(self.temporary.name) / f"evidence-ple-invalid-{index}"
+                with self.assertRaises(EvidenceError):
+                    self.export(output=output)
+
+    def test_runtime_overlay_tree_rejects_undeclared_or_digest_changed_files(
+        self,
+    ) -> None:
+        self.fixture.add_sglang_runtime_overlays()
+        overlay_dir = (
+            self.fixture.results
+            / "runtime-overlays"
+            / "synthetic-sglang-recipe"
+        )
+        (overlay_dir / "undeclared.py").write_text(
+            "UNDECLARED = True\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(EvidenceError, "file set changed"):
+            self.export()
+
+        (overlay_dir / "undeclared.py").unlink()
+        (overlay_dir / "qwen4_exp.py").write_text(
+            "MODEL_KIND = 'changed'\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(EvidenceError, "digest mismatch"):
+            self.export()
+
+    def test_cold_start_safety_annotations_have_exact_typed_projection(self) -> None:
+        annotations = {
+            "cold_start_swap_growth_exceeded_safety_limit": (
+                [
+                    "swap_growth_mib=3315.9",
+                    "safety_limit_mib=512",
+                    "memavailable_gib=31.17",
+                    "memory_psi_full_avg10=2.23",
+                ],
+                {
+                    "reason": "cold_start_swap_growth_exceeded_safety_limit",
+                    "swap_growth_mib": 3315.9,
+                    "safety_limit_mib": 512.0,
+                    "memavailable_gib": 31.17,
+                    "memory_psi_full_avg10": 2.23,
+                },
+            ),
+            "ple_materialization_swap_growth_exceeded_safety_limit": (
+                [
+                    "swap_growth_mib=4096.5",
+                    "safety_limit_mib=512",
+                    "memavailable_gib=27.25",
+                    "memory_psi_full_avg10=3.5",
+                    "ple_allocated_blocks=47",
+                ],
+                {
+                    "reason": (
+                        "ple_materialization_swap_growth_exceeded_safety_limit"
+                    ),
+                    "swap_growth_mib": 4096.5,
+                    "safety_limit_mib": 512.0,
+                    "memavailable_gib": 27.25,
+                    "memory_psi_full_avg10": 3.5,
+                    "ple_allocated_blocks": 47,
+                },
+            ),
+        }
+        summary_path = self.fixture.run_dir / "summary.json"
+        for index, (reason, (evidence, expected)) in enumerate(
+            annotations.items(), 1
+        ):
+            source_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            annotation = {
+                "evidence": evidence,
+                "measurement_valid": False,
+                "reason": reason,
+                "scope": "startup",
+                "timestamp": "2026-08-27T00:35:40.854+00:00",
+            }
+            source_summary["measurement_annotations"] = [annotation]
+            source_summary["startup_measurement_annotations"] = [annotation]
+            source_summary["startup_measurement_valid"] = False
+            self.fixture.write_json(summary_path, source_summary)
+            output = Path(self.temporary.name) / f"evidence-cold-start-{index}"
+
+            self.export(output=output)
+
+            published = json.loads(
+                (
+                    output
+                    / "runs"
+                    / self.fixture.run_id
+                    / "summary.json"
+                ).read_text(encoding="utf-8")
+            )["aggregates"]
+            self.assertEqual([expected], published["cold_start_safety_annotations"])
+            self.assertEqual(1, published["measurement_annotations_count"])
+            self.assertEqual(1, published["startup_measurement_annotations_count"])
+            self.assertNotIn("evidence", json_keys(published))
+            self.assertNotIn("timestamp", json_keys(published))
+            self.assertEqual("verified", verify_evidence(output)["status"])
+
+    def test_cold_start_safety_annotation_source_and_output_fail_closed(self) -> None:
+        summary_path = self.fixture.run_dir / "summary.json"
+        source_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        annotation = {
+            "evidence": [
+                "swap_growth_mib=3315.9",
+                "safety_limit_mib=512",
+                "memavailable_gib=31.17",
+                "memory_psi_full_avg10=2.23",
+                "unexpected_scalar=1",
+            ],
+            "measurement_valid": False,
+            "reason": "cold_start_swap_growth_exceeded_safety_limit",
+            "scope": "startup",
+            "timestamp": "2026-08-27T00:35:40.854+00:00",
+        }
+        source_summary["measurement_annotations"] = [annotation]
+        source_summary["startup_measurement_annotations"] = [annotation]
+        self.fixture.write_json(summary_path, source_summary)
+        with self.assertRaisesRegex(EvidenceError, "evidence changed"):
+            self.export()
+
+        annotation["evidence"].pop()
+        self.fixture.write_json(summary_path, source_summary)
+        self.export()
+        published_path = (
+            self.fixture.output
+            / "runs"
+            / self.fixture.run_id
+            / "summary.json"
+        )
+        published = json.loads(published_path.read_text(encoding="utf-8"))
+        published["aggregates"]["cold_start_safety_annotations"][0][
+            "swap_growth_mib"
+        ] = "3315.9"
+        self.fixture.write_json(published_path, published)
+        self.refresh_run_checksums(self.fixture.run_id)
+        with self.assertRaisesRegex(EvidenceError, "finite float"):
+            verify_evidence(self.fixture.output)
 
     def test_memory_protocol_exports_exact_scalar_evidence_deterministically(
         self,

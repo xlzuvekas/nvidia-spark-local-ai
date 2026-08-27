@@ -7,6 +7,7 @@ the pinned public patchers, and admits only the expected final byte digests.
 
 from __future__ import annotations
 
+import argparse
 import ast
 from dataclasses import dataclass
 import hashlib
@@ -19,6 +20,13 @@ import sys
 import tempfile
 from typing import Sequence
 
+from bench.qwen38_ple_cache import (
+    PLECacheError,
+    default_cache_path,
+    materialize_ple_cache,
+    validate_ple_cache,
+)
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 PINNED_IMAGE = (
@@ -26,7 +34,7 @@ PINNED_IMAGE = (
     "14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4"
 )
 OUTPUT_RELATIVE = Path(
-    "results/runtime-overlays/qwen38-flash-next-bf2b7c75"
+    "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-v1"
 )
 PATCHER_ROOT = REPOSITORY_ROOT / "patches" / "sglang"
 MODULE_PATH_MARKER = "SPARKBENCH_SGLANG_MODULE_PATHS="
@@ -45,6 +53,8 @@ class OverlaySpec:
     patcher_name: str
     patcher_sha256: str
     output_sha256: str
+    post_patcher_name: str | None = None
+    post_patcher_sha256: str | None = None
 
 
 MODULE_OVERLAYS = (
@@ -60,8 +70,13 @@ MODULE_OVERLAYS = (
             "b01c6cc034dfe6bad1e4f29a8aa21555"
         ),
         output_sha256=(
-            "c687bf96b8adb980eaf3a1db2ad4a7c"
-            "00b558537865d91674c0e1b43f4ae1d71"
+            "0b513b4dc4f2394f6b1733bb0b74fa40"
+            "ab59f4a04f6b33601350b2a606c67804"
+        ),
+        post_patcher_name="qwen38-persistent-ple-cache.py",
+        post_patcher_sha256=(
+            "bf47f244406e149a3c7fe51d42d326d6"
+            "3a008733d55868b51a73112052e3bcdf"
         ),
     ),
     OverlaySpec(
@@ -153,17 +168,27 @@ def _verify_cached_image() -> None:
 
 def _verify_patchers(specs: Sequence[OverlaySpec]) -> None:
     for spec in specs:
-        patcher = PATCHER_ROOT / spec.patcher_name
-        if patcher.is_symlink() or not patcher.is_file():
-            raise OverlayPreparationError(
-                f"missing regular vendored patcher: {spec.patcher_name}"
+        patchers = ((spec.patcher_name, spec.patcher_sha256),)
+        if spec.post_patcher_name is not None:
+            if spec.post_patcher_sha256 is None:
+                raise OverlayPreparationError(
+                    "post-patcher name is missing its pinned digest"
+                )
+            patchers += (
+                (spec.post_patcher_name, spec.post_patcher_sha256),
             )
-        actual = _sha256(patcher)
-        if actual != spec.patcher_sha256:
-            raise OverlayPreparationError(
-                f"vendored patcher digest mismatch for {spec.patcher_name}: "
-                f"expected {spec.patcher_sha256}, got {actual}"
-            )
+        for patcher_name, expected_digest in patchers:
+            patcher = PATCHER_ROOT / patcher_name
+            if patcher.is_symlink() or not patcher.is_file():
+                raise OverlayPreparationError(
+                    f"missing regular pinned patcher: {patcher_name}"
+                )
+            actual = _sha256(patcher)
+            if actual != expected_digest:
+                raise OverlayPreparationError(
+                    f"pinned patcher digest mismatch for {patcher_name}: "
+                    f"expected {expected_digest}, got {actual}"
+                )
 
 
 def _checked_output_parent(workspace: Path) -> Path:
@@ -371,23 +396,27 @@ def _extract_sources(
 
 
 def _apply_patcher(source: Path, spec: OverlaySpec) -> None:
-    patcher = PATCHER_ROOT / spec.patcher_name
-    try:
-        result = subprocess.run(
-            [sys.executable, str(patcher), str(source)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise OverlayPreparationError(
-            f"vendored patcher timed out: {spec.patcher_name}"
-        ) from error
-    if result.returncode != 0:
-        raise OverlayPreparationError(
-            f"vendored patcher rejected the image source: {spec.patcher_name}"
-        )
+    patcher_names = [spec.patcher_name]
+    if spec.post_patcher_name is not None:
+        patcher_names.append(spec.post_patcher_name)
+    for patcher_name in patcher_names:
+        patcher = PATCHER_ROOT / patcher_name
+        try:
+            result = subprocess.run(
+                [sys.executable, str(patcher), str(source)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise OverlayPreparationError(
+                f"pinned patcher timed out: {patcher_name}"
+            ) from error
+        if result.returncode != 0:
+            raise OverlayPreparationError(
+                f"pinned patcher rejected the image source: {patcher_name}"
+            )
 
 
 def _verify_ast(source: Path, spec: OverlaySpec) -> None:
@@ -422,7 +451,17 @@ def _verify_ast(source: Path, spec: OverlaySpec) -> None:
             or "_alloc_ple_table(source_weight.shape" not in class_source
             or "pin_memory" in class_source
             or "SGLANG_QWEN4_PLE_MMAP_DIR" not in text
-            or "torch.from_file(path, shared=True" not in text
+            or "SGLANG_QWEN4_PLE_CACHE_MODE" not in text
+            or "_validate_readonly_ple_cache" not in text
+            or "shared=not readonly" not in text
+            or "if _ple_cache_is_readonly():" not in text
+            or 'tensor.get("shard_count") != 128' not in text
+            or r're.search(r"\.ngram_embedding\.shard_(\d+)\.weight$", name)'
+            not in text
+            or "ple_cache_seen_shards != expected_ple_shards" not in text
+            or "loaded_weight.dtype != torch.float8_e4m3fn" not in text
+            or "tuple(loaded_weight.shape) != (2500012, 160)" not in text
+            or 'f"{prefix}.ngram_embedding.weight_scale"' not in text
         ):
             raise OverlayPreparationError(
                 "PLE overlay failed structural verification"
@@ -508,7 +547,49 @@ def prepare_overlays(workspace: Path = REPOSITORY_ROOT) -> Path:
     return target
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Prepare pinned SGLang overlays and persistent PLE cache"
+    )
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument(
+        "--materialize-ple",
+        action="store_true",
+        help=(
+            "offline-build or verify/adopt the exact 47.7 GiB PLE cache; "
+            "does not construct the model"
+        ),
+    )
+    actions.add_argument(
+        "--verify-ple-cache",
+        action="store_true",
+        help="fully hash and verify an existing completed PLE cache",
+    )
+    args = parser.parse_args(argv)
+    if args.materialize_ple:
+        try:
+            record = materialize_ple_cache(progress=print)
+        except PLECacheError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        print(
+            "ready: persistent PLE cache "
+            f"sha256:{record.payload_sha256}"
+        )
+        return 0
+    if args.verify_ple_cache:
+        try:
+            record = validate_ple_cache(
+                default_cache_path(), verify_payload=True
+            )
+        except PLECacheError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        print(
+            "verified: persistent PLE cache "
+            f"sha256:{record.payload_sha256}"
+        )
+        return 0
     try:
         target = prepare_overlays()
     except OverlayPreparationError as error:
