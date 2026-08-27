@@ -258,6 +258,40 @@ class SGLangRuntimeTests(unittest.TestCase):
         self.assertEqual(c8.native_context, 262144)
         self.assertEqual(c8.estimated_ram_gib, 105.0)
 
+        mtp2 = profiles["qwen38-flash-next-nvfp4-mtp2-c8-sglang"]
+        for field in (
+            "source",
+            "revision",
+            "image_digest",
+            "recipe_revision",
+            "sglang_ple_cache_marker_digest",
+            "sglang_ple_cache_payload_digest",
+            "sglang_source_overlays",
+            "max_context",
+            "native_context",
+        ):
+            with self.subTest(mtp2_field=field):
+                self.assertEqual(getattr(mtp2, field), getattr(c8, field))
+        mtp2_expected_flags = {
+            "--max-mamba-cache-size": "32",
+            "--max-total-tokens": "32768",
+            "--max-running-requests": "8",
+            "--speculative-num-steps": "2",
+            "--speculative-num-draft-tokens": "3",
+        }
+        for flag, expected in mtp2_expected_flags.items():
+            with self.subTest(mtp2_flag=flag):
+                self.assertEqual(
+                    mtp2.args[mtp2.args.index(flag) + 1],
+                    expected,
+                )
+        mtp2_graph_index = mtp2.args.index("--cuda-graph-bs-decode")
+        self.assertEqual(
+            mtp2.args[mtp2_graph_index + 1 : mtp2_graph_index + 9],
+            tuple(str(index) for index in range(1, 9)),
+        )
+        self.assertEqual(mtp2.estimated_ram_gib, 103.5)
+
     def test_flash_next_long_profile_reuses_pins_with_target_only_budget(self) -> None:
         profiles = load_models(ROOT / "manifests" / "models.toml")
         throughput = profiles["qwen38-flash-next-nvfp4-mtp-sglang"]
