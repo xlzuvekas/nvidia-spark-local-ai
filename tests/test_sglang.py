@@ -181,12 +181,18 @@ class SGLangRuntimeTests(unittest.TestCase):
         self.assertEqual(long_context.tasks, ("chat",))
         self.assertEqual(long_context.architecture, "moe+qsa+gdn")
         self.assertEqual(long_context.quantization, "nvfp4+ple-fp8")
-        self.assertEqual(long_context.estimated_ram_gib, 100.0)
+        self.assertEqual(long_context.estimated_ram_gib, 101.0)
         self.assertEqual(
             long_context.args[
                 long_context.args.index("--max-mamba-cache-size") + 1
             ],
-            "1",
+            "5",
+        )
+        self.assertEqual(
+            long_context.args[
+                long_context.args.index("--mamba-ssm-dtype") + 1
+            ],
+            "bfloat16",
         )
         self.assertEqual(
             long_context.args[
