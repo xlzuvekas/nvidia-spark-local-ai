@@ -1991,10 +1991,11 @@ cache_dir = "user"
 max_context = 262144
 native_context = 262144
 startup_timeout_s = 1800
-# The public .85 run measured about 103 GiB resident. Returning 6% of Spark's
-# 121.6 GiB pool at .79 projects about 96 GiB; 102 GiB retains roughly 6 GiB
-# calibration margin before SparkBench adds its separate 8 GiB launch reserve.
-estimated_ram_gib = 102.0
+# The pinned public recipe uses .85 and measured about 103 GiB resident. The
+# persistent read-only PLE plus per-shard cache eviction removes the duplicate
+# cold-load page cache; 105 GiB retains 2 GiB calibration margin before
+# SparkBench adds its separate 8 GiB launch reserve.
+estimated_ram_gib = 105.0
 endpoint = "http://127.0.0.1:30000/v1"
 sglang_source_overlays = [
   { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:0b513b4dc4f2394f6b1733bb0b74fa40ab59f4a04f6b33601350b2a606c67804" },
@@ -2016,7 +2017,7 @@ args = [
   "--reasoning-parser", "qwen3",
   "--tool-call-parser", "qwen3_coder",
   "--mamba-radix-cache-strategy", "extra_buffer",
-  "--mem-fraction-static", "0.79",
+  "--mem-fraction-static", "0.85",
   "--context-length", "262144",
   "--chunked-prefill-size", "1024",
   "--max-running-requests", "4",

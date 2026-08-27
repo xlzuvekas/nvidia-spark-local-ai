@@ -132,7 +132,11 @@ class SGLangRuntimeTests(unittest.TestCase):
             profile.sglang_ple_cache_payload_digest,
             "sha256:b070f9644adf93794d8a1030584ab705809387e64396a9327a68fa3a3a6666b3",
         )
-        self.assertEqual(profile.estimated_ram_gib, 102.0)
+        self.assertEqual(profile.estimated_ram_gib, 105.0)
+        self.assertEqual(
+            profile.args[profile.args.index("--mem-fraction-static") + 1],
+            "0.85",
+        )
         self.assertIn("--weight-loader-drop-cache-after-load", profile.args)
         self.assertEqual(len(profile.sglang_source_overlays), 2)
         self.assertTrue(
