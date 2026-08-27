@@ -217,7 +217,7 @@ lifecycle records needed to reproduce the historical Harbor bundle are retained
 locally and are inputs, not tracked artifacts. A first export requires both;
 subsequent refreshes may carry the existing canonical Harbor bundle forward only
 after its schema and checksums verify. The current tracked refresh contains
-1,736 files and 268 run bundles. It publishes the four day-zero llama.cpp Flash
+1,835 files and 285 run bundles. It publishes the four day-zero llama.cpp Flash
 Next attempts under
 [`evidence/runs/`](evidence/runs/), including the
 [core bundle](evidence/runs/20260826T165913Z-qwen38-flash-next-ud-iq4-xs-llamacpp-p8-core-b5a0f9ad/manifest.json),
@@ -297,8 +297,59 @@ minimum available memory sampled across measured cases was 16.564 GiB.
 
 Thirty periodic server-log samples had mean accepted length 2.956 and mean
 acceptance rate 0.653. They are sparse observations, not an authoritative
-lifetime or case aggregate, and without an otherwise matched MTP-off run they
-do not identify MTP's throughput contribution.
+lifetime or case aggregate, and they are not used to identify MTP's throughput
+contribution.
+
+#### Clean MTP confirmation and bounded C8
+
+The clean, near-matched confirmation at harness revision `2ce8b292` ran MTP3
+and MTP off in separate lifetimes with the same nominal D256/C1 geometry, two
+warmups and 20 measured requests. All 40 measured requests completed and
+validated. MTP3 encoded 1,610 prompt tokens versus 1,590 off, a 1.26% aggregate
+input-token mismatch; each arm produced 5,120 output tokens. Aggregate output
+throughput is primary because speculative streaming may bundle multiple tokens
+in one event and bias the client-timed decode estimate.
+
+| Arm | Output tokens | Aggregate output | Case wall time | Sampled output tok/J |
+| --- | ---: | ---: | ---: | ---: |
+| MTP3 | 5,120 | **30.123639 tok/s** | **169.966 s** | **0.785612** |
+| MTP off | 5,120 | 16.663713 tok/s | 307.254 s | 0.431324 |
+
+MTP3 measured `1.807739x` throughput (+80.7739%), saved 137.288 seconds
+(44.682%) and measured `1.821397x` sampled output tokens per joule. This is a
+bounded single-stream estimate from a near-matched control; one pair of server
+lifetimes does not estimate between-lifetime variance. The preceding
+fixed-order depth-0/1/2/3
+screen observed 15.9384/26.7568/29.5341/30.7661 tok/s, but it ran from a dirty
+worktree and its depth-one/depth-two startup was swap-contaminated. It is
+exploratory and does not resolve depth two versus depth three.
+
+After the measured MTP3 case, the runner performed one authenticated,
+scalar-only audit: `/v1/tokenize`, then native non-streaming `/generate`. The
+pinned build rejects `return_meta_info` and supplies `meta_info` automatically.
+The audit accepted 175/243 proposed draft tokens across 81 verifies (72.0165%),
+with position counts 72/55/48 and mean accepted length 3.16049. Its scope is
+`explicit_sglang_native_audit_requests_only`; no counter is attributed
+retroactively to the streaming measurement. Generated text, output IDs,
+request identifiers and unallowlisted metadata are discarded.
+
+The clean MTP2 `extra_buffer_lazy` profile then ran the short-context C1-C8
+suite with a 4,096 context cap, 32,768 total-token pool, eight decode graphs and
+32 recurrent states. Fresh C1/C2/C4/C8 aggregate rates were 28.7930, 48.2511,
+77.3798 and **114.5755 tok/s**. All 24 C8 requests completed 256 validated
+tokens each. C8 was 48.069% above C4 while median end-to-end latency was
+`1.930421x` C1, passing the frozen `>=10%` retention and `<2x` latency gates.
+Operator-log inspection observed eight running, zero queued and graph
+execution; occupancy from logs is not promoted to machine evidence. The
+separate MTP2 audit accepted 159/192 proposals and applies only to that audit.
+
+Ordinary `extra_buffer` with 32 states completed offered C8 at 80.5772 tok/s,
+but operator-log inspection showed six running and two queued, so it is not a
+simultaneous-eight result. The 40-state MTP2 allocation was safety-stopped at
+602.48 MiB swap growth against a 512 MiB gate. An MTP3/40-state attempt
+separately crossed below the 14 GiB host-availability floor during graph
+capture. These are
+capacity rejections, not crashes; the lazy MTP2/32-state profile is retained.
 
 The repeated-word 131K exact-key case passed twice: once in
 [`a06b138a`](evidence/runs/20260827T015017Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-a06b138a/summary.json)
@@ -980,6 +1031,17 @@ python3 sparkbench.py verify-evidence evidence
 # After staging the intended commit:
 python3 sparkbench.py verify-evidence evidence --staged
 ```
+
+Startup capacity stops may also receive an append-only
+`annotate-safety-gate` record. The v2 record is deliberately closed and
+prose-free: `host_memavailable` uses GiB with a strict `observed < limit`
+breach, while `startup_swap_growth` uses MiB with a strict
+`observed > limit` breach. Values must be finite and bounded, only one record
+per metric is allowed, and the summary publishes the gates in canonical metric
+order. Export requires the timestamped journal record, both summary annotation
+mirrors, `startup_measurement_valid=false`, and any legacy swap-gate projection
+to agree. Tracked evidence retains only metric, observed value, limit, unit and
+comparison; it drops the timestamp and all free-form annotation fields.
 
 The first Harbor campaign export requires its two owner-private lifecycle
 inputs. Later full refreshes may omit them: the exporter carries the existing

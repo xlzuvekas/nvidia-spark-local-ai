@@ -10,7 +10,10 @@ from pathlib import Path
 import statistics
 from typing import Any
 
-from .annotations import measurement_annotations
+from .annotations import (
+    measurement_annotations,
+    startup_safety_gates_from_annotations,
+)
 from .journal import write_json
 from .llamacpp_metrics import (
     aggregate_llamacpp_spec_decode_metrics,
@@ -392,6 +395,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         else None
     )
     annotations = measurement_annotations(events)
+    startup_safety_gates = startup_safety_gates_from_annotations(annotations)
     startup_annotations = [
         annotation
         for annotation in annotations
@@ -1303,6 +1307,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         "measurement_annotations": annotations,
         "startup_measurement_valid": not startup_annotations,
         "startup_measurement_annotations": startup_annotations,
+        "startup_safety_gates": startup_safety_gates,
         "measurement_invalid_cases": sorted(case_annotations),
         "startup_telemetry": telemetry.get("server_startup"),
         "first_request_after_start": next(

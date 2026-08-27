@@ -26,6 +26,12 @@ import tempfile
 from typing import Any, Sequence
 import unicodedata
 
+from .annotations import (
+    measurement_annotations,
+    normalize_startup_safety_gate,
+    startup_safety_gate_annotations_from_annotations,
+    startup_safety_gates_from_annotations,
+)
 from .manifest import KNOWN_AGENTIC_CASE_IDS
 from .memory_ops import (
     MEMORY_OPERATION_CONTEXT_TOKENS,
@@ -1692,6 +1698,7 @@ _SUMMARY_KEYS = {
     "speculative_decoding",
     "startup_measurement_annotations",
     "startup_measurement_valid",
+    "startup_safety_gates",
     "startup_telemetry",
     "status",
     "suite",
@@ -5884,6 +5891,7 @@ _PREFIX_CACHE_SUMMARY_SOURCE_EMPTY_LIST_FIELDS = frozenset(
         "context_limited_cases",
         "failed_cases",
         "measurement_invalid_cases",
+        "startup_safety_gates",
         "unimplemented_cases",
         "unsupported_cases",
         "validation_failed_cases",
@@ -8112,9 +8120,128 @@ def _project_cold_start_safety_annotations(
     return startup if startup is not None else measurement
 
 
+def _project_startup_safety_gates(value: Any) -> list[dict[str, Any]]:
+    """Validate the scalar-only published form of typed startup gates."""
+
+    if not isinstance(value, list):
+        raise EvidenceError("startup_safety_gates must be a list")
+    projected: list[dict[str, Any]] = []
+    seen_metrics: set[str] = set()
+    for raw_gate in value:
+        try:
+            gate = normalize_startup_safety_gate(raw_gate)
+        except ValueError as error:
+            raise EvidenceError(f"invalid startup safety gate: {error}") from error
+        if not _json_strict_equal(gate, raw_gate):
+            raise EvidenceError("startup safety-gate scalar schema changed")
+        metric = gate["metric"]
+        if metric in seen_metrics:
+            raise EvidenceError(f"duplicate startup safety-gate metric: {metric}")
+        seen_metrics.add(metric)
+        projected.append(gate)
+    ordered = sorted(projected, key=lambda gate: gate["metric"])
+    if not _json_strict_equal(ordered, value):
+        raise EvidenceError("startup safety gates are not in canonical order")
+    return ordered
+
+
+def _source_summary_startup_safety_gates(
+    summary: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Require the typed summary list to equal both annotation mirrors."""
+
+    mirror_gates: dict[str, list[dict[str, Any]]] = {}
+    for field in ("measurement_annotations", "startup_measurement_annotations"):
+        raw_annotations = summary.get(field)
+        if raw_annotations is None:
+            mirror_gates[field] = []
+            continue
+        if not isinstance(raw_annotations, list):
+            raise EvidenceError(f"{field} must be a list")
+        try:
+            mirror_gates[field] = startup_safety_gates_from_annotations(
+                raw_annotations
+            )
+        except ValueError as error:
+            raise EvidenceError(
+                f"invalid startup safety-gate annotation mirror: {error}"
+            ) from error
+
+    measurement = mirror_gates["measurement_annotations"]
+    startup = mirror_gates["startup_measurement_annotations"]
+    if not _json_strict_equal(measurement, startup):
+        raise EvidenceError("startup safety gates disagree across summary mirrors")
+
+    raw_gates = summary.get("startup_safety_gates")
+    if raw_gates is None:
+        if measurement:
+            raise EvidenceError("startup_safety_gates is missing from the summary")
+        return []
+    projected = _project_startup_safety_gates(raw_gates)
+    if not _json_strict_equal(projected, measurement):
+        raise EvidenceError("startup safety gates disagree with annotation mirrors")
+    if projected and summary.get("startup_measurement_valid") is not False:
+        raise EvidenceError(
+            "startup safety gates require startup_measurement_valid=false"
+        )
+    return projected
+
+
+def _source_summary_startup_safety_gate_annotations(
+    summary: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Require both source summary mirrors to retain typed journal identity."""
+
+    mirrored: dict[str, list[dict[str, Any]]] = {}
+    for field in ("measurement_annotations", "startup_measurement_annotations"):
+        annotations = summary.get(field)
+        if annotations is None:
+            mirrored[field] = []
+            continue
+        if not isinstance(annotations, list):
+            raise EvidenceError(f"{field} must be a list")
+        try:
+            mirrored[field] = startup_safety_gate_annotations_from_annotations(
+                annotations
+            )
+        except ValueError as error:
+            raise EvidenceError(
+                f"invalid startup safety-gate annotation mirror: {error}"
+            ) from error
+    measurement = mirrored["measurement_annotations"]
+    startup = mirrored["startup_measurement_annotations"]
+    if not _json_strict_equal(measurement, startup):
+        raise EvidenceError(
+            "startup safety-gate annotations disagree across summary mirrors"
+        )
+    return measurement
+
+
+def _validate_startup_safety_representation_consistency(
+    gates: list[dict[str, Any]],
+    cold_start_annotations: list[dict[str, Any]],
+) -> None:
+    """Reject contradictory typed and legacy swap-gate projections."""
+
+    typed_swap = next(
+        (gate for gate in gates if gate["metric"] == "startup_swap_growth"),
+        None,
+    )
+    if typed_swap is None:
+        return
+    for annotation in cold_start_annotations:
+        if (
+            annotation.get("swap_growth_mib") != typed_swap["observed"]
+            or annotation.get("safety_limit_mib") != typed_swap["limit"]
+        ):
+            raise EvidenceError(
+                "typed and legacy startup swap safety gates disagree"
+            )
+
+
 def _project_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
     if summary is None:
-        return {}
+        return {"startup_safety_gates": []}
     unknown = set(summary) - _SUMMARY_KEYS
     if unknown:
         raise EvidenceError(f"unknown summary fields: {sorted(unknown)!r}")
@@ -8231,8 +8358,14 @@ def _project_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
             if not isinstance(annotations, list):
                 raise EvidenceError(f"{key} must be a list")
             result[f"{key}_count"] = len(annotations)
+    startup_safety_gates = _source_summary_startup_safety_gates(summary)
+    result["startup_safety_gates"] = startup_safety_gates
     cold_start_annotations = _project_cold_start_safety_annotations(
         summary, source=True
+    )
+    _validate_startup_safety_representation_consistency(
+        startup_safety_gates,
+        cold_start_annotations,
     )
     if cold_start_annotations:
         result["cold_start_safety_annotations"] = cold_start_annotations
@@ -8833,6 +8966,30 @@ def _export_run(
     if memory_protocol:
         telemetry = []
     projected_summary = _project_summary(summary)
+    try:
+        journal_annotations = startup_safety_gate_annotations_from_annotations(
+            measurement_annotations(events)
+        )
+    except ValueError as error:
+        raise EvidenceError(f"invalid startup safety-gate journal: {error}") from error
+    summary_annotations = (
+        _source_summary_startup_safety_gate_annotations(summary)
+        if summary is not None
+        else []
+    )
+    if not _json_strict_equal(journal_annotations, summary_annotations):
+        raise EvidenceError(
+            "startup safety-gate annotations disagree between journal and summary"
+        )
+    journal_safety_gates = sorted(
+        (annotation["safety_gate"] for annotation in journal_annotations),
+        key=lambda gate: gate["metric"],
+    )
+    if not _json_strict_equal(
+        journal_safety_gates,
+        projected_summary.get("startup_safety_gates", []),
+    ):
+        raise EvidenceError("startup safety gates disagree between journal and summary")
     if memory_protocol:
         requests, projected_summary = _translate_memory_case_ids(
             requests,
@@ -11522,8 +11679,40 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     aggregates = summary["aggregates"]
     if not isinstance(aggregates, dict):
         raise EvidenceError(f"run aggregates must be an object: {run_id}")
-    if "cold_start_safety_annotations" in aggregates:
+    cold_start_annotations = (
         _project_cold_start_safety_annotations(aggregates, source=False)
+        if "cold_start_safety_annotations" in aggregates
+        else []
+    )
+    exact_protocol = is_prefix_cache_manifest or memory_suite is not None
+    if exact_protocol:
+        gates: list[dict[str, Any]] = []
+    else:
+        if "startup_safety_gates" not in aggregates:
+            raise EvidenceError("published startup safety gates are missing")
+        gates = _project_startup_safety_gates(aggregates["startup_safety_gates"])
+        if gates:
+            if aggregates.get("startup_measurement_valid") is not False:
+                raise EvidenceError(
+                    "startup safety gates require startup_measurement_valid=false"
+                )
+            startup_count = aggregates.get(
+                "startup_measurement_annotations_count"
+            )
+            measurement_count = aggregates.get("measurement_annotations_count")
+            if (
+                type(startup_count) is not int
+                or startup_count < len(gates)
+                or type(measurement_count) is not int
+                or measurement_count < startup_count
+            ):
+                raise EvidenceError(
+                    "startup safety-gate annotation counts are inconsistent"
+                )
+    _validate_startup_safety_representation_consistency(
+        gates,
+        cold_start_annotations,
+    )
     if memory_suite is not None:
         aggregates = _project_memory_summary_document(aggregates, source=False)
         if manifest.get("status") != aggregates.get("status"):

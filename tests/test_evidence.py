@@ -1107,6 +1107,51 @@ class EvidenceExportTests(unittest.TestCase):
                 replace=replace,
             )
 
+    def add_typed_startup_safety_gates(
+        self,
+        gates: list[dict[str, object]],
+        *,
+        journal: bool = True,
+        summary: bool = True,
+    ) -> None:
+        annotations = [
+            {
+                "timestamp": f"2026-08-27T00:00:0{index}+00:00",
+                "scope": "startup",
+                "measurement_valid": False,
+                "safety_gate": gate,
+            }
+            for index, gate in enumerate(gates, 1)
+        ]
+        if journal:
+            events_path = self.fixture.run_dir / "events.jsonl"
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+            ]
+            events.extend(
+                {
+                    "timestamp": annotation["timestamp"],
+                    "event": "measurement_annotation",
+                    "schema_version": 2,
+                    "scope": "startup",
+                    "measurement_valid": False,
+                    "safety_gate": annotation["safety_gate"],
+                }
+                for annotation in annotations
+            )
+            self.fixture.write_jsonl(events_path, events)
+        if summary:
+            summary_path = self.fixture.run_dir / "summary.json"
+            source_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            source_summary["measurement_annotations"].extend(annotations)
+            source_summary["startup_measurement_annotations"] = annotations
+            source_summary["startup_measurement_valid"] = False
+            source_summary["startup_safety_gates"] = sorted(
+                gates, key=lambda gate: str(gate["metric"])
+            )
+            self.fixture.write_json(summary_path, source_summary)
+
     def harbor_results(
         self, *, second_size_offset: int = 0
     ) -> tuple[Path, Path]:
@@ -1471,6 +1516,248 @@ class EvidenceExportTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(EvidenceError, "digest mismatch"):
             self.export()
+
+    def test_typed_startup_safety_gates_export_as_sorted_scalars_only(self) -> None:
+        gates = [
+            {
+                "metric": "startup_swap_growth",
+                "observed": 518.25,
+                "limit": 512.0,
+                "unit": "mib",
+                "comparison": "gt",
+            },
+            {
+                "metric": "host_memavailable",
+                "observed": 13.46,
+                "limit": 14.0,
+                "unit": "gib",
+                "comparison": "lt",
+            },
+        ]
+        self.add_typed_startup_safety_gates(gates)
+
+        self.export()
+
+        published = json.loads(
+            (
+                self.fixture.output
+                / "runs"
+                / self.fixture.run_id
+                / "summary.json"
+            ).read_text(encoding="utf-8")
+        )["aggregates"]
+        self.assertEqual(
+            ["host_memavailable", "startup_swap_growth"],
+            [gate["metric"] for gate in published["startup_safety_gates"]],
+        )
+        self.assertEqual(3, published["measurement_annotations_count"])
+        self.assertEqual(2, published["startup_measurement_annotations_count"])
+        self.assertNotIn("cold_start_safety_annotations", published)
+        self.assertNotIn("reason", json_keys(published["startup_safety_gates"]))
+        self.assertNotIn("evidence", json_keys(published["startup_safety_gates"]))
+        self.assertNotIn("timestamp", json_keys(published["startup_safety_gates"]))
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+
+    def test_typed_startup_safety_gate_source_mirrors_fail_closed(self) -> None:
+        gate = {
+            "metric": "host_memavailable",
+            "observed": 13.46,
+            "limit": 14.0,
+            "unit": "gib",
+            "comparison": "lt",
+        }
+        self.add_typed_startup_safety_gates([gate], summary=False)
+        with self.assertRaisesRegex(EvidenceError, "journal and summary"):
+            self.export()
+
+        summary_path = self.fixture.run_dir / "summary.json"
+        source_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        annotation = {
+            "timestamp": "2026-08-27T00:00:01+00:00",
+            "scope": "startup",
+            "measurement_valid": False,
+            "safety_gate": gate,
+        }
+        source_summary["measurement_annotations"].append(annotation)
+        source_summary["startup_measurement_annotations"] = []
+        source_summary["startup_safety_gates"] = [gate]
+        self.fixture.write_json(summary_path, source_summary)
+        with self.assertRaisesRegex(EvidenceError, "summary mirrors"):
+            self.export()
+
+    def test_typed_startup_safety_gate_requires_invalid_startup(self) -> None:
+        gate = {
+            "metric": "host_memavailable",
+            "observed": 13.46,
+            "limit": 14.0,
+            "unit": "gib",
+            "comparison": "lt",
+        }
+        self.add_typed_startup_safety_gates([gate])
+        summary_path = self.fixture.run_dir / "summary.json"
+        source_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        source_summary["startup_measurement_valid"] = True
+        self.fixture.write_json(summary_path, source_summary)
+        with self.assertRaisesRegex(EvidenceError, "startup_measurement_valid=false"):
+            self.export()
+
+    def test_typed_startup_safety_gate_journal_identity_fails_closed(self) -> None:
+        gate = {
+            "metric": "host_memavailable",
+            "observed": 13.46,
+            "limit": 14.0,
+            "unit": "gib",
+            "comparison": "lt",
+        }
+        self.add_typed_startup_safety_gates([gate])
+        summary_path = self.fixture.run_dir / "summary.json"
+        source_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        source_summary["measurement_annotations"][-1]["timestamp"] = (
+            "2026-08-27T00:00:09+00:00"
+        )
+        source_summary["startup_measurement_annotations"][-1]["timestamp"] = (
+            "2026-08-27T00:00:09+00:00"
+        )
+        self.fixture.write_json(summary_path, source_summary)
+        with self.assertRaisesRegex(EvidenceError, "journal and summary"):
+            self.export()
+
+        source_summary["measurement_annotations"][-1]["timestamp"] = (
+            "not-an-iso-timestamp"
+        )
+        source_summary["startup_measurement_annotations"][-1]["timestamp"] = (
+            "not-an-iso-timestamp"
+        )
+        self.fixture.write_json(summary_path, source_summary)
+        with self.assertRaisesRegex(EvidenceError, "timestamp"):
+            self.export()
+
+    def test_typed_startup_safety_gate_source_schema_fails_closed(self) -> None:
+        gate = {
+            "metric": "host_memavailable",
+            "observed": 13.46,
+            "limit": 14.0,
+            "unit": "gib",
+            "comparison": "lt",
+        }
+        self.add_typed_startup_safety_gates([gate])
+        summary_path = self.fixture.run_dir / "summary.json"
+        source_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        source_summary["startup_safety_gates"][0]["unexpected"] = 1
+        self.fixture.write_json(summary_path, source_summary)
+        with self.assertRaisesRegex(EvidenceError, "exactly"):
+            self.export()
+
+        source_summary["startup_safety_gates"][0].pop("unexpected")
+        source_summary["startup_safety_gates"].append(
+            dict(source_summary["startup_safety_gates"][0])
+        )
+        self.fixture.write_json(summary_path, source_summary)
+        with self.assertRaisesRegex(EvidenceError, "duplicate"):
+            self.export()
+
+    def test_published_startup_safety_gate_verification_fails_closed(self) -> None:
+        gate = {
+            "metric": "startup_swap_growth",
+            "observed": 518.25,
+            "limit": 512.0,
+            "unit": "mib",
+            "comparison": "gt",
+        }
+        self.add_typed_startup_safety_gates([gate])
+        self.export()
+        published_path = (
+            self.fixture.output
+            / "runs"
+            / self.fixture.run_id
+            / "summary.json"
+        )
+
+        published = json.loads(published_path.read_text(encoding="utf-8"))
+        published["aggregates"]["startup_safety_gates"][0]["observed"] = 500.0
+        self.fixture.write_json(published_path, published)
+        self.refresh_run_checksums(self.fixture.run_id)
+        with self.assertRaisesRegex(EvidenceError, "true breach"):
+            verify_evidence(self.fixture.output)
+
+        validity_output = Path(self.temporary.name) / "evidence-gate-validity"
+        self.export(output=validity_output)
+        published_path = (
+            validity_output / "runs" / self.fixture.run_id / "summary.json"
+        )
+        published = json.loads(published_path.read_text(encoding="utf-8"))
+        published["aggregates"]["startup_measurement_valid"] = True
+        self.fixture.write_json(published_path, published)
+        self.refresh_run_checksums(
+            self.fixture.run_id,
+            evidence_root=validity_output,
+        )
+        with self.assertRaisesRegex(EvidenceError, "startup_measurement_valid=false"):
+            verify_evidence(validity_output)
+
+        missing_output = Path(self.temporary.name) / "evidence-gate-missing"
+        self.export(output=missing_output)
+        published_path = (
+            missing_output / "runs" / self.fixture.run_id / "summary.json"
+        )
+        published = json.loads(published_path.read_text(encoding="utf-8"))
+        published["aggregates"].pop("startup_safety_gates")
+        self.fixture.write_json(published_path, published)
+        self.refresh_run_checksums(
+            self.fixture.run_id,
+            evidence_root=missing_output,
+        )
+        with self.assertRaisesRegex(EvidenceError, "safety gates are missing"):
+            verify_evidence(missing_output)
+
+        counts_output = Path(self.temporary.name) / "evidence-gate-counts"
+        self.export(output=counts_output)
+        published_path = (
+            counts_output / "runs" / self.fixture.run_id / "summary.json"
+        )
+        published = json.loads(published_path.read_text(encoding="utf-8"))
+        published["aggregates"]["startup_measurement_annotations_count"] = 0
+        self.fixture.write_json(published_path, published)
+        self.refresh_run_checksums(
+            self.fixture.run_id,
+            evidence_root=counts_output,
+        )
+        with self.assertRaisesRegex(EvidenceError, "annotation counts"):
+            verify_evidence(counts_output)
+
+    def test_typed_and_legacy_startup_swap_gates_must_agree(self) -> None:
+        gate = {
+            "metric": "startup_swap_growth",
+            "observed": 602.48,
+            "limit": 512.0,
+            "unit": "mib",
+            "comparison": "gt",
+        }
+        self.add_typed_startup_safety_gates([gate])
+        summary_path = self.fixture.run_dir / "summary.json"
+        source_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        legacy = {
+            "evidence": [
+                "swap_growth_mib=700",
+                "safety_limit_mib=512",
+                "memavailable_gib=15",
+                "memory_psi_full_avg10=2",
+            ],
+            "measurement_valid": False,
+            "reason": "cold_start_swap_growth_exceeded_safety_limit",
+            "scope": "startup",
+            "timestamp": "2026-08-27T00:00:02+00:00",
+        }
+        source_summary["measurement_annotations"].append(legacy)
+        source_summary["startup_measurement_annotations"].append(legacy)
+        self.fixture.write_json(summary_path, source_summary)
+        with self.assertRaisesRegex(EvidenceError, "typed and legacy"):
+            self.export()
+
+        legacy["evidence"][0] = "swap_growth_mib=602.48"
+        self.fixture.write_json(summary_path, source_summary)
+        self.export()
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
 
     def test_cold_start_safety_annotations_have_exact_typed_projection(self) -> None:
         annotations = {
@@ -3000,7 +3287,7 @@ class EvidenceValidationTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            {"artifact_validation": {}},
+            {"artifact_validation": {}, "startup_safety_gates": []},
             projected,
         )
 

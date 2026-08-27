@@ -11,7 +11,11 @@ import json
 from pathlib import Path
 import sys
 
-from bench.annotations import append_measurement_annotation
+from bench.annotations import (
+    STARTUP_SAFETY_GATE_REGISTRY,
+    append_measurement_annotation,
+    append_startup_safety_gate,
+)
 from bench.acquire import fetch_model_snapshot
 from bench.audit import audit_matrix
 from bench.diffusion_direct import run_direct_diffusion
@@ -379,6 +383,33 @@ def command_annotate(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_annotate_safety_gate(args: argparse.Namespace) -> int:
+    run_dir = args.run_dir.resolve()
+    annotation = append_startup_safety_gate(
+        run_dir,
+        metric=args.metric,
+        observed=args.observed,
+        limit=args.limit,
+        unit=args.unit,
+        comparison=args.comparison,
+    )
+    summary = summarize_run(run_dir)
+    print(
+        json.dumps(
+            {
+                "annotation": annotation,
+                "summary_path": str(run_dir / "summary.json"),
+                "startup_measurement_valid": summary[
+                    "startup_measurement_valid"
+                ],
+                "startup_safety_gates": summary["startup_safety_gates"],
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def command_audit_matrix(args: argparse.Namespace) -> int:
     report = audit_matrix(args.matrix_dir)
     print(json.dumps(report, indent=2, sort_keys=True))
@@ -527,6 +558,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="supporting fact or local artifact reference (repeatable)",
     )
     annotate.set_defaults(function=command_annotate)
+
+    annotate_safety_gate = subparsers.add_parser(
+        "annotate-safety-gate",
+        help="append a typed startup safety-gate breach to a frozen run",
+    )
+    annotate_safety_gate.add_argument("run_dir", type=Path)
+    annotate_safety_gate.add_argument(
+        "--metric", required=True, choices=tuple(STARTUP_SAFETY_GATE_REGISTRY)
+    )
+    annotate_safety_gate.add_argument("--observed", required=True, type=float)
+    annotate_safety_gate.add_argument("--limit", required=True, type=float)
+    annotate_safety_gate.add_argument(
+        "--unit", required=True, choices=("gib", "mib")
+    )
+    annotate_safety_gate.add_argument(
+        "--comparison", required=True, choices=("gt", "lt")
+    )
+    annotate_safety_gate.set_defaults(function=command_annotate_safety_gate)
 
     audit = subparsers.add_parser(
         "audit-matrix", help="read-only verification of a completed matrix"

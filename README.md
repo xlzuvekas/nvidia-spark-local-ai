@@ -14,6 +14,7 @@ quality checks, and the provenance needed to interpret each number.
 | How fast are Qwen3.6 and Qwen3.8 under concurrency and 61K–246K inputs? | [Cache-off NVFP4+MTP3 throughput, wall time, TTFT, retries, and validation](docs/qwen36-qwen38-long-context-tps-2026-08-25.md) |
 | How does Qwen3.8-Flash-Next run on one Spark? | [Native Radix SGLang and IQ4_XS llama.cpp throughput, validation, and memory boundaries](docs/qwen38-flash-next-gb10-2026-08-26.md) |
 | Does SGLang's native Flash-Next path run on GB10, and how does it fit? | [Measured NVFP4+MTP result, read-only NVMe PLE mechanics, exact pins, and long-context limit](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md) |
+| What did the first day of GB10 community work add? | [Primary-source review of the one-Spark vLLM mmap patch, upstream status, and dual-Spark SGLang report](docs/qwen38-flash-next-gb10-day-one-2026-08-27.md) |
 | What does native llama.cpp prompt-KV reuse change for Qwen3.6? | [Prefix-cache controls: 8K and 32K shared-prefix cold/warm observations](docs/qwen36-prefix-cache-results-2026-08-18.md) |
 | How did Qwen3-Coder-Next fare on terminal coding tasks? | [Harbor/Terminal-Bench-derived results: Qwen Code versus OpenCode](docs/harbor-terminal-results-2026-08-18.md) |
 | How are offline coding-agent harnesses compared? | [Qwen3-Coder-Next Harbor campaign protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign) |
@@ -34,7 +35,7 @@ data. Its [human-readable map](evidence/README.md) and
 aborted, and nonterminal attempts without publishing raw payloads. The
 [evidence publication section](BENCHMARK.md#publishing-sanitized-evidence)
 explains how to create and verify both files. The current refresh contains
-1,736 files covering 268 run bundles.
+1,835 files covering 285 run bundles.
 
 ## What the results say
 
@@ -50,8 +51,17 @@ explains how to create and verify both files. The current refresh contains
   GiB. The lifecycle completed; the scalar summary is `partial` only because
   the synthetic quality case scored 3/4 after one code-reasoning miss. Thirty
   periodic server-log samples had mean accepted length 2.956 and mean
-  acceptance rate 0.653, but they are neither a lifetime/case aggregate nor an
-  MTP-off causal comparison. See the
+  acceptance rate 0.653, but they are neither a lifetime nor case aggregate.
+  The later clean, near-matched D256/C1 pair gives the bounded MTP estimate:
+  MTP3 reached 30.123639 tok/s versus 16.663713 off (`1.807739x`), saved
+  137.288 seconds/44.682% of case wall time, and measured `1.821397x` output
+  tokens per sampled joule. Its separate native audit accepted 175/243
+  proposals (72.0165%), scoped only to that explicit audit request. The MTP3
+  arm encoded 1,610 prompt tokens versus 1,590 off, a disclosed 1.26% input
+  mismatch across otherwise nominally identical 20-request shapes. The clean
+  bounded lazy-state MTP2 profile reached 114.5755 tok/s at offered C8,
+  +48.069% over C4 while holding median E2E to `1.930421x` C1; operator-log
+  inspection observed all eight requests running. See the
   [native result and exact pins](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md).
 - The same native MTP route passed the repeated-word 131K exact-key case in two
   runs, including [one with 72.285 s TTFT](evidence/runs/20260827T024144Z-qwen38-flash-next-nvfp4-mtp-long-sglang-qwen38-flash-next-sglang-long-context-7c25f743/summary.json).
@@ -159,8 +169,8 @@ geometries, slot counts, or validation states.
 
 - [Qwen3.8-Flash-Next native SGLang result and optimization record — 2026-08-26](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md):
   full Radix NVFP4 admission with read-only NVMe PLE and trained `NEXTN`, native
-  C1-C4 and 8K/32K measurements, 131K admission, the incompatible 245K boundary,
-  and the earlier isolated kernel and tiny-model diagnostics.
+  C1-C4 and 8K/32K measurements, clean MTP3/off confirmation, bounded MTP2 C8,
+  131K admission, the incompatible 245K boundary, and earlier kernel controls.
 - [Qwen3.8-Flash-Next day-zero GB10 results — 2026-08-26](docs/qwen38-flash-next-gb10-2026-08-26.md):
   pinned IQ4_XS llama.cpp admission, quick and core throughput, bounded text
   capability checks, and the observed unified-memory and swap boundary.
@@ -216,6 +226,7 @@ geometries, slot counts, or validation states.
 - [Cached training capability](docs/cached-training-capability-2026-08-15.md)
 - [Laguna, Graphiti, and memory-reflection benchmark plan](docs/laguna-graphiti-memory-plan-2026-08-24.md)
 - [RLM and HALO overnight campaign protocol](docs/rlm-halo-overnight-2026-08-25.md)
+- [Qwen3.8-Flash-Next GB10 day-one literature review](docs/qwen38-flash-next-gb10-day-one-2026-08-27.md)
 - [Nemotron diffusion direct-run guide](docs/nemotron-diffusion-direct.md)
 - [Experimental NInfer SM121a patch and reproduction notes](patches/ninfer/README.md)
 - [SGLang SM121 QSA and persistent read-only PLE patch guide](patches/sglang/README.md)

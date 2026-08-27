@@ -1,5 +1,8 @@
 # Qwen3.8-Flash-Next on one DGX Spark / GB10 — 2026-08-26
 
+Updated 2026-08-27 with clean MTP controls, the bounded C8 result, and the
+day-one upstream/community boundary.
+
 ## Result
 
 The full released Qwen3.8-Flash-Next language stack now runs on one 128 GB DGX
@@ -17,9 +20,20 @@ FP8 table, not an NVFP4 conversion, and the NEXTN module is BF16. The PLE mmap
 avoids making the 47.684 GiB table permanently resident, but its pages still
 consume unified-memory page cache when touched. The measured synthetic prompts
 repeat one word and therefore do not establish cold or varied-token PLE cost.
-SGLang's OpenAI path exposed no authoritative accepted/proposed-token aggregate,
-and no matched MTP-off full-model run completed, so the result does not quantify
-MTP acceleration.
+The later clean D256/C1 confirmation provides a bounded near-matched MTP estimate:
+MTP3 reached 30.123639 aggregate output tok/s versus 16.663713 with MTP off,
+or `1.807739x`, while saving 137.288 seconds (44.682%) and measuring
+`1.821397x` output tokens per sampled joule. A separate authenticated native
+audit accepted 175 of 243 proposed tokens (72.0165%). Its counters apply only
+to that explicit audit request, not to the preceding streaming workload.
+
+At bounded 4K context, a clean MTP2 profile using SGLang's lazy extra-buffer
+recurrent-state strategy measured 114.5755 aggregate output tok/s at offered
+C8. That was 48.069% above its matched C4 case while C8 median end-to-end
+latency was `1.930421x` its C1 value, clearing the frozen `>=10%`
+throughput-retention and `<2x` latency gates. Operator-log inspection observed
+eight running requests; the tracked machine evidence is the scalar client
+result and telemetry, not an occupancy counter.
 
 The primary native lifecycle started in 581.652 seconds and retained at least
 16.564 GiB sampled host `MemAvailable` with no sampled swap growth. That safe
@@ -61,13 +75,16 @@ template. They otherwise differed materially.
 
 | Deployment | Main model | PLE | MTP | Serving geometry | Measured scope |
 | --- | --- | --- | --- | --- | --- |
-| Native SGLang | released Radix ModelOpt NVFP4 | released FP8, 51,200,245,760-byte read-only NVMe mmap | released BF16 NEXTN, steps 3 / top-k 1 / four draft tokens | max running 4; 20 recurrent-state slots; `.85` static fraction; 262,144 declared context | D256, C1/C2/C4, 8K/32K prefill and needles |
+| Native SGLang baseline | released Radix ModelOpt NVFP4 | released FP8, 51,200,245,760-byte read-only NVMe mmap | released BF16 NEXTN, steps 3 / top-k 1 / four total speculative tokens | max running 4; 20 recurrent-state slots; `.85` static fraction; 262,144 declared context | D256, C1/C2/C4, 8K/32K prefill and needles |
+| Native SGLang MTP controls | same | same | near-matched MTP3 and off lifetimes | max running 4; 20 recurrent-state slots for MTP3; D256/C1 | clean 20-request estimate plus one separate MTP3 counter audit |
+| Native SGLang bounded C8 | same | same | BF16 NEXTN, steps 2 / three total speculative tokens | max running 8; 32 lazy recurrent-state slots; 4,096 context; 32,768 total-token cap | fresh C1/C2/C4/C8 and one separate MTP2 counter audit |
 | Provisional llama.cpp | Unsloth `UD-IQ4_XS` GGUF | GGUF-converted representation | omitted by converter | eight slots, each 32,768 context; F16 K/V | target-only D256, C1/C2/C4/C8 and bounded context |
 
 The native path used Triton prefill attention, the pinned SM121 TRT-LLM/XQA
 decode overlay, `modelopt_fp4`, 1,024-token chunked prefill, and the exact
 released Radix snapshot. The completed PLE file and marker were mounted
-read-only. This is one SGLang configuration, not a backend A/B experiment.
+read-only. The MTP3/off pair is a near-matched same-runtime control; comparisons to
+llama.cpp remain descriptive rather than a backend A/B experiment.
 
 Both successful llama.cpp profiles used full GPU offload, CUDA flash attention,
 an 8,192-token batch, a 512-token microbatch, Jinja chat templating, F16 K/V,
@@ -111,6 +128,72 @@ counters:
 | ---: | ---: | ---: | ---: |
 | 8,192 | 8,261 | 3.927 s | **2,103.468 tok/s** |
 | 32,768 | 32,835 | 15.065 s | **2,179.588 tok/s** |
+
+### Clean MTP3 versus MTP off
+
+The final near-matched confirmation ran at clean harness revision `2ce8b292`,
+with two warmups and 20 measured D256/C1 requests in each separate server
+lifetime. All 40 requests completed and each arm produced 5,120 validated
+output tokens. MTP3 encoded 1,610 prompt tokens versus 1,590 off, a 1.26%
+aggregate input-token mismatch despite the identical nominal shape.
+Whole-case throughput is primary because speculative streaming can put
+multiple tokens in one event and bias client-estimated per-request decode.
+
+| Arm | Aggregate output | Case wall time | Median E2E | P95 E2E | Sampled output tok/J |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| [MTP3](../evidence/runs/20260827T194940Z-qwen38-flash-next-nvfp4-mtp-depth3-sglang-qwen38-flash-next-sglang-mtp-depth-confirm-af30d00f/summary.json) | **30.123639 tok/s** | **169.966 s** | 8.344 s | 9.509 s | **0.785612** |
+| [MTP off](../evidence/runs/20260827T200256Z-qwen38-flash-next-nvfp4-mtp-depth0-sglang-qwen38-flash-next-sglang-mtp-depth-confirm-aa26aac9/summary.json) | 16.663713 tok/s | 307.254 s | 15.294 s | 15.788 s | 0.431324 |
+
+The resulting `1.807739x` throughput and `1.821397x` energy-efficiency ratios
+are bounded to this no-thinking single-stream workload. MTP3 ran first, the two
+arms are independent server lifetimes, and this one pair does not estimate
+between-lifetime variance.
+
+SparkBench ran a dedicated acceptance audit after the measured MTP3 case. It
+used authenticated `/v1/tokenize` followed by native non-streaming `/generate`;
+the pinned server rejects `return_meta_info`, but returns the required
+`meta_info` automatically. The audit recorded 175 accepted of 243 proposed
+draft tokens across 81 verifies, 72.0165% acceptance, position counts 72/55/48,
+and mean accepted length 3.16049. Text, token IDs, request identifiers and
+unrelated metadata were discarded. The exported scope is explicitly the audit
+request only; these are not retroactive counters for the 20 streaming requests.
+
+An earlier five-request forward screen observed 15.9384/26.7568/29.5341/
+30.7661 tok/s at depths 0/1/2/3. It ran from a dirty worktree in fixed order,
+and depth-one/depth-two startup was swap-contaminated, so it is exploratory.
+It shows why off/MTP3 was confirmed; it does not resolve the 4.2% observed
+depth-three edge over depth two.
+
+### Bounded MTP2 C8 ladder
+
+The clean lazy-state run
+[`9597ea2a`](../evidence/runs/20260827T193218Z-qwen38-flash-next-nvfp4-mtp2-c8-lazy-sglang-qwen38-flash-next-sglang-c8-9597ea2a/summary.json)
+used depth two, a 4,096-token context cap, a 32,768-token total pool, eight
+decode graphs and 32 lazy extra-buffer recurrent states. It measured:
+
+| Fresh shape | Requests | Aggregate output | Median E2E | Sampled output tok/J |
+| --- | ---: | ---: | ---: | ---: |
+| C1 | 3 | 28.7930 tok/s | 9.010 s | 0.8061 |
+| C2 | 6 | 48.2511 tok/s | 10.819 s | 1.3110 |
+| C4 | 12 | 77.3798 tok/s | 13.180 s | 2.0950 |
+| C8 | 24 | **114.5755 tok/s** | 17.393 s | **3.0928** |
+
+All 24 C8 requests completed 256 validated tokens each. C8 retained +48.069%
+aggregate throughput over C4 and held median end-to-end latency to
+`1.930421x` C1, passing the frozen `>=10%` and `<2x` gates. During the C8 case,
+minimum sampled `MemAvailable` was 16.450 GiB. Operator inspection of the server
+log observed eight running requests, no queue and CUDA-graph execution; those
+occupancy fields are not promoted to machine evidence. The separate audit
+accepted 159/192 proposed tokens (82.8125%), scoped only to its audit request.
+
+The ordinary 32-state `extra_buffer` arm completed offered C8 at 80.5772 tok/s,
+but operator-log inspection showed a six-running/two-queued split. It is not a
+simultaneous-eight execution result. Increasing that strategy to 40 states was
+safety-stopped before measurement when swap growth reached 602.48 MiB, above
+the frozen 512 MiB limit. An MTP3/40-state attempt independently crossed the
+14 GiB host-availability floor during graph capture. Both are capacity
+rejections, not model crashes; the lazy 32-state MTP2 profile is the retained
+bounded C8 route.
 
 ### Fair local GGUF comparison
 
@@ -356,10 +439,14 @@ is 172.782 GiB, so neither admits on one Spark.
   47.684 GiB FP8 PLE on NVMe and demand-paging it through the pinned overlay;
   that is a measured local extension, not a cookbook GB10 lane.
 - The [vLLM recipe](https://recipes.vllm.ai/Qwen/Qwen3.8-Flash-Next) requires a
-  dedicated image and selects the community
-  `Inferact/Qwen3.8-Flash-Next-NVFP4` artifact for its NVFP4 lane. It declares
-  130 GB minimum VRAM for that variant, 265 GB for FP8, and 423 GB for BF16. It
-  has no memory-safe single-Spark admission.
+  dedicated image and currently documents the official FP8 checkpoint on four
+  GB300 GPUs or eight H200 GPUs. Its host-memory PLE offload does not by itself
+  solve Spark's unified-memory capacity bound. Model support
+  [PR #53896](https://github.com/vllm-project/vllm/pull/53896) and PLE-offload
+  [PR #53899](https://github.com/vllm-project/vllm/pull/53899) remained open at
+  the 2026-08-27 review cutoff, and the recipe has no validated one-GB10 NVFP4
+  lane. A community NVMe-mmap extension is reviewed separately in the
+  [day-one literature report](qwen38-flash-next-gb10-day-one-2026-08-27.md).
 - The [TokenSpeed recipe](https://lightseek.org/tokenspeed/recipes/models#qwen38-flash-next)
   publishes a TP4 FP8 + MTP3 launch. It has no single-Spark recipe.
 
@@ -452,6 +539,25 @@ silently merged into the final run.
 | [`20260827T030636Z-qwen38-flash-next-nvfp4-long-sglang-qwen38-flash-next-sglang-long-context-7b88e52c`](../evidence/runs/20260827T030636Z-qwen38-flash-next-nvfp4-long-sglang-qwen38-flash-next-sglang-long-context-7b88e52c/manifest.json) | `d0e53f45` | target-only `.85`, five BF16 recurrent slots, 246,272-token cap, C1 | safety abort during only case | 0.046 GiB sampled minimum; about 6.1 GiB observed swap and PSI memory `avg10` 19.84; profile retired |
 | [`20260827T032027Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-20e1283b`](../evidence/runs/20260827T032027Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-20e1283b/manifest.json) | `717b17c3` | `.85`, 20 recurrent slots, MTP3/C4; 8K/32K cap | `completed` / `partial`; 12/12 cases | primary safe bounded run; only publication failure was exact answers 3/4 |
 
+### Native MTP and C8 optimization attempts
+
+The first four-arm depth matrix was an explicitly exploratory dirty-worktree
+screen at commit `6778586`, in fixed 0/1/2/3 order. Its 15.9384, 26.7568,
+29.5341 and 30.7661 tok/s observations are retained, but the screen is not a
+publication-quality depth ranking and its depth-one/depth-two startups were
+swap-contaminated. The final off/MTP3 pair and C8 ladder below ran from clean
+revisions.
+
+| Run | Harness | Geometry | Terminal state | Evidence interpretation |
+| --- | --- | --- | --- | --- |
+| [`a4336a0f`](../evidence/runs/20260827T183826Z-qwen38-flash-next-nvfp4-mtp-c8-sglang-qwen38-flash-next-sglang-c8-a4336a0f/manifest.json) | `35337d6` clean | MTP3, 40 ordinary states, planned C8 | preflight abort; 0 cases | conservative model-plus-reserve estimate rejected before Docker |
+| [`617007f4`](../evidence/runs/20260827T183912Z-qwen38-flash-next-nvfp4-mtp-c8-sglang-qwen38-flash-next-sglang-c8-617007f4/manifest.json) | `efceae4` clean | MTP3, 40 ordinary states, planned C8 | startup safety abort; 0 cases | host availability crossed below 14 GiB during graph capture; capacity rejection |
+| [`a8f54d30`](../evidence/runs/20260827T185155Z-qwen38-flash-next-nvfp4-mtp2-c8-sglang-qwen38-flash-next-sglang-c8-a8f54d30/manifest.json) | `5948de1` clean | MTP2, 32 ordinary states, offered C8 | completed; 6/6 cases | 80.5772 tok/s offered C8; operator-log observation showed six running/two queued |
+| [`85e3ddfb`](../evidence/runs/20260827T192011Z-qwen38-flash-next-nvfp4-mtp2-c8-sglang-qwen38-flash-next-sglang-c8-85e3ddfb/manifest.json) | `e3e719b` clean | MTP2, 40 ordinary states, planned C8 | startup safety abort; 0 cases | 602.48 MiB swap growth exceeded frozen 512 MiB gate |
+| [`9597ea2a`](../evidence/runs/20260827T193218Z-qwen38-flash-next-nvfp4-mtp2-c8-lazy-sglang-qwen38-flash-next-sglang-c8-9597ea2a/manifest.json) | `2ce8b29` clean | MTP2, 32 lazy states, C8 | completed; 6/6 cases | retained C8 arm, 114.5755 tok/s; scalar gates passed and all-eight-running was observed only in operator logs |
+| [`af30d00f`](../evidence/runs/20260827T194940Z-qwen38-flash-next-nvfp4-mtp-depth3-sglang-qwen38-flash-next-sglang-mtp-depth-confirm-af30d00f/manifest.json) | `2ce8b29` clean | MTP3, D256/C1, 20 requests | completed | 30.123639 tok/s plus separate 175/243 native audit |
+| [`aa26aac9`](../evidence/runs/20260827T200256Z-qwen38-flash-next-nvfp4-mtp-depth0-sglang-qwen38-flash-next-sglang-mtp-depth-confirm-aa26aac9/manifest.json) | `2ce8b29` clean | MTP off, D256/C1, 20 requests | completed | near-matched 16.663713 tok/s control |
+
 ### Provisional llama.cpp attempts
 
 | Run ID | Revision | K/V | Terminal state | Published interpretation |
@@ -476,6 +582,6 @@ bundles. The full exporter recognizes the prior `loop-*` topology, and the
 two exact private Harbor lifecycle inputs remain outside Git. After validating
 its canonical schema and checksums, the exporter carried the already-sanitized
 Harbor campaign forward without reopening those inputs. At this publication
-cutoff the deterministic archive contains 1,736 files and indexes 268 run
+cutoff the deterministic archive contains 1,835 files and indexes 285 run
 bundles. Normal archive verification passed, and a second complete export
 reported no change; no hand-selected or hand-merged archive is valid.

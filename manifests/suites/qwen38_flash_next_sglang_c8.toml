@@ -2,7 +2,7 @@ schema_version = 1
 
 [suite]
 id = "qwen38-flash-next-sglang-c8"
-description = "Short-context one-lifecycle Qwen3.8-Flash-Next SGLang C1-C8 saturation pass for the bounded forty-slot NEXTN allocation."
+description = "Short-context one-lifecycle Qwen3.8-Flash-Next SGLang C1-C8 saturation pass for a profile-specific bounded NEXTN allocation."
 
 [[cases]]
 id = "chat-smoke"

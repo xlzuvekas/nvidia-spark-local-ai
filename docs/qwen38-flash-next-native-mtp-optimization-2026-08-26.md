@@ -1,5 +1,8 @@
 # Qwen3.8-Flash-Next native SGLang result and MTP/PLE optimization — 2026-08-26
 
+Updated 2026-08-27 with the clean MTP3/off confirmation, native scalar counter
+audit, and bounded MTP2 C8 state-cache result.
+
 ## Decision
 
 Keep the measured 87.249 GiB `UD-IQ4_XS` GGUF as a target-only local
@@ -23,12 +26,23 @@ tok/s for D256, then 27.413, 50.330, and 72.821 tok/s at fresh C1, C2, and C4.
 The client-TTFT prefill approximations were 2,103.468 tok/s at 8K and 2,179.588
 tok/s at 32K.
 
-This closes full-checkpoint admission, not every optimization question. A
-separate 131K repeated-word needle case passed, while 245K was pressure-unsafe.
-NVFP4/I4 PLE packing is therefore future memory/headroom optimization rather
-than the prerequisite for native admission. MTP acceleration is also not yet
-causally established: periodic logs observed draft activity, but there is no
-MTP-off control or authoritative per-run acceptance aggregate.
+This closes full-checkpoint admission, and the clean follow-up gives a bounded
+single-stream MTP estimate. Across separate near-matched D256/C1
+lifetimes, MTP3 delivered 30.123639 aggregate output tok/s versus 16.663713
+with MTP off: `1.807739x` throughput, 137.288 seconds or 44.682% less measured
+case wall time, and `1.821397x` sampled output tokens per joule. The MTP3
+lifetime's separate native audit accepted 175 of 243 proposed draft tokens
+(72.0165%). Those counters apply only to that explicit audit request, not
+retroactively to the 20 measured requests.
+
+A separate 131K repeated-word needle case passed, while 245K was
+pressure-unsafe. NVFP4/I4 PLE packing is therefore future memory/headroom
+optimization rather than the prerequisite for native admission. At bounded
+4K context, the clean MTP2 lazy-state profile also reached 114.5755 aggregate
+output tok/s at offered C8; operator-log inspection observed all eight requests
+running with no queue. That is the retained short-context throughput profile;
+it is not evidence that the long-context MTP3 allocation can support eight
+simultaneous requests.
 
 ## Why PLE is the fit lever
 
@@ -225,8 +239,9 @@ The successful profile is
 
 The measured server used TP1, ModelOpt FP4, Triton prefill, TRT-LLM MHA
 decode, 1,024-token chunked prefill, `mem-fraction-static=0.85`, four running
-requests, a 20-slot recurrent cache, and the official `NEXTN` depth-3 / top-k-1
-/ four-draft-token recipe. PLE mmap was explicit `readonly`; startup rejected
+requests, a 20-slot recurrent cache, and the official `NEXTN` recipe with depth
+three, top-k one, and four total speculative tokens. PLE mmap was explicit
+`readonly`; startup rejected
 nondefault checkpoint-loader modes and the runtime mount was read-only.
 
 Startup took 581.652 seconds: target loading accounted for 420.36 seconds and
@@ -251,9 +266,92 @@ retrieval, or worst-case cold/varied-token NVMe PLE behavior.
 
 Periodic server logs contained 30 acceptance samples with mean accepted length
 2.956 and mean acceptance rate 0.653. They show that the trained draft was
-active, but they are not an authoritative run aggregate and do not establish a
-speedup. The current evidence has no same-run accepted/proposed-token aggregate
-and there is no MTP-off control.
+active, but they are operator-log observations rather than authoritative
+machine-readable lifetime or case aggregates. They are not used for the
+speedup estimate or retroactively converted into counters.
+
+#### Clean MTP-off confirmation and scoped native counters
+
+The final confirmation ran from clean harness revision `2ce8b292` in two
+separate server lifetimes, MTP3 first and MTP off second. Both arms used the
+same pinned target, image, overlays, read-only PLE payload, no-thinking request,
+D256/C1 case, two warmups and 20 measured repetitions. Every measured request
+completed and each arm produced 5,120 validated output tokens. MTP3 encoded
+1,610 prompt tokens versus 1,590 off, a 1.26% aggregate input-token mismatch,
+so this is near-matched rather than token-identical. Whole-case aggregate
+throughput is primary because SGLang may bundle multiple speculative tokens in
+one stream event, biasing the client's event-timed per-request decode estimate.
+
+| Clean arm | Requests / output | Aggregate output | Case wall time | Sampled output tok/J |
+| --- | ---: | ---: | ---: | ---: |
+| [MTP3](../evidence/runs/20260827T194940Z-qwen38-flash-next-nvfp4-mtp-depth3-sglang-qwen38-flash-next-sglang-mtp-depth-confirm-af30d00f/summary.json) | 20 / 5,120 | **30.123639 tok/s** | **169.966 s** | **0.785612** |
+| [MTP off](../evidence/runs/20260827T200256Z-qwen38-flash-next-nvfp4-mtp-depth0-sglang-qwen38-flash-next-sglang-mtp-depth-confirm-aa26aac9/summary.json) | 20 / 5,120 | 16.663713 tok/s | 307.254 s | 0.431324 |
+
+MTP3 therefore measured `1.807739x` the MTP-off aggregate rate, or +80.7739%.
+It saved 137.288 seconds, or 44.682% of case wall time, and measured
+`1.821397x` the sampled output tokens per joule. This is a bounded
+single-stream estimate from a near-matched control, not a guarantee for other
+prompts, context lengths,
+sampling policies, or concurrency levels. The two independent server
+lifetimes also leave between-lifetime variance unestimated.
+
+After the measured MTP3 case, SparkBench ran one dedicated scalar-only
+acceptance audit. It authenticated an explicit `/v1/tokenize` request, sent the
+result to native non-streaming `/generate`, validated the returned counters,
+and discarded generated text, output token IDs, request identifiers and all
+unallowlisted metadata. The pinned build returns `meta_info` automatically and
+rejects a `return_meta_info` request field, so the audit deliberately omits
+that field. Its 81 verify calls proposed exactly 243 tokens at configured depth
+three; 175 were accepted, for 72.0165% draft acceptance, position counts
+72/55/48, and mean accepted length 3.16049 including the verified target token.
+The scope is `explicit_sglang_native_audit_requests_only`: it proves that the
+trained draft executed and its counters were internally consistent for that
+audit request, but supplies no counters for the preceding streaming workload.
+
+The earlier forward depth screen remains exploratory because all four arms ran
+from dirty commit `6778586` in fixed order 0, 1, 2, 3, with five D256 requests
+per lifetime. Its observed aggregate rates were 15.9384, 26.7568, 29.5341 and
+30.7661 tok/s. Depth one captured most of the gain, depth two added a smaller
+increment, and depth three was only 4.2% above depth two. Startup swap changed
+during the depth-one/depth-two sequence, including roughly 2.2 GiB by the
+depth-two startup, so the sweep is not suitable for memory or fine-grained
+depth-two-versus-three claims. It motivated the clean off/MTP3 confirmation;
+it does not replace one, and it does not establish depth three as better than
+depth two.
+
+#### Bounded C8 state-cache result
+
+The concurrency ladder used MTP2 because the dirty sweep left the small
+MTP3-over-MTP2 difference unresolved and because MTP2 requires fewer recurrent
+states. All retained C8 measurements are 4K-context, no-thinking, fresh-short
+D256 requests in one lifecycle; they do not expand the 131K single-request
+boundary.
+
+| Recurrent-state strategy | Configured cache | Admission/result | Interpretation |
+| --- | ---: | --- | --- |
+| `extra_buffer` | 32 states | completed; offered-C8 80.5772 tok/s | Operator-log observation showed at most six running and two queued, so this is not a true-eight-running result |
+| `extra_buffer` | 40 states | safety-rejected before measurement | Swap grew 602.48 MiB, above the frozen 512 MiB ceiling, despite 18.19 GB engine reserve; sampled host availability remained above the separate 14 GiB floor |
+| `extra_buffer_lazy` | 32 states | completed; **offered C8 114.5755 tok/s** | Operator-log observation showed eight running, queue zero and graph execution; scalar client result passed the retention gates |
+
+The clean lazy-state run
+[`9597ea2a`](../evidence/runs/20260827T193218Z-qwen38-flash-next-nvfp4-mtp2-c8-lazy-sglang-qwen38-flash-next-sglang-c8-9597ea2a/summary.json)
+measured 28.7930, 48.2511, 77.3798 and 114.5755 aggregate output tok/s at
+fresh C1/C2/C4/C8. C8 was 48.069% above C4, clearing the prespecified 10%
+retention gate, while median end-to-end latency was 17.393 seconds versus
+9.010 seconds at C1, a `1.930421x` ratio below the `2x` ceiling. All 24 C8
+requests completed 256 tokens each and validated. During the C8 case, minimum
+sampled `MemAvailable` was 16.450 GiB. Its separate MTP2 audit accepted 159 of 192
+proposals (82.8125%), but that value again applies only to the audit request.
+
+The non-lazy 32-state run is useful negative geometry evidence: its client
+offered eight requests and recorded 80.5772 tok/s, but the server log was
+observed to execute six while queuing two. Log-derived occupancy is not part of
+the machine evidence archive. Increasing the same strategy to 40 states was
+stopped at the frozen swap-growth gate, while an earlier MTP3/40-state attempt
+was stopped when host `MemAvailable` crossed below 14 GiB during graph capture.
+These are safe capacity rejections, not model crashes. The lazy 32-state
+profile is therefore the retained C8 arm; its all-eight-running designation is
+an operator-log observation, not a tracked occupancy counter.
 
 Long-context escalation established a narrower boundary. The 131K
 repeated-word needle completed and validated in
@@ -339,9 +437,11 @@ SGLang baseline used:
 
 The checkpoint contains one physical MTP layer. Steps 1/2/3 repeatedly apply
 that layer during speculation; they are not three separately trained heads.
-The follow-up sweep must test steps 1 and 2 with the corresponding bounded draft
-tree, plus MTP off. Loading trained MTP and observing periodic acceptance logs
-does not establish depth 3 as faster; it remains the recipe baseline.
+The exploratory forward screen tested off and steps 1/2/3; the clean
+confirmation then established the MTP3-versus-off effect. It did not resolve
+the small depth-three-versus-depth-two difference, so depth three remains the
+recipe baseline rather than a proven optimum. The bounded C8 arm therefore
+uses depth two to reduce recurrent-state demand.
 
 ### vLLM second
 
@@ -365,6 +465,15 @@ image labels do not identify an exact vLLM source commit, so the image would
 need to be rebuilt from a pinned revision before it met this repository's
 provenance contract.
 
+A day-one [community one-Spark vLLM mmap patch](https://github.com/blazux/qwen3.8-Flash-DGX/tree/82ed48d373d8a2c03d142d203f07bce0a6b69125)
+reports roughly 17 tok/s off and 27 tok/s with MTP2, plus 2,400-2,660 tok/s
+prefill. Its code repository and base-image digest are pinned, but its model
+download is not revision-pinned and it publishes no persisted repeated
+measurement or power/memory bundle. It is a valuable next A/B target, not a
+measurement in this report. The complete source audit and safe reproduction
+requirements are in the
+[GB10 day-one literature review](qwen38-flash-next-gb10-day-one-2026-08-27.md).
+
 The current [TokenSpeed recipe](https://lightseek.org/tokenspeed/recipes/models#qwen38-flash-next)
 publishes FP8 TP4 plus MTP3 and has no native single-Spark NVFP4/I4 route.
 
@@ -381,13 +490,19 @@ The completed admission path was:
    copies;
 5. load the NVFP4 target and trained BF16 MTP under the bounded 0.85/C4 profile;
 6. complete the 12-case native suite, then escalate repeated-word context to
-   the validated 131K boundary.
+   the validated 131K boundary;
+7. add the authenticated scalar-only native acceptance audit and run the MTP
+   depth screen; and
+8. confirm MTP3 against MTP off from a clean revision, then complete offered C8
+   at bounded 4K context with the MTP2 lazy recurrent-state strategy.
 
 The next optimization sequence is deliberately narrower:
 
-1. **Authoritative MTP proof.** Capture bounded per-request proposed, verified,
-   and accepted-token aggregates; run MTP off and depths 1/2/3 in separate
-   lifetimes before attributing throughput to speculation.
+1. **Depth-two versus depth-three replication.** The clean off/MTP3 result
+   establishes a bounded MTP gain, but the dirty five-request sweep cannot
+   resolve its approximately 4% depth-three edge over depth two. Use clean,
+   counter-audited replicated lifetimes before choosing between them outside
+   the current recipe/C8 roles.
 2. **Quality confirmation.** Investigate the failed code-reasoning item and run
    a larger fixed battery without changing runtime settings.
 3. **Memory-safe context.** Treat 131K as the current upper validated boundary.
@@ -424,11 +539,14 @@ minimum available memory, swap delta, power, proposed/accepted MTP tokens,
 acceptance by position, and cache-hit counters. Engine-emitted tokens that fail
 the validator are not usable throughput.
 
-The first depth screen uses D256/C1 with two warmups and five repetitions. The
-winner gets a 20-repetition confirmation with reversed/interleaved order before
-the C1/C2/C4/C8 and long-context ladders. Streaming and non-streaming parity
-must be checked below and above 32K because speculative output corruption can
-otherwise look like a speedup.
+The completed first depth screen used D256/C1 with two warmups and five
+repetitions, but its dirty state and fixed order make it exploratory. The clean
+20-repetition confirmation established MTP3 versus off, and the clean lazy
+MTP2 ladder completed bounded offered C8 with all-eight-running observed in the
+operator log. A future depth-two/depth-three
+confirmation should use replicated or counterbalanced lifetimes. Streaming and
+non-streaming parity must still be checked below and above 32K because
+speculative output corruption can otherwise look like a speedup.
 
 ## Acceptance gates
 
@@ -454,39 +572,32 @@ A native result is publishable only when all applicable gates pass:
 The GGUF comparison remains descriptive: quantization, runtime, PLE precision,
 and MTP all differ. It is a product target, not a backend-only causal control.
 
-## Repository work after full-checkpoint admission
+## Repository state after full-checkpoint admission
 
-SparkBench already supports vLLM concurrency and parses vLLM lifetime MTP
-counters, but the SGLang OpenAI path currently exports no corresponding
-acceptance aggregate and neither backend fails closed per case. Before a long
-campaign:
+SparkBench now supports a separate authenticated SGLang acceptance audit. It
+uses `/v1/tokenize` plus native `/generate`, retains only validated scalar
+counts/rates/histograms, and fails the lifecycle closed when required counters
+are absent or inconsistent. The pinned build rejects `return_meta_info`; its
+native final response includes the counters automatically. The implementation
+requires `accepted <= proposed`, the configured number of proposed tokens per
+verify call, a histogram whose accepted-token sum matches the total, and finite
+rates. It discards response text, token IDs, request IDs, reasoning and
+unallowlisted metadata.
 
-- add a separate authenticated, non-streaming SGLang acceptance audit using
-  `return_meta_info=true`; validate and retain only proposed/accepted draft
-  counts, verify count, acceptance scalars, and the bounded histogram;
-- require `accepted <= proposed`, histogram steps equal verify count, histogram
-  accepted-token sum equal the reported accepted count, and proposed count
-  equal `verify_count * (configured_draft_tokens - 1)`;
-- optionally enable `/metrics` and retain `sglang:spec_verify_calls_total` only
-  as an activity cross-check. Its acceptance fields are interval gauges and it
-  has no cumulative proposed/accepted-token counters, so it cannot replace the
-  per-request audit;
-- keep streaming TPS measurements explicitly counter-unverified until exact
-  same-request streaming counters are available; SGLang rejects
-  `return_meta_info=true` for OpenAI streaming requests;
+That audit remains deliberately separate from the OpenAI streaming workload.
+Its exported scope says `explicit_sglang_native_audit_requests_only`, so the
+repository does not manufacture retroactive counters for measured cases.
+Periodic `/metrics` or server-log acceptance gauges remain activity
+cross-checks only; they are not cumulative proposed/accepted-token evidence.
 
-- snapshot speculative counters after warmup and after each measured case;
-- derive bounded per-case deltas and reject missing/reset/inconsistent MTP
-  evidence;
-- add backend-neutral MTP depth screening and confirmation suites;
-- add isolated Flash-Next 16K/32K/64K/128K suites rather than reusing one
-  ascending lifetime;
-- add a separate vLLM/SGLang prefix-cache cold/warm protocol; and
-- persist only sanitized scalar evidence—never prompts, completions, reasoning,
-  tool payloads, request identifiers, local paths, or raw logs.
+The remaining protocol work is to add clean replicated depth-two/depth-three
+confirmation, isolated 16K/32K/64K/128K lifetimes, streaming/non-streaming
+parity at longer context, and a separate prefix-cache cold/warm protocol.
+Persist only sanitized scalar evidence—never prompts, completions, reasoning,
+tool payloads, request identifiers, local paths, commands or raw logs.
 
-The manifest now retains both the explicitly labeled tiny/dummy diagnostics and
-the measured exploratory full-checkpoint profile. Keep the latter pinned to its
-exact FP8 PLE payload/marker and overlay digests. It must not be relabeled as
-upstream-supported or MTP-accelerated until the SM121 parity and authoritative
-acceptance controls above pass; the 245K profile remains incompatible.
+The manifest retains the explicitly labeled tiny/dummy diagnostics, the
+measured full-checkpoint profiles, the MTP controls, and the bounded lazy C8
+arm. Keep every route pinned to the exact FP8 PLE payload/marker and overlay
+digests. None may be relabeled as tagged upstream GB10 support; the 245K
+profile remains incompatible.

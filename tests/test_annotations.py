@@ -9,10 +9,17 @@ import unittest
 
 from bench.annotations import (
     append_measurement_annotation,
+    append_startup_safety_gate,
     measurement_annotations,
+    normalize_startup_safety_gate,
+    startup_safety_gates_from_annotations,
 )
 from bench.report import summarize_run
-from sparkbench import build_parser, command_annotate
+from sparkbench import (
+    build_parser,
+    command_annotate,
+    command_annotate_safety_gate,
+)
 
 
 class MeasurementAnnotationTests(unittest.TestCase):
@@ -210,6 +217,196 @@ class MeasurementAnnotationTests(unittest.TestCase):
             ]
         )
         self.assertEqual(len(annotations), 1)
+
+    def test_typed_startup_safety_gate_is_append_only_and_summarized(self) -> None:
+        events_path = self.run_dir / "events.jsonl"
+        before = events_path.read_bytes()
+        event = append_startup_safety_gate(
+            self.run_dir,
+            metric="host_memavailable",
+            observed=13.46,
+            limit=14.0,
+            unit="gib",
+            comparison="lt",
+        )
+
+        self.assertTrue(events_path.read_bytes().startswith(before))
+        self.assertEqual(
+            set(event),
+            {
+                "event",
+                "measurement_valid",
+                "safety_gate",
+                "schema_version",
+                "scope",
+                "timestamp",
+            },
+        )
+        self.assertEqual(event["event"], "measurement_annotation")
+        self.assertEqual(event["schema_version"], 2)
+        self.assertEqual(event["scope"], "startup")
+        self.assertIs(event["measurement_valid"], False)
+        self.assertEqual(
+            event["safety_gate"],
+            {
+                "metric": "host_memavailable",
+                "observed": 13.46,
+                "limit": 14.0,
+                "unit": "gib",
+                "comparison": "lt",
+            },
+        )
+        self.assertNotIn("reason", event)
+        self.assertNotIn("evidence", event)
+
+        summary = summarize_run(self.run_dir)
+        self.assertFalse(summary["startup_measurement_valid"])
+        self.assertEqual(
+            summary["startup_safety_gates"], [event["safety_gate"]]
+        )
+        self.assertEqual(len(summary["measurement_annotations"]), 1)
+        self.assertEqual(
+            summary["measurement_annotations"],
+            summary["startup_measurement_annotations"],
+        )
+        normalized = summary["measurement_annotations"][0]
+        self.assertEqual(
+            set(normalized),
+            {"measurement_valid", "safety_gate", "scope", "timestamp"},
+        )
+        self.assertEqual(normalized["safety_gate"], event["safety_gate"])
+
+    def test_typed_startup_safety_gate_registry_and_breach_fail_closed(self) -> None:
+        valid = {
+            "metric": "host_memavailable",
+            "observed": 13.46,
+            "limit": 14.0,
+            "unit": "gib",
+            "comparison": "lt",
+        }
+        invalid = (
+            ({**valid, "metric": "other"}, "unknown"),
+            ({**valid, "metric": []}, "unknown"),
+            ({**valid, "unit": "mib"}, "requires"),
+            ({**valid, "comparison": "gt"}, "requires"),
+            ({**valid, "observed": -0.1}, "nonnegative"),
+            ({**valid, "observed": float("nan")}, "finite"),
+            ({**valid, "observed": float("inf")}, "finite"),
+            ({**valid, "observed": 10**10000}, "bounded"),
+            ({**valid, "limit": 1024**2 + 1}, "supported range"),
+            ({**valid, "limit": 0.0}, "positive"),
+            ({**valid, "observed": 14.0}, "true breach"),
+            ({**valid, "observed": True}, "numeric"),
+            ({**valid, "extra": 1}, "exactly"),
+            (
+                {
+                    **valid,
+                    "metric": "startup_swap_growth",
+                    "observed": 512.0,
+                    "limit": 512.0,
+                    "unit": "mib",
+                    "comparison": "gt",
+                },
+                "true breach",
+            ),
+        )
+        for value, message in invalid:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, message):
+                    normalize_startup_safety_gate(value)
+
+    def test_typed_startup_safety_gate_rejects_duplicate_and_event_drift(self) -> None:
+        append_startup_safety_gate(
+            self.run_dir,
+            metric="startup_swap_growth",
+            observed=513.0,
+            limit=512.0,
+            unit="mib",
+            comparison="gt",
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            append_startup_safety_gate(
+                self.run_dir,
+                metric="startup_swap_growth",
+                observed=600.0,
+                limit=512.0,
+                unit="mib",
+                comparison="gt",
+            )
+
+        event = {
+            "timestamp": "2026-08-27T00:00:00+00:00",
+            "event": "measurement_annotation",
+            "schema_version": 2,
+            "scope": "startup",
+            "measurement_valid": False,
+            "safety_gate": {
+                "metric": "host_memavailable",
+                "observed": 13.0,
+                "limit": 14.0,
+                "unit": "gib",
+                "comparison": "lt",
+            },
+            "unexpected": "field",
+        }
+        with self.assertRaisesRegex(ValueError, "schema changed"):
+            measurement_annotations([event])
+
+        for field, value, message in (
+            ("schema_version", 2.0, "schema version"),
+            ("timestamp", "not-a-timestamp", "timestamp"),
+            ("timestamp", "2026-08-27T00:00:00", "timezone"),
+        ):
+            malformed = dict(event)
+            malformed.pop("unexpected")
+            malformed[field] = value
+            with self.subTest(field=field, value=value):
+                with self.assertRaisesRegex(ValueError, message):
+                    measurement_annotations([malformed])
+
+        with self.assertRaisesRegex(ValueError, "must be an object"):
+            startup_safety_gates_from_annotations([None])  # type: ignore[list-item]
+
+    def test_typed_startup_safety_gate_cli_has_no_prose_fields(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "annotate-safety-gate",
+                str(self.run_dir),
+                "--metric",
+                "startup_swap_growth",
+                "--observed",
+                "518.25",
+                "--limit",
+                "512",
+                "--unit",
+                "mib",
+                "--comparison",
+                "gt",
+            ]
+        )
+        self.assertIs(args.function, command_annotate_safety_gate)
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            status = args.function(args)
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(status, 0)
+        self.assertFalse(payload["startup_measurement_valid"])
+        self.assertEqual(
+            payload["startup_safety_gates"],
+            [
+                {
+                    "comparison": "gt",
+                    "limit": 512.0,
+                    "metric": "startup_swap_growth",
+                    "observed": 518.25,
+                    "unit": "mib",
+                }
+            ],
+        )
+        self.assertNotIn("reason", payload["annotation"])
+        self.assertNotIn("evidence", payload["annotation"])
 
 
 if __name__ == "__main__":
