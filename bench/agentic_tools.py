@@ -42,9 +42,20 @@ _FAILURE_CODES = frozenset(
     }
 )
 _CONTROLLED_REQUEST_KEYS = frozenset(
-    {"extra_body", "max_tokens", "prompt", "request_id", "temperature"}
+    {
+        "chat_template_kwargs",
+        "enable_thinking",
+        "extra_body",
+        "max_tokens",
+        "prompt",
+        "reasoning",
+        "reasoning_effort",
+        "request_id",
+        "temperature",
+    }
 )
 _CONTROLLED_BODY_KEYS = frozenset({"messages", "tool_choice", "tools"})
+_ALLOWED_REASONING_EFFORTS = frozenset({"low", "medium", "xhigh"})
 _FINAL_ANSWER = re.compile(r"\s*FINAL\s*:\s*(?P<answer>[^\r\n]+?)\s*", re.IGNORECASE)
 
 _SYSTEM_PROMPT = (
@@ -634,14 +645,35 @@ def run_agentic_scenario(
         raise ValueError("extra_body contains unsupported agentic settings")
     if "chat_template_kwargs" in additions:
         template_options = additions["chat_template_kwargs"]
-        if (
-            not isinstance(template_options, Mapping)
-            or set(template_options) != {"enable_thinking"}
-            or not isinstance(template_options["enable_thinking"], bool)
+        if not isinstance(template_options, Mapping):
+            raise ValueError(
+                "agentic chat_template_kwargs must be a mapping"
+            )
+        option_keys = set(template_options)
+        if option_keys not in (
+            {"enable_thinking"},
+            {"enable_thinking", "reasoning_effort"},
         ):
             raise ValueError(
-                "agentic chat_template_kwargs must contain one boolean enable_thinking"
+                "agentic chat_template_kwargs must contain enable_thinking and "
+                "optionally reasoning_effort"
             )
+        enable_thinking = template_options["enable_thinking"]
+        if not isinstance(enable_thinking, bool):
+            raise ValueError("agentic enable_thinking must be boolean")
+        if "reasoning_effort" in template_options:
+            if not enable_thinking:
+                raise ValueError(
+                    "agentic reasoning_effort requires enable_thinking true"
+                )
+            reasoning_effort = template_options["reasoning_effort"]
+            if (
+                not isinstance(reasoning_effort, str)
+                or reasoning_effort not in _ALLOWED_REASONING_EFFORTS
+            ):
+                raise ValueError(
+                    "agentic reasoning_effort must be low, medium, or xhigh"
+                )
 
     scenario = _scenario(scenario_id, variant)
     tools = _rotated_tool_schemas(scenario)

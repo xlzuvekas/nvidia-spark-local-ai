@@ -194,7 +194,10 @@ class AgenticToolBatteryTests(unittest.TestCase):
         )
         model = SimpleNamespace(
             served_name="synthetic-model",
-            request_body_json=None,
+            request_body_json=(
+                '{"chat_template_kwargs":{"enable_thinking":true,'
+                '"reasoning_effort":"low"}}'
+            ),
         )
         case = SimpleNamespace(
             id="agentic-select-and-call",
@@ -229,11 +232,13 @@ class AgenticToolBatteryTests(unittest.TestCase):
             self.assertTrue(result["passed"])
             self.assertNotIn("content", result)
             self.assertNotIn("reasoning", result)
+            self.assertNotIn("reasoning_effort", result)
             self.assertNotIn("request_id", result)
             self.assertNotIn("tool_calls", result)
             serialized = journal.path.read_text()
             self.assertNotIn("FINAL: 42", serialized)
             self.assertNotIn('{\\"a\\":6,\\"b\\":7}', serialized)
+            self.assertNotIn("reasoning_effort", serialized)
 
     def test_no_tool_scenario_abstains_for_every_variant(self) -> None:
         answers = ("ORCHID-27", "EMBER-41", "QUARTZ-63")
@@ -509,6 +514,87 @@ class AgenticToolBatteryTests(unittest.TestCase):
                 _ScriptedRequests([]),
                 extra_body={"stop": ["unsafe-override"]},
             )
+
+    def test_bounded_reasoning_effort_policy_is_forwarded_not_persisted(self) -> None:
+        policies = (
+            {"enable_thinking": False},
+            {"enable_thinking": True},
+            {"enable_thinking": True, "reasoning_effort": "low"},
+            {"enable_thinking": True, "reasoning_effort": "medium"},
+            {"enable_thinking": True, "reasoning_effort": "xhigh"},
+        )
+        for policy in policies:
+            with self.subTest(policy=policy):
+                script = _ScriptedRequests([_result(content="FINAL: ORCHID-27")])
+
+                result = _run(
+                    "agentic-no-tool",
+                    0,
+                    script,
+                    extra_body={"chat_template_kwargs": policy},
+                )
+
+                self.assertTrue(result.passed)
+                self.assertEqual(
+                    script.calls[0]["extra_body"]["chat_template_kwargs"],
+                    policy,
+                )
+                self.assertNotIn("chat_template_kwargs", result.to_dict())
+                self.assertNotIn("reasoning_effort", result.to_dict())
+
+    def test_invalid_nested_reasoning_effort_policies_are_rejected(self) -> None:
+        invalid_policies = (
+            None,
+            {},
+            {"enable_thinking": "true"},
+            {"enable_thinking": True, "unknown": "value"},
+            {"reasoning_effort": "low"},
+            {"enable_thinking": False, "reasoning_effort": "low"},
+            {"enable_thinking": True, "reasoning_effort": "high"},
+            {"enable_thinking": True, "reasoning_effort": True},
+        )
+        for policy in invalid_policies:
+            with self.subTest(policy=policy):
+                with self.assertRaises(ValueError):
+                    _run(
+                        "agentic-no-tool",
+                        0,
+                        _ScriptedRequests([]),
+                        extra_body={"chat_template_kwargs": policy},
+                    )
+
+    def test_top_level_reasoning_fields_are_rejected(self) -> None:
+        fields = {
+            "chat_template_kwargs": {"enable_thinking": True},
+            "enable_thinking": True,
+            "reasoning": {"effort": "low"},
+            "reasoning_effort": "low",
+        }
+        for field, value in fields.items():
+            with self.subTest(location="request_kwargs", field=field):
+                with self.assertRaisesRegex(ValueError, "controlled fields"):
+                    run_agentic_scenario(
+                        scenario_id="agentic-no-tool",
+                        variant=0,
+                        request_function=_ScriptedRequests([]),
+                        request_kwargs={"model": "synthetic", field: value},
+                        request_id_prefix="ephemeral-test",
+                        max_turns=6,
+                        max_output_tokens=4_096,
+                    )
+        for field, value in fields.items():
+            if field == "chat_template_kwargs":
+                continue
+            with self.subTest(location="extra_body", field=field):
+                with self.assertRaisesRegex(
+                    ValueError, "unsupported agentic settings"
+                ):
+                    _run(
+                        "agentic-no-tool",
+                        0,
+                        _ScriptedRequests([]),
+                        extra_body={field: value},
+                    )
 
 
 if __name__ == "__main__":
