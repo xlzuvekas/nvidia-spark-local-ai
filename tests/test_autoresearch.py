@@ -1009,6 +1009,43 @@ class ReplayTests(unittest.TestCase):
                 self.assertEqual(state.phase, "terminal")
                 self.assertEqual(state.terminal_reason, kind)
 
+    def test_cutoff_terminates_an_idle_campaign(self) -> None:
+        contract = policy()
+        events = [
+            campaign_started(contract),
+            transition(
+                "autoresearch_campaign_terminated",
+                1,
+                failure_kind="cutoff",
+                cleanup_verified=True,
+                restored_preflight=True,
+            ),
+        ]
+
+        state = replay_transitions(contract, events)
+
+        self.assertEqual(state.phase, "terminal")
+        self.assertEqual(state.terminal_reason, FailureKind.CUTOFF.value)
+        self.assertEqual(state.next_pair_index, 0)
+
+    def test_cutoff_cannot_discard_an_active_candidate(self) -> None:
+        contract = policy()
+        events = [
+            campaign_started(contract),
+            candidate_started(1),
+            transition(
+                "autoresearch_candidate_discarded",
+                2,
+                candidate_id="candidate-1",
+                failure_kind="cutoff",
+                cleanup_verified=True,
+                restored_preflight=True,
+            ),
+        ]
+
+        with self.assertRaisesRegex(TransitionError, "campaign-terminal"):
+            replay_transitions(contract, events)
+
     def test_recovered_startup_must_discard_not_terminate(self) -> None:
         contract = policy()
         events = [

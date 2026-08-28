@@ -908,6 +908,7 @@ def evaluate_calibration(
 
 
 class FailureKind(str, Enum):
+    CUTOFF = "cutoff"
     CANDIDATE_SYNTAX = "candidate_syntax"
     CANDIDATE_STARTUP = "candidate_startup"
     MEASUREMENT = "measurement"
