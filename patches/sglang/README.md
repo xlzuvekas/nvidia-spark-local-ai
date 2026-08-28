@@ -136,15 +136,24 @@ env -i PATH="$PATH" LANG=C LC_ALL=C \
     > sglang-sm121-storage-274ee330.tar
 ```
 
-Build from exactly that tar stream. Do not substitute a later `HEAD`, export
-the mutable worktree, or run the verifier against the export. A tracked-tree
-export is required because
-this Dockerfile's `.dockerignore` does not exclude `.git`. This contract's
-status is `source_and_build_invocation_only`: it describes a build candidate,
-not an admitted runtime, and it is not a reproducible dependency closure.
-Mutable apt, pip, rustup, and other remote dependency resolution still require
+Build from exactly that tar stream, explicitly selecting `docker/Dockerfile`
+rather than the repository-root default. Do not substitute a later `HEAD`,
+export the mutable worktree, or run the verifier against the export. A
+tracked-tree export is required because this Dockerfile's `.dockerignore` does
+not exclude `.git`. This contract's status is
+`source_and_build_invocation_only`: it describes a build candidate, not an
+admitted runtime, and it is not a reproducible dependency closure. Mutable
+apt, pip, rustup, and other remote dependency resolution still require
 recording the newly built OCI digest and completing the ARM64 `_storage`, SM121
 Triton, long-context, and quality admission checks separately.
+
+The first exact-archive ARM64 build completed on 2026-08-28 as OCI image
+`sha256:b14c39fb7cb2e0b82f2f8cae1e115a55f2bb69b5ec6fd7ccc4099b219d1096b0`.
+It has passed narrow no-network storage and real-GB10 SM121 kernel gates, but
+has not loaded the checkpoint or earned runtime admission. The scalar-only
+[mechanical admission record](../../docs/qwen38-flash-next-sm121-storage-pre-admission-2026-08-28.md)
+keeps those positive prerequisites separate from the remaining quality and
+varied-token long-context gates.
 
 ## Historical measured route identity
 

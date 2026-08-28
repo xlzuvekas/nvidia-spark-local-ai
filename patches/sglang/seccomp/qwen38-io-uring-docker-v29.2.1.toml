@@ -1,0 +1,29 @@
+schema_version = 1
+kind = "sparkbench-seccomp-profile-contract"
+candidate_id = "qwen38-io-uring-docker-v29.2.1"
+status = "future_only_not_admitted"
+
+[baseline]
+repository = "https://github.com/moby/profiles"
+module = "github.com/moby/profiles/seccomp"
+tag = "seccomp/v0.1.0"
+commit = "c936cc7b4074219137bc0bee45670f5e4618d462"
+path = "patches/sglang/seccomp/moby-profiles-seccomp-v0.1.0-default.json"
+sha256 = "01536f1d1df938ae611eba20d6349e0de7a99b6ecdee1549427a0b01b8301e28"
+
+[engine]
+product = "Docker Engine"
+version = "29.2.1"
+source_tag = "docker-v29.2.1"
+source_commit = "6bc6209b88a7a834c91f77d848e025c79e0227a1"
+seccomp_module = "github.com/moby/profiles/seccomp"
+seccomp_module_version = "v0.1.0"
+
+[derived]
+path = "patches/sglang/seccomp/qwen38-io-uring-docker-v29.2.1.json"
+sha256 = "1c9c9ffc77260ddc8361f0443bac881348324b00b732d5cfabde61a239ff5b62"
+canonical_format = "json.dumps(ensure_ascii=True,sort_keys=True,separators=(',',':'))+newline"
+
+[extension]
+action = "SCMP_ACT_ALLOW"
+names = ["io_uring_setup", "io_uring_enter", "io_uring_register"]
