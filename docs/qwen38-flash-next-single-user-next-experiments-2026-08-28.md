@@ -259,13 +259,17 @@ latency or pressure safety.
 Adaptive execution is real on both reviewed pins: NEXTN normalizes to EAGLE,
 which instantiates and switches an adaptive controller. It is not a valid
 benchmark arm yet. The
-[default adaptive tiers](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/speculative/adaptive_spec_params.py#L22-L47)
+[default candidate union](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/speculative/adaptive_spec_params.py#L22-L47)
 are `{0, 1, 3, 7}`, so the retained depth-two setting fails the exact
 [membership gate](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/arg_groups/speculative_hook.py#L788-L810)
 rather than becoming the baseline tier. A custom adaptive config is therefore
 a coupled bundle, not a one-flag treatment. On the safe source, adaptive mode
 also
 [disables Qwen QSA index sharing](https://github.com/sgl-project/sglang/blob/3681c4e03f6848dff82972b3f572602d3b8394cc/python/sglang/srt/speculative/eagle_worker_v2.py#L382-L389).
+After alias resolution, adaptive also requires EAGLE/EAGLE3 with top-k one;
+DP attention, multi-layer EAGLE, two-batch overlap, or PDMux can warn and fall
+back to static parameters. A future gate must attest the resolved algorithm,
+top-k, and `speculative_adaptive=true`, not argv alone.
 
 The decisive blocker is measurement validity. The scheduler records verify
 count and accepted totals but not the active tier/proposal depth. The tokenizer
@@ -276,11 +280,19 @@ after any adaptive tier switch. There is no native tier-residence histogram or
 per-position proposed counter, so even aggregate acceptance rate is not
 attestable for this arm.
 
+The default union also expands the maximum from retained step two to step seven
+(three versus eight draft-token slots), and each candidate owns step-shaped
+draft/verify/extend resources and graphs. That is a serving-geometry bundle,
+not a free controller toggle.
+
 Do not spend a GPU lifetime or publish native acceptance metrics for adaptive
 NEXTN on these pins. Reconsider only after an admitted source change records
 exact proposed tokens per verify, active-tier residence, and accepted position;
-then freeze one custom tier bundle containing the retained depth, verify graph
-and QSA coupling, and run an unscored counter oracle before any ABBA.
+then freeze and hash a matched custom policy. The smallest future pair is
+adaptive `[2]` as a no-switch control versus `[1, 2]`, both initialized at two:
+both retain a three-slot maximum and disable safe-source QSA index sharing,
+while the candidate adds only step-one runtime state. Run an unscored counter
+oracle before any ABBA.
 
 ### 8. Stream coalescing
 
