@@ -25,9 +25,10 @@ Therefore:
   candidate, while preserving the provenance limitation;
 - build the exact PR source into a new digest-pinned arm64 image rather than
   overlaying its Python files on an older cached runtime; and
-- do not start that work until the current frozen SGLang campaign has reached
-  its cutoff or a real terminal state and the host passes the unchanged clean
-  swap/memory admission gates.
+- do not start that work until the frozen SGLang campaign reaches its fixed
+  07:00 cutoff and the host passes the unchanged clean swap/memory admission
+  gates. Its legacy `blocked_environment` summary is admission-expired but not
+  a controller-terminal state and does not authorize changing the harness early.
 
 This plan is separate from the frozen 84-file campaign harness. It does not
 authorize changing that harness before cutoff.
@@ -408,8 +409,8 @@ image architecture, import vLLM and the PLE mmap module, confirm CUDA 13.0 and
 device capability `(12, 1)`, and inspect native objects and CUDA images for
 AArch64 and SM12x code. An existing local `vllm-openai:qwen38` image comes from
 older vLLM source and is not admissible evidence. Do not start this cold build
-until the frozen campaign has reached cutoff or been explicitly abandoned and
-the original workload, memory and swap gates pass.
+until the frozen campaign reaches its fixed 07:00 cutoff and the original
+workload, memory and swap gates pass.
 
 The author reported:
 
