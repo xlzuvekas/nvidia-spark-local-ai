@@ -446,9 +446,12 @@ outcome rather than matched-concurrency TPS.
 The first ordinary-D2 lifetime completed that five-case prefix, but its appended
 C6 tail exceeded the 512 MiB runtime swap-growth limit by reaching a
 2,473.8359375 MiB increase. The C6 case is measurement-invalid and must not be
-retried. The frozen `interaction-core-v2` recovery suite contains exactly the
-five completed prefix cases; use it for ordinary D3, lazy D2, and lazy D3, and
-compute the interaction only across the common prefix.
+retried. The frozen `interaction-core-v2` recovery suite contained exactly the
+five completed prefix cases, but the following ordinary-D3 startup increased
+swap by 3,173.1484375 MiB and was stopped before any case. That second breach
+terminated the block: lazy D2/D3 were not started, the interaction is not
+estimable, and lazy D3 remains unreplicated. Do not splice the earlier lazy
+panel into the missing fresh cells.
 The earlier 40-state ordinary D2/D3 safety
 rejections remain incompatible and must not be retried. The full frozen design
 and commands are in the

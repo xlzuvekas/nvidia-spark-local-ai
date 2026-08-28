@@ -187,7 +187,9 @@ a second throughput lifetime cannot make its startup safety valid.
 
 The unchanged safety gates are 14 GiB available host memory and 512 MiB swap
 growth. Retain typed failures, early stops, and null aggregates without retries
-or gate relaxation. Commands after committing the clean harness are:
+or gate relaxation.
+
+### Follow-up outcome — stopped by safety gates
 
 The first `O2` lifetime completed the original five-case prefix, then the new
 C6 diagnostic drove swap from 51.97265625 MiB at the idle baseline to
@@ -196,24 +198,32 @@ marked measurement-invalid. This observation invalidates C6 as a safe shared
 diagnostic in the fixed post-C8 position; it does not retroactively invalidate
 the five completed prefix cases, whose maximum swap use was 515.1875 MiB.
 
-The outcome-informed `qwen38-flash-next-sglang-lazy-depth3-interaction-core-v2`
-repair is therefore frozen for the remaining `O3`, `L2`, and `L3` lifetimes. It
-is exactly the original D256/C1/C2/C4/C8 prefix and omits C6. Compare only those
-five common cells with the completed `O2` prefix. C1/C2/C4 remain the primary
-matched-strategy interaction; D256 is the single-user decode cell and C8
-remains a capacity/scheduling result. Do not run the rejected C6 tail again.
+| Completed O2 prefix | Aggregate output | Median TTFT | Median E2E |
+| --- | ---: | ---: | ---: |
+| Warmed D256/C1 | 26.925 tok/s | 0.278 s | 9.566 s |
+| Fresh C1 | 28.388 tok/s | 0.271 s | 8.540 s |
+| Fresh C2 | 50.279 tok/s | 0.280 s | 10.085 s |
+| Fresh C4 | 68.960 tok/s | 0.303 s | 14.686 s |
+| Fresh C8 | 76.908 tok/s | 0.478 s | 16.482 s |
 
-```bash
-python3 sparkbench.py benchmark \
-  qwen38-flash-next-nvfp4-mtp3-c6-extra-ple-mapped-sglang \
-  --suite manifests/suites/qwen38_flash_next_sglang_lazy_depth3_interaction_core_v2.toml
-python3 sparkbench.py benchmark \
-  qwen38-flash-next-nvfp4-mtp2-c8-lazy-ple-mapped-sglang \
-  --suite manifests/suites/qwen38_flash_next_sglang_lazy_depth3_interaction_core_v2.toml
-python3 sparkbench.py benchmark \
-  qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-mapped-sglang \
-  --suite manifests/suites/qwen38_flash_next_sglang_lazy_depth3_interaction_core_v2.toml
-```
+The outcome-informed `qwen38-flash-next-sglang-lazy-depth3-interaction-core-v2`
+repair froze exactly the original D256/C1/C2/C4/C8 prefix and omitted C6. The
+next `O3` lifetime nevertheless grew swap from an 868.48046875 MiB baseline to
+4,041.62890625 MiB during startup: a typed 3,173.1484375 MiB breach. It was
+stopped before `server_ready`, so it has zero case measurements. Minimum
+available memory was 18.0951805115 GiB; the swap gate alone rejected it.
+
+That second pressure breach terminated the campaign. `L2` and `L3` were not
+started, the 2 x 2 interaction is not estimable, and mapped lazy D3 remains at
+one throughput lifetime rather than the requested two. Do not substitute the
+older lazy D2/D3 panel into the missing fresh block or present O2 versus the old
+panel as a causal lazy-buffer effect. D2 lazy therefore remains the fastest
+replicated, safety-clean configuration established by the preceding panel;
+ordinary D3 is not an admissible route on this host state.
+
+Sanitized scalar evidence retains the [O2 completed prefix and invalid C6
+tail](../evidence/runs/20260828T034223Z-qwen38-flash-next-nvfp4-mtp2-c6-extra-ple-mapped-sglang-qwen38-flash-next-sglang-lazy-depth3-interaction-2ccfaed5/summary.json)
+and the [O3 startup rejection](../evidence/runs/20260828T040243Z-qwen38-flash-next-nvfp4-mtp3-c6-extra-ple-mapped-sglang-qwen38-flash-next-sglang-lazy-depth3-interaction-core-v2-11522bac/summary.json).
 
 ## Frozen artifacts and omission contract
 
