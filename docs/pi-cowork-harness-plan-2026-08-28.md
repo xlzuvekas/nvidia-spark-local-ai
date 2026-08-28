@@ -114,16 +114,22 @@ environment, task state, or evidence.
 For the coding campaign, expose exactly `read`, `bash`, `edit`, and `write`
 inside the task container. Freeze a 900-second task wall ceiling, a lower
 wrapper timeout with TERM/KILL grace, maximum model turns, concurrency one, and
-no automatic retry. One trial is an unscored plumbing canary only. Any scored
-coding task requires at least two independent fresh-server-lifetime replicates
-and a frozen aggregation rule.
+no automatic retry. One `fix-git` episode is an unscored plumbing canary only.
+Any scored coding claim requires at least two complete six-task blocks in
+independent fresh server lifetimes and a frozen aggregation rule. That
+standalone canary is outside every block estimator; after admission, each block
+runs a new `fix-git` episode as its scored first task.
 
 Start with the existing pinned six-task Harbor set. The historical
 `qwen38-flash-next-nvfp4-mtp2-agent64k-low-ple-mapped-sglang` profile supplies
 only measured geometry and rate priors; its SM121 TRT-LLM overlay is
-superseded and must not serve a new Pi campaign. First derive and admit a new
-64K mapped-PLE/lazy/MTP2 profile on the pinned safe SM121 Triton runtime,
-rebaseline it, and give the Pi manifest a new identity. Freeze a new execution
+superseded and must not serve a new Pi campaign. First build and admit a new
+64K PLE-capacity/lazy/MTP2 profile on an explicitly pinned SM121 Triton runtime,
+including native ARM64 build, import, runtime, and varied-token correctness
+gates; then rebaseline it and give the Pi manifest a new identity. The current
+candidate composition uses the `io_uring` PLE reader, not the historical
+persistent-mmap overlay, and remains unadmitted until those gates pass. A future
+mmap port is a separate integration and admission gate. Freeze a new execution
 order rather than importing the old Qwen Code/OpenCode counterbalance:
 
 - `fix-git` as the isolation/correctness canary;
@@ -135,6 +141,24 @@ order rather than importing the old Qwen Code/OpenCode counterbalance:
 
 These tasks measure coding only. Do not claim that they cover cowork-style
 document, retrieval, or structured-data work.
+
+## Episode, block, and replicate
+
+An **episode** is one task executed by one fresh Pi instance in one fresh task
+container, private home, in-memory history, and workspace. A C1 **block** is
+the fixed ordered six coding episodes or the fixed ordered twelve cowork
+episodes, all served by one newly started model-server lifetime. Clean every
+episode's Pi, task, relay, home, and workspace before starting the next one;
+keep only the admitted server, bridge, and private endpoint infrastructure
+alive until the block ends.
+
+A scored **replicate** is one complete identical block, not one task or model
+request. Every coding or C1 cowork claim requires at least two complete blocks
+on independent fresh server lifetimes. Freeze the episode order and
+lifetime-level estimator before launch; never pool per-request ratios or call
+multiple episodes within one server lifetime independent replicates. The C2
+scheduling record uses its separately defined counterbalanced lifetime panel
+below.
 
 ## Exact request policy
 
@@ -167,28 +191,40 @@ retries, and cross-episode history. History grows normally only within an
 episode; later turns are intended to exercise that episode's own growing
 prefix.
 
-Prevent accidental reuse between episodes with a private byte-distinct
-sentinel before any otherwise shared prefix, or with a separately admitted
-cache reset or fresh server lifetime. Publish request-scoped cached-token
-counts only after a semantics canary reconciles them with an admitted native
-source. Otherwise omit them, and never infer a cache hit from TTFT.
+Prevent accidental reuse between episodes with an admitted non-prompt cache
+namespace: generate a private per-episode `cache_salt`, keep it stable across
+that episode's turns, and assert it after every provider transform. If the
+pinned runtime cannot prove that namespace is consumed, use an admitted cache
+reset between episodes. If neither mechanism passes, the shared-server block is
+not runnable; refreeze a fresh-server-per-episode design and its replicate unit
+before scoring. Never inject a sentinel into the measured prompt. Require
+unique salts across episodes and zero device/host/storage native hits on every
+episode's first request. Keep salts private. Publish request-scoped cached-token
+counts only after a zero-hit semantics canary reconciles them with native
+counters. Normalize an absent/null detail object to zero only for that admitted
+behavior; malformed or unsupported telemetry remains invalid. Otherwise omit
+the counts, and never infer a cache hit from TTFT.
 
 ## C1 and C2 scheduling admission
 
 The newly safe-rebaselined 64K profile is C1-only. Freeze a separate C2 bundle
 with the same 65,536-token context/pool, `--max-running-requests 2`,
 `--max-mamba-cache-size 8`, and `--cuda-graph-bs-decode 1 2`. Before fan-out,
-compare this eight-lazy-slot profile at C1 with the retained C1 profile and
-reject it if the extra geometry breaches pressure gates or fails a numerical
-slowdown gate frozen before execution. Use the same exact serial cowork pair in
-fresh counterbalanced lifetimes with at least two independent lifetimes per
-profile; do not define the workload, replicate count, or threshold after seeing
-results.
+compare this eight-lazy-slot profile at C1 with the newly admitted safe C1
+profile. Use the same exact serial cowork pair in fresh ABBA lifetimes with two
+independent lifetimes per profile. The primary is the ratio of arithmetic-mean
+lifetime resident wall; require `C2-profile/C1-profile <= 1.0102`, every exact
+oracle, sampled `MemAvailable >= 14 GiB`, starting used swap `<= 64 MiB`, and
+swap growth `<= 64 MiB`. Keep D256 separate. Do not define the workload,
+replicate count, estimator, or threshold after seeing results.
 
 For every C2 pair, both fully rendered histories plus reserved outputs and MTP
 allowance must total at most 61,440 tokens, leaving 4,096 tokens unallocated.
 Run two independent Pi instances and process groups with private homes,
-histories, and workspaces behind one common release barrier. C2 means two
+histories, and workspaces behind one common release barrier. In both serial and
+parallel modes, prepare and admit both task containers, Pi processes, homes,
+and workspaces before the timed release. Parallel releases both tasks; serial
+releases the second only after the first terminal result. C2 means two
 independent subtasks for one user; it is not a multi-user result or permission
 to parallelize a sequential tool chain.
 
@@ -207,29 +243,50 @@ conflict variant zero and set B as the corresponding variant one. Fresh
 lifetime A runs set A serially and set B in parallel. Fresh lifetime B runs set
 A in parallel and set B serially, with the serial task order reversed. Score
 time-to-both only when both exact oracles pass. Repeat that counterbalanced
-two-lifetime block before promotion so every set/mode has two independent
-observations. Keep the six-task coding result C1-only and separate from cowork;
-never pool their scores.
+two-lifetime panel once, yielding two independent panels, four fresh server
+lifetimes, and two observations for every set/mode. For each panel, divide the
+sum of its two parallel makespans by the sum of its two serial makespans;
+require both ratios to be at most `0.90`. For every task variant, require its
+parallel per-task resident wall to be at most `1.25x` its matched serial
+per-task resident wall and its relay-measured parallel first-turn TTFT no more
+than `0.50` seconds above its matched serial TTFT. Every oracle and the exact
+memory/swap gates above must pass. Keep relay model E2E separate. Keep the
+six-task coding result C1-only and separate from cowork; never pool their
+scores.
 
-Record bounded common-release skew and require at least one pair of model
-request intervals to overlap. If an admitted scheduler metric exists, also
-require the maximum running-request count to reach two. Otherwise label the
-result dual-client offered load, not observed C2 execution. Retain per-task
-wall/fairness, running/queued maxima, memory, swap, and cleanup as guardrails.
+Require common-release skew at most `10 ms`. Within every scored parallel task
+pair, at least one pair of outbound model-request intervals must overlap and an
+admitted scheduler metric must show maximum running-request count two during
+that pair. The common host bridge/orchestrator timestamps release, both outbound
+request intervals, and both terminal results on one monotonic clock; clocks in
+separate task relays or wrappers cannot establish overlap or makespan. If any
+of those attestations is absent, label the result dual-client offered load and
+make it non-promotable. Retain per-task wall/fairness, running/queued maxima,
+memory, swap, and cleanup as guardrails.
 
 ## Pi timing and scalar evidence
 
 Record cold server start-to-ready, task-container/Pi setup, resident task wall,
 external verifier wall, and certified cleanup wall separately. The trusted
-wrapper owns monotonic timestamps:
+wrapper owns task-local monotonic timestamps:
 
 - resident task wall: instruction release through `agent_end` or terminal
   abort, including Pi orchestration, model requests, and tools;
-- request start: `turn_start`;
-- TTFT: first text, thinking, or tool-call start;
-- model E2E: assistant message end;
-- tool wall: tool execution start through end; and
-- turn wall: turn start through end.
+- turn wall: Pi `turn_start` through `turn_end`;
+- tool wall: tool execution start through end.
+
+The common host bridge/orchestrator owns model timing after the final payload
+is serialized:
+
+- request start: bridge dispatch toward the loopback model endpoint;
+- TTFT: first model response content/thinking/tool event; and
+- model E2E: terminal model response.
+
+Publish bridge request E2E separately from Pi turn wall. Pi `turn_start` is not
+evidence that an HTTP request has been dispatched. Task relays deliver terminal
+notices to the common orchestrator, which timestamps them. For C2, only that
+clock can establish request overlap, makespan, and release skew; wrapper clocks
+remain task-local.
 
 For C2, makespan is the common release barrier through the later terminal
 result. For serial work, it is release of the first task through the second
@@ -279,10 +336,12 @@ path. Require that total to remain at or below 61,440 tokens, leaving 4,096
 tokens unallocated in the 65,536-token server pool.
 
 The twelve episodes should target roughly 6,500–8,000 assistant-emitted tokens,
-including reasoning and serialized tool calls. At the retained ~29.4 tok/s C1
-anchor, decode is approximately four to five minutes. The provisional target
-is seven to ten minutes including prefill and tools, with a 15-minute
-(900-second) suite cap. Cold server startup remains separate.
+including reasoning and serialized tool calls. The historical superseded
+runtime's ~29.4 tok/s C1 result is a planning prior only; refreeze timing and
+the suite ceiling after the safe runtime baseline. A provisional seven-to-ten
+minute resident target and 15-minute (900-second) suite cap must not be carried
+forward as measured expectations without that rebaseline. Cold server startup
+remains separate.
 
 ## Cowork scoring and publication
 
@@ -307,23 +366,32 @@ The scalar projection may contain:
 Do not publish filenames, source IDs, queries, table values, synthetic
 workspace or artifact hashes, prompts, completions, reasoning, arguments, tool
 results, trajectories, request IDs, commands, or paths. Public pinned package,
-model, and protocol digests remain allowed provenance. Inject unique private
-sentinels into every raw surface and exception path, then prove they are absent
-from journals, reports, exports, and staged blobs.
+model, and protocol digests remain allowed provenance. Put unique private leak
+canaries only in ignored fixture/raw-state surfaces and exception paths, never
+in measured prompts, then prove they are absent from journals, reports,
+exports, and staged blobs.
 
 ## Cleanup and failure rules
 
-Every Pi trial ends through one bounded `finally` path:
+Every episode ends through one bounded `finally` path:
 
 1. abort Pi;
 2. TERM/KILL the Pi wrapper's exact owned process group within grace;
 3. restore network deny-all;
 4. run the external verifier;
 5. remove the exact task/relay containers and ephemeral task image;
-6. delete the isolated Pi home/session/temp state, including shell spill files;
-7. stop the exact bridge and model server under the campaign lock;
-8. delete the private key/socket; and
-9. prove no owned descendant, container, socket, key, or task state remains.
+6. delete the isolated Pi home/session/temp state, workspace, and shell spill
+   files;
+7. prove no episode-owned descendant, container, home, workspace, or task state
+   remains.
+
+At the end of each block or scheduling lifetime--normal, failed, invalid,
+interrupted, campaign-stopped, or aborted--an unconditional second bounded
+`finally` path stops the exact bridge and model server under the campaign lock,
+deletes the private key/socket, and proves no lifetime-owned descendant,
+container, socket, key, or state remains. If an episode cleanup is uncertain,
+do not reuse the server for the next episode; invalidate the lifetime and run
+the lifetime cleanup immediately.
 
 A wrong artifact, oracle miss, verifier reward zero, output-limit finish, or
 ordinary bounded timeout is a valid failed model trial. Preserve its scalar
