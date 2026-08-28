@@ -27,7 +27,7 @@ Spark and a fresh preflight establishes unambiguous ownership, no unrelated
 GPU or container workload, at least 14 GiB `MemAvailable`, and a new recorded
 swap baseline no greater than 64 MiB. A reset does not make either rejected
 interaction cell valid and does not authorize resuming it. If the reset and
-preflight leave less than 4,620 seconds before the frozen cutoff, record the
+preflight leave less than 4,930 seconds before the frozen cutoff, record the
 campaign as stopped without starting a pair; do not move the cutoff or silently
 shorten a cell.
 
@@ -48,18 +48,31 @@ Spark serving has about a ten-minute cold start, correctness is lexicographic,
 and unified-memory pressure can contaminate later measurements. The local
 adaptation therefore uses:
 
-- a 1,800-second inclusive envelope for one fresh server lifetime;
-- a 3,600-second envelope for one frozen two-cell pair;
-- 120 seconds of owned cleanup grace outside the causal measurement;
+- a 30-second cap for each fresh worker to publish its bound
+  `measurement_started` marker;
+- a 1,800-second inclusive causal envelope from `measurement_started` through
+  `measurement_complete` for one fresh server lifetime;
+- a 3,600-second causal measurement envelope for one frozen two-cell pair;
+- 120 seconds of owned cleanup grace per cell, ending at `server_stopped`;
+- a 120-second inter-cell allowance measured from the first
+  `server_stopped` marker;
+- a 10-second finalization bound from the final cell's `server_stopped` to
+  `run_complete`;
 - a 900-second final audit reserve;
 - an append-only, replayable journal rather than an overwritten log;
 - immutable frozen plans for both pair cells before either cell starts; and
 - a champion pointer that advances only after reverse-order confirmation.
 
-Do not start a pair unless at least 4,620 seconds remain before the hard
-campaign cutoff. The overnight cutoff is 07:00 MST on 2026-08-28. A workload
-may finish before its envelope; do not pad it. Startup, evaluator wall time,
-TTFT, prefill, and decode remain separate metrics.
+Do not start a pair unless at least 4,930 seconds remain before the hard
+campaign cutoff. The exact admission arithmetic is `2 * 1,800` seconds of
+causal measurement + `2 * 120` seconds of owned cleanup + `2 * 30` seconds to
+reach the bound start markers + `120` seconds for the inter-cell gap + `10`
+seconds for final-cell finalization + `900` seconds of audit reserve = `4,930`
+seconds. The first cell's at-most-10-second finalization is inside the
+120-second inter-cell allowance, which begins at its `server_stopped` marker.
+The overnight cutoff is 07:00 MST on 2026-08-28. A workload may finish before
+its envelope; do not pad it. Startup, evaluator wall time, TTFT, prefill, and
+decode remain separate metrics.
 
 ## Exact four-profile queue
 
@@ -148,16 +161,31 @@ python3 sparkbench.py autoresearch-run results/autoresearch/FROZEN_CAMPAIGN_DIR
 python3 sparkbench.py autoresearch-summarize results/autoresearch/FROZEN_CAMPAIGN_DIR
 ```
 
+The checkpoint proof implementation is present, but the
+`autoresearch-checkpoint` parser/dispatch and the `run_campaign` admission gate
+are not wired in this revision. The command and `checkpoint_required` status
+documented below are the target integration, not currently callable behavior.
+Until that wiring lands and a campaign is frozen against the resulting harness
+hash, stop manually after each pair; do not interpret the controller's return
+alone as proof that evidence was committed and reached the live upstream.
+
 One `autoresearch-run` invocation crosses at most one complete pair boundary:
 first calibration, then one screen or confirmation pair. This deliberate stop
 lets the operator export, verify, commit, and push the scalar checkpoint before
 explicitly invoking the same command again. The controller counterbalances
-cell order, starts each frozen cell in a new process group, sends `SIGINT` at
-the 1,800-second causal boundary, allows 120 seconds for owned cleanup, and
-uses `SIGKILL` only as a last resort. The two causal envelopes sum to the frozen
-3,600-second pair budget; the 900-second audit reserve remains outside it. A
-timeout, interruption, or inter-cell gap over 120 seconds invalidates the pair;
-never resume that cell.
+cell order and starts each frozen cell in a new process group. `run_start`
+binds the plan fingerprint and one-use nonce. The durable
+`measurement_started` monotonic marker opens the 1,800-second causal clock;
+`measurement_complete` closes it and opens the separate 120-second owned
+cleanup phase; `server_stopped` closes cleanup and opens a 10-second
+finalization phase; and `run_complete` closes that phase. Only a cell whose
+remaining raw audit also passes is scoreable. At an expired phase the
+supervisor interrupts the exact owned group with `SIGINT` and uses `SIGKILL`
+only as a bounded last resort. A search-pair score records its audit reserve
+from the later cell's durable `run_complete` wall timestamp, not from a later
+controller replay or scoring clock. A timeout, incomplete lifecycle, or
+inter-cell gap over 120 seconds invalidates the pair; never resume or rerun
+that frozen cell.
 
 ## Evaluator hierarchy
 
@@ -252,18 +280,31 @@ cleanup, audit, validation, or measurement failures terminate the campaign.
 `blocked_environment` is pre-journal admission state, not a measured result.
 
 If interrupted before a cell starts, replay may continue. If interrupted while
-a cell owns a server, recover only that exact lifecycle and invalidate the
-pair. If the inter-cell gap exceeds 120 seconds, restart the entire pair with
-new lifetimes. If both cells completed but no decision was written, audit and
-score idempotently. Never combine resumed or pre-interruption measurements for
-promotion.
+a cell owns a server, recover only that exact lifecycle. A frozen cell is
+one-use: if it started but its exact artifacts do not reach bound
+`measurement_started`, `measurement_complete`, `server_stopped`, and
+`run_complete` terminal state, the cell and pair are invalid and the campaign
+terminates; neither arm is launched again. An inter-cell gap over 120 seconds
+likewise invalidates the pair rather than authorizing a replacement lifetime.
+
+A raw-complete cell is different from an incomplete started cell. Its existing
+artifacts may be reprojected and reconciled into a missing controller
+completion or score only when the frozen fingerprint, plan integrity, nonce,
+terminal markers, validations, telemetry, and pair order all replay exactly.
+Reconciliation reuses those durable artifacts and performs no inference. If a
+raw-complete pair lacks a decision, recompute the observation from both raw
+cells and score or decide idempotently; never combine a partial cell with a new
+lifetime or relabel pre-interruption measurements.
 
 ## Checkpoint, commit, and push policy
 
 Push the frozen clean protocol before any campaign preflight. Within a pair,
-append a private local checkpoint after each terminal cell and verify owned
-cleanup immediately, but do not edit, commit, pull, or push between the two
-cells; that would risk plan drift and consume the 120-second inter-cell bound.
+fsync each cell's private lifecycle markers and verify exact owned cleanup, but
+do not run any Git operation, evidence export, live-remote check, or other
+network operation between the two cells. In particular, never run the
+forthcoming `autoresearch-checkpoint` command after only one arm: its evidence
+and live-upstream proofs belong strictly after a complete pair, outside the
+120-second inter-cell bound.
 
 After every complete audited pair—calibration, screen, or confirmation—export
 the deterministic scalar projection, review only the new allowlisted files,
@@ -274,16 +315,45 @@ safety event or the final cutoff. A failed push stops further pairs until it is
 resolved; local raw state alone is not a substitute for the requested remote
 checkpoint.
 
+The target explicit workflow, pending the CLI integration noted above, is:
+
+```bash
+python3 sparkbench.py export-evidence \
+  --results results --output evidence --replace
+python3 sparkbench.py verify-evidence evidence
+git add evidence
+python3 sparkbench.py verify-evidence evidence --staged
+git commit -m "Record autoresearch pair evidence"
+git push
+python3 sparkbench.py autoresearch-checkpoint \
+  results/autoresearch/FROZEN_CAMPAIGN_DIR
+python3 sparkbench.py autoresearch-run \
+  results/autoresearch/FROZEN_CAMPAIGN_DIR
+```
+
+The explicit acknowledgement is a private, scalar-only, mode-0600 record under
+ignored `logs/autoresearch-checkpoints/`, keyed by the frozen campaign
+integrity. It binds the latest completed pair, the controller-journal prefix,
+the verified working and Git-index evidence, clean `HEAD`, and the identical
+live upstream. Keeping it out of both `results/` and `evidence/` prevents the
+acknowledgement from becoming an input to the corpus whose checksum it proves.
+It is never a substitute for the tracked scalar evidence or the pushed commit.
+
 Never stage `results/`, raw journals, server logs, telemetry streams, prompts,
 completions, reasoning, tool payloads, request identifiers, local paths, or
 commands. Frequent pushes do not relax the scalar-only publication contract,
-and Git work never enters a measured 30-minute cell or 60-minute pair.
+and Git work never enters a causal measurement or an admitted pair lifecycle.
 
-The controller enforces that boundary by returning after at most one pair. A
-status of `active` means the just-finished pair is locally replayable and the
-same frozen campaign directory may be passed to `autoresearch-run` after the
-checkpoint is pushed. `blocked_environment` starts no cell and writes no
-campaign transition; `terminated` and `complete` must not be resumed.
+The current controller enforces only the first half of that boundary by
+returning after at most one pair. Once the pending admission gate is wired, a
+missing, newer, or changed acknowledgement will return
+`checkpoint_required` before another pair starts. That status is a resumable,
+nonterminal pause: it starts no cell and must not append a failure transition;
+after the exact checkpoint is acknowledged, the same frozen campaign may
+resume. Until then, `active` means only that the just-finished pair is locally
+replayable, not that its remote checkpoint has been proven.
+`blocked_environment` starts no cell and writes no campaign transition;
+`terminated` and `complete` must not be resumed.
 
 ## Evidence and interpretation
 

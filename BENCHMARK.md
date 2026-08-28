@@ -481,10 +481,19 @@ needle, and a warmed five-repetition D256/C1 decode cell. Every measured
 request is C1 at temperature zero. The profile queue is fixed; it does not
 authorize composing candidate axes or editing a live profile.
 
-One fresh server lifetime has an inclusive 30-minute envelope. A frozen
-two-cell pair has a 60-minute envelope, followed by separately attributed
-cleanup and audit reserves. After the current host safety stop is cleared by
-an operator reset and clean preflight, validate and freeze the exact campaign:
+One fresh server lifetime has an inclusive 1,800-second causal measurement
+envelope, opened by its durable `measurement_started` marker and closed by
+`measurement_complete`. Each cell gets 30 seconds to reach that start marker,
+then 120 seconds of separately attributed owned cleanup through
+`server_stopped`; `run_complete` must follow the stop within 10 seconds before
+the cell is scoreable. A pair is admitted only with at least 4,930 seconds
+remaining: `2 * 1,800` measurement + `2 * 120` cleanup + `2 * 30` start-marker
+allowance + `120` inter-cell gap + `10` final-cell finalization + `900` audit
+reserve. The first finalization fits inside the inter-cell allowance.
+Search-pair scores derive the durable audit reserve from the later cell's
+`run_complete` wall timestamp, not a later replay clock. After the current host
+safety stop is cleared by an operator reset and clean preflight, validate and
+freeze the exact campaign:
 
 ```bash
 python3 sparkbench.py autoresearch-plan \
@@ -501,15 +510,47 @@ python3 sparkbench.py autoresearch-summarize results/autoresearch/FROZEN_CAMPAIG
 
 Substitute the exact directory printed by the freeze command. Each run
 invocation executes at most one calibration, screen, or confirmation pair and
-then returns, enforcing a Git checkpoint boundary before another pair. Do not
-resume a timed-out cell or cross the 120-second inter-cell gap. The four
-profiles also freeze a fail-closed 250 ms host watchdog: at least 14 GiB
+then returns. Frozen cells are one-use: an incomplete started cell or an
+inter-cell gap over 120 seconds invalidates the pair and terminates the
+campaign; neither arm is restarted. A raw-complete cell may instead be
+reprojected and reconciled without inference only when its fingerprint, plan
+integrity, nonce, lifecycle markers, validations, telemetry, and frozen order
+all replay exactly. The four profiles also freeze a fail-closed 250 ms host
+watchdog: at least 14 GiB
 available memory, at most 64 MiB starting swap, and at most 512 MiB additional
 swap. It interrupts only the exact owned SGLang container; safety profiles
 reject `--keep-server`. After every audited pair, and after any terminal safety
 stop, export only allowlisted scalar evidence, verify the staged projection,
 commit, and push before explicitly resuming. Raw prompts, completions,
 reasoning, tool payloads, logs, identifiers, and commands remain ignored.
+
+The checkpoint proof core is landed, but this revision does not yet wire the
+`autoresearch-checkpoint` CLI parser/dispatch or the `run_campaign` gate. The
+following is the target workflow, not a currently callable command sequence:
+
+```bash
+python3 sparkbench.py export-evidence \
+  --results results --output evidence --replace
+python3 sparkbench.py verify-evidence evidence
+git add evidence
+python3 sparkbench.py verify-evidence evidence --staged
+git commit -m "Record autoresearch pair evidence"
+git push
+python3 sparkbench.py autoresearch-checkpoint \
+  results/autoresearch/FROZEN_CAMPAIGN_DIR
+python3 sparkbench.py autoresearch-run \
+  results/autoresearch/FROZEN_CAMPAIGN_DIR
+```
+
+The target command writes a private mode-0600 acknowledgement under ignored
+`logs/autoresearch-checkpoints/`, outside both raw `results/` and tracked
+`evidence/`, so it cannot become an input to the evidence checksum it binds.
+It proves the completed pair, journal prefix, evidence tree, clean commit, and
+identical live upstream. No Git, evidence export, remote proof, or other
+network operation is permitted between pair cells. Once the gate is wired,
+`checkpoint_required` will be a resumable nonterminal pause that starts no
+cell and appends no failure transition. Until then, returning after a pair is
+only a manual stop point, not proof that the remote checkpoint exists.
 
 No campaign-admitted Pi harness is available. The nine cases are deterministic
 coding/cowork proxies; they do not measure Pi, repository editing, document
