@@ -175,6 +175,14 @@ python3 sparkbench.py autoresearch-run results/autoresearch/FROZEN_CAMPAIGN_DIR
 python3 sparkbench.py autoresearch-summarize results/autoresearch/FROZEN_CAMPAIGN_DIR
 ```
 
+Do not invoke `autoresearch-summarize` after a fresh pre-journal
+`blocked_environment` return. The current summarizer derives controller state
+only; with no journal it would rewrite the preserved blocker summary as
+`planned` and drop its blocker codes. The frozen campaign remains safely
+resumable without that command. Use the controller's run output and existing
+summary for the preflight outcome; use the summarizer only after a controller
+journal exists.
+
 The controller and `autoresearch-checkpoint` command enforce a remote evidence
 boundary between settled pairs. A run returns after each calibration, screen,
 or confirmation pair. The next pair is not admitted until the latest completed
