@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -27,6 +28,7 @@ from bench.autoresearch_campaign import (
     _CellLifecycleProgress,
     _cell_specs,
     _normalized_flags,
+    campaign_evidence_snapshot,
     freeze_campaign,
     campaign_admission,
     load_frozen_campaign,
@@ -352,6 +354,40 @@ def _admission_records(campaign_dir: Path) -> tuple[dict[str, object], ...]:
     return tuple(json.loads(line) for line in path.read_text().splitlines())
 
 
+def _campaign_tree_snapshot(root: Path) -> tuple[tuple[object, ...], ...]:
+    """Capture topology, stable metadata, and content without recording atime."""
+
+    rows: list[tuple[object, ...]] = []
+    for path in (root, *sorted(root.rglob("*"))):
+        metadata = os.lstat(path)
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        if stat.S_ISREG(metadata.st_mode):
+            kind = "file"
+            content_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+        elif stat.S_ISDIR(metadata.st_mode):
+            kind = "directory"
+            content_sha256 = ""
+        elif stat.S_ISLNK(metadata.st_mode):
+            kind = "symlink"
+            content_sha256 = os.readlink(path)
+        else:
+            kind = "other"
+            content_sha256 = ""
+        rows.append(
+            (
+                relative,
+                kind,
+                stat.S_IMODE(metadata.st_mode),
+                metadata.st_ino,
+                metadata.st_nlink,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                content_sha256,
+            )
+        )
+    return tuple(rows)
+
+
 def _synthetic_projection(cell: object, *, improvement: float) -> CellProjection:
     profile_id = str(getattr(cell, "profile_id"))
     fingerprint = str(getattr(cell, "plan_fingerprint"))
@@ -464,6 +500,90 @@ def _worker_result(
         cleanup=cleanup,
         timeout_phase=timeout_phase,  # type: ignore[arg-type]
     )
+
+
+class AutoresearchCampaignEvidenceSnapshotTests(unittest.TestCase):
+    def _cutoff_campaign(self, root: Path) -> tuple[Path, object]:
+        campaign_dir = _freeze_campaign_fixture(root)
+        frozen = load_frozen_campaign(campaign_dir)
+        summary = run_campaign(
+            campaign_dir,
+            workspace=ROOT,
+            now=lambda: frozen.cutoff + timedelta(seconds=1),
+            meminfo_reader=lambda: _admission_meminfo(),
+            harness_identity_reader=lambda _root: (
+                frozen.harness_tree_sha256,
+                frozen.harness_file_count,
+            ),
+            cell_runner=lambda _cell: self.fail("cutoff campaign launched a cell"),
+        )
+        self.assertEqual("expired", summary["status"])
+        return campaign_dir, load_frozen_campaign(campaign_dir)
+
+    def test_schema_three_snapshot_is_deterministic_and_never_writes(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir, frozen = self._cutoff_campaign(Path(directory))
+            before = _campaign_tree_snapshot(campaign_dir)
+            with patch(
+                "bench.autoresearch_campaign.write_json",
+                side_effect=AssertionError("evidence snapshot must be read-only"),
+            ):
+                first = campaign_evidence_snapshot(campaign_dir)
+                middle = _campaign_tree_snapshot(campaign_dir)
+                second = campaign_evidence_snapshot(campaign_dir)
+            after = _campaign_tree_snapshot(campaign_dir)
+
+        self.assertEqual(first, second)
+        self.assertEqual(before, middle)
+        self.assertEqual(before, after)
+        self.assertEqual(1, first["snapshot_schema_version"])
+        self.assertEqual(3, first["frozen_campaign_schema_version"])
+        self.assertTrue(first["admission_journal_required"])
+        self.assertEqual("required", first["provenance_mode"])
+        self.assertEqual(frozen.campaign_id, first["campaign_id"])
+        self.assertEqual(
+            frozen.integrity_hash, first["campaign_integrity_sha256"]
+        )
+        self.assertEqual(frozen.preview_digest, first["preview_sha256"])
+        self.assertEqual(frozen.policy_digest, first["policy_sha256"])
+        self.assertEqual(frozen.harness_tree_sha256, first["harness_tree_sha256"])
+        self.assertEqual(frozen.harness_file_count, first["harness_file_count"])
+        self.assertEqual(14, first["planned_cell_count"])
+        self.assertEqual(
+            [proposal.candidate_id for proposal in frozen.proposals],
+            [proposal["candidate_id"] for proposal in first["proposals"]],
+        )
+        self.assertEqual({}, first["controller_event_counts"])
+        self.assertEqual("expired", first["summary"]["status"])
+        self.assertEqual(1, first["summary"]["admission_count"])
+        self.assertEqual(1, len(first["admissions"]))
+        admission = first["admissions"][0]
+        self.assertEqual("calibration", admission["target_kind"])
+        self.assertEqual("cutoff", admission["outcome"])
+        self.assertEqual(["insufficient_time_for_pair"], admission["blockers"])
+        self.assertEqual(
+            admission["record_sha256"],
+            first["summary"]["last_admission_sha256"],
+        )
+
+    def test_snapshot_fails_closed_while_controller_lock_is_exclusive(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir, _frozen = self._cutoff_campaign(Path(directory))
+            lock_path = campaign_dir / ".autoresearch.lock"
+            descriptor = os.open(
+                lock_path,
+                os.O_RDWR | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaisesRegex(
+                    CampaignPlanningError,
+                    "another autoresearch controller holds the campaign lock",
+                ):
+                    campaign_evidence_snapshot(campaign_dir)
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
 
 
 class AutoresearchFrozenCellWorkerTests(unittest.TestCase):
@@ -1282,6 +1402,7 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
             lock_path = campaign_dir / ".autoresearch.lock"
             protected = Path(directory) / "protected"
             protected.write_text("do-not-touch")
+            lock_path.unlink()
             lock_path.symlink_to(protected)
             with self.assertRaisesRegex(CampaignPlanningError, "lock path is unsafe"):
                 run_campaign(

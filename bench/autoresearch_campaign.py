@@ -860,6 +860,11 @@ def freeze_campaign(
     stamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
     campaign_dir = results_root / f"{stamp}-{definition.id}-{preview.digest[:8]}"
     campaign_dir.mkdir(parents=True, exist_ok=False)
+    # Freeze the lock topology with the campaign itself.  Read-only consumers
+    # can then take a shared lock without creating or chmodding anything in the
+    # source tree they are inspecting.
+    with _campaign_lock(campaign_dir / ".autoresearch.lock"):
+        pass
     frozen_cells: list[dict[str, Any]] = []
     for ordinal, cell in enumerate(_cell_specs(preview), start=1):
         cell_root = campaign_dir / "cells" / f"{ordinal:02d}-{cell['cell_id']}"
@@ -4486,6 +4491,179 @@ def _campaign_lock(path: Path) -> Iterator[None]:
                 raise CampaignPlanningError("campaign lock path changed")
     finally:
         os.close(descriptor)
+
+
+@contextmanager
+def _read_only_campaign_lock(path: Path) -> Iterator[None]:
+    """Share an existing frozen campaign lock without mutating its topology."""
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise CampaignPlanningError("campaign read lock requires no-follow support")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | nofollow)
+    except OSError as error:
+        raise CampaignPlanningError(
+            "campaign read lock is absent or unsafe"
+        ) from error
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size != 0
+        ):
+            raise CampaignPlanningError("campaign read lock topology changed")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise CampaignPlanningError(
+                "another autoresearch controller holds the campaign lock"
+            ) from error
+        try:
+            path_metadata = os.lstat(path)
+        except OSError as error:
+            raise CampaignPlanningError("campaign read lock path changed") from error
+        locked_identity = _metadata_identity(metadata)
+        if _metadata_identity(path_metadata) != locked_identity:
+            raise CampaignPlanningError("campaign read lock path changed")
+        try:
+            yield
+        finally:
+            try:
+                path_metadata = os.lstat(path)
+            except OSError as error:
+                raise CampaignPlanningError(
+                    "campaign read lock path changed"
+                ) from error
+            if _metadata_identity(path_metadata) != locked_identity:
+                raise CampaignPlanningError("campaign read lock path changed")
+    finally:
+        os.close(descriptor)
+
+
+def _controller_event_counts(
+    events: tuple[dict[str, Any], ...],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for event in events:
+        name = event.get("event")
+        if not isinstance(name, str) or not name:
+            raise CampaignPlanningError("controller journal event name is malformed")
+        counts[name] = counts.get(name, 0) + 1
+    return {name: counts[name] for name in sorted(counts)}
+
+
+def _campaign_snapshot_payload(
+    campaign: FrozenCampaign,
+    *,
+    summary: Mapping[str, Any],
+    admissions: tuple[dict[str, Any], ...],
+    events: tuple[dict[str, Any], ...],
+    provenance_mode: str,
+) -> dict[str, Any]:
+    return {
+        "snapshot_schema_version": 1,
+        "frozen_campaign_schema_version": (
+            FROZEN_CAMPAIGN_SCHEMA_VERSION
+            if campaign.admission_journal_required
+            else 2
+        ),
+        "campaign_id": campaign.campaign_id,
+        "created_at": campaign.created_at,
+        "cutoff_at": campaign.cutoff.isoformat(),
+        "baseline_id": campaign.baseline_id,
+        "suite_id": EXPECTED_SUITE_ID,
+        "planned_cell_count": len(campaign.cells),
+        "campaign_integrity_sha256": campaign.integrity_hash,
+        "preview_sha256": campaign.preview_digest,
+        "policy_sha256": campaign.policy_digest,
+        "harness_tree_sha256": campaign.harness_tree_sha256,
+        "harness_file_count": campaign.harness_file_count,
+        "admission_journal_required": campaign.admission_journal_required,
+        "provenance_mode": provenance_mode,
+        "proposals": [
+            {
+                "candidate_id": proposal.candidate_id,
+                "axis": proposal.axis,
+                "delta_sha256": proposal.delta.digest,
+            }
+            for proposal in campaign.proposals
+        ],
+        "summary": json.loads(canonical_json(summary)),
+        "admissions": json.loads(canonical_json(admissions)),
+        "controller_event_counts": _controller_event_counts(events),
+    }
+
+
+def campaign_evidence_snapshot(campaign_dir: Path) -> dict[str, Any]:
+    """Return a validated, scalar-only campaign snapshot without source writes."""
+
+    initial = load_frozen_campaign(campaign_dir)
+    lock_path = initial.campaign_dir / ".autoresearch.lock"
+    if _is_legacy_blocked_campaign(initial):
+        with _legacy_campaign_lock(lock_path):
+            campaign = load_frozen_campaign(initial.campaign_dir)
+            if not _is_legacy_blocked_campaign(campaign):
+                raise CampaignPlanningError(
+                    "preserved legacy campaign identity changed under lock"
+                )
+            summary = _read_legacy_blocked_summary(campaign)
+            return _campaign_snapshot_payload(
+                campaign,
+                summary=summary,
+                admissions=(),
+                events=(),
+                provenance_mode="sealed_legacy_unjournaled",
+            )
+
+    with _read_only_campaign_lock(lock_path):
+        campaign = load_frozen_campaign(initial.campaign_dir)
+        if (
+            _is_legacy_blocked_campaign(campaign)
+            or campaign.integrity_hash != initial.integrity_hash
+            or campaign.created_at != initial.created_at
+        ):
+            raise CampaignPlanningError("campaign identity changed under read lock")
+        events = tuple(
+            _controller_events(Journal(campaign.campaign_dir / "events.jsonl"))
+        )
+        summary = _campaign_summary_payload(campaign)
+        admissions = _read_campaign_admissions(campaign, events=events)
+        controller_hash = controller_prefix_sha256(events)
+        if (
+            summary.get("controller_event_count") != len(events)
+            or summary.get("controller_prefix_sha256") != controller_hash
+            or summary.get("admission_count") != len(admissions)
+            or summary.get("last_admission")
+            != (admissions[-1] if admissions else None)
+        ):
+            raise CampaignPlanningError(
+                "campaign state changed while evidence was snapshotted"
+            )
+        if tuple(
+            _controller_events(Journal(campaign.campaign_dir / "events.jsonl"))
+        ) != events:
+            raise CampaignPlanningError(
+                "controller journal changed while evidence was snapshotted"
+            )
+        final = load_frozen_campaign(initial.campaign_dir)
+        if (
+            final.integrity_hash != campaign.integrity_hash
+            or final.created_at != campaign.created_at
+        ):
+            raise CampaignPlanningError("campaign identity changed under read lock")
+        return _campaign_snapshot_payload(
+            campaign,
+            summary=summary,
+            admissions=admissions,
+            events=events,
+            provenance_mode=(
+                "required" if campaign.admission_journal_required else "optional"
+            ),
+        )
 
 
 def _require_checkpoint_boundary(campaign: FrozenCampaign) -> None:

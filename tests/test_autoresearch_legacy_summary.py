@@ -14,7 +14,11 @@ from unittest.mock import patch
 import bench.autoresearch_campaign as campaign_module
 from bench.autoresearch_campaign import CampaignPlanningError
 from bench.journal import write_json
-from tests.test_autoresearch_campaign import ROOT, _freeze_campaign_fixture
+from tests.test_autoresearch_campaign import (
+    ROOT,
+    _downgrade_pre_admission_campaign_fixture,
+    _freeze_campaign_fixture,
+)
 
 
 def _freeze_synthetic_campaign(root: Path) -> Path:
@@ -80,17 +84,20 @@ def _create_sealed_fixture(
     root: Path,
 ) -> tuple[Path, campaign_module._LegacyBlockedCampaignSeal, dict[str, object]]:
     campaign_dir = _freeze_synthetic_campaign(root)
+    _downgrade_pre_admission_campaign_fixture(campaign_dir)
     campaign = campaign_module.load_frozen_campaign(campaign_dir)
     for cell in campaign.cells:
         write_json(cell.run_dir / "inventory.json", {"synthetic": True})
     summary = _blocked_summary(campaign)
     write_json(campaign_dir / "summary.json", summary)
-    descriptor = os.open(
-        campaign_dir / ".autoresearch.lock",
-        os.O_CREAT | os.O_EXCL | os.O_RDWR,
-        0o600,
-    )
-    os.close(descriptor)
+    lock_metadata = os.lstat(campaign_dir / ".autoresearch.lock")
+    if (
+        not stat.S_ISREG(lock_metadata.st_mode)
+        or lock_metadata.st_nlink != 1
+        or stat.S_IMODE(lock_metadata.st_mode) != 0o600
+        or lock_metadata.st_size != 0
+    ):
+        raise AssertionError("frozen campaign lock does not have sealed topology")
     campaign_bytes = (campaign_dir / "campaign.json").read_bytes()
     summary_bytes = (campaign_dir / "summary.json").read_bytes()
     seal = campaign_module._LegacyBlockedCampaignSeal(
@@ -185,6 +192,40 @@ class ImmutableLegacySummaryTests(unittest.TestCase):
                     campaign_module.summarize_campaign(copied), expected
                 )
             self.assertEqual(_tree_snapshot(copied), before)
+
+    def test_evidence_snapshot_reads_exact_sealed_summary_without_mutation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir, seal, expected = _create_sealed_fixture(Path(directory))
+            before = _tree_snapshot(campaign_dir)
+            with (
+                patch.object(
+                    campaign_module, "_LEGACY_BLOCKED_CAMPAIGN_SEAL", seal
+                ),
+                patch.object(
+                    campaign_module,
+                    "write_json",
+                    side_effect=AssertionError("legacy evidence must not be written"),
+                ),
+            ):
+                first = campaign_module.campaign_evidence_snapshot(campaign_dir)
+                second = campaign_module.campaign_evidence_snapshot(campaign_dir)
+            after = _tree_snapshot(campaign_dir)
+
+        self.assertEqual(first, second)
+        self.assertEqual(before, after)
+        self.assertEqual(expected, first["summary"])
+        self.assertEqual(1, first["snapshot_schema_version"])
+        self.assertEqual(2, first["frozen_campaign_schema_version"])
+        self.assertFalse(first["admission_journal_required"])
+        self.assertEqual("sealed_legacy_unjournaled", first["provenance_mode"])
+        self.assertEqual(seal.campaign_id, first["campaign_id"])
+        self.assertEqual(seal.integrity_sha256, first["campaign_integrity_sha256"])
+        self.assertEqual(seal.preview_sha256, first["preview_sha256"])
+        self.assertEqual(seal.policy_sha256, first["policy_sha256"])
+        self.assertEqual([], first["admissions"])
+        self.assertEqual({}, first["controller_event_counts"])
 
     def test_run_refuses_sealed_campaign_before_execution_or_mutation(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
