@@ -2755,6 +2755,20 @@ def _calibration_path(campaign: FrozenCampaign) -> Path:
     return campaign.campaign_dir / "calibration.json"
 
 
+def _calibration_record_payload(
+    observation: PairObservation,
+    *,
+    passed: bool,
+    reasons: tuple[str, ...],
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "observation": observation.to_mapping(),
+        "passed": passed,
+        "reasons": list(reasons),
+    }
+
+
 def _write_calibration(
     campaign: FrozenCampaign,
     observation: PairObservation,
@@ -2762,17 +2776,74 @@ def _write_calibration(
     passed: bool,
     reasons: tuple[str, ...],
 ) -> None:
-    record = {
-        "schema_version": 1,
-        "observation": observation.to_mapping(),
-        "passed": passed,
-        "reasons": list(reasons),
-    }
+    record = _calibration_record_payload(
+        observation, passed=passed, reasons=reasons
+    )
     record["integrity_hash"] = content_hash(record, 64)
     write_json(_calibration_path(campaign), record)
 
 
-def _load_calibration(campaign: FrozenCampaign) -> PairObservation | None:
+def _calibration_raw_topology(
+    campaign: FrozenCampaign,
+) -> tuple[dict[str, FrozenCell], dict[str, CellProjection]]:
+    """Project the valid one-use calibration prefix without launching work."""
+
+    cells = campaign.cells_for(candidate_id="control", stage="calibration")
+    journal_sizes = {
+        arm: _safe_cell_journal_size(cells[arm].run_dir / "events.jsonl")
+        for arm in ("control_a", "control_b")
+    }
+    if journal_sizes["control_b"] and not journal_sizes["control_a"]:
+        raise CampaignPlanningError(
+            "calibration control B exists without its control A predecessor"
+        )
+    projections: dict[str, CellProjection] = {}
+    for arm in ("control_a", "control_b"):
+        if journal_sizes[arm]:
+            projections[arm] = _project_frozen_cell(cells[arm])
+    return cells, projections
+
+
+def _recomputed_calibration(
+    campaign: FrozenCampaign,
+    cells: Mapping[str, FrozenCell],
+    projections: Mapping[str, CellProjection],
+) -> tuple[PairObservation, bool, tuple[str, ...]]:
+    if set(cells) != {"control_a", "control_b"} or set(projections) != {
+        "control_a",
+        "control_b",
+    }:
+        raise CampaignPlanningError(
+            "calibration requires both exact frozen raw controls"
+        )
+    gap_s = (
+        _run_started_at(cells["control_b"])
+        - _server_stopped_at(cells["control_a"])
+    ).total_seconds()
+    if gap_s < 0 or gap_s > campaign.policy.cleanup_timeout_s:
+        raise CellProjectionError(
+            "calibration inter-cell gap exceeded the frozen cleanup bound"
+        )
+    score_projections = {
+        "champion": projections["control_a"],
+        "candidate": projections["control_b"],
+    }
+    observation = observation_from_cells(
+        campaign.policy,
+        pair_index=0,
+        champion=score_projections["champion"],
+        candidate=score_projections["candidate"],
+        audit_reserve_remaining_s=_durable_pair_audit_reserve_s(
+            campaign, score_projections
+        ),
+    )
+    decision = evaluate_calibration(campaign.policy, observation)
+    return observation, decision.passed, decision.reasons
+
+
+def _verify_calibration_record(
+    campaign: FrozenCampaign,
+) -> tuple[PairObservation, bool] | None:
     path = _calibration_path(campaign)
     if not path.exists():
         return None
@@ -2783,15 +2854,47 @@ def _load_calibration(campaign: FrozenCampaign) -> PairObservation | None:
     integrity = record.pop("integrity_hash")
     if not isinstance(integrity, str) or content_hash(record, 64) != integrity:
         raise CampaignPlanningError("calibration record integrity hash does not match")
-    observation = PairObservation.from_mapping(record["observation"])
-    decision = evaluate_calibration(campaign.policy, observation)
-    if record["passed"] is not decision.passed or record["reasons"] != list(
-        decision.reasons
-    ):
-        raise CampaignPlanningError("calibration record decision does not replay")
-    if not decision.passed:
+    cells, projections = _calibration_raw_topology(campaign)
+    observation, passed, reasons = _recomputed_calibration(
+        campaign, cells, projections
+    )
+    expected = _calibration_record_payload(
+        observation, passed=passed, reasons=reasons
+    )
+    if canonical_json(record) != canonical_json(expected):
+        raise CampaignPlanningError(
+            "calibration record does not match its exact frozen raw controls"
+        )
+    return observation, passed
+
+
+def _load_calibration(campaign: FrozenCampaign) -> PairObservation | None:
+    verified = _verify_calibration_record(campaign)
+    if verified is None:
+        return None
+    observation, passed = verified
+    if not passed:
         raise CellProjectionError("control-to-control calibration did not pass")
     return observation
+
+
+def _reconcile_raw_calibration(campaign: FrozenCampaign) -> bool:
+    """Write a missing record from two raw-complete controls, without inference."""
+
+    if _load_calibration(campaign) is not None:
+        return False
+    cells, projections = _calibration_raw_topology(campaign)
+    if set(projections) != {"control_a", "control_b"}:
+        return False
+    observation, passed, reasons = _recomputed_calibration(
+        campaign, cells, projections
+    )
+    _write_calibration(
+        campaign, observation, passed=passed, reasons=reasons
+    )
+    if not passed:
+        raise CellProjectionError("control-to-control calibration did not pass")
+    return True
 
 
 def _remaining_s(campaign: FrozenCampaign, now: Callable[[], datetime]) -> float:
@@ -2811,10 +2914,28 @@ def _run_calibration(
     existing = _load_calibration(campaign)
     if existing is not None:
         return existing
+    cells, projections = _calibration_raw_topology(campaign)
+    if set(projections) == {"control_a", "control_b"}:
+        observation, passed, reasons = _recomputed_calibration(
+            campaign, cells, projections
+        )
+        _write_calibration(
+            campaign, observation, passed=passed, reasons=reasons
+        )
+        if not passed:
+            raise CellProjectionError("control-to-control calibration did not pass")
+        return observation
     if _remaining_s(campaign, now) < PAIR_ADMISSION_REMAINING_S:
         raise CellProjectionError("insufficient time remains for calibration")
-    cells = campaign.cells_for(candidate_id="control", stage="calibration")
-    control_a = cell_runner(cells["control_a"])
+    if "control_a" not in projections:
+        launched_a = cell_runner(cells["control_a"])
+        if (
+            launched_a.profile_id != cells["control_a"].profile_id
+            or launched_a.plan_fingerprint != cells["control_a"].plan_fingerprint
+        ):
+            raise CellProjectionError("calibration control A does not match schedule")
+        projections["control_a"] = _project_frozen_cell(cells["control_a"])
+    control_a = projections["control_a"]
     if (
         control_a.measurement_elapsed_s > campaign.policy.cell_timeout_s
         or control_a.cleanup_elapsed_s > campaign.policy.cleanup_timeout_s
@@ -2822,33 +2943,29 @@ def _run_calibration(
         raise CellProjectionError(
             "first calibration cell exceeded its measurement or cleanup budget"
         )
-    stopped_path = cells["control_a"].run_dir / "events.jsonl"
-    control_a_stopped = (
-        _server_stopped_at(cells["control_a"])
-        if stopped_path.exists() and stopped_path.stat().st_size
-        else now()
-    )
+    control_a_stopped = _server_stopped_at(cells["control_a"])
     calibration_gap_s = (now() - control_a_stopped).total_seconds()
     if calibration_gap_s < 0 or calibration_gap_s > campaign.policy.cleanup_timeout_s:
         raise CellProjectionError(
             "calibration inter-cell gap exceeded the frozen cleanup bound"
         )
-    control_b = cell_runner(cells["control_b"])
-    observation = observation_from_cells(
-        campaign.policy,
-        pair_index=0,
-        champion=control_a,
-        candidate=control_b,
-        audit_reserve_remaining_s=_remaining_s(campaign, now),
+    launched_b = cell_runner(cells["control_b"])
+    if (
+        launched_b.profile_id != cells["control_b"].profile_id
+        or launched_b.plan_fingerprint != cells["control_b"].plan_fingerprint
+    ):
+        raise CellProjectionError("calibration control B does not match schedule")
+    projections["control_b"] = _project_frozen_cell(cells["control_b"])
+    observation, passed, reasons = _recomputed_calibration(
+        campaign, cells, projections
     )
-    decision = evaluate_calibration(campaign.policy, observation)
     _write_calibration(
         campaign,
         observation,
-        passed=decision.passed,
-        reasons=decision.reasons,
+        passed=passed,
+        reasons=reasons,
     )
-    if not decision.passed:
+    if not passed:
         raise CellProjectionError("control-to-control calibration did not pass")
     return observation
 
@@ -3133,7 +3250,7 @@ def summarize_campaign(campaign_dir: Path) -> dict[str, Any]:
     journal = Journal(campaign.campaign_dir / "events.jsonl")
     events = tuple(_controller_events(journal))
     state = _replay_frozen_campaign(campaign, events) if events else None
-    calibration_path = _calibration_path(campaign)
+    calibration = _verify_calibration_record(campaign)
     summary = {
         "schema_version": 1,
         "campaign_id": campaign.campaign_id,
@@ -3147,7 +3264,7 @@ def summarize_campaign(campaign_dir: Path) -> dict[str, Any]:
             else "active"
         ),
         "terminal_reason": state.terminal_reason if state else None,
-        "calibration_recorded": calibration_path.exists(),
+        "calibration_recorded": calibration is not None,
         "next_pair_index": state.next_pair_index if state else 0,
         "candidate_decisions": _candidate_decisions(events),
         "policy_digest": campaign.policy_digest,
@@ -3210,6 +3327,7 @@ def run_campaign(
             if existing_events
             else None
         )
+        calibration_reconciled = False
         try:
             _recover_interrupted_cells(campaign)
             _validate_search_artifact_admission(
@@ -3219,6 +3337,7 @@ def run_campaign(
                 campaign, existing_journal, existing_state
             )
             existing_events = _controller_events(existing_journal)
+            calibration_reconciled = _reconcile_raw_calibration(campaign)
         except CellProjectionError as error:
             if existing_state is not None and existing_state.phase == "terminal":
                 raise CampaignPlanningError(
@@ -3234,6 +3353,8 @@ def run_campaign(
             )
             return summarize_campaign(campaign.campaign_dir)
         if existing_state is not None and existing_state.phase == "terminal":
+            return summarize_campaign(campaign.campaign_dir)
+        if calibration_reconciled:
             return summarize_campaign(campaign.campaign_dir)
         if _search_reconciliation_needs_admission(campaign, existing_state):
             blockers = list(

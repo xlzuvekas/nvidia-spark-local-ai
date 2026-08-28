@@ -322,18 +322,48 @@ def _synthetic_projection_boundary(
 ) -> Iterator[None]:
     """Isolate controller-policy tests from the raw replay boundary."""
 
+    def calibration_raw_topology(
+        campaign: object,
+    ) -> tuple[dict[str, object], dict[str, CellProjection]]:
+        cells = getattr(campaign, "cells_for")(
+            candidate_id="control", stage="calibration"
+        )
+        campaign_dir = Path(getattr(campaign, "campaign_dir"))
+        if not (campaign_dir / "calibration.json").exists():
+            return cells, {}
+        return cells, {
+            arm: projector(cells[arm]) for arm in ("control_a", "control_b")
+        }
+
+    def durable_audit_reserve(
+        campaign: object, projections: dict[str, CellProjection]
+    ) -> float:
+        profile_ids = {projection.profile_id for projection in projections.values()}
+        if len(profile_ids) == 1:
+            policy = getattr(campaign, "policy")
+            return max(audit_reserve_s, float(getattr(policy, "audit_reserve_s")))
+        return audit_reserve_s
+
     with (
         patch(
             "bench.autoresearch_campaign._project_frozen_cell",
             side_effect=projector,
         ),
         patch(
+            "bench.autoresearch_campaign._calibration_raw_topology",
+            side_effect=calibration_raw_topology,
+        ),
+        patch(
             "bench.autoresearch_campaign._server_stopped_at",
             return_value=stopped_at,
         ),
         patch(
+            "bench.autoresearch_campaign._run_started_at",
+            return_value=stopped_at,
+        ),
+        patch(
             "bench.autoresearch_campaign._durable_pair_audit_reserve_s",
-            return_value=audit_reserve_s,
+            side_effect=durable_audit_reserve,
         ),
         patch(
             "bench.autoresearch_campaign._validate_completed_pair_gap",
