@@ -140,6 +140,61 @@ PAIR_ADMISSION_REMAINING_S = (
 MAX_PROGRESS_LINE_BYTES = 16 * 1024 * 1024
 MAX_PROGRESS_JOURNAL_BYTES = 64 * 1024 * 1024
 
+
+@dataclass(frozen=True, slots=True)
+class _LegacyBlockedCampaignSeal:
+    campaign_id: str
+    created_at: str
+    cutoff: str
+    integrity_sha256: str
+    preview_sha256: str
+    policy_sha256: str
+    harness_tree_sha256: str
+    harness_file_count: int
+    campaign_json_sha256: str
+    campaign_json_size: int
+    summary_json_sha256: str
+    summary_json_size: int
+    tree_sha256: str
+    tree_size: int
+
+
+_LEGACY_BLOCKED_CAMPAIGN_SEAL = _LegacyBlockedCampaignSeal(
+    campaign_id=EXPECTED_CAMPAIGN_ID,
+    created_at="2026-08-28T08:09:19.396+00:00",
+    cutoff=EXPECTED_CAMPAIGN_CUTOFF,
+    integrity_sha256=(
+        "ea576eaf6540bd842e956bbaec719227b60389df52505390ad0d26025bdf7d92"
+    ),
+    preview_sha256=(
+        "be2b70f0c0415d258e7d43979566e59606c55bc3adc87534d93945a067d8d1cb"
+    ),
+    policy_sha256=(
+        "ff3237c4106ebafbc50710e9a2222007611fc972ccc001b28a7100a6c01a50e7"
+    ),
+    harness_tree_sha256=(
+        "33170881721d0dce0f4466495110b336a7451fcd1635c5667f7fc5f722f7599f"
+    ),
+    harness_file_count=84,
+    campaign_json_sha256=(
+        "523112428589a338faab93bf2eaa94a474bc0722c9ff396ca0fff4f34269f421"
+    ),
+    campaign_json_size=14_874,
+    summary_json_sha256=(
+        "8c197a3f0dbda0bb06c3fca1e04940f54cb8f918754aa164acd8603f4afa847d"
+    ),
+    summary_json_size=471,
+    tree_sha256=(
+        "5b121756b6a95644cb99969f309adaf43ea9d9b5d153749d869cd8bac420e988"
+    ),
+    tree_size=156_253,
+)
+_LEGACY_BLOCKED_CAMPAIGN_BLOCKERS = (
+    "insufficient_time_for_pair",
+    "starting_swap_above_clean_limit",
+    "insufficient_preflight_memavailable",
+)
+
 _TOP_LEVEL_KEYS = frozenset({"schema_version", "campaign", "candidates"})
 _CAMPAIGN_KEYS = frozenset(
     {
@@ -3594,11 +3649,353 @@ def _campaign_summary_payload(campaign: FrozenCampaign) -> dict[str, Any]:
     }
 
 
-def summarize_campaign(campaign_dir: Path) -> dict[str, Any]:
-    campaign = load_frozen_campaign(campaign_dir)
+def _is_legacy_blocked_campaign(campaign: FrozenCampaign) -> bool:
+    seal = _LEGACY_BLOCKED_CAMPAIGN_SEAL
+    return (
+        campaign.campaign_id == seal.campaign_id
+        and campaign.created_at == seal.created_at
+        and campaign.cutoff.isoformat() == seal.cutoff
+        and campaign.integrity_hash == seal.integrity_sha256
+        and campaign.preview_digest == seal.preview_sha256
+        and campaign.policy_digest == seal.policy_sha256
+        and campaign.harness_tree_sha256 == seal.harness_tree_sha256
+        and campaign.harness_file_count == seal.harness_file_count
+    )
+
+
+def _legacy_blocked_summary_payload() -> dict[str, Any]:
+    seal = _LEGACY_BLOCKED_CAMPAIGN_SEAL
+    return {
+        "blockers": list(_LEGACY_BLOCKED_CAMPAIGN_BLOCKERS),
+        "calibration_recorded": False,
+        "campaign_id": seal.campaign_id,
+        "candidate_decisions": {},
+        "next_pair_index": 0,
+        "policy_digest": seal.policy_sha256,
+        "schema_version": 1,
+        "status": "blocked_environment",
+        "terminal_reason": None,
+    }
+
+
+def _read_sealed_regular_file(
+    path: Path,
+    *,
+    expected_size: int,
+    expected_sha256: str,
+    context: str,
+) -> bytes:
+    """Read one exact owned file without accepting links or replacement races."""
+
+    payload = _read_owned_regular_file(
+        path,
+        max_size=expected_size + 1,
+        context=context,
+    )
+    if (
+        len(payload) != expected_size
+        or hashlib.sha256(payload).hexdigest() != expected_sha256
+    ):
+        raise CampaignPlanningError(f"{context} content changed")
+    return payload
+
+
+def _metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _pread_bounded(descriptor: int, limit: int) -> bytes:
+    payload = bytearray()
+    while len(payload) < limit:
+        chunk = os.pread(descriptor, min(65_536, limit - len(payload)), len(payload))
+        if not chunk:
+            break
+        payload.extend(chunk)
+    return bytes(payload)
+
+
+def _read_owned_regular_file(
+    path: Path,
+    *,
+    max_size: int,
+    context: str,
+) -> bytes:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise CampaignPlanningError(f"{context} requires no-follow support")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | nofollow)
+    except OSError as error:
+        raise CampaignPlanningError(f"{context} is absent or unsafe") from error
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_uid != os.geteuid()
+            or before.st_size < 0
+            or before.st_size > max_size
+        ):
+            raise CampaignPlanningError(f"{context} topology changed")
+        payload = _pread_bounded(descriptor, before.st_size + 1)
+        after = os.fstat(descriptor)
+        if (
+            _metadata_identity(before) != _metadata_identity(after)
+            or len(payload) != before.st_size
+        ):
+            raise CampaignPlanningError(f"{context} content changed")
+        return payload
+    finally:
+        os.close(descriptor)
+
+
+def _legacy_expected_topology(
+    campaign: FrozenCampaign,
+) -> tuple[set[Path], set[Path]]:
+    directories = {Path(".")}
+    files = {
+        Path(".autoresearch.lock"),
+        Path("campaign.json"),
+        Path("summary.json"),
+    }
+    for cell in campaign.cells:
+        relative = cell.run_dir.relative_to(campaign.campaign_dir)
+        directories.add(relative)
+        directories.update(relative.parents)
+        files.add(relative / "inventory.json")
+        files.add(relative / "plan.json")
+    return directories, files
+
+
+def _topology_snapshot_row(
+    relative: Path, kind: str, metadata: os.stat_result
+) -> tuple[object, ...]:
+    return (relative.as_posix(), kind, *_metadata_identity(metadata))
+
+
+def _require_legacy_topology(
+    campaign: FrozenCampaign,
+) -> tuple[tuple[object, ...], ...]:
+    """Require the sealed campaign to contain planning artifacts and nothing else."""
+
+    root = campaign.campaign_dir
+    expected_directories, expected_files = _legacy_expected_topology(campaign)
+    actual_directories: set[Path] = {Path(".")}
+    actual_files: set[Path] = set()
+    snapshot: list[tuple[object, ...]] = []
+
+    def walk_error(error: OSError) -> None:
+        raise error
+
+    try:
+        root_metadata = os.lstat(root)
+        if (
+            not stat.S_ISDIR(root_metadata.st_mode)
+            or stat.S_ISLNK(root_metadata.st_mode)
+            or root_metadata.st_uid != os.geteuid()
+        ):
+            raise CampaignPlanningError(
+                "preserved legacy campaign root topology changed"
+            )
+        snapshot.append(_topology_snapshot_row(Path("."), "directory", root_metadata))
+        for current, directory_names, file_names in os.walk(
+            root, topdown=True, onerror=walk_error, followlinks=False
+        ):
+            current_path = Path(current)
+            for name in directory_names:
+                path = current_path / name
+                metadata = os.lstat(path)
+                if (
+                    not stat.S_ISDIR(metadata.st_mode)
+                    or stat.S_ISLNK(metadata.st_mode)
+                    or metadata.st_uid != os.geteuid()
+                ):
+                    raise CampaignPlanningError(
+                        "preserved legacy campaign directory topology changed"
+                    )
+                relative = path.relative_to(root)
+                actual_directories.add(relative)
+                snapshot.append(
+                    _topology_snapshot_row(relative, "directory", metadata)
+                )
+            for name in file_names:
+                path = current_path / name
+                metadata = os.lstat(path)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 1
+                    or metadata.st_uid != os.geteuid()
+                ):
+                    raise CampaignPlanningError(
+                        "preserved legacy campaign file topology changed"
+                    )
+                relative = path.relative_to(root)
+                actual_files.add(relative)
+                snapshot.append(_topology_snapshot_row(relative, "file", metadata))
+    except OSError as error:
+        raise CampaignPlanningError(
+            "preserved legacy campaign topology is unreadable"
+        ) from error
+    if (
+        actual_directories != expected_directories
+        or actual_files != expected_files
+    ):
+        raise CampaignPlanningError(
+            "preserved legacy campaign topology changed"
+        )
+    return tuple(sorted(snapshot))
+
+
+def _legacy_tree_identity(campaign: FrozenCampaign) -> tuple[str, int]:
+    _expected_directories, expected_files = _legacy_expected_topology(campaign)
+    digest = hashlib.sha256()
+    total_size = 0
+    for relative in sorted(expected_files, key=lambda path: path.as_posix()):
+        payload = _read_owned_regular_file(
+            campaign.campaign_dir / relative,
+            max_size=16 * 1024 * 1024,
+            context="preserved legacy campaign artifact",
+        )
+        relative_bytes = relative.as_posix().encode("utf-8")
+        digest.update(len(relative_bytes).to_bytes(4, "big"))
+        digest.update(relative_bytes)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+        total_size += len(payload)
+        if total_size > 64 * 1024 * 1024:
+            raise CampaignPlanningError(
+                "preserved legacy campaign tree exceeds its size bound"
+            )
+    return digest.hexdigest(), total_size
+
+
+@contextmanager
+def _legacy_campaign_lock(path: Path) -> Iterator[None]:
+    """Share an existing immutable lock without creating or changing it."""
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise CampaignPlanningError("legacy campaign lock requires no-follow support")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | nofollow)
+    except OSError as error:
+        raise CampaignPlanningError("legacy campaign lock is absent or unsafe") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size != 0
+        ):
+            raise CampaignPlanningError("legacy campaign lock topology changed")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise CampaignPlanningError(
+                "another autoresearch controller holds the campaign lock"
+            ) from error
+        try:
+            path_metadata = os.lstat(path)
+        except OSError as error:
+            raise CampaignPlanningError(
+                "legacy campaign lock path changed"
+            ) from error
+        locked_identity = _metadata_identity(metadata)
+        if _metadata_identity(path_metadata) != locked_identity:
+            raise CampaignPlanningError("legacy campaign lock path changed")
+        try:
+            yield
+        finally:
+            try:
+                path_metadata = os.lstat(path)
+            except OSError as error:
+                raise CampaignPlanningError(
+                    "legacy campaign lock path changed"
+                ) from error
+            if _metadata_identity(path_metadata) != locked_identity:
+                raise CampaignPlanningError("legacy campaign lock path changed")
+    finally:
+        os.close(descriptor)
+
+
+def _read_legacy_blocked_summary(campaign: FrozenCampaign) -> dict[str, Any]:
+    seal = _LEGACY_BLOCKED_CAMPAIGN_SEAL
+    before = _require_legacy_topology(campaign)
+    if _legacy_tree_identity(campaign) != (seal.tree_sha256, seal.tree_size):
+        raise CampaignPlanningError(
+            "preserved legacy campaign tree content changed"
+        )
+    _read_sealed_regular_file(
+        campaign.campaign_dir / "campaign.json",
+        expected_size=seal.campaign_json_size,
+        expected_sha256=seal.campaign_json_sha256,
+        context="preserved legacy campaign manifest",
+    )
+    payload = _read_sealed_regular_file(
+        campaign.campaign_dir / "summary.json",
+        expected_size=seal.summary_json_size,
+        expected_sha256=seal.summary_json_sha256,
+        context="preserved legacy campaign summary",
+    )
+    try:
+        summary = json.loads(
+            payload.decode("utf-8"), object_pairs_hook=_reject_duplicate_pairs
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, CellProjectionError) as error:
+        raise CampaignPlanningError(
+            "preserved legacy campaign summary is malformed"
+        ) from error
+    if summary != _legacy_blocked_summary_payload():
+        raise CampaignPlanningError(
+            "preserved legacy campaign summary payload changed"
+        )
+    after = _require_legacy_topology(campaign)
+    if after != before:
+        raise CampaignPlanningError(
+            "preserved legacy campaign topology changed while reading"
+        )
+    return summary
+
+
+def _summarize_campaign_locked(campaign: FrozenCampaign) -> dict[str, Any]:
+    if _is_legacy_blocked_campaign(campaign):
+        raise CampaignPlanningError(
+            "the preserved legacy campaign summary is immutable"
+        )
     summary = _campaign_summary_payload(campaign)
     write_json(campaign.campaign_dir / "summary.json", summary)
     return summary
+
+
+def summarize_campaign(campaign_dir: Path) -> dict[str, Any]:
+    initial = load_frozen_campaign(campaign_dir)
+    lock_path = initial.campaign_dir / ".autoresearch.lock"
+    if _is_legacy_blocked_campaign(initial):
+        with _legacy_campaign_lock(lock_path):
+            campaign = load_frozen_campaign(initial.campaign_dir)
+            if not _is_legacy_blocked_campaign(campaign):
+                raise CampaignPlanningError(
+                    "preserved legacy campaign identity changed under lock"
+                )
+            return _read_legacy_blocked_summary(campaign)
+    with _campaign_lock(lock_path):
+        campaign = load_frozen_campaign(initial.campaign_dir)
+        if _is_legacy_blocked_campaign(campaign):
+            raise CampaignPlanningError(
+                "campaign identity changed into the preserved legacy campaign"
+            )
+        return _summarize_campaign_locked(campaign)
 
 
 @contextmanager
@@ -3623,13 +4020,29 @@ def _campaign_lock(path: Path) -> Iterator[None]:
             raise CampaignPlanningError("campaign lock must be a single-link file")
         if stat.S_IMODE(metadata.st_mode) != 0o600:
             os.fchmod(descriptor, 0o600)
+            metadata = os.fstat(descriptor)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise CampaignPlanningError(
                 "another autoresearch controller holds the campaign lock"
             ) from error
-        yield
+        try:
+            path_metadata = os.lstat(path)
+        except OSError as error:
+            raise CampaignPlanningError("campaign lock path changed") from error
+        locked_identity = _metadata_identity(metadata)
+        if _metadata_identity(path_metadata) != locked_identity:
+            raise CampaignPlanningError("campaign lock path changed")
+        try:
+            yield
+        finally:
+            try:
+                path_metadata = os.lstat(path)
+            except OSError as error:
+                raise CampaignPlanningError("campaign lock path changed") from error
+            if _metadata_identity(path_metadata) != locked_identity:
+                raise CampaignPlanningError("campaign lock path changed")
     finally:
         os.close(descriptor)
 
@@ -3714,9 +4127,17 @@ def acknowledge_campaign_checkpoint(
     )
 
     initial = load_frozen_campaign(campaign_dir)
+    if _is_legacy_blocked_campaign(initial):
+        raise CampaignPlanningError(
+            "the preserved legacy campaign is immutable and cannot be acknowledged"
+        )
     lock_path = initial.campaign_dir / ".autoresearch.lock"
     with _campaign_lock(lock_path):
         campaign = load_frozen_campaign(initial.campaign_dir)
+        if _is_legacy_blocked_campaign(campaign):
+            raise CampaignPlanningError(
+                "campaign identity changed into the preserved legacy campaign"
+            )
         try:
             _recover_interrupted_cells(campaign)
         except CellProjectionError as error:
@@ -3764,12 +4185,24 @@ def run_campaign(
     """Run or replay the finite queue, never resuming an interrupted cell."""
 
     campaign = load_frozen_campaign(campaign_dir)
+    if _is_legacy_blocked_campaign(campaign):
+        raise CampaignPlanningError(
+            "the preserved legacy campaign is immutable and cannot be run"
+        )
     for cell in campaign.cells:
         blocker = model_execution_blocker(_bound_frozen_cell_plan_model(cell))
         if blocker is not None:
             raise CampaignPlanningError(blocker)
     lock_path = campaign.campaign_dir / ".autoresearch.lock"
     with _campaign_lock(lock_path):
+        refreshed = load_frozen_campaign(campaign.campaign_dir)
+        if _is_legacy_blocked_campaign(refreshed):
+            raise CampaignPlanningError(
+                "campaign identity changed into the preserved legacy campaign"
+            )
+        if refreshed.integrity_hash != campaign.integrity_hash:
+            raise CampaignPlanningError("campaign identity changed under lock")
+        campaign = refreshed
         existing_journal = Journal(campaign.campaign_dir / "events.jsonl")
         recovery_error: CellProjectionError | None = None
         try:
@@ -3803,7 +4236,7 @@ def run_campaign(
                 raise CampaignPlanningError(
                     "cleanup failed and controller truth could not be terminalized"
                 ) from replay_error
-            return summarize_campaign(campaign.campaign_dir)
+            return _summarize_campaign_locked(campaign)
 
         raw_prefix: tuple[str, ...] = ()
         topology_error: CellProjectionError | None = None
@@ -3841,10 +4274,10 @@ def run_campaign(
                 failure_kind=topology_error.failure_kind,
                 cleanup_verified=True,
             )
-            return summarize_campaign(campaign.campaign_dir)
+            return _summarize_campaign_locked(campaign)
 
         if existing_state is not None and existing_state.phase == "terminal":
-            return summarize_campaign(campaign.campaign_dir)
+            return _summarize_campaign_locked(campaign)
 
         calibration_reconciled = False
         calibration_boundary_recovered = False
@@ -3880,9 +4313,9 @@ def run_campaign(
                 cleanup_verified=error.failure_kind
                 not in {"cleanup_breach", "ownership_ambiguity"},
             )
-            return summarize_campaign(campaign.campaign_dir)
+            return _summarize_campaign_locked(campaign)
         if calibration_reconciled or calibration_boundary_recovered:
-            return summarize_campaign(campaign.campaign_dir)
+            return _summarize_campaign_locked(campaign)
         calibration_ready = _calibration_path(campaign).exists()
         current_events = tuple(_controller_events(existing_journal))
         if _checkpoint_gate_required(
@@ -3940,8 +4373,8 @@ def run_campaign(
                         failure_kind=failure_kind,
                         cleanup_verified=True,
                     )
-                    return summarize_campaign(campaign.campaign_dir)
-                summary = summarize_campaign(campaign.campaign_dir)
+                    return _summarize_campaign_locked(campaign)
+                summary = _summarize_campaign_locked(campaign)
                 summary.update(
                     {
                         "status": "blocked_environment",
@@ -3988,7 +4421,7 @@ def run_campaign(
                 now=now,
             )
             if not calibration_already_recorded:
-                return summarize_campaign(campaign.campaign_dir)
+                return _summarize_campaign_locked(campaign)
             while True:
                 state = _replay_frozen_campaign(campaign, _controller_events(journal))
                 if state.phase == "terminal":
@@ -4161,4 +4594,4 @@ def run_campaign(
                 cleanup_verified=error.failure_kind
                 not in {"cleanup_breach", "ownership_ambiguity"},
             )
-        return summarize_campaign(campaign.campaign_dir)
+        return _summarize_campaign_locked(campaign)
