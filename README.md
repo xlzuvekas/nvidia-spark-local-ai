@@ -17,6 +17,7 @@ quality checks, and the provenance needed to interpret each number.
 | What did the first day of GB10 community work add? | [Primary-source review of the one-Spark vLLM mmap patch, upstream status, and dual-Spark SGLang report](docs/qwen38-flash-next-gb10-day-one-2026-08-27.md) |
 | What do matched PLE mapping/omission and NEXTN depths show? | [Replicated lazy-C8 depth results, semantic-ablation failures, and quality-clean exact-answer v2](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md) |
 | How is the single-user Qwen3.8-Flash-Next serving search frozen? | [Frozen 14-cell, nine-case 64K autoresearch protocol and pre-measurement swap safety stop](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md) |
+| What should the next single-user Flash-Next experiments test? | [Ranked long-prefix cache, continuous-decode, CUDA-graph, chunk-size, adaptive-NEXTN, and streaming backlog](docs/qwen38-flash-next-single-user-next-experiments-2026-08-28.md) |
 | What does native llama.cpp prompt-KV reuse change for Qwen3.6? | [Prefix-cache controls: 8K and 32K shared-prefix cold/warm observations](docs/qwen36-prefix-cache-results-2026-08-18.md) |
 | How did Qwen3-Coder-Next fare on terminal coding tasks? | [Harbor/Terminal-Bench-derived results: Qwen Code versus OpenCode](docs/harbor-terminal-results-2026-08-18.md) |
 | How are offline coding-agent harnesses compared? | [Qwen3-Coder-Next Harbor campaign protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign) |
@@ -245,6 +246,7 @@ geometries, slot counts, or validation states.
 - [RLM and HALO overnight campaign protocol](docs/rlm-halo-overnight-2026-08-25.md)
 - [Qwen3.8-Flash-Next GB10 day-one literature review](docs/qwen38-flash-next-gb10-day-one-2026-08-27.md)
 - [Qwen3.8-Flash-Next single-user autoresearch protocol](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md)
+- [Qwen3.8-Flash-Next single-user serving backlog](docs/qwen38-flash-next-single-user-next-experiments-2026-08-28.md)
 - [Nemotron diffusion direct-run guide](docs/nemotron-diffusion-direct.md)
 - [Experimental NInfer SM121a patch and reproduction notes](patches/ninfer/README.md)
 - [SGLang SM121 QSA and persistent read-only PLE patch guide](patches/sglang/README.md)
