@@ -12,6 +12,24 @@ weights. Model, tokenizer, PLE payload, SGLang image, source overlays, hardware,
 prompts, validators, sampling policy, and evaluator versions remain immutable.
 One declared serving axis or coupled NEXTN bundle may change per candidate.
 
+## Current status: safety-stopped, no campaign measurements
+
+This campaign has not started and none of its four profiles has produced a
+measurement under this protocol. The host is currently safety-stopped because
+the preceding buffer-strategy interaction block crossed the frozen 512 MiB
+swap-growth limit twice: the ordinary depth-two C6 tail reached
+2,473.8359375 MiB of growth, and the following ordinary depth-three startup
+reached 3,173.1484375 MiB before any case began. Those observations belong to
+the earlier interaction study, not to this campaign.
+
+Do not run any inference command in this document until an operator resets the
+Spark and a fresh preflight establishes unambiguous ownership, no unrelated
+GPU or container workload, at least 14 GiB `MemAvailable`, and a new recorded
+swap baseline. A reset does not make either rejected interaction cell valid and
+does not authorize resuming it. If the reset and preflight leave less than
+4,620 seconds before the frozen cutoff, record the campaign as stopped without
+starting a pair; do not move the cutoff or silently shorten a cell.
+
 ## Autoresearch adaptation
 
 The controller design is adapted from Karpathy's
@@ -42,6 +60,109 @@ campaign cutoff. The overnight cutoff is 07:00 MST on 2026-08-28. A workload
 may finish before its envelope; do not pad it. Startup, evaluator wall time,
 TTFT, prefill, and decode remain separate metrics.
 
+## Exact four-profile queue
+
+The queue is finite and immutable. Each candidate below is a one-axis change
+from the first profile; public identity and served name are bookkeeping, not
+experimental axes.
+
+| Queue | Profile | Role and only intended delta from baseline |
+| ---: | --- | --- |
+| 1 | `qwen38-flash-next-nvfp4-mtp2-agent64k-low-ple-mapped-sglang` | Baseline: mapped FP8 PLE, `extra_buffer_lazy`, NEXTN depth 2, 1,024-token chunked prefill, low reasoning |
+| 2 | `qwen38-flash-next-nvfp4-mtp2-agent64k-none-ple-mapped-sglang` | Request policy changes from thinking/low to explicit no-thinking |
+| 3 | `qwen38-flash-next-nvfp4-mtp2-agent64k-low-chunk2k-ple-mapped-sglang` | Chunked-prefill size 2,048 |
+| 4 | `qwen38-flash-next-nvfp4-mtp3-agent64k-low-ple-mapped-sglang` | NEXTN depth 3 bundle: three speculative steps and four draft tokens |
+
+All profiles retain the same pinned checkpoint, mapped PLE payload and marker,
+SGLang image and overlays, 65,536-token context and token pool, C1 request
+geometry, four lazy recurrent states, 0.85 static-memory fraction, tool and
+reasoning parsers, and temperature-zero suite. The queue does not permit a PLE
+omission arm, ordinary buffers, extra concurrency, a context change, or an
+unlisted reasoning effort.
+
+The first matched pair is baseline-to-baseline calibration. Candidate proposals
+then follow queue order 2, 3, 4. The request-policy and chunk candidates retain
+the baseline server geometry and run before depth three. Depth three is last
+because earlier, different depth-three geometries crossed the memory or swap
+safety gate. Every candidate is defined against the frozen baseline. If a
+candidate is promoted before later proposals are reached, stop this queue: a
+later fixed profile may then differ from the champion on more than one axis.
+Combining a winning axis with another candidate requires a new profile, new
+frozen plan, and new protocol revision rather than an in-place edit.
+Calibration is recorded in its own admission record and does not consume the
+candidate journal's global pair index; search pair index zero therefore still
+runs champion then candidate.
+
+## Exact nine-case suite
+
+Every profile is bound to
+`manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml`; using a
+different suite is an admission failure. Cases run in this exact order:
+
+| Order | Case ID | Shape |
+| ---: | --- | --- |
+| 1 | `json-smoke` | JSON capability; 1 repetition; 64 output tokens |
+| 2 | `tools-smoke` | tool-call capability; 1 repetition; 64 output tokens |
+| 3 | `synthetic-exact-answer-v2` | strict quality; 2 repetitions; 512 output tokens |
+| 4 | `agentic-select-and-call` | 3 variants; at most 6 turns and 4,096 output tokens per turn |
+| 5 | `agentic-no-tool` | 3 variants; at most 6 turns and 4,096 output tokens per turn |
+| 6 | `agentic-two-hop` | 3 variants; at most 6 turns and 4,096 output tokens per turn |
+| 7 | `agentic-tool-error-recovery` | 3 variants; at most 6 turns and 4,096 output tokens per turn |
+| 8 | `long-context-needle-60000-agent-c1` | 60,000 prompt repetitions; 1 repetition; 128 output tokens |
+| 9 | `agent64k-decode-256-c1-v1` | 1 warm-up, then 5 repetitions of 256 output tokens |
+
+All nine cases use concurrency one and temperature zero. The first eight have
+no warm-up. Agentic ordering, arguments, dependencies, recovery, and final
+answers are validated; the 60K case is a synthetic exact-key capacity probe,
+not natural-document comprehension. Warm-up work from the final decode case is
+not scored.
+
+## Execution commands and time budgets
+
+The commands below document the frozen queue; the current safety stop makes
+them non-executable until the reset and preflight above. First verify the
+pinned overlay and PLE payload without downloading anything:
+
+```bash
+python3 prepare_sglang_overlays.py --prepare-ple-ablation
+python3 prepare_sglang_overlays.py --verify-ple-cache
+python3 sparkbench.py inventory --sizes
+python3 sparkbench.py list --verbose
+```
+
+Each fresh cell has a 30-minute inclusive envelope. `timeout` sends `INT` at
+that boundary so SparkBench enters its owned-cleanup path, then allows at most
+the separate 120-second cleanup grace before a last-resort kill:
+
+```bash
+/usr/bin/timeout --signal=INT --kill-after=120s 30m \
+  python3 sparkbench.py benchmark \
+  qwen38-flash-next-nvfp4-mtp2-agent64k-low-ple-mapped-sglang \
+  --suite manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml
+
+/usr/bin/timeout --signal=INT --kill-after=120s 30m \
+  python3 sparkbench.py benchmark \
+  qwen38-flash-next-nvfp4-mtp2-agent64k-none-ple-mapped-sglang \
+  --suite manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml
+
+/usr/bin/timeout --signal=INT --kill-after=120s 30m \
+  python3 sparkbench.py benchmark \
+  qwen38-flash-next-nvfp4-mtp2-agent64k-low-chunk2k-ple-mapped-sglang \
+  --suite manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml
+
+/usr/bin/timeout --signal=INT --kill-after=120s 30m \
+  python3 sparkbench.py benchmark \
+  qwen38-flash-next-nvfp4-mtp3-agent64k-low-ple-mapped-sglang \
+  --suite manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml
+```
+
+These are individual cell invocations, not a four-cell unmatched sequence.
+Freeze both plans before a pair, then invoke the appropriate two commands in
+the counterbalanced order. Their causal envelopes sum to the frozen 60-minute
+pair budget. The 120-second cleanup allowance is outside the score, and the
+900-second audit reserve is outside the pair. A timeout, interruption, or
+inter-cell gap over 120 seconds invalidates the pair; never resume it.
+
 ## Evaluator hierarchy
 
 Eligibility is decided before speed:
@@ -58,20 +179,30 @@ Eligibility is decided before speed:
 7. Sampled `MemAvailable` stays at or above 14 GiB and swap growth stays at or
    below 512 MiB.
 
-The local Pi executable is not installed. The frozen SparkBench multi-turn tool
-battery is the first admission gate. The pinned Harbor/Qwen Code harness and
-fresh-prompt content battery may be used only through their existing offline,
-loopback, scalar-only contracts. Harbor task reward is a correctness gate and
-agent wall time is an end-to-end diagnostic. The content battery covers code,
-technical explanation, reasoning, and prose, but its minimum-length check is
-not semantic correctness; its rates cannot promote a candidate that fails the
-agentic or coding gate.
+No pinned, campaign-admitted Pi harness is available. A transitive Pi package
+elsewhere on the host is not a frozen offline dependency and is excluded. The
+SparkBench multi-turn tool battery is therefore a proxy admission gate. The
+pinned Harbor/Qwen Code harness and fresh-prompt content battery may be used
+only as separately labeled diagnostics through their existing offline,
+loopback, scalar-only contracts; neither is part of the nine-case suite.
+Harbor task reward is a correctness gate and agent wall time is an end-to-end
+diagnostic. The content battery covers code, technical explanation, reasoning,
+and prose, but its minimum-length check is not semantic correctness; its rates
+cannot promote a candidate that fails the agentic gate.
 
-Primary speed is the geometric mean of candidate/control
-`aggregate_output_tps` ratios over the frozen C1 generation cells. Task wall
-time and first-turn TTFT are product-facing diagnostics and become the primary
-ordering whenever two configurations produce different valid token counts.
-Concurrency greater than one is outside the promotion score.
+Consequently, this campaign can compare deterministic JSON, tool use,
+exact-answer behavior, synthetic 60K retention, and C1 decode under the four
+serving profiles. It cannot support a claim about Pi, autonomous repository
+editing, cowork document handling, or end-to-end single-user productivity.
+
+Primary speed is the geometric mean of six fixed-task speed factors. For the
+four agentic cases, each factor is control/candidate median task wall time. For
+the 60K needle it is control/candidate median end-to-end time. For the fixed
+D256 decode case it is candidate/control aggregate output TPS. First-turn TTFT
+is a separate guardrail. Any missing validation, truncation, or mismatched work
+removes the entire pair from scoring; token-rate gains cannot compensate for a
+different or incorrect task. Concurrency greater than one is outside the
+promotion score.
 
 ## Calibration, screening, and promotion
 
@@ -121,6 +252,27 @@ pair. If the inter-cell gap exceeds 120 seconds, restart the entire pair with
 new lifetimes. If both cells completed but no decision was written, audit and
 score idempotently. Never combine resumed or pre-interruption measurements for
 promotion.
+
+## Checkpoint, commit, and push policy
+
+Push the frozen clean protocol before any campaign preflight. Within a pair,
+append a private local checkpoint after each terminal cell and verify owned
+cleanup immediately, but do not edit, commit, pull, or push between the two
+cells; that would risk plan drift and consume the 120-second inter-cell bound.
+
+After every complete audited pair—calibration, screen, or confirmation—export
+the deterministic scalar projection, review only the new allowlisted files,
+stage those exact paths, and run both normal and staged evidence verification.
+Commit and push that checkpoint before proposing the next pair. Apply the same
+export/verify/commit/push boundary immediately after any campaign-terminal
+safety event or the final cutoff. A failed push stops further pairs until it is
+resolved; local raw state alone is not a substitute for the requested remote
+checkpoint.
+
+Never stage `results/`, raw journals, server logs, telemetry streams, prompts,
+completions, reasoning, tool payloads, request identifiers, local paths, or
+commands. Frequent pushes do not relax the scalar-only publication contract,
+and Git work never enters a measured 30-minute cell or 60-minute pair.
 
 ## Evidence and interpretation
 

@@ -457,6 +457,72 @@ rejections remain incompatible and must not be retried. The full frozen design
 and commands are in the
 [follow-up protocol](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md#lazy-buffer--depth-follow-up--frozen-2026-08-28).
 
+#### Single-user 64K autoresearch campaign (planned)
+
+The next campaign is a prospective C1 serving search, not a reported result.
+It freezes the following profile queue in this order:
+
+1. `qwen38-flash-next-nvfp4-mtp2-agent64k-low-ple-mapped-sglang`
+   (baseline: mapped PLE, lazy recurrent state, NEXTN depth two, 1,024-token
+   chunks, low reasoning);
+2. `qwen38-flash-next-nvfp4-mtp2-agent64k-none-ple-mapped-sglang`
+   (explicit no-thinking candidate);
+3. `qwen38-flash-next-nvfp4-mtp2-agent64k-low-chunk2k-ple-mapped-sglang`
+   (2,048-token chunk candidate); and
+4. `qwen38-flash-next-nvfp4-mtp3-agent64k-low-ple-mapped-sglang`
+   (depth-three candidate, deliberately last because prior depth-three
+   geometries crossed the memory or swap safety gate).
+
+All four profiles bind only to
+`manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml`.
+That immutable nine-case suite runs JSON and tool-call smokes, exact-answer v2,
+the four three-variant agentic scenarios, a 60,000-repetition long-context
+needle, and a warmed five-repetition D256/C1 decode cell. Every measured
+request is C1 at temperature zero. The profile queue is fixed; it does not
+authorize composing candidate axes or editing a live profile.
+
+One fresh server lifetime has an inclusive 30-minute envelope. A frozen
+two-cell pair has a 60-minute envelope, followed by separately attributed
+cleanup and audit reserves. After the current host safety stop is cleared by
+an operator reset and clean preflight, the exact per-cell commands are:
+
+```bash
+/usr/bin/timeout --signal=INT --kill-after=120s 30m \
+  python3 sparkbench.py benchmark \
+  qwen38-flash-next-nvfp4-mtp2-agent64k-low-ple-mapped-sglang \
+  --suite manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml
+
+/usr/bin/timeout --signal=INT --kill-after=120s 30m \
+  python3 sparkbench.py benchmark \
+  qwen38-flash-next-nvfp4-mtp2-agent64k-none-ple-mapped-sglang \
+  --suite manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml
+
+/usr/bin/timeout --signal=INT --kill-after=120s 30m \
+  python3 sparkbench.py benchmark \
+  qwen38-flash-next-nvfp4-mtp2-agent64k-low-chunk2k-ple-mapped-sglang \
+  --suite manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml
+
+/usr/bin/timeout --signal=INT --kill-after=120s 30m \
+  python3 sparkbench.py benchmark \
+  qwen38-flash-next-nvfp4-mtp3-agent64k-low-ple-mapped-sglang \
+  --suite manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml
+```
+
+These are cell commands, not permission to run four unmatched lifetimes.
+Freeze and counterbalance each control/candidate pair before starting either
+cell. Do not resume a timed-out cell or cross the 120-second inter-cell gap.
+Checkpoint the private append-only state after each cell, but do not mutate Git
+between paired cells. After every audited pair, and after any terminal safety
+stop, export only allowlisted scalar evidence, verify the staged projection,
+commit, and push before starting another pair. Raw prompts, completions,
+reasoning, tool payloads, logs, identifiers, and commands remain ignored.
+
+No campaign-admitted Pi harness is available. The nine cases are deterministic
+coding/cowork proxies; they do not measure Pi, repository editing, document
+work, or end-to-end agent productivity. See the
+[full campaign protocol](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md)
+for the queue, scoring, current stop, and interpretation limits.
+
 #### Retained day-zero diagnostics
 
 The isolated CUDA NVFP4 embedding primitive matched an independent
