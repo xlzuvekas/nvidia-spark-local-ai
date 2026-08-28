@@ -580,7 +580,8 @@ three with collection off again. Report collection overhead as the profiled
 block divided by the mean of its two unprofiled brackets, minus one, for both
 full request wall and ITL. Keep the capture near 30--40 seconds and below five
 minutes. Add C2, long prefill or an equivalent SGLang-P trace only after this
-minimum capture is interpretable.
+minimum capture is interpretable. Admit at most one of those follow-ups inside
+this campaign; the other diagnostics require a newly frozen protocol.
 
 The local tool gate is now resolved. Nsight Systems 2025.3.2 and Nsight Compute
 2025.3.1 recognize the CC 12.1 GPU as counter chip GB20B. CUDA and NVTX
@@ -630,12 +631,13 @@ launch/scheduler or PLE-I/O limits.
 
 The source build and any acquisition are a separately capped preparation phase
 and must not consume a frozen measurement window. Once all artifacts are
-local, the plan contains nine managed lifetimes: one Phase-1 admission, four
-core ABBA lifetimes, two long-context lifetimes and two profiler lifetimes.
-Budget about 4–5.5 hours plus any separately admitted cowork campaign; enforce
-a six-hour hard cap including validation, export, checkpointing and cleanup.
-Freeze 1,800 seconds per startup, 2,700 seconds per admission/core/long
-lifetime, and 1,800 seconds per profiler lifetime.
+local, the plan contains eight required managed lifetimes: one Phase-1
+admission, four core ABBA lifetimes, two long-context lifetimes and one minimum
+profiler lifetime. One conditional profiler follow-up may bring the cap to
+nine. Budget about 4–5.5 hours plus any separately admitted cowork campaign;
+enforce a six-hour hard cap including validation, export, checkpointing and
+cleanup. Freeze 1,800 seconds per startup, 2,700 seconds per
+admission/core/long lifetime, and 1,800 seconds per profiler lifetime.
 
 Do not begin an ABBA pair or long/profiler phase unless the complete next unit
 plus cleanup/evidence reserve fits. At the cap, preserve partial and failed
