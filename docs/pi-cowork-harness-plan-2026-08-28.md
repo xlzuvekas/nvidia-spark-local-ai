@@ -147,23 +147,78 @@ fields, unknown nested fields, missing effort, a changed temperature or token
 limit, and any model/endpoint drift. Hold this wrapper constant across serving
 arms so the experiment changes server configuration rather than client policy.
 
+## Episode history and cache boundary
+
+Start every episode with a fresh in-memory Pi instance, empty history, private
+home, and disjoint workspace. Disable saved sessions, discovery, compaction,
+retries, and cross-episode history. History grows normally only within an
+episode; later turns are intended to exercise that episode's own growing
+prefix.
+
+Prevent accidental reuse between episodes with a private byte-distinct
+sentinel before any otherwise shared prefix, or with a separately admitted
+cache reset or fresh server lifetime. Publish request-scoped cached-token
+counts only after a semantics canary reconciles them with an admitted native
+source. Otherwise omit them, and never infer a cache hit from TTFT.
+
+## C1 and C2 scheduling admission
+
+The retained 64K profile is C1-only. Freeze a separate C2 bundle with the same
+65,536-token context/pool, `--max-running-requests 2`,
+`--max-mamba-cache-size 8`, and `--cuda-graph-bs-decode 1 2`. Before fan-out,
+compare this eight-lazy-slot profile at C1 with the retained C1 profile and
+reject it if the extra geometry breaches pressure gates or materially slows
+the control workload.
+
+For every C2 pair, both fully rendered histories plus reserved outputs and MTP
+allowance must total at most 61,440 tokens, leaving 4,096 tokens unallocated.
+Run two independent Pi instances and process groups with private homes,
+histories, and workspaces behind one common release barrier. C2 means two
+independent subtasks for one user; it is not a multi-user result or permission
+to parallelize a sequential tool chain.
+
+The smallest admission-only sequence is one C1 `fix-git` trial, one C1
+`cowork-write-conflict-recovery` variant, then one C2 pair containing
+byte-distinct `cowork-table-reconcile` and conflict-recovery variants. This
+checks isolation, low-effort payload attestation, growing history, mutation and
+conflict recovery, dual-client cleanup, and C2 capacity. It makes no speed
+claim.
+
+For a first descriptive scheduling panel, define workload set A as table and
+conflict variant zero and set B as the corresponding variant one. Fresh
+lifetime A runs set A serially and set B in parallel. Fresh lifetime B runs set
+A in parallel and set B serially, with the serial task order reversed. Score
+time-to-both only when both exact oracles pass. Repeat that counterbalanced
+two-lifetime block before promotion so every set/mode has two independent
+observations. Keep the six-task coding result C1-only and separate from cowork;
+never pool their scores.
+
 ## Pi timing and scalar evidence
 
-The trusted wrapper owns monotonic timestamps:
+Record cold server start-to-ready, task-container/Pi setup, resident task wall,
+external verifier wall, and certified cleanup wall separately. The trusted
+wrapper owns monotonic timestamps:
 
-- task wall: immediately before the prompt through `agent_end`;
+- resident task wall: instruction release through `agent_end` or terminal
+  abort, including Pi orchestration, model requests, and tools;
 - request start: `turn_start`;
 - TTFT: first text, thinking, or tool-call start;
 - model E2E: assistant message end;
 - tool wall: tool execution start through end; and
 - turn wall: turn start through end.
 
-Publish first-turn and median later-turn TTFT, total task wall, model-request
-count, turn count, tool counts by category, tool-error count, timeout and stop
-enums, external verifier reward, and cleanup/admission booleans. Pi-reported
-input, cache-read, output, and total tokens may be published only after a
-canary validates their semantics. Label them `pi_usage`; they are not native
-server decode counters.
+For C2, makespan is the common release barrier through the later terminal
+result. For serial work, it is release of the first task through the second
+terminal result. Never substitute summed per-task walls for makespan or fold
+setup, verifier, or cleanup into resident task wall.
+
+Publish first-turn and median later-turn TTFT, per-turn request and tool wall,
+total resident task wall or makespan, model-request count, turn count, tool
+counts by category, tool-error count, timeout and stop enums, external verifier
+reward, and cleanup/admission booleans. Pi-reported input, cache-read, output,
+and total tokens may be published only after a canary validates their semantics
+against the admitted native source. Label them `pi_usage`; they are not native
+server decode counters, and client-stack task wall is not server TPS.
 
 Wrapper stdout is one exact scalar JSON object. Keep prompts, completions,
 reasoning, tool arguments/results, commands, diffs, paths, sessions, request
