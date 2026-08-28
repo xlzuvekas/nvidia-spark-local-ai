@@ -832,7 +832,7 @@ def evaluate_promotion(
     return GateDecision("promotion", not reasons, combined, tuple(dict.fromkeys(reasons)))
 
 
-def _simplification_pair_screen(
+def evaluate_simplification_screen(
     policy: CampaignPolicy, observation: PairObservation
 ) -> GateDecision:
     reasons = _pair_reasons(policy, observation)
@@ -1193,7 +1193,7 @@ def replay_transitions(
                     completed_arms = ()
                     continue
                 if decision == "confirm_simplification":
-                    if len(observations) != 1 or not _simplification_pair_screen(
+                    if len(observations) != 1 or not evaluate_simplification_screen(
                         policy, latest
                     ).passed:
                         raise TransitionError(

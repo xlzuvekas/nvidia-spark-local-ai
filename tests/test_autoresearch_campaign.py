@@ -22,6 +22,7 @@ from bench.autoresearch_campaign import (
     EXPECTED_CASE_IDS,
     EXPECTED_PRIMARY_CASE_IDS,
     _cell_specs,
+    _normalized_flags,
     freeze_campaign,
     campaign_admission,
     load_frozen_campaign,
@@ -40,6 +41,7 @@ from bench.autoresearch_worker import (
     WorkerRunResult,
 )
 from bench.journal import content_hash, write_json
+from bench.manifest import model_spec_to_dict
 from bench.runner import _canonical_case
 
 
@@ -80,6 +82,15 @@ class AutoresearchCampaignPlanningTests(unittest.TestCase):
                     "reasoning_effort": "low",
                 }
             },
+        )
+        reasoning_candidate = models[preview.proposals[0].candidate_id]
+        self.assertLess(
+            set(_normalized_flags(model_spec_to_dict(reasoning_candidate))),
+            set(
+                _normalized_flags(
+                    model_spec_to_dict(models[definition.baseline_id])
+                )
+            ),
         )
 
     def test_candidate_queue_freezes_calibration_and_two_fresh_pairs_each(self) -> None:
@@ -700,7 +711,10 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
 
             def runner(cell: object) -> CellProjection:
                 calls.append(str(getattr(cell, "cell_id")))
-                return _synthetic_projection(cell, improvement=1.05)
+                projection = _synthetic_projection(cell, improvement=1.05)
+                if "agent64k-none" in str(getattr(cell, "profile_id")):
+                    return replace(projection, normalized_flags=())
+                return projection
 
             summary = run_campaign(
                 campaign_dir,
@@ -740,7 +754,10 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
         first_candidate = (
             "qwen38-flash-next-nvfp4-mtp2-agent64k-none-ple-mapped-sglang"
         )
-        self.assertEqual(promoted["candidate_decisions"][first_candidate], "promote")
+        self.assertEqual(
+            promoted["candidate_decisions"][first_candidate],
+            "promote_simplification",
+        )
         self.assertEqual(promoted["next_pair_index"], 2)
 
     def test_equal_candidates_are_rejected_and_queue_is_exhausted(self) -> None:

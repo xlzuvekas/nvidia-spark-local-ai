@@ -36,6 +36,8 @@ from .autoresearch import (
     evaluate_calibration,
     evaluate_promotion,
     evaluate_screen,
+    evaluate_simplification_promotion,
+    evaluate_simplification_screen,
     pair_order,
     replay_transitions,
     validate_one_axis_delta,
@@ -1286,7 +1288,9 @@ def _validate_plan_integrity(plan: Mapping[str, Any]) -> None:
 
 def _normalized_flags(model: Mapping[str, Any]) -> tuple[str, ...]:
     raw = model.get("args")
-    if not isinstance(raw, list) or any(not isinstance(value, str) for value in raw):
+    if not isinstance(raw, (list, tuple)) or any(
+        not isinstance(value, str) for value in raw
+    ):
         raise CellProjectionError("cell plan model args must be a string array")
     arguments = list(raw)
     indexes = [
@@ -1295,6 +1299,34 @@ def _normalized_flags(model: Mapping[str, Any]) -> tuple[str, ...]:
     if len(indexes) != 1 or indexes[0] + 1 >= len(arguments):
         raise CellProjectionError("cell plan has invalid served-model-name args")
     arguments[indexes[0] + 1] = "<served-name>"
+    request_body = model.get("request_body_json")
+    if not isinstance(request_body, str):
+        raise CellProjectionError("cell plan has no explicit request policy")
+    try:
+        request_policy = json.loads(request_body)
+    except json.JSONDecodeError as error:
+        raise CellProjectionError("cell plan request policy is invalid JSON") from error
+    if not isinstance(request_policy, dict) or set(request_policy) != {
+        "chat_template_kwargs"
+    }:
+        raise CellProjectionError("cell plan request policy topology changed")
+    template = request_policy["chat_template_kwargs"]
+    if not isinstance(template, dict):
+        raise CellProjectionError("cell plan chat-template policy is invalid")
+    thinking = template.get("enable_thinking")
+    if not isinstance(thinking, bool):
+        raise CellProjectionError("cell plan thinking policy must be boolean")
+    if thinking:
+        if set(template) != {"enable_thinking", "reasoning_effort"}:
+            raise CellProjectionError("thinking request policy topology changed")
+        effort = template.get("reasoning_effort")
+        if not isinstance(effort, str) or not effort:
+            raise CellProjectionError("cell plan reasoning effort is invalid")
+        arguments.extend(
+            ("<request:enable-thinking>", f"<request:reasoning-effort={effort}>")
+        )
+    elif set(template) != {"enable_thinking"}:
+        raise CellProjectionError("no-thinking request policy topology changed")
     return tuple(arguments)
 
 
@@ -2469,20 +2501,51 @@ def run_campaign(
                     raise CampaignPlanningError("search pair did not reach scored state")
                 observations = state.candidate_observations
                 _require_score_eligible(campaign.policy, observations[-1])
+                proposal = next(
+                    (
+                        item
+                        for item in campaign.proposals
+                        if item.candidate_id == state.candidate_id
+                    ),
+                    None,
+                )
+                if proposal is None:
+                    raise CampaignPlanningError(
+                        "scored candidate is absent from the frozen queue"
+                    )
                 if len(observations) == 1:
-                    decision = (
-                        "confirm"
-                        if evaluate_screen(campaign.policy, observations[0]).passed
-                        else "reject"
-                    )
-                elif len(observations) == 2:
-                    decision = (
-                        "promote"
-                        if evaluate_promotion(
-                            campaign.policy, observations[0], observations[1]
+                    if (
+                        proposal.axis == "reasoning_policy"
+                        and evaluate_simplification_screen(
+                            campaign.policy, observations[0]
                         ).passed
-                        else "reject"
-                    )
+                    ):
+                        decision = "confirm_simplification"
+                    else:
+                        decision = (
+                            "confirm"
+                            if evaluate_screen(
+                                campaign.policy, observations[0]
+                            ).passed
+                            else "reject"
+                        )
+                elif len(observations) == 2:
+                    if state.confirmation_mode == "simplification":
+                        decision = (
+                            "promote_simplification"
+                            if evaluate_simplification_promotion(
+                                campaign.policy, observations[0], observations[1]
+                            ).passed
+                            else "reject"
+                        )
+                    else:
+                        decision = (
+                            "promote"
+                            if evaluate_promotion(
+                                campaign.policy, observations[0], observations[1]
+                            ).passed
+                            else "reject"
+                        )
                 else:
                     raise CampaignPlanningError("candidate has an invalid score count")
                 append_transition(

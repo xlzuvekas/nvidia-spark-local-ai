@@ -38,6 +38,7 @@ from bench.autoresearch import (
     evaluate_promotion,
     evaluate_screen,
     evaluate_simplification_promotion,
+    evaluate_simplification_screen,
     failure_disposition,
     geometric_mean,
     pair_order,
@@ -650,6 +651,25 @@ class ScorePolicyTests(unittest.TestCase):
         decision = evaluate_simplification_promotion(contract, first, reverse)
         self.assertTrue(decision.passed, decision.reasons)
         self.assertAlmostEqual(decision.geometric_mean_ratio, 0.99)
+
+    def test_simplification_screen_accepts_one_proven_benefit(self) -> None:
+        contract = policy()
+        decision = evaluate_simplification_screen(
+            contract,
+            observation(
+                0,
+                (0.99, 0.99),
+                champion_flags=("--a", "--b"),
+                candidate_flags=("--a",),
+            ),
+        )
+
+        self.assertTrue(decision.passed, decision.reasons)
+        missing = evaluate_simplification_screen(
+            contract, observation(0, (1.0, 1.0))
+        )
+        self.assertFalse(missing.passed)
+        self.assertIn("simplification_benefit_missing", missing.reasons)
 
     def test_simplification_passes_with_strict_flags_confirmed_twice(self) -> None:
         contract = policy()
