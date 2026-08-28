@@ -26,6 +26,16 @@ gain that saved 137.288 seconds, or 44.682%, over 5,120 output tokens. That is
 not a matched MTP2/MTP3 result. See the
 [native MTP study](qwen38-flash-next-native-mtp-optimization-2026-08-26.md).
 
+Two independent mapped-PLE MTP2 lifetimes also give a replicated fan-out
+signal. Their C2 cases performed exactly twice the fixed 256-token request work
+in only `1.155x` and `1.128x` the corresponding three-request C1 case wall.
+Projecting each C1 wall linearly to six serial requests, the observed C2 wall
+would be 42.243% and 43.582% lower; a six-request serial arm was not measured.
+Median per-request E2E increased 11.113% and 11.360%, while median TTFT
+increased by 0.171 and 0.161 seconds. These are 4K synthetic fixed-output
+observations, not proof for 64K agent tasks, but they justify an
+admission-first single-user fan-out test.
+
 Cold start is still the largest managed-lifetime cost. The comparable
 mapped-PLE depth lifetimes spent roughly 578–601 seconds in startup before
 useful work. For an interactive deployment, retaining a healthy resident
@@ -73,7 +83,63 @@ repeated long-prefix work across tool turns.
 This experiment asks whether the default cache avoids repeated prefill and
 hybrid-state work. It must not infer a cache hit from latency alone.
 
-### 2. Continuous decode steps
+### 2. Two-way single-user fan-out, admission first
+
+This is an application-scheduling experiment for one person decomposing one
+task into two independent subtasks. It is not a multi-user throughput claim.
+The retained 64K profile admits only one running request, so first freeze a
+separate C2-capable profile and prove its C1 behavior and safety before scoring
+parallel work.
+
+- Admission bundle: keep the 65,536-token pool, raise running requests from one
+  to two, provide eight lazy recurrent-state slots for two four-slot sequences,
+  and capture decode graph batches one and two. Treat this as one inseparable
+  concurrency-geometry bundle.
+- Capacity gate: precompute the sum of both requests' fully rendered inputs,
+  reserved outputs, and draft allowances. It must fit the shared pool with an
+  explicit safety margin; full-60K requests are therefore outside this arm.
+- Geometry control: compare the C2-capable profile at C1 against the retained
+  C1 profile before using it. Reject it if the extra graph/cache geometry
+  breaches pressure gates or materially slows one-request work.
+- Scheduling control: inside the same admitted C2 profile, run two fixed,
+  independent, strictly validated native cowork/agent subtasks serially and
+  then in parallel. Counterbalance serial/parallel order across fresh lifetimes
+  and keep total prompts, output budgets, tools, and oracle work identical. Add
+  Pi only after its separate client-stack admission.
+- Primary outcome: time until both correct artifacts are complete. Retain
+  per-task E2E, TTFT, output-limit hits, memory, swap, and fairness as
+  guardrails.
+
+Promote fan-out only for genuinely decomposable work with disjoint virtual
+workspaces or an exact deterministic merge. Sequential tool chains and one
+long-context task remain on the C1 path.
+
+### 3. Short-output MTP break-even
+
+The clean MTP3/off result proves the decode benefit at D256, but the primary
+native run's 20-token JSON, 36-token tool, and 32-token chat outputs spent
+69.4%, 78.3%, and 53.7% of E2E in TTFT. Trained-MTP loading also accounted for
+83.86 seconds of the 581.652-second cold start. Treating the clean 20-request
+MTP3/off D256 case-wall difference as linear in total output at fixed request
+count, then combining it with that separately attributed startup component,
+projects a coarse crossover near 3,127 total emitted tokens for that batch
+shape. It is not a break-even for one request or an arbitrary short-turn mix,
+an MTP2 prediction, or an end-to-end measurement.
+
+- Control: the promoted fixed-depth MTP profile.
+- Candidate: an otherwise identical MTP-off profile that removes only the
+  complete speculative-decoding bundle.
+- Suite: strict short JSON/tool cases, the complete multi-turn agent battery,
+  and D256 as a decode anchor. Hold reasoning, prompt, output, parser, cache,
+  and sampling policy fixed.
+- Design: fresh-lifetime ABBA with two independent lifetimes per arm. Report
+  cold start-to-first-correct-task wall and resident task wall separately;
+  never subtract startup after the fact to create a synthetic winner.
+- Interpretation: an MTP-off arm may justify a specialized ephemeral profile
+  if it wins cold managed wall without losing correctness. It should not
+  replace the resident default unless it also wins matched resident task wall.
+
+### 4. Continuous decode steps
 
 - Control: the runtime default, `num_continuous_decode_steps=1`.
 - Candidate: add `--num-continuous-decode-steps 2`.
@@ -88,7 +154,7 @@ The expected mechanism is fewer scheduler and CPU round trips at C1. This is a
 low-memory-risk serving flag, but a throughput gain cannot excuse worse
 interactive stop or cancellation behavior.
 
-### 3. Decode CUDA-graph causal control
+### 5. Decode CUDA-graph causal control
 
 - Control bundle: `--cuda-graph-backend-decode full` with
   `--cuda-graph-bs-decode 1`.
@@ -104,7 +170,7 @@ interactive stop or cancellation behavior.
 Do not capture graph batches above one for a C1 objective. They are unexercised
 at one running request and add capture, startup, and headroom cost.
 
-### 4. Conditional next chunk size
+### 6. Conditional next chunk size
 
 Propose another value only if the current queue reaches and completes a valid
 1,024/2,048 pair. An earlier promotion ends that queue without a chunk result.
@@ -120,7 +186,7 @@ At concurrency one, larger chunks have no scheduling-fairness justification.
 They must win on actual prefill or task wall time without harming interactive
 latency or pressure safety.
 
-### 5. Adaptive NEXTN, admission first
+### 7. Adaptive NEXTN, admission first
 
 The fixed-depth evidence shows declining marginal acceptance at deeper
 positions, so adaptive proposal length is plausible for mixed code and tool
@@ -137,7 +203,7 @@ accepted adaptive configuration and Qwen3.8-Flash-Next compatibility.
   audit, at most one explicit unscored counter-admission smoke may establish
   that the required native surface exists.
 
-### 6. Stream coalescing
+### 8. Stream coalescing
 
 This is lower priority than compute and cache axes.
 
