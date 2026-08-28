@@ -501,8 +501,9 @@ shared
 therefore normalizes `all` to `align`, while model initialization
 [rejects](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/models/qwen4_exp/nvidia/model.py#L612-L624)
 an `all` value that survives normalization. A launch flag is not evidence of a
-distinct treatment. Any later cache-mode experiment needs an admitted source
-change plus persisted resolved configuration before it can be scored.
+distinct treatment. Any later experiment that treats `all` as distinct needs
+an admitted source change plus persisted resolved configuration before it can
+be scored; the quarantined `align` canary above does not.
 
 ### Exact-head cache-state risk surface
 
