@@ -65,6 +65,12 @@ three-syscall `io_uring` policy is tested rather than assumed.
 
 ## Historical measured route identity
 
+The `gd91c3682b` package version is a reported base, not a reconstructible
+Qwen3.8 source identity. Pristine upstream d91 lacks the native Qwen4 model,
+QSA backend, and associated draft/glue code. The historical runtime identity is
+the exact image digest and its baked contents plus the tracked overlays below;
+source claims from public d91 must be re-attested against that image.
+
 - Container image: `lmsysorg/sglang@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4`
 - Reported SGLang base: `d91c3682b0b429e4c70df63cd57f819588ce29b0`
 - SGLang package: `0.0.0.dev1+gd91c3682b`

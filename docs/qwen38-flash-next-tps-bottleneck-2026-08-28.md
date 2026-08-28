@@ -173,7 +173,8 @@ following prerequisites as one total ranking. Items 1--3 and 6--9 are the
 retained-SGLang product track; items 4--5 are the vLLM systems track:
 
 1. keep a healthy server resident when interactive latency matters;
-2. retain mapped PLE, lazy recurrent state, and MTP2 as the safe default;
+2. retain mapped PLE, lazy recurrent state, and MTP2 as the historical measured
+   geometry, but rebaseline them on the newly admitted safe SM121 Triton runtime;
 3. finish the frozen low/no-thinking, chunk-size, and MTP2/MTP3 task-wall
    comparisons only after a clean host preflight;
 4. on the direct-mmap vLLM branch, test the isolated live-token hash slice
@@ -183,12 +184,11 @@ retained-SGLang product track; items 4--5 are the vLLM systems track:
    resolved CUTLASS path attested;
 6. measure the retained long-prefix Radix/lazy-state bundle against its
    coupled ChunkCache/one-live-state control for multi-turn agents;
-7. test the decode-graph causal control; keep continuous-decode out of the
-   queue until an admitted source actually consumes its setting;
-8. admit a separate C2-capable geometry for independent single-user fan-out;
-   and
-9. evaluate MTP off only as a cold short-task specialization, not as the
-   resident decode default.
+7. admit a separate C2-capable geometry for independent single-user fan-out;
+8. evaluate MTP off only as a cold short-task specialization, not as the
+   resident decode default; and
+9. test the decode-graph causal control; keep continuous-decode out of the
+   queue until an admitted source actually consumes its setting.
 
 The ranked product-track protocols are in the
 [single-user experiment backlog](qwen38-flash-next-single-user-next-experiments-2026-08-28.md).

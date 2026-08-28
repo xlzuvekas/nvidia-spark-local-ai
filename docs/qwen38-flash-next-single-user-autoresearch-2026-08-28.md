@@ -414,7 +414,8 @@ tracked. Each candidate record must retain its exact profile delta, cell order,
 run status, gate outcomes, aggregate C1 metrics, agent success and wall time,
 TTFT diagnostics, memory/swap extrema, and keep/discard decision.
 
-This one-night adaptive search is local and sequential. Even a confirmed local
+This one-night finite serving-configuration search is local and sequential.
+Even a confirmed local
 winner is not a general Qwen3.8 recommendation, an official agent benchmark,
 or evidence about a different context length, reasoning policy, runtime,
 quantization, checkpoint, workload, or machine.

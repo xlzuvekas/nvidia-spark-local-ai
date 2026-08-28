@@ -21,11 +21,19 @@ The tracks have different runtime and artifact baselines and are not one
 interleaved ranking. A systems candidate does not displace the retained product
 default until it passes its own admission and matched task gates.
 
+That baseline is a historical measured prior and the immutable campaign's
+frozen identity, not a runtime for new work: it uses the superseded SM121
+TRT-LLM overlay. Before any backlog experiment, build and admit a newly pinned
+safe SM121 Triton runtime, reproduce the baseline geometry and correctness, and
+establish fresh C1 rates. The ranking below orders product questions, not
+permission to reuse the historical image. Never pool performance across the
+d91-image composition and a `3681c4e`-derived or later safe runtime.
+
 ## Evidence-backed prior
 
-The retained default is mapped FP8 PLE, `extra_buffer_lazy`, and NEXTN depth
-two. Its two independent fresh-C1 lifetimes averaged 29.594 output tok/s; its
-two warmed D256 lifetimes averaged 29.402 tok/s. The single mapped depth-three
+The historical retained prior is mapped FP8 PLE, `extra_buffer_lazy`, and NEXTN
+depth two. Its two independent fresh-C1 lifetimes averaged 29.594 output tok/s;
+its two warmed D256 lifetimes averaged 29.402 tok/s. The single mapped depth-three
 D256 point reached 32.221 tok/s, but it was unreplicated and its first request
 fell to 13.905 GiB available memory, below the frozen 14 GiB floor. See the
 [matched depth study](qwen38-flash-next-ple-depth-study-2026-08-27.md).
@@ -78,7 +86,9 @@ repeated long-prefix work across tool turns.
   `extra_buffer_lazy`; require startup `impl=UnifiedRadixCache` with hybrid SSM.
 - Bundle B: add `--disable-radix-cache`; retained chunked prefill then selects
   `ChunkCache`, and the runtime disables the lazy Mamba-state predicates even
-  though their argument remains present. Require both facts at startup.
+  though their argument remains present. Require `impl=ChunkCache` at startup,
+  pin the source assertion that both lazy predicates are false, and corroborate
+  one-state runtime use with scalar pool/state evidence.
 - Suite: in each lifetime run T0 as a cold 32K--48K deterministic coding or
   document prefix, then T1 and T2 after appending prescribed assistant tool
   calls, tool results, and user suffixes. Do not feed arm-specific generated
@@ -112,7 +122,8 @@ selects `ChunkCache`. Bundle A has a four-slot lazy peak at C1 while B needs one
 live recurrent-state slot, but the explicit four-slot pool likely remains
 allocated in both, so do not claim reclaimed model memory. The public d91 tree
 predates public Qwen4/QSA support; attest the exact retained overlay before
-claiming that a matched Mamba checkpoint also restores its PLE/QSA side state.
+claiming that a matched hybrid prefix restores full/QSA KV and that matched
+Mamba-slot copy-on-write restores PLE side state.
 The result estimates whether the retained cache/state bundle avoids repeated
 prefill for iterative work. It must not infer a hit from latency or attribute
 the delta to Radix bookkeeping alone.
@@ -178,9 +189,9 @@ an MTP2 prediction, or an end-to-end measurement.
 ### 4. Rejected at source gate: continuous decode steps
 
 Do not run the planned `num_continuous_decode_steps=1` versus `2` ABBA on the
-reviewed sources. On both the measured
-[`d91c3682` source](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/server_args.py#L966-L970)
-and the safe-candidate
+reviewed public sources. On both the reported-base
+[`d91c3682` tree](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/server_args.py#L966-L970)
+and the safe-candidate public
 [`3681c4e` source](https://github.com/sgl-project/sglang/blob/3681c4e03f6848dff82972b3f572602d3b8394cc/python/sglang/srt/server_args.py#L972-L976),
 the field is declared with default one but no scheduler or worker reads it. The
 generated scalar CLI accepts any integer without a choices/range gate, while
@@ -188,11 +199,13 @@ the exact
 [scheduler loops](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/managers/scheduler.py#L1721-L1828)
 retain one plan/run/process cycle per iteration.
 
-Values one and two are therefore equivalent runtime configurations on these
-pins. Any measured difference would be noise, not a scheduler optimization.
-Reconsider this candidate only on a new admitted source identity that actually
-reads the field, with a unit or instrumented cadence test proving the branch is
-exercised before any GPU ABBA.
+Values one and two are therefore equivalent on those public trees. Pristine
+d91 predates Qwen4/QSA, while the measured image contains baked changes plus
+tracked overlays. Before considering its exact historical runtime, statically
+attest that the image's server/scheduler/worker files also have no consumer; if
+they match, reject without a GPU lifetime. Reconsider only on a new admitted
+source identity that actually reads the field, with a unit or instrumented
+cadence test proving the branch is exercised before any GPU ABBA.
 
 ### 5. Decode CUDA-graph causal control
 
@@ -204,10 +217,13 @@ exercised before any GPU ABBA.
   `max_bs=1` versus backend `disabled` with the same list and maximum. The
   control must
   increment `sglang:cuda_graph_passes_total{mode="decode_cuda_graph"}` and the
-  candidate only `mode="decode_none"`. Require nonzero versus zero graph
-  memory/startup fields for target verify, draft decode, and draft extend.
+  candidate only `mode="decode_none"`; this attests target replay. Separately
+  require exact pinned-runtime state/log evidence for nonzero versus zero
+  target-verify, draft-decode, and draft-extend capture construction.
 - Canary: before ABBA, run one exact capability/tool/stream/cancel sequence and
-  D256. Require finish/tool/cancel equivalence and no emission after a stop.
+  D256. Require semantic terminal/tool invariants, bounded cancellation, and no
+  emission after a stop; graph/eager token identity and cancel latency are not
+  assumed.
 - Design: ABBA with two independent lifetimes per arm. In every lifetime use
   the same unscored warmup, five D256 repetitions, and one fixed agent/tool
   fixture. Keep cold ready time, per-phase capture time/memory, D256, NEXTN
@@ -273,14 +289,13 @@ DP attention, multi-layer EAGLE, two-batch overlap, or PDMux can warn and fall
 back to static parameters. A future gate must attest the resolved algorithm,
 top-k, and `speculative_adaptive=true`, not argv alone.
 
-The decisive blocker is measurement validity. The scheduler records verify
-count and accepted totals but not the active tier/proposal depth. The tokenizer
-then
+The decisive blocker is measurement validity. The scheduler exposes
+point-in-time active-step/draft-token gauges and records verify/accepted totals,
+but no per-tier residence or per-verify proposed count. The tokenizer then
 [computes proposed drafts](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/managers/tokenizer_manager.py#L2780-L2803)
 as verify count times the startup fixed draft width. That formula becomes wrong
-after any adaptive tier switch. There is no native tier-residence histogram or
-per-position proposed counter, so even aggregate acceptance rate is not
-attestable for this arm.
+after any adaptive tier switch. A request or observation window spanning a
+switch therefore has no attestable aggregate proposed count or acceptance rate.
 
 The default union also expands the maximum from retained step two to step seven
 (three versus eight draft-token slots), and each candidate owns step-shaped
@@ -313,20 +328,24 @@ calls the streamer once, so it can jump over an emission endpoint. At two,
 scalar decode emits at lengths 1, 3, 5, and so on, while odd/even speculative
 acceptance can suppress several verify results or make the setting effectively
 inert. Finished requests always flush. Prefill produces one sampled token, so
-ordinary first semantic emission should remain unchanged.
+the first scheduler output batch is unchanged; measure the first non-empty
+semantic wire delta because reasoning/tool parsers may hold that batch.
 
 - Design: fresh-lifetime A/B/B/A at C1 with identical request bytes, sampling,
   reasoning, tools, and limits. In each lifetime run one deterministic streamed
   256--512-token coding/text case and one forced tool-call case; add one short
   cancel probe only if cancellation is part of promotion.
 - Wire attestation: timestamp loopback SSE privately and group parser-created
-  frames by cumulative completion-token value. Publish only semantic frame and
+  frames by cumulative completion-token value. Send identical
+  `stream_options={"include_usage":true,"continuous_usage_stats":true}` in both
+  arms and admit its semantics first. Publish only semantic frame and
   distinct-usage counts, first semantic delta, median/p95/maximum wire gap,
   first tool-name time, valid-tool-JSON time, finish time, total wall, final
   token count, and canonical final text/tool hash. Event arrays stay private.
-- Server controls: bracket requests with TTFT/E2E, generation/request,
-  speculative verify/accept, and abort counters. Server inter-token latency is
-  token-normalized at output batches, not a wire-gap metric.
+- Server controls: bracket requests with TTFT/E2E, generation/request, verify,
+  and abort counters plus acceptance and active-width gauges/log snapshots.
+  Server inter-token latency is token-normalized at output batches, not a
+  wire-gap metric.
 - Gates: exact final text/tool hash, token count, tool name/arguments, finish
   reason, complete terminal flush, no retraction/error, comparable NEXTN
   evidence, non-inferior first/tool-ready latency, and a frozen p95/maximum gap

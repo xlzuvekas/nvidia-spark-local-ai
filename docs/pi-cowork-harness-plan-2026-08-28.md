@@ -113,14 +113,18 @@ environment, task state, or evidence.
 
 For the coding campaign, expose exactly `read`, `bash`, `edit`, and `write`
 inside the task container. Freeze a 900-second task wall ceiling, a lower
-wrapper timeout with TERM/KILL grace, maximum model turns, concurrency one, one
-trial, and no automatic retry.
+wrapper timeout with TERM/KILL grace, maximum model turns, concurrency one, and
+no automatic retry. One trial is an unscored plumbing canary only. Any scored
+coding task requires at least two independent fresh-server-lifetime replicates
+and a frozen aggregation rule.
 
-Start with the existing pinned six-task Harbor set. A new Pi-only manifest must
-pin the starting server profile as
-`qwen38-flash-next-nvfp4-mtp2-agent64k-low-ple-mapped-sglang` and freeze a new
-execution order rather than importing the old Qwen Code/OpenCode
-counterbalance:
+Start with the existing pinned six-task Harbor set. The historical
+`qwen38-flash-next-nvfp4-mtp2-agent64k-low-ple-mapped-sglang` profile supplies
+only measured geometry and rate priors; its SM121 TRT-LLM overlay is
+superseded and must not serve a new Pi campaign. First derive and admit a new
+64K mapped-PLE/lazy/MTP2 profile on the pinned safe SM121 Triton runtime,
+rebaseline it, and give the Pi manifest a new identity. Freeze a new execution
+order rather than importing the old Qwen Code/OpenCode counterbalance:
 
 - `fix-git` as the isolation/correctness canary;
 - `cancel-async-tasks`;
@@ -171,8 +175,8 @@ source. Otherwise omit them, and never infer a cache hit from TTFT.
 
 ## C1 and C2 scheduling admission
 
-The retained 64K profile is C1-only. Freeze a separate C2 bundle with the same
-65,536-token context/pool, `--max-running-requests 2`,
+The newly safe-rebaselined 64K profile is C1-only. Freeze a separate C2 bundle
+with the same 65,536-token context/pool, `--max-running-requests 2`,
 `--max-mamba-cache-size 8`, and `--cuda-graph-bs-decode 1 2`. Before fan-out,
 compare this eight-lazy-slot profile at C1 with the retained C1 profile and
 reject it if the extra geometry breaches pressure gates or fails a numerical
