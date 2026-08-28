@@ -583,7 +583,9 @@ serving-flag backlog:
    successor. Those 21 are also exactly the profiles using recipe revision
    `bf2b7c75870d3703730b6bd8f3bb93dc622c278d` with explicit
    `trtllm_mha` decode; no other overlay targets that QSA source under a
-   different digest.
+   different digest. Enforce the digest retirement both when selecting a new
+   manifest profile and when loading an already-frozen plan; its embedded
+   historical `support_status` must not bypass the post-cutoff gate.
 3. Freeze the exact stacked PR #54129 tree rather than combining it with the
    newer #53896 head, then build an immutable Linux/aarch64 image. Use the
    pinned local Radix NVFP4-backbone/FP8-PLE checkpoint as the best-supported
