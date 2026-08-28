@@ -246,7 +246,7 @@ varied-token corruption. Preserve them as provenance only; do not run the
 commands or use these profiles for new inference. New work requires a newly
 built, pinned, and admitted SM121 Triton runtime. The sole bounded exception is
 the already-frozen fourteen-cell campaign under its unchanged cutoff and
-[full protocol](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md#current-status-safety-stopped-no-campaign-measurements).
+[full protocol](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md#current-status-time-inadmissible-no-campaign-measurements).
 
 The completed native profile pins `RadixArk/Qwen3.8-Flash-Next-NVFP4` revision
 `7b719225242aacd3dbd3f9407468c2ee9a9d2594`: 206 weight files totaling
