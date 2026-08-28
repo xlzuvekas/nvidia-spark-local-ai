@@ -67,7 +67,7 @@ The operational decision is:
 
 This is a strict delta from the day-one review's repository cutoff. The prior
 report was committed at `2026-08-27T21:58:59Z`; this review covers public
-changes visible through `2026-08-28T10:32:52Z`. Materially relevant changes
+changes visible through `2026-08-28T10:43:36Z`. Materially relevant changes
 that began before the cutoff but were absent from the prior report are labeled
 **supplemental** or explicitly described as a sequence that straddles the
 cutoff; they are not silently counted as day-two publications.
@@ -422,6 +422,38 @@ completed findings document for the claimed multimodal checks. Quantizing the
 PLE changes model semantics, so this artifact needs row-level, language,
 tool-use, long-context, and multimodal validation before performance matters.
 
+### Mixed-FP8 dense-projection checkpoint
+
+The current
+[`lovedheart/Qwen3.8-Flash-Next-NVFP4-FP8`](https://huggingface.co/lovedheart/Qwen3.8-Flash-Next-NVFP4-FP8)
+head is `344f3a6820275dfcbb07d9c2a9d8b7ca1f37b3af`. It retains NVFP4 routed
+experts while quantizing QSA attention and GDN input/output projections to
+128-by-128 blockwise FP8 weight-only form. That directly targets the dense
+BF16 GEMV/weight-traffic hypothesis rather than changing only PLE storage.
+
+[vLLM issue #54125](https://github.com/vllm-project/vllm/issues/54125) reports
+that the preview runtime incorrectly declares DeepGEMM supported for the whole
+SM120 capability family, including GB10's SM121. Selecting DeepGEMM for these
+FP8 projections hard-faulted during startup. With `VLLM_USE_DEEP_GEMM=0`, the
+author attested the CUTLASS fallback and reported 23.7 tok/s single-stream,
+156 tok/s at C16, and a 39% single-stream improvement over an
+unquantized-dense build of the same model. Reported NLL/token was 0.7610 versus
+0.7748 for that comparison.
+
+Those figures omit a pinned model revision, MTP state, request count, prompt
+shape and context, so they cannot be compared with this repository's 29.4
+tok/s mapped-MTP2 anchor. The Hugging Face card labels the artifact a private
+candidate and warns that stock SGLang silently mishandles its `FP8_PB_WO`
+layers; its documented one-command route was verified on SM120, not GB10.
+
+This is nevertheless the strongest new artifact-level performance hypothesis.
+Test it only after the exact vLLM mmap baseline is admitted, as a separate
+quality-first checkpoint arm with an immutable revision. On GB10, force and
+attest `VLLM_USE_DEEP_GEMM=0` before model load and reject any resolved
+DeepGEMM kernel rather than recovering after a device fault. Require matched
+perplexity, the strict coding/cowork gates, varied-token long context and the
+same MTP/runtime geometry before making a speed or quality claim.
+
 ### Task-shaped vLLM and llama.cpp comparison
 
 A one-GX10 report became visible in an
@@ -493,6 +525,7 @@ The support matrix at this review is therefore:
 | SGLang SM121 Triton QSA | Open corrective PR directly atop the restriction; useful one-Spark correctness evidence, but unmerged and publicly red/gated | Leading safe-kernel component candidate; reproduce before combining with storage |
 | SGLang `io_uring` PLE streaming | Open stacked PR with exact-checkpoint data, but its head predates the SM121 safety restriction and its public checks are red | Rebase/force the safe QSA fallback before testing the reader; use narrow syscall admission |
 | vLLM direct PLE mmap | Open PR stacked on open model support; promising row and spot checks; a different mmap stack has a growing-prefix cache-on crash | Highest-priority post-cutoff reproduction target, cache-off first |
+| Mixed-FP8 dense projections | Private-candidate checkpoint directly targets dense GEMV traffic; external speed claim lacks matched protocol and DeepGEMM hard-faults on SM121 | Quality-first arm after mmap baseline; force and attest CUTLASS |
 | vLLM CPU PLE offload | Open PR; default container isolation blocks `pidfd_getfd` | Do not add `SYS_PTRACE` merely to benchmark it; prefer mmap |
 | Compressed NVFP4 PLE | Pinned community checkpoint, minimal quality evidence | Quality-first research arm, not champion candidate |
 | HashK PLE | Source unavailable and reconstruction/output warnings | Reject |
