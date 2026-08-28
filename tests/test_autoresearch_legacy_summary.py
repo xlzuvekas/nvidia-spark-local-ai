@@ -216,7 +216,7 @@ class ImmutableLegacySummaryTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(before, after)
         self.assertEqual(expected, first["summary"])
-        self.assertEqual(1, first["snapshot_schema_version"])
+        self.assertEqual(2, first["snapshot_schema_version"])
         self.assertEqual(2, first["frozen_campaign_schema_version"])
         self.assertFalse(first["admission_journal_required"])
         self.assertEqual("sealed_legacy_unjournaled", first["provenance_mode"])
@@ -226,6 +226,7 @@ class ImmutableLegacySummaryTests(unittest.TestCase):
         self.assertEqual(seal.policy_sha256, first["policy_sha256"])
         self.assertEqual([], first["admissions"])
         self.assertEqual({}, first["controller_event_counts"])
+        self.assertEqual([], first["controller_decisions"])
 
     def test_run_refuses_sealed_campaign_before_execution_or_mutation(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:

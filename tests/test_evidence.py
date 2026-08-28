@@ -904,6 +904,12 @@ class EvidenceFixture:
         )
         cells_root = campaign_dir / "cells"
         cells_root.mkdir(parents=True)
+        descriptor = os.open(
+            campaign_dir / ".autoresearch.lock",
+            os.O_CREAT | os.O_EXCL | os.O_RDWR,
+            0o600,
+        )
+        os.close(descriptor)
         shutil.rmtree(self.run_dir)
 
         candidate_specs = (

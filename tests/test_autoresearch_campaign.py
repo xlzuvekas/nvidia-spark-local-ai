@@ -536,7 +536,7 @@ class AutoresearchCampaignEvidenceSnapshotTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(before, middle)
         self.assertEqual(before, after)
-        self.assertEqual(1, first["snapshot_schema_version"])
+        self.assertEqual(2, first["snapshot_schema_version"])
         self.assertEqual(3, first["frozen_campaign_schema_version"])
         self.assertTrue(first["admission_journal_required"])
         self.assertEqual("required", first["provenance_mode"])
@@ -554,6 +554,7 @@ class AutoresearchCampaignEvidenceSnapshotTests(unittest.TestCase):
             [proposal["candidate_id"] for proposal in first["proposals"]],
         )
         self.assertEqual({}, first["controller_event_counts"])
+        self.assertEqual([], first["controller_decisions"])
         self.assertEqual("expired", first["summary"]["status"])
         self.assertEqual(1, first["summary"]["admission_count"])
         self.assertEqual(1, len(first["admissions"]))

@@ -864,54 +864,58 @@ def freeze_campaign(
     # can then take a shared lock without creating or chmodding anything in the
     # source tree they are inspecting.
     with _campaign_lock(campaign_dir / ".autoresearch.lock"):
-        pass
-    frozen_cells: list[dict[str, Any]] = []
-    for ordinal, cell in enumerate(_cell_specs(preview), start=1):
-        cell_root = campaign_dir / "cells" / f"{ordinal:02d}-{cell['cell_id']}"
-        cell_root.mkdir(parents=True, exist_ok=False)
-        run_dir = create_plan_fn(
-            model=models[cell["profile_id"]],
-            suite=suite,
-            results_root=cell_root,
-            models_path=definition.models_path,
-            suite_path=definition.suite_path,
-        )
-        plan = json.loads((run_dir / "plan.json").read_text())
-        run_nonce = plan.get("run_nonce")
-        if (
-            not isinstance(run_nonce, str)
-            or len(run_nonce) != 32
-            or any(character not in "0123456789abcdef" for character in run_nonce)
+        frozen_cells: list[dict[str, Any]] = []
+        for ordinal, cell in enumerate(_cell_specs(preview), start=1):
+            cell_root = campaign_dir / "cells" / f"{ordinal:02d}-{cell['cell_id']}"
+            cell_root.mkdir(parents=True, exist_ok=False)
+            run_dir = create_plan_fn(
+                model=models[cell["profile_id"]],
+                suite=suite,
+                results_root=cell_root,
+                models_path=definition.models_path,
+                suite_path=definition.suite_path,
+            )
+            plan = json.loads((run_dir / "plan.json").read_text())
+            run_nonce = plan.get("run_nonce")
+            if (
+                not isinstance(run_nonce, str)
+                or len(run_nonce) != 32
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in run_nonce
+                )
+            ):
+                raise CampaignPlanningError("fresh cell plan has no ownership nonce")
+            frozen_cells.append(
+                {
+                    **cell,
+                    "ordinal": ordinal,
+                    "run_dir": str(run_dir.relative_to(campaign_dir)),
+                    "plan_fingerprint": plan["fingerprint"],
+                    "plan_integrity_hash": plan.get("integrity_hash"),
+                    "run_nonce": run_nonce,
+                }
+            )
+        if harness_tree_identity(workspace) != (
+            harness_tree_sha256,
+            harness_file_count,
         ):
-            raise CampaignPlanningError("fresh cell plan has no ownership nonce")
-        frozen_cells.append(
-            {
-                **cell,
-                "ordinal": ordinal,
-                "run_dir": str(run_dir.relative_to(campaign_dir)),
-                "plan_fingerprint": plan["fingerprint"],
-                "plan_integrity_hash": plan.get("integrity_hash"),
-                "run_nonce": run_nonce,
-            }
-        )
-    if harness_tree_identity(workspace) != (
-        harness_tree_sha256,
-        harness_file_count,
-    ):
-        raise CampaignPlanningError("benchmark harness changed while plans were frozen")
-    frozen = {
-        "schema_version": FROZEN_CAMPAIGN_SCHEMA_VERSION,
-        "created_at": utc_now(),
-        "harness_tree_sha256": harness_tree_sha256,
-        "harness_file_count": harness_file_count,
-        "admission_journal_required": True,
-        "preview": preview.to_mapping(),
-        "preview_digest": preview.digest,
-        "cells": frozen_cells,
-        "execution_started": False,
-    }
-    frozen["integrity_hash"] = content_hash(frozen, 64)
-    write_json(campaign_dir / "campaign.json", frozen)
+            raise CampaignPlanningError(
+                "benchmark harness changed while plans were frozen"
+            )
+        frozen = {
+            "schema_version": FROZEN_CAMPAIGN_SCHEMA_VERSION,
+            "created_at": utc_now(),
+            "harness_tree_sha256": harness_tree_sha256,
+            "harness_file_count": harness_file_count,
+            "admission_journal_required": True,
+            "preview": preview.to_mapping(),
+            "preview_digest": preview.digest,
+            "cells": frozen_cells,
+            "execution_started": False,
+        }
+        frozen["integrity_hash"] = content_hash(frozen, 64)
+        write_json(campaign_dir / "campaign.json", frozen)
     return campaign_dir
 
 
@@ -4556,6 +4560,27 @@ def _controller_event_counts(
     return {name: counts[name] for name in sorted(counts)}
 
 
+def _controller_decision_history(
+    events: tuple[dict[str, Any], ...],
+) -> list[dict[str, str]]:
+    """Project the ordered, scalar-only candidate decision history."""
+
+    history: list[dict[str, str]] = []
+    for event in events:
+        if event.get("event") != "autoresearch_candidate_decided":
+            continue
+        candidate_id = event.get("candidate_id")
+        decision = event.get("decision")
+        if not isinstance(candidate_id, str) or not isinstance(decision, str):
+            raise CampaignPlanningError(
+                "controller journal candidate decision is malformed"
+            )
+        history.append(
+            {"candidate_id": candidate_id, "decision": decision}
+        )
+    return history
+
+
 def _campaign_snapshot_payload(
     campaign: FrozenCampaign,
     *,
@@ -4565,7 +4590,7 @@ def _campaign_snapshot_payload(
     provenance_mode: str,
 ) -> dict[str, Any]:
     return {
-        "snapshot_schema_version": 1,
+        "snapshot_schema_version": 2,
         "frozen_campaign_schema_version": (
             FROZEN_CAMPAIGN_SCHEMA_VERSION
             if campaign.admission_journal_required
@@ -4595,21 +4620,21 @@ def _campaign_snapshot_payload(
         "summary": json.loads(canonical_json(summary)),
         "admissions": json.loads(canonical_json(admissions)),
         "controller_event_counts": _controller_event_counts(events),
+        "controller_decisions": _controller_decision_history(events),
     }
 
 
 def campaign_evidence_snapshot(campaign_dir: Path) -> dict[str, Any]:
     """Return a validated, scalar-only campaign snapshot without source writes."""
 
-    initial = load_frozen_campaign(campaign_dir)
-    lock_path = initial.campaign_dir / ".autoresearch.lock"
-    if _is_legacy_blocked_campaign(initial):
-        with _legacy_campaign_lock(lock_path):
-            campaign = load_frozen_campaign(initial.campaign_dir)
-            if not _is_legacy_blocked_campaign(campaign):
-                raise CampaignPlanningError(
-                    "preserved legacy campaign identity changed under lock"
-                )
+    source = Path(campaign_dir)
+    metadata = source.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise CampaignPlanningError("campaign evidence root must be a real directory")
+    root = source.resolve(strict=True)
+    with _read_only_campaign_lock(root / ".autoresearch.lock"):
+        campaign = load_frozen_campaign(root)
+        if _is_legacy_blocked_campaign(campaign):
             summary = _read_legacy_blocked_summary(campaign)
             return _campaign_snapshot_payload(
                 campaign,
@@ -4618,15 +4643,6 @@ def campaign_evidence_snapshot(campaign_dir: Path) -> dict[str, Any]:
                 events=(),
                 provenance_mode="sealed_legacy_unjournaled",
             )
-
-    with _read_only_campaign_lock(lock_path):
-        campaign = load_frozen_campaign(initial.campaign_dir)
-        if (
-            _is_legacy_blocked_campaign(campaign)
-            or campaign.integrity_hash != initial.integrity_hash
-            or campaign.created_at != initial.created_at
-        ):
-            raise CampaignPlanningError("campaign identity changed under read lock")
         events = tuple(
             _controller_events(Journal(campaign.campaign_dir / "events.jsonl"))
         )
@@ -4649,7 +4665,7 @@ def campaign_evidence_snapshot(campaign_dir: Path) -> dict[str, Any]:
             raise CampaignPlanningError(
                 "controller journal changed while evidence was snapshotted"
             )
-        final = load_frozen_campaign(initial.campaign_dir)
+        final = load_frozen_campaign(root)
         if (
             final.integrity_hash != campaign.integrity_hash
             or final.created_at != campaign.created_at
@@ -4664,6 +4680,26 @@ def campaign_evidence_snapshot(campaign_dir: Path) -> dict[str, Any]:
                 "required" if campaign.admission_journal_required else "optional"
             ),
         )
+
+
+@contextmanager
+def campaign_evidence_read_lock(campaign_dir: Path) -> Iterator[None]:
+    """Hold the existing campaign lock across a larger read-only export."""
+
+    source = Path(campaign_dir)
+    metadata = source.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise CampaignPlanningError("campaign evidence root must be a real directory")
+    root = source.resolve(strict=True)
+    lock_path = root / ".autoresearch.lock"
+    with _read_only_campaign_lock(lock_path):
+        initial = root.lstat()
+        yield
+        refreshed = root.lstat()
+        if _metadata_identity(refreshed) != _metadata_identity(initial):
+            raise CampaignPlanningError(
+                "campaign evidence root changed under read lock"
+            )
 
 
 def _require_checkpoint_boundary(campaign: FrozenCampaign) -> None:

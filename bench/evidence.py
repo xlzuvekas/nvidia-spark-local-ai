@@ -9,6 +9,7 @@ allowlists and validates the materialized output before publication.
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import ExitStack
 import csv
 from datetime import datetime, timezone
 import fcntl
@@ -26,6 +27,8 @@ import tempfile
 from typing import Any, Sequence
 import unicodedata
 
+from . import autoresearch as autoresearch_module
+from . import autoresearch_campaign as autoresearch_campaign_module
 from .annotations import (
     measurement_annotations,
     normalize_startup_safety_gate,
@@ -71,8 +74,11 @@ HARBOR_REPLICATE_COUNT = 2
 LOOP_EVIDENCE_KIND = "rlm_halo_loop_campaign"
 LOOP_RESULT_ROOTS = ("loop-campaigns", "loop-smoke-plans", "loop-smokes")
 AUTORESEARCH_RESULT_ROOT = "autoresearch"
-AUTORESEARCH_CAMPAIGN_SCHEMA_VERSION = 2
+AUTORESEARCH_EVIDENCE_KIND = "autoresearch_campaign"
+AUTORESEARCH_CAMPAIGN_SCHEMA_VERSION = 3
+AUTORESEARCH_CAMPAIGN_SCHEMA_VERSIONS = frozenset({2, 3})
 AUTORESEARCH_CELL_COUNT = 14
+AUTORESEARCH_REQUIRED_PREFLIGHT_MEMAVAILABLE_KIB = 117_964_800
 AUTORESEARCH_SUITE_ID = "qwen38-flash-next-sglang-agent64k-autoresearch"
 AUTORESEARCH_SUITE_DESCRIPTION = (
     "Immutable single-user coding/cowork proxy for the exact "
@@ -82,6 +88,21 @@ AUTORESEARCH_SUITE_DESCRIPTION = (
 AUTORESEARCH_SUITE_SPEC_DIGEST = (
     "260506c71f890e714b50829e69289fdc1e2490b1c7d5a8a08218c5369128a063"
 )
+_AUTORESEARCH_CONTROLLER_EVENTS = frozenset(autoresearch_module._EVENT_KEYS)
+_AUTORESEARCH_CONTROLLER_PHASES = frozenset(
+    {"new", "idle", "candidate", "pair", "scored", "terminal"}
+)
+_AUTORESEARCH_CANDIDATE_DECISIONS = frozenset(autoresearch_module._DECISIONS)
+_AUTORESEARCH_TERMINAL_REASONS = frozenset(
+    {"completed", *(kind.value for kind in autoresearch_module.FailureKind)}
+)
+_AUTORESEARCH_FAILURE_REASONS = frozenset(
+    reason for reason in _AUTORESEARCH_TERMINAL_REASONS if reason != "completed"
+)
+_AutoresearchSourceTopology = tuple[
+    tuple[int, int] | None,
+    tuple[tuple[Path, tuple[int, int]], ...],
+]
 MAX_SOURCE_JSON_BYTES = 16 * 1024 * 1024
 MAX_SOURCE_LINE_BYTES = 1024 * 1024
 MAX_OUTPUT_FILE_BYTES = 2 * 1024 * 1024
@@ -259,7 +280,7 @@ _AUTORESEARCH_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 _AUTORESEARCH_PATH_COMPONENT_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,255}\Z"
 )
-_AUTORESEARCH_CAMPAIGN_FIELDS = frozenset(
+_AUTORESEARCH_CAMPAIGN_V2_FIELDS = frozenset(
     {
         "schema_version",
         "created_at",
@@ -271,6 +292,9 @@ _AUTORESEARCH_CAMPAIGN_FIELDS = frozenset(
         "execution_started",
         "integrity_hash",
     }
+)
+_AUTORESEARCH_CAMPAIGN_V3_FIELDS = frozenset(
+    _AUTORESEARCH_CAMPAIGN_V2_FIELDS | {"admission_journal_required"}
 )
 _AUTORESEARCH_PREVIEW_FIELDS = frozenset(
     {
@@ -298,6 +322,145 @@ _AUTORESEARCH_CELL_FIELDS = frozenset(
         "plan_fingerprint",
         "plan_integrity_hash",
         "run_nonce",
+    }
+)
+_AUTORESEARCH_SNAPSHOT_FIELDS = frozenset(
+    {
+        "snapshot_schema_version",
+        "frozen_campaign_schema_version",
+        "campaign_id",
+        "created_at",
+        "cutoff_at",
+        "baseline_id",
+        "suite_id",
+        "planned_cell_count",
+        "campaign_integrity_sha256",
+        "preview_sha256",
+        "policy_sha256",
+        "harness_tree_sha256",
+        "harness_file_count",
+        "admission_journal_required",
+        "provenance_mode",
+        "proposals",
+        "summary",
+        "admissions",
+        "controller_event_counts",
+        "controller_decisions",
+    }
+)
+_AUTORESEARCH_ADMISSION_FIELDS = frozenset(
+    {
+        "schema_version",
+        "sequence",
+        "previous_record_sha256",
+        "record_sha256",
+        "campaign_id",
+        "campaign_integrity_sha256",
+        "preview_sha256",
+        "policy_sha256",
+        "controller_event_count",
+        "controller_prefix_sha256",
+        "target_kind",
+        "candidate_id",
+        "pair_index",
+        "observed_at",
+        "cutoff_at",
+        "remaining_s",
+        "required_remaining_s",
+        "memavailable_kib",
+        "required_memavailable_kib",
+        "swap_used_kib",
+        "max_starting_swap_kib",
+        "observed_harness_sha256",
+        "observed_harness_file_count",
+        "harness_matches",
+        "blockers",
+        "outcome",
+    }
+)
+_AUTORESEARCH_SUMMARY_V1_FIELDS = frozenset(
+    {
+        "blockers",
+        "calibration_recorded",
+        "campaign_id",
+        "candidate_decisions",
+        "next_pair_index",
+        "policy_digest",
+        "schema_version",
+        "status",
+        "terminal_reason",
+    }
+)
+_AUTORESEARCH_SUMMARY_V2_FIELDS = frozenset(
+    {
+        "schema_version",
+        "campaign_id",
+        "status",
+        "controller_status",
+        "controller_phase",
+        "terminal_reason",
+        "calibration_recorded",
+        "next_pair_index",
+        "candidate_decisions",
+        "admission_count",
+        "last_admission",
+        "last_admission_sha256",
+        "blockers",
+        "campaign_integrity_sha256",
+        "preview_sha256",
+        "policy_sha256",
+        "controller_event_count",
+        "controller_prefix_sha256",
+        "policy_digest",
+    }
+)
+_AUTORESEARCH_MANIFEST_FIELDS = frozenset(
+    {
+        "schema_version",
+        "evidence_kind",
+        "campaign_id",
+        "frozen_campaign_schema_version",
+        "created_at",
+        "cutoff_at",
+        "baseline_id",
+        "suite_id",
+        "planned_cell_count",
+        "campaign_integrity_sha256",
+        "preview_sha256",
+        "policy_sha256",
+        "harness_tree_sha256",
+        "harness_file_count",
+        "admission_journal_required",
+        "provenance_mode",
+        "candidates",
+        "status",
+        "payloads_included",
+        "sanitization_policy",
+    }
+)
+_AUTORESEARCH_CONTROLLER_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "controller_status",
+        "controller_phase",
+        "terminal_reason",
+        "calibration_recorded",
+        "next_pair_index",
+        "candidate_decision_count",
+        "candidate_decisions",
+        "controller_event_count",
+        "controller_event_counts",
+        "controller_prefix_sha256",
+    }
+)
+_AUTORESEARCH_ADMISSIONS_DOCUMENT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "record_count",
+        "records",
+        "effective_outcome",
+        "effective_blockers",
     }
 )
 _GROUPED_RUN_ROOT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -13045,6 +13208,592 @@ def _verify_loop_campaign_bundle(
     _verify_loop_telemetry(directory, root, campaign_id=campaign_id)
 
 
+def _verify_autoresearch_campaign_bundle(
+    root: Path,
+    directory: Path,
+    entry: dict[str, Any],
+    primary: Any,
+) -> None:
+    manifest = _expect_object_keys(
+        primary,
+        set(_AUTORESEARCH_MANIFEST_FIELDS),
+        name="autoresearch manifest",
+    )
+    if {path.name for path in directory.iterdir()} != {
+        "admissions.json",
+        "checksums.json",
+        "controller.json",
+        "manifest.json",
+    }:
+        raise EvidenceError("autoresearch campaign bundle file set changed")
+    if (
+        manifest.get("schema_version") != SCHEMA_VERSION
+        or manifest.get("evidence_kind") != AUTORESEARCH_EVIDENCE_KIND
+        or manifest.get("campaign_id") != entry.get("campaign_id")
+        or manifest.get("status") != entry.get("status")
+        or manifest.get("payloads_included") is not False
+        or manifest.get("sanitization_policy") != SANITIZATION_POLICY
+    ):
+        raise EvidenceError("autoresearch campaign index or manifest binding changed")
+
+    campaign_id = _autoresearch_id(
+        manifest.get("campaign_id"), name="published campaign ID"
+    )
+    frozen_schema = manifest.get("frozen_campaign_schema_version")
+    if type(frozen_schema) is not int or frozen_schema not in {2, 3}:
+        raise EvidenceError("autoresearch published frozen schema changed")
+    required = manifest.get("admission_journal_required")
+    if type(required) is not bool or required is not (frozen_schema == 3):
+        raise EvidenceError("autoresearch published admission requirement changed")
+    provenance_mode = manifest.get("provenance_mode")
+    if provenance_mode not in (
+        {"required"} if required else {"optional", "sealed_legacy_unjournaled"}
+    ):
+        raise EvidenceError("autoresearch published provenance mode changed")
+    created_at = _autoresearch_timestamp(
+        manifest.get("created_at"), name="published creation time"
+    )
+    cutoff_at = _autoresearch_timestamp(
+        manifest.get("cutoff_at"), name="published cutoff time"
+    )
+    baseline_id = _autoresearch_id(
+        manifest.get("baseline_id"), name="published baseline ID"
+    )
+    suite_id = _autoresearch_id(
+        manifest.get("suite_id"), name="published suite ID"
+    )
+    if (
+        _autoresearch_positive_integer(
+            manifest.get("planned_cell_count"), name="published planned cell count"
+        )
+        != AUTORESEARCH_CELL_COUNT
+    ):
+        raise EvidenceError("autoresearch published cell count changed")
+    campaign_integrity = _autoresearch_sha256(
+        manifest.get("campaign_integrity_sha256"),
+        name="published campaign integrity hash",
+    )
+    preview_sha256 = _autoresearch_sha256(
+        manifest.get("preview_sha256"), name="published preview hash"
+    )
+    policy_sha256 = _autoresearch_sha256(
+        manifest.get("policy_sha256"), name="published policy hash"
+    )
+    harness_sha256 = _autoresearch_sha256(
+        manifest.get("harness_tree_sha256"), name="published harness hash"
+    )
+    harness_count = _autoresearch_positive_integer(
+        manifest.get("harness_file_count"), name="published harness file count"
+    )
+    candidates = _autoresearch_candidates(manifest.get("candidates"))
+    candidate_ids = [candidate["candidate_id"] for candidate in candidates]
+    status = manifest.get("status")
+    if status not in {
+        "active",
+        "blocked_environment",
+        "complete",
+        "expired",
+        "planned",
+        "terminated",
+    }:
+        raise EvidenceError("autoresearch published status changed")
+
+    if campaign_id == autoresearch_campaign_module.EXPECTED_CAMPAIGN_ID:
+        if (
+            baseline_id != autoresearch_campaign_module.EXPECTED_BASELINE_ID
+            or suite_id != AUTORESEARCH_SUITE_ID
+            or cutoff_at != autoresearch_campaign_module.EXPECTED_CAMPAIGN_CUTOFF
+            or tuple(candidate_ids)
+            != autoresearch_campaign_module.EXPECTED_CANDIDATE_IDS
+            or policy_sha256
+            != autoresearch_campaign_module._LEGACY_BLOCKED_CAMPAIGN_SEAL.policy_sha256
+        ):
+            raise EvidenceError("autoresearch production identity changed")
+    elif required or provenance_mode == "sealed_legacy_unjournaled":
+        raise EvidenceError("non-production autoresearch provenance claim changed")
+
+    if provenance_mode == "sealed_legacy_unjournaled":
+        seal = autoresearch_campaign_module._LEGACY_BLOCKED_CAMPAIGN_SEAL
+        if (
+            created_at != seal.created_at
+            or cutoff_at != seal.cutoff
+            or campaign_integrity != seal.integrity_sha256
+            or preview_sha256 != seal.preview_sha256
+            or policy_sha256 != seal.policy_sha256
+            or harness_sha256 != seal.harness_tree_sha256
+            or harness_count != seal.harness_file_count
+            or status != "blocked_environment"
+        ):
+            raise EvidenceError("sealed autoresearch evidence identity changed")
+
+    controller = _expect_object_keys(
+        _load_json(directory / "controller.json", root),
+        set(_AUTORESEARCH_CONTROLLER_FIELDS),
+        name="autoresearch controller",
+    )
+    if (
+        controller.get("schema_version") != SCHEMA_VERSION
+        or controller.get("status") != status
+    ):
+        raise EvidenceError("autoresearch controller status binding changed")
+    controller_status = controller.get("controller_status")
+    if controller_status not in {"active", "complete", "planned", "terminated"}:
+        raise EvidenceError("autoresearch controller classification changed")
+    controller_phase = _autoresearch_id(
+        controller.get("controller_phase"), name="published controller phase"
+    )
+    if controller_phase not in _AUTORESEARCH_CONTROLLER_PHASES:
+        raise EvidenceError("autoresearch published controller phase changed")
+    terminal_reason = controller.get("terminal_reason")
+    if terminal_reason is not None:
+        terminal_reason = _autoresearch_id(
+            terminal_reason, name="published terminal reason"
+        )
+        if terminal_reason not in _AUTORESEARCH_TERMINAL_REASONS:
+            raise EvidenceError("autoresearch published terminal reason changed")
+    calibration_recorded = controller.get("calibration_recorded")
+    if type(calibration_recorded) is not bool:
+        raise EvidenceError("autoresearch published calibration flag changed")
+    next_pair_index = _autoresearch_nonnegative_integer(
+        controller.get("next_pair_index"), name="published next pair index"
+    )
+    if next_pair_index > 2 * len(candidates):
+        raise EvidenceError("autoresearch published next pair index is out of range")
+    controller_event_count = _autoresearch_nonnegative_integer(
+        controller.get("controller_event_count"),
+        name="published controller event count",
+    )
+    controller_prefix = _autoresearch_sha256(
+        controller.get("controller_prefix_sha256"),
+        name="published controller prefix hash",
+    )
+    event_counts_value = controller.get("controller_event_counts")
+    if not isinstance(event_counts_value, dict):
+        raise EvidenceError("autoresearch published event counts must be an object")
+    event_counts: dict[str, int] = {}
+    for event_name, count in event_counts_value.items():
+        checked_name = _autoresearch_id(
+            event_name, name="published controller event name"
+        )
+        if checked_name not in _AUTORESEARCH_CONTROLLER_EVENTS:
+            raise EvidenceError("autoresearch published controller event changed")
+        event_counts[checked_name] = _autoresearch_positive_integer(
+            count, name="published controller event count"
+        )
+    if sum(event_counts.values()) != controller_event_count:
+        raise EvidenceError("autoresearch published event counts disagree")
+    empty_prefix = hashlib.sha256(b"[]").hexdigest()
+    if controller_event_count == 0 and controller_prefix != empty_prefix:
+        raise EvidenceError("autoresearch empty controller prefix changed")
+
+    decision_count = _autoresearch_nonnegative_integer(
+        controller.get("candidate_decision_count"),
+        name="published candidate decision count",
+    )
+    decisions = _autoresearch_decision_history(
+        controller.get("candidate_decisions"), candidate_ids=candidate_ids
+    )
+    if decision_count != len(decisions):
+        raise EvidenceError("autoresearch candidate decision count changed")
+    if event_counts.get("autoresearch_candidate_decided", 0) != len(decisions):
+        raise EvidenceError("autoresearch decisions disagree with controller events")
+
+    campaign_started_count = event_counts.get(
+        "autoresearch_campaign_started", 0
+    )
+    campaign_completed_count = event_counts.get(
+        "autoresearch_campaign_completed", 0
+    )
+    campaign_terminated_count = event_counts.get(
+        "autoresearch_campaign_terminated", 0
+    )
+    pair_started_count = event_counts.get("autoresearch_pair_started", 0)
+    pair_scored_count = event_counts.get("autoresearch_pair_scored", 0)
+    cell_completed_count = event_counts.get(
+        "autoresearch_cell_completed", 0
+    )
+    candidate_discarded_count = event_counts.get(
+        "autoresearch_candidate_discarded", 0
+    )
+    if pair_scored_count != next_pair_index:
+        raise EvidenceError("autoresearch scored-pair count changed")
+    open_pair_count = pair_started_count - pair_scored_count
+    open_pair_cells = cell_completed_count - (2 * pair_scored_count)
+    undecided_scores = pair_scored_count - len(decisions)
+    if (
+        open_pair_count < 0
+        or open_pair_cells < 0
+        or open_pair_cells > 2 * open_pair_count
+    ):
+        raise EvidenceError("autoresearch pair event topology changed")
+    if undecided_scores not in {0, 1}:
+        raise EvidenceError("autoresearch score decision topology changed")
+
+    if controller_status == "planned":
+        allowed_planned_statuses = (
+            {"blocked_environment"}
+            if provenance_mode == "sealed_legacy_unjournaled"
+            else {"blocked_environment", "expired", "planned"}
+        )
+        if (
+            status not in allowed_planned_statuses
+            or controller_phase != "new"
+            or terminal_reason is not None
+            or calibration_recorded
+            or next_pair_index != 0
+            or decisions
+            or controller_event_count != 0
+            or event_counts
+        ):
+            raise EvidenceError("autoresearch planned controller state changed")
+    elif controller_status == "active":
+        if (
+            status != "active"
+            or controller_phase not in {"idle", "candidate", "pair", "scored"}
+            or terminal_reason is not None
+            or controller_event_count == 0
+            or campaign_started_count != 1
+            or campaign_completed_count != 0
+            or campaign_terminated_count != 0
+            or open_pair_count
+            > candidate_discarded_count
+            + (1 if controller_phase == "pair" else 0)
+            or (
+                controller_phase == "pair"
+                and open_pair_count <= candidate_discarded_count
+            )
+            or undecided_scores != (1 if controller_phase == "scored" else 0)
+        ):
+            raise EvidenceError("autoresearch active controller state changed")
+    elif controller_status == "complete":
+        if (
+            status != "complete"
+            or controller_phase != "terminal"
+            or terminal_reason != "completed"
+            or campaign_started_count != 1
+            or campaign_completed_count != 1
+            or campaign_terminated_count != 0
+            or not calibration_recorded
+            or open_pair_count > candidate_discarded_count
+        ):
+            raise EvidenceError("autoresearch complete controller state changed")
+    elif (
+        controller_phase != "terminal"
+        or terminal_reason not in _AUTORESEARCH_FAILURE_REASONS
+        or campaign_started_count != 1
+        or campaign_completed_count != 0
+        or campaign_terminated_count != 1
+        or open_pair_count > candidate_discarded_count + 1
+        or status
+        != ("expired" if terminal_reason == "cutoff" else "terminated")
+    ):
+        raise EvidenceError("autoresearch terminated controller state changed")
+
+    if controller_status != "planned" and controller_event_count == 0:
+        raise EvidenceError("autoresearch executed controller lacks start event")
+    if controller_status in {"complete", "terminated"} and undecided_scores not in {
+        0,
+        1,
+    }:
+        raise EvidenceError("autoresearch terminal event topology changed")
+
+    admissions = _expect_object_keys(
+        _load_json(directory / "admissions.json", root),
+        set(_AUTORESEARCH_ADMISSIONS_DOCUMENT_FIELDS),
+        name="autoresearch admissions",
+    )
+    records_value = admissions.get("records")
+    record_count = _autoresearch_nonnegative_integer(
+        admissions.get("record_count"), name="published admission record count"
+    )
+    if (
+        admissions.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(records_value, list)
+        or record_count != len(records_value)
+    ):
+        raise EvidenceError("autoresearch published admission count changed")
+
+    previous_record = "0" * 64
+    previous_controller_count = 0
+    previous_observed_at: datetime | None = None
+    prefix_by_count: dict[int, str] = {}
+    target_by_count: dict[int, tuple[str, str, int]] = {}
+    search_target_by_pair: dict[int, tuple[str, str, int]] = {}
+    screen_pair_by_candidate: dict[str, int] = {}
+    confirmation_candidates: set[str] = set()
+    admitted_search_pairs: set[int] = set()
+    search_seen = False
+    latest_search_pair = -1
+    latest_candidate_position = -1
+    records: list[dict[str, Any]] = []
+    for expected_sequence, raw_record in enumerate(records_value, start=1):
+        record = _expect_object_keys(
+            raw_record,
+            set(_AUTORESEARCH_ADMISSION_FIELDS),
+            name="published autoresearch admission record",
+        )
+        if record.get("schema_version") != 1:
+            raise EvidenceError("autoresearch admission schema version changed")
+        if (
+            _autoresearch_positive_integer(
+                record.get("sequence"), name="admission sequence"
+            )
+            != expected_sequence
+            or record.get("previous_record_sha256") != previous_record
+        ):
+            raise EvidenceError("autoresearch admission chain changed")
+        record_sha256 = _autoresearch_sha256(
+            record.get("record_sha256"), name="admission record hash"
+        )
+        if record_sha256 != _autoresearch_admission_sha256(record):
+            raise EvidenceError("autoresearch admission record digest changed")
+        if (
+            record.get("campaign_id") != campaign_id
+            or record.get("campaign_integrity_sha256") != campaign_integrity
+            or record.get("preview_sha256") != preview_sha256
+            or record.get("policy_sha256") != policy_sha256
+            or record.get("cutoff_at") != cutoff_at
+        ):
+            raise EvidenceError("autoresearch admission campaign binding changed")
+        admission_controller_count = _autoresearch_nonnegative_integer(
+            record.get("controller_event_count"),
+            name="admission controller event count",
+        )
+        if (
+            admission_controller_count < previous_controller_count
+            or admission_controller_count > controller_event_count
+        ):
+            raise EvidenceError("autoresearch admission controller prefix moved")
+        admission_prefix = _autoresearch_sha256(
+            record.get("controller_prefix_sha256"),
+            name="admission controller prefix hash",
+        )
+        prior_prefix = prefix_by_count.setdefault(
+            admission_controller_count, admission_prefix
+        )
+        if prior_prefix != admission_prefix:
+            raise EvidenceError("autoresearch admission prefix hash changed")
+        if admission_controller_count == 0 and admission_prefix != empty_prefix:
+            raise EvidenceError("autoresearch admission empty prefix changed")
+        if (
+            admission_controller_count == controller_event_count
+            and admission_prefix != controller_prefix
+        ):
+            raise EvidenceError("autoresearch admission tail prefix changed")
+
+        target_kind = record.get("target_kind")
+        candidate_id = record.get("candidate_id")
+        pair_index = _autoresearch_nonnegative_integer(
+            record.get("pair_index"), name="admission pair index"
+        )
+        if target_kind == "calibration":
+            if candidate_id != "control" or pair_index != 0:
+                raise EvidenceError("autoresearch calibration target changed")
+            if search_seen or admission_controller_count not in {0, 1}:
+                raise EvidenceError(
+                    "autoresearch calibration target history changed"
+                )
+        elif target_kind in {"screen", "confirmation"}:
+            if candidate_id not in candidate_ids:
+                raise EvidenceError("autoresearch search target changed")
+            if not calibration_recorded or admission_controller_count < 1:
+                raise EvidenceError(
+                    "autoresearch search target lacks calibration provenance"
+                )
+            search_seen = True
+        else:
+            raise EvidenceError("autoresearch admission target kind changed")
+        target = (str(target_kind), str(candidate_id), pair_index)
+        prior_target = target_by_count.setdefault(
+            admission_controller_count, target
+        )
+        if prior_target != target:
+            raise EvidenceError(
+                "autoresearch admission target changed at one controller prefix"
+            )
+        if target_kind != "calibration":
+            if pair_index > next_pair_index:
+                raise EvidenceError("autoresearch admission pair index is ahead")
+            prior_pair_target = search_target_by_pair.get(pair_index)
+            if prior_pair_target is not None:
+                if prior_pair_target != target or pair_index != latest_search_pair:
+                    raise EvidenceError(
+                        "autoresearch search target history moved backward"
+                    )
+            else:
+                if pair_index != latest_search_pair + 1:
+                    raise EvidenceError(
+                        "autoresearch search pair indices are not contiguous"
+                    )
+                position = candidate_ids.index(str(candidate_id))
+                if target_kind == "screen":
+                    if (
+                        str(candidate_id) in screen_pair_by_candidate
+                        or position != latest_candidate_position + 1
+                    ):
+                        raise EvidenceError(
+                            "autoresearch candidate screen order changed"
+                        )
+                    screen_pair_by_candidate[str(candidate_id)] = pair_index
+                    latest_candidate_position = position
+                else:
+                    screen_pair = screen_pair_by_candidate.get(str(candidate_id))
+                    if (
+                        screen_pair is None
+                        or pair_index != screen_pair + 1
+                        or position != latest_candidate_position
+                        or str(candidate_id) in confirmation_candidates
+                    ):
+                        raise EvidenceError(
+                            "autoresearch confirmation target history changed"
+                        )
+                    confirmation_candidates.add(str(candidate_id))
+                search_target_by_pair[pair_index] = target
+                latest_search_pair = pair_index
+
+        observed_at_text = _autoresearch_timestamp(
+            record.get("observed_at"), name="admission observation time"
+        )
+        observed_at = datetime.fromisoformat(
+            observed_at_text.replace("Z", "+00:00")
+        )
+        cutoff = datetime.fromisoformat(cutoff_at.replace("Z", "+00:00"))
+        if previous_observed_at is not None and observed_at < previous_observed_at:
+            raise EvidenceError("autoresearch admission observation time moved backward")
+        remaining_s = _autoresearch_finite_float(
+            record.get("remaining_s"), name="admission remaining seconds"
+        )
+        required_remaining_s = _autoresearch_finite_float(
+            record.get("required_remaining_s"),
+            name="admission required remaining seconds",
+        )
+        if (
+            remaining_s != (cutoff - observed_at).total_seconds()
+            or required_remaining_s
+            != float(autoresearch_campaign_module.PAIR_ADMISSION_REMAINING_S)
+        ):
+            raise EvidenceError("autoresearch admission time calculation changed")
+        memavailable_kib = _autoresearch_nonnegative_integer(
+            record.get("memavailable_kib"), name="admission available memory"
+        )
+        required_memavailable_kib = _autoresearch_nonnegative_integer(
+            record.get("required_memavailable_kib"),
+            name="admission required available memory",
+        )
+        swap_used_kib = _autoresearch_nonnegative_integer(
+            record.get("swap_used_kib"), name="admission used swap"
+        )
+        max_starting_swap_kib = _autoresearch_nonnegative_integer(
+            record.get("max_starting_swap_kib"),
+            name="admission maximum starting swap",
+        )
+        if (
+            required_memavailable_kib
+            != AUTORESEARCH_REQUIRED_PREFLIGHT_MEMAVAILABLE_KIB
+            or max_starting_swap_kib
+            != autoresearch_campaign_module.HOST_SAFETY_MAX_STARTING_SWAP_KIB
+        ):
+            raise EvidenceError("autoresearch admission safety binding changed")
+        observed_harness = _autoresearch_sha256(
+            record.get("observed_harness_sha256"),
+            name="admission observed harness hash",
+        )
+        observed_harness_count = _autoresearch_positive_integer(
+            record.get("observed_harness_file_count"),
+            name="admission observed harness file count",
+        )
+        harness_matches = record.get("harness_matches")
+        expected_harness_match = (
+            observed_harness == harness_sha256
+            and observed_harness_count == harness_count
+        )
+        if type(harness_matches) is not bool or harness_matches != expected_harness_match:
+            raise EvidenceError("autoresearch admission harness match changed")
+        blockers: list[str] = []
+        if not expected_harness_match:
+            blockers.append("harness_code_changed")
+        if remaining_s < required_remaining_s:
+            blockers.append("insufficient_time_for_pair")
+        if swap_used_kib > max_starting_swap_kib:
+            blockers.append("starting_swap_above_clean_limit")
+        if memavailable_kib < required_memavailable_kib:
+            blockers.append("insufficient_preflight_memavailable")
+        expected_outcome = (
+            "admitted"
+            if not blockers
+            else "cutoff"
+            if blockers == ["insufficient_time_for_pair"]
+            else "blocked_environment"
+        )
+        if record.get("blockers") != blockers or record.get("outcome") != expected_outcome:
+            raise EvidenceError("autoresearch admission outcome changed")
+        if expected_outcome == "admitted" and target_kind != "calibration":
+            admitted_search_pairs.add(pair_index)
+        if expected_outcome != "admitted" and (
+            target_kind != "calibration" or admission_controller_count == 1
+        ) and expected_sequence != record_count:
+            raise EvidenceError("autoresearch denial is not the admission tail")
+        records.append(record)
+        previous_record = record_sha256
+        previous_controller_count = admission_controller_count
+        previous_observed_at = observed_at
+
+    effective_outcome = admissions.get("effective_outcome")
+    effective_blockers = admissions.get("effective_blockers")
+    if records:
+        if (
+            effective_outcome != records[-1]["outcome"]
+            or effective_blockers != records[-1]["blockers"]
+        ):
+            raise EvidenceError("autoresearch effective admission tail changed")
+    elif provenance_mode == "sealed_legacy_unjournaled":
+        if (
+            effective_outcome != "blocked_environment"
+            or effective_blockers
+            != list(autoresearch_campaign_module._LEGACY_BLOCKED_CAMPAIGN_BLOCKERS)
+        ):
+            raise EvidenceError("sealed autoresearch blocker evidence changed")
+    elif effective_outcome != "unobserved" or effective_blockers != []:
+        raise EvidenceError("autoresearch unobserved admission state changed")
+
+    if provenance_mode == "required" and controller_event_count and not records:
+        raise EvidenceError("autoresearch executed state lacks required admission")
+    if provenance_mode == "sealed_legacy_unjournaled" and records:
+        raise EvidenceError("sealed autoresearch evidence invented admissions")
+    if not set(range(next_pair_index)) <= admitted_search_pairs:
+        raise EvidenceError("autoresearch scored pair lacks admitted provenance")
+
+    if controller_status == "planned":
+        expected_status = (
+            "blocked_environment"
+            if provenance_mode == "sealed_legacy_unjournaled"
+            else "expired"
+            if records and records[-1]["outcome"] == "cutoff"
+            else "blocked_environment"
+            if records and records[-1]["outcome"] == "blocked_environment"
+            else "planned"
+        )
+        if status != expected_status:
+            raise EvidenceError("autoresearch planned admission status changed")
+    elif records and records[-1]["outcome"] != "admitted":
+        if controller_status != "terminated":
+            raise EvidenceError("autoresearch live controller has a denied tail")
+        tail_blockers = records[-1]["blockers"]
+        expected_terminal_reason = (
+            "audit"
+            if "harness_code_changed" in tail_blockers
+            else "swap_pressure"
+            if "starting_swap_above_clean_limit" in tail_blockers
+            else "memory_pressure"
+            if "insufficient_preflight_memavailable" in tail_blockers
+            else "cutoff"
+        )
+        if terminal_reason != expected_terminal_reason:
+            raise EvidenceError(
+                "autoresearch admission denial terminal reason changed"
+            )
+
+
 def _verify_simple_bundle(
     root: Path,
     entry: dict[str, Any],
@@ -13074,6 +13823,17 @@ def _verify_simple_bundle(
         raise EvidenceError(f"{category} schema mismatch: {identity}")
     if primary.get("evidence_kind") != entry["evidence_kind"]:
         raise EvidenceError(f"{category} kind mismatch: {identity}")
+    if category == "campaigns" and (
+        entry.get("evidence_kind") == AUTORESEARCH_EVIDENCE_KIND
+        or primary.get("evidence_kind") == AUTORESEARCH_EVIDENCE_KIND
+    ):
+        if (
+            entry.get("evidence_kind") != AUTORESEARCH_EVIDENCE_KIND
+            or primary.get("evidence_kind") != AUTORESEARCH_EVIDENCE_KIND
+        ):
+            raise EvidenceError("autoresearch campaign evidence kind changed")
+        _verify_autoresearch_campaign_bundle(root, directory, entry, primary)
+        return
     if category == "campaigns" and (
         identity == HARBOR_CAMPAIGN_ID
         or entry["evidence_kind"] == HARBOR_EVIDENCE_KIND
@@ -13711,20 +14471,142 @@ def _autoresearch_published_run_id(
     return checked
 
 
-def _autoresearch_run_dirs(results_root: Path) -> list[tuple[Path, str]]:
-    """Validate frozen campaigns and enumerate only their declared cell plans."""
+def _require_autoresearch_lock(campaign_dir: Path) -> None:
+    lock_path = campaign_dir / ".autoresearch.lock"
+    try:
+        metadata = lock_path.lstat()
+    except OSError as error:
+        raise EvidenceError("autoresearch campaign lock is missing") from error
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_size != 0
+    ):
+        raise EvidenceError("autoresearch campaign lock topology changed")
 
+
+def _planned_autoresearch_snapshot(
+    campaign: dict[str, Any],
+    preview: dict[str, Any],
+    *,
+    proposals: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Project a pristine non-production schema-2 fixture for migration tests."""
+
+    campaign_id = str(preview["campaign_id"])
+    policy_digest = str(preview["policy_digest"])
+    empty_prefix = hashlib.sha256(b"[]").hexdigest()
+    summary = {
+        "schema_version": 2,
+        "campaign_id": campaign_id,
+        "status": "planned",
+        "controller_status": "planned",
+        "controller_phase": "new",
+        "terminal_reason": None,
+        "calibration_recorded": False,
+        "next_pair_index": 0,
+        "candidate_decisions": {},
+        "admission_count": 0,
+        "last_admission": None,
+        "last_admission_sha256": None,
+        "blockers": [],
+        "campaign_integrity_sha256": campaign["integrity_hash"],
+        "preview_sha256": campaign["preview_digest"],
+        "policy_sha256": policy_digest,
+        "controller_event_count": 0,
+        "controller_prefix_sha256": empty_prefix,
+        "policy_digest": policy_digest,
+    }
+    return {
+        "snapshot_schema_version": 2,
+        "frozen_campaign_schema_version": 2,
+        "campaign_id": campaign_id,
+        "created_at": campaign["created_at"],
+        "cutoff_at": preview["cutoff"],
+        "baseline_id": preview["baseline_id"],
+        "suite_id": preview["suite_id"],
+        "planned_cell_count": preview["planned_cell_count"],
+        "campaign_integrity_sha256": campaign["integrity_hash"],
+        "preview_sha256": campaign["preview_digest"],
+        "policy_sha256": policy_digest,
+        "harness_tree_sha256": campaign["harness_tree_sha256"],
+        "harness_file_count": campaign["harness_file_count"],
+        "admission_journal_required": False,
+        "provenance_mode": "optional",
+        "proposals": [
+            {
+                "candidate_id": proposal["candidate_id"],
+                "axis": proposal["axis"],
+                "delta_sha256": proposal["delta_digest"],
+            }
+            for proposal in proposals
+        ],
+        "summary": summary,
+        "admissions": [],
+        "controller_event_counts": {},
+        "controller_decisions": [],
+    }
+
+
+def _autoresearch_source_snapshot(
+    campaign_dir: Path,
+    campaign: dict[str, Any],
+    preview: dict[str, Any],
+    *,
+    proposals: list[dict[str, Any]],
+    campaign_entries: set[str],
+) -> dict[str, Any]:
+    _require_autoresearch_lock(campaign_dir)
+    schema_version = campaign["schema_version"]
+    campaign_id = str(preview["campaign_id"])
+    if (
+        schema_version == 2
+        and campaign_id != autoresearch_campaign_module.EXPECTED_CAMPAIGN_ID
+    ):
+        if campaign_entries != {".autoresearch.lock", "campaign.json", "cells"}:
+            raise EvidenceError(
+                "non-production schema-2 autoresearch fixture contains state"
+            )
+        return _planned_autoresearch_snapshot(
+            campaign, preview, proposals=proposals
+        )
+    try:
+        snapshot = autoresearch_campaign_module.campaign_evidence_snapshot(
+            campaign_dir
+        )
+    except (OSError, ValueError) as error:
+        raise EvidenceError(
+            "autoresearch campaign state failed strict validation"
+        ) from error
+    if not isinstance(snapshot, dict) or set(snapshot) != set(
+        _AUTORESEARCH_SNAPSHOT_FIELDS
+    ):
+        raise EvidenceError("autoresearch campaign snapshot schema changed")
+    return snapshot
+
+
+def _autoresearch_sources(
+    results_root: Path,
+    *,
+    locked_topology: _AutoresearchSourceTopology,
+) -> tuple[list[tuple[Path, str]], list[dict[str, Any]]]:
+    """Validate campaigns and return their snapshots plus declared cell plans."""
+
+    campaign_dirs = _validate_autoresearch_source_topology(
+        results_root, locked_topology
+    )
+    if locked_topology[0] is None:
+        return [], []
     autoresearch_root = results_root / AUTORESEARCH_RESULT_ROOT
-    if not autoresearch_root.exists():
-        return []
     autoresearch_root = _autoresearch_real_directory(
         autoresearch_root, name="results root"
     )
-    campaign_dirs = sorted(autoresearch_root.iterdir())
-    if not campaign_dirs:
-        raise EvidenceError("autoresearch results root must contain a campaign")
 
     published: list[tuple[Path, str]] = []
+    campaign_snapshots: list[dict[str, Any]] = []
     for campaign_dir in campaign_dirs:
         if (
             _AUTORESEARCH_PATH_COMPONENT_RE.fullmatch(campaign_dir.name) is None
@@ -13736,6 +14618,7 @@ def _autoresearch_run_dirs(results_root: Path) -> list[tuple[Path, str]]:
         campaign_entries = {entry.name: entry for entry in campaign_dir.iterdir()}
         allowed_campaign_files = {
             ".autoresearch.lock",
+            "admissions.jsonl",
             "calibration.json",
             "campaign.json",
             "events.jsonl",
@@ -13761,12 +14644,26 @@ def _autoresearch_run_dirs(results_root: Path) -> list[tuple[Path, str]]:
                 raise EvidenceError("autoresearch campaign control must be a real file")
 
         campaign = _load_json(campaign_dir / "campaign.json", results_root)
-        if not isinstance(campaign, dict) or set(campaign) != set(
-            _AUTORESEARCH_CAMPAIGN_FIELDS
-        ):
+        if not isinstance(campaign, dict):
             raise EvidenceError("autoresearch campaign schema changed")
-        if campaign.get("schema_version") != AUTORESEARCH_CAMPAIGN_SCHEMA_VERSION:
+        schema_version = campaign.get("schema_version")
+        expected_campaign_fields = (
+            _AUTORESEARCH_CAMPAIGN_V3_FIELDS
+            if schema_version == AUTORESEARCH_CAMPAIGN_SCHEMA_VERSION
+            else _AUTORESEARCH_CAMPAIGN_V2_FIELDS
+        )
+        if (
+            schema_version not in AUTORESEARCH_CAMPAIGN_SCHEMA_VERSIONS
+            or set(campaign) != set(expected_campaign_fields)
+        ):
             raise EvidenceError("unsupported autoresearch campaign schema")
+        if (
+            schema_version == AUTORESEARCH_CAMPAIGN_SCHEMA_VERSION
+            and campaign.get("admission_journal_required") is not True
+        ):
+            raise EvidenceError(
+                "autoresearch admission-journal requirement changed"
+            )
         campaign_integrity = _autoresearch_sha256(
             campaign.get("integrity_hash"), name="campaign integrity hash"
         )
@@ -14061,16 +14958,511 @@ def _autoresearch_run_dirs(results_root: Path) -> list[tuple[Path, str]]:
         if actual_plan_paths != declared_plan_paths:
             raise EvidenceError("autoresearch campaign contains an undeclared plan")
 
+        campaign_snapshots.append(
+            _autoresearch_source_snapshot(
+                campaign_dir,
+                campaign,
+                preview,
+                proposals=proposals,
+                campaign_entries=set(campaign_entries),
+            )
+        )
+
     published_ids = [run_id for _, run_id in published]
     if len(published_ids) != len(set(published_ids)):
         raise EvidenceError("autoresearch published run identifiers are duplicated")
-    return published
+    campaign_ids = [snapshot.get("campaign_id") for snapshot in campaign_snapshots]
+    if len(campaign_ids) != len(set(campaign_ids)):
+        raise EvidenceError("autoresearch campaign identifiers are duplicated")
+    return published, campaign_snapshots
+
+
+def _hold_autoresearch_source_locks(
+    results_root: Path, stack: ExitStack
+) -> _AutoresearchSourceTopology:
+    """Keep every campaign stable through snapshot and nested-run export."""
+
+    autoresearch_root = results_root / AUTORESEARCH_RESULT_ROOT
+    try:
+        root_metadata = autoresearch_root.lstat()
+    except FileNotFoundError:
+        return None, ()
+    except OSError as error:
+        raise EvidenceError("autoresearch results root is unreadable") from error
+    autoresearch_root = _autoresearch_real_directory(
+        autoresearch_root, name="results root"
+    )
+    root_identity = (root_metadata.st_dev, root_metadata.st_ino)
+    campaign_dirs = sorted(autoresearch_root.iterdir())
+    if not campaign_dirs:
+        raise EvidenceError("autoresearch results root must contain a campaign")
+    locked_campaigns: list[tuple[Path, tuple[int, int]]] = []
+    for campaign_dir in campaign_dirs:
+        if _AUTORESEARCH_PATH_COMPONENT_RE.fullmatch(campaign_dir.name) is None:
+            raise EvidenceError("unsafe autoresearch campaign directory name")
+        campaign_dir = _autoresearch_real_directory(
+            campaign_dir, name="campaign directory"
+        )
+        metadata = campaign_dir.lstat()
+        identity = (metadata.st_dev, metadata.st_ino)
+        try:
+            stack.enter_context(
+                autoresearch_campaign_module.campaign_evidence_read_lock(
+                    campaign_dir
+                )
+            )
+        except (OSError, ValueError) as error:
+            raise EvidenceError(
+                "autoresearch campaign could not be locked for evidence export"
+            ) from error
+        refreshed = campaign_dir.lstat()
+        if (refreshed.st_dev, refreshed.st_ino) != identity:
+            raise EvidenceError("autoresearch campaign directory changed under lock")
+        locked_campaigns.append((campaign_dir, identity))
+    topology = root_identity, tuple(locked_campaigns)
+    _validate_autoresearch_source_topology(results_root, topology)
+    return topology
+
+
+def _validate_autoresearch_source_topology(
+    results_root: Path,
+    topology: _AutoresearchSourceTopology,
+) -> tuple[Path, ...]:
+    """Require the exact campaign directory set captured before export."""
+
+    root_identity, locked_campaigns = topology
+    autoresearch_root = results_root / AUTORESEARCH_RESULT_ROOT
+    if root_identity is None:
+        try:
+            autoresearch_root.lstat()
+        except FileNotFoundError:
+            return ()
+        except OSError as error:
+            raise EvidenceError("autoresearch results root is unreadable") from error
+        raise EvidenceError("autoresearch results root appeared during export")
+    autoresearch_root = _autoresearch_real_directory(
+        autoresearch_root, name="results root"
+    )
+    root_metadata = autoresearch_root.lstat()
+    if (root_metadata.st_dev, root_metadata.st_ino) != root_identity:
+        raise EvidenceError("autoresearch results root changed during export")
+    current_entries = sorted(autoresearch_root.iterdir())
+    expected_names = [path.name for path, _identity in locked_campaigns]
+    if [path.name for path in current_entries] != expected_names:
+        raise EvidenceError("autoresearch campaign set changed during export")
+    resolved: list[Path] = []
+    for current, (expected_path, expected_identity) in zip(
+        current_entries, locked_campaigns, strict=True
+    ):
+        if _AUTORESEARCH_PATH_COMPONENT_RE.fullmatch(current.name) is None:
+            raise EvidenceError("unsafe autoresearch campaign directory name")
+        checked = _autoresearch_real_directory(
+            current, name="campaign directory"
+        )
+        metadata = checked.lstat()
+        if (
+            checked != expected_path
+            or (metadata.st_dev, metadata.st_ino) != expected_identity
+        ):
+            raise EvidenceError("autoresearch campaign identity changed during export")
+        resolved.append(checked)
+    return tuple(resolved)
+
+
+def _autoresearch_timestamp(value: Any, *, name: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > 64:
+        raise EvidenceError(f"invalid autoresearch {name}")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise EvidenceError(f"invalid autoresearch {name}") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise EvidenceError(f"autoresearch {name} must be timezone-aware")
+    return value
+
+
+def _autoresearch_nonnegative_integer(value: Any, *, name: str) -> int:
+    if type(value) is not int or value < 0:
+        raise EvidenceError(f"autoresearch {name} must be a nonnegative integer")
+    return value
+
+
+def _autoresearch_positive_integer(value: Any, *, name: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise EvidenceError(f"autoresearch {name} must be a positive integer")
+    return value
+
+
+def _autoresearch_finite_float(value: Any, *, name: str) -> float:
+    if type(value) is not float or not math.isfinite(value):
+        raise EvidenceError(f"autoresearch {name} must be a finite float")
+    return value
+
+
+def _autoresearch_admission_sha256(record: dict[str, Any]) -> str:
+    payload = {
+        key: value for key, value in record.items() if key != "record_sha256"
+    }
+    return hashlib.sha256(_canonical(payload).rstrip(b"\n")).hexdigest()
+
+
+def _autoresearch_candidates(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list) or len(value) != 3:
+        raise EvidenceError("autoresearch candidates must contain three rows")
+    candidates: list[dict[str, str]] = []
+    for row in value:
+        row = _expect_object_keys(
+            row,
+            {"candidate_id", "axis", "delta_sha256"},
+            name="autoresearch candidate",
+        )
+        candidates.append(
+            {
+                "candidate_id": _autoresearch_id(
+                    row["candidate_id"], name="candidate ID"
+                ),
+                "axis": _autoresearch_id(row["axis"], name="candidate axis"),
+                "delta_sha256": _autoresearch_sha256(
+                    row["delta_sha256"], name="candidate delta hash"
+                ),
+            }
+        )
+    if (
+        len({row["candidate_id"] for row in candidates}) != len(candidates)
+        or tuple(row["axis"] for row in candidates)
+        != autoresearch_campaign_module.EXPECTED_AXES
+    ):
+        raise EvidenceError("autoresearch candidate identity or order changed")
+    return candidates
+
+
+def _autoresearch_decision_history(
+    value: Any, *, candidate_ids: Sequence[str]
+) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise EvidenceError("autoresearch controller decisions must be an array")
+    history: list[dict[str, str]] = []
+    candidate_positions = {
+        candidate_id: position
+        for position, candidate_id in enumerate(candidate_ids)
+    }
+    active_candidate: str | None = None
+    active_position = -1
+    active_decisions: list[str] = []
+    for value_row in value:
+        row = _expect_object_keys(
+            value_row,
+            {"candidate_id", "decision"},
+            name="autoresearch controller decision",
+        )
+        candidate_id = _autoresearch_id(
+            row.get("candidate_id"), name="decision candidate ID"
+        )
+        decision = _autoresearch_id(
+            row.get("decision"), name="candidate decision"
+        )
+        if (
+            candidate_id not in candidate_positions
+            or decision not in _AUTORESEARCH_CANDIDATE_DECISIONS
+        ):
+            raise EvidenceError("autoresearch candidate decision changed")
+        position = candidate_positions[candidate_id]
+        if candidate_id != active_candidate:
+            if active_decisions and active_decisions[-1] in {
+                "confirm",
+                "confirm_simplification",
+            }:
+                raise EvidenceError(
+                    "autoresearch confirmation has no final decision"
+                )
+            if active_decisions and active_decisions[-1] in {
+                "promote",
+                "promote_simplification",
+            }:
+                raise EvidenceError("autoresearch decision follows promotion")
+            if position <= active_position:
+                raise EvidenceError("autoresearch candidate decision order changed")
+            active_candidate = candidate_id
+            active_position = position
+            active_decisions = []
+        active_decisions.append(decision)
+        if len(active_decisions) == 1:
+            if decision not in {"reject", "confirm", "confirm_simplification"}:
+                raise EvidenceError("autoresearch promotion lacks confirmation")
+        elif len(active_decisions) == 2:
+            expected_final = (
+                {"reject", "promote"}
+                if active_decisions[0] == "confirm"
+                else {"reject", "promote_simplification"}
+                if active_decisions[0] == "confirm_simplification"
+                else set()
+            )
+            if decision not in expected_final:
+                raise EvidenceError("autoresearch confirmation mode changed")
+        else:
+            raise EvidenceError("autoresearch candidate has too many decisions")
+        history.append({"candidate_id": candidate_id, "decision": decision})
+    return history
+
+
+def _autoresearch_latest_decisions(
+    history: Sequence[dict[str, str]],
+) -> dict[str, str]:
+    latest: dict[str, str] = {}
+    for row in history:
+        latest[row["candidate_id"]] = row["decision"]
+    return latest
+
+
+def _project_autoresearch_admission_record(value: Any) -> dict[str, Any]:
+    record = _expect_object_keys(
+        value,
+        set(_AUTORESEARCH_ADMISSION_FIELDS),
+        name="autoresearch admission record",
+    )
+    return {key: record[key] for key in sorted(_AUTORESEARCH_ADMISSION_FIELDS)}
+
+
+def _project_autoresearch_snapshot(
+    snapshot: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    snapshot = _expect_object_keys(
+        snapshot,
+        set(_AUTORESEARCH_SNAPSHOT_FIELDS),
+        name="autoresearch campaign snapshot",
+    )
+    if snapshot.get("snapshot_schema_version") != 2:
+        raise EvidenceError("autoresearch snapshot version changed")
+    frozen_schema = snapshot.get("frozen_campaign_schema_version")
+    if type(frozen_schema) is not int or frozen_schema not in {2, 3}:
+        raise EvidenceError("autoresearch frozen schema changed")
+    required = snapshot.get("admission_journal_required")
+    if type(required) is not bool or required is not (frozen_schema == 3):
+        raise EvidenceError("autoresearch admission requirement changed")
+    provenance_mode = snapshot.get("provenance_mode")
+    expected_modes = (
+        {"required"} if required else {"optional", "sealed_legacy_unjournaled"}
+    )
+    if provenance_mode not in expected_modes:
+        raise EvidenceError("autoresearch provenance mode changed")
+
+    campaign_id = _autoresearch_id(snapshot.get("campaign_id"), name="campaign ID")
+    created_at = _autoresearch_timestamp(
+        snapshot.get("created_at"), name="creation time"
+    )
+    cutoff_at = _autoresearch_timestamp(
+        snapshot.get("cutoff_at"), name="cutoff time"
+    )
+    baseline_id = _autoresearch_id(snapshot.get("baseline_id"), name="baseline ID")
+    suite_id = _autoresearch_id(snapshot.get("suite_id"), name="suite ID")
+    planned_cell_count = _autoresearch_positive_integer(
+        snapshot.get("planned_cell_count"), name="planned cell count"
+    )
+    if planned_cell_count != AUTORESEARCH_CELL_COUNT:
+        raise EvidenceError("autoresearch planned cell count changed")
+    campaign_integrity = _autoresearch_sha256(
+        snapshot.get("campaign_integrity_sha256"), name="campaign integrity hash"
+    )
+    preview_sha256 = _autoresearch_sha256(
+        snapshot.get("preview_sha256"), name="preview hash"
+    )
+    policy_sha256 = _autoresearch_sha256(
+        snapshot.get("policy_sha256"), name="policy hash"
+    )
+    harness_sha256 = _autoresearch_sha256(
+        snapshot.get("harness_tree_sha256"), name="harness tree hash"
+    )
+    harness_file_count = _autoresearch_positive_integer(
+        snapshot.get("harness_file_count"), name="harness file count"
+    )
+    candidates = _autoresearch_candidates(snapshot.get("proposals"))
+
+    summary = snapshot.get("summary")
+    if not isinstance(summary, dict):
+        raise EvidenceError("autoresearch source summary must be an object")
+    if provenance_mode == "sealed_legacy_unjournaled":
+        if set(summary) != set(_AUTORESEARCH_SUMMARY_V1_FIELDS):
+            raise EvidenceError("sealed autoresearch summary schema changed")
+    elif set(summary) != set(_AUTORESEARCH_SUMMARY_V2_FIELDS):
+        raise EvidenceError("autoresearch source summary schema changed")
+    if (
+        summary.get("campaign_id") != campaign_id
+        or summary.get("policy_digest") != policy_sha256
+    ):
+        raise EvidenceError("autoresearch summary binding changed")
+    status = summary.get("status")
+    if status not in {
+        "active",
+        "blocked_environment",
+        "complete",
+        "expired",
+        "planned",
+        "terminated",
+    }:
+        raise EvidenceError("autoresearch summary status changed")
+
+    admissions_value = snapshot.get("admissions")
+    if not isinstance(admissions_value, list):
+        raise EvidenceError("autoresearch admissions must be an array")
+    records = [
+        _project_autoresearch_admission_record(record)
+        for record in admissions_value
+    ]
+    event_counts_value = snapshot.get("controller_event_counts")
+    if not isinstance(event_counts_value, dict):
+        raise EvidenceError("autoresearch controller counts must be an object")
+    event_counts: dict[str, int] = {}
+    for name, count in sorted(event_counts_value.items()):
+        event_name = _autoresearch_id(name, name="controller event name")
+        if event_name not in _AUTORESEARCH_CONTROLLER_EVENTS:
+            raise EvidenceError("autoresearch controller event changed")
+        parsed_count = _autoresearch_positive_integer(
+            count, name="controller event count"
+        )
+        event_counts[event_name] = parsed_count
+
+    decisions_value = summary.get("candidate_decisions")
+    if not isinstance(decisions_value, dict):
+        raise EvidenceError("autoresearch candidate decisions must be an object")
+    candidate_order = [row["candidate_id"] for row in candidates]
+    if not set(decisions_value) <= set(candidate_order):
+        raise EvidenceError("autoresearch candidate decision binding changed")
+    decision_history = _autoresearch_decision_history(
+        snapshot.get("controller_decisions"), candidate_ids=candidate_order
+    )
+    latest_decisions = _autoresearch_latest_decisions(decision_history)
+    if latest_decisions != decisions_value:
+        raise EvidenceError("autoresearch decision history changed")
+
+    if provenance_mode == "sealed_legacy_unjournaled":
+        controller_status = "planned"
+        controller_phase = "new"
+        controller_event_count = 0
+        controller_prefix = hashlib.sha256(b"[]").hexdigest()
+    else:
+        controller_status = summary.get("controller_status")
+        controller_phase = summary.get("controller_phase")
+        controller_event_count = _autoresearch_nonnegative_integer(
+            summary.get("controller_event_count"), name="controller event count"
+        )
+        controller_prefix = _autoresearch_sha256(
+            summary.get("controller_prefix_sha256"), name="controller prefix hash"
+        )
+    if controller_status not in {"active", "complete", "planned", "terminated"}:
+        raise EvidenceError("autoresearch controller status changed")
+    controller_phase = _autoresearch_id(
+        controller_phase, name="controller phase"
+    )
+    if controller_phase not in _AUTORESEARCH_CONTROLLER_PHASES:
+        raise EvidenceError("autoresearch controller phase changed")
+    if sum(event_counts.values()) != controller_event_count:
+        raise EvidenceError("autoresearch controller event counts disagree")
+    terminal_reason = summary.get("terminal_reason")
+    if terminal_reason is not None:
+        terminal_reason = _autoresearch_id(
+            terminal_reason, name="terminal reason"
+        )
+        if terminal_reason not in _AUTORESEARCH_TERMINAL_REASONS:
+            raise EvidenceError("autoresearch terminal reason changed")
+    calibration_recorded = summary.get("calibration_recorded")
+    if type(calibration_recorded) is not bool:
+        raise EvidenceError("autoresearch calibration flag changed")
+    next_pair_index = _autoresearch_nonnegative_integer(
+        summary.get("next_pair_index"), name="next pair index"
+    )
+
+    if provenance_mode == "sealed_legacy_unjournaled":
+        effective_outcome = "blocked_environment"
+        effective_blockers = list(
+            autoresearch_campaign_module._LEGACY_BLOCKED_CAMPAIGN_BLOCKERS
+        )
+    elif records:
+        effective_outcome = records[-1].get("outcome")
+        effective_blockers = records[-1].get("blockers")
+    else:
+        effective_outcome = "unobserved"
+        effective_blockers = []
+    if not isinstance(effective_outcome, str) or not isinstance(
+        effective_blockers, list
+    ):
+        raise EvidenceError("autoresearch effective admission state changed")
+
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "evidence_kind": AUTORESEARCH_EVIDENCE_KIND,
+        "campaign_id": campaign_id,
+        "frozen_campaign_schema_version": frozen_schema,
+        "created_at": created_at,
+        "cutoff_at": cutoff_at,
+        "baseline_id": baseline_id,
+        "suite_id": suite_id,
+        "planned_cell_count": planned_cell_count,
+        "campaign_integrity_sha256": campaign_integrity,
+        "preview_sha256": preview_sha256,
+        "policy_sha256": policy_sha256,
+        "harness_tree_sha256": harness_sha256,
+        "harness_file_count": harness_file_count,
+        "admission_journal_required": required,
+        "provenance_mode": provenance_mode,
+        "candidates": candidates,
+        "status": status,
+        "payloads_included": False,
+        "sanitization_policy": SANITIZATION_POLICY,
+    }
+    controller = {
+        "schema_version": SCHEMA_VERSION,
+        "status": status,
+        "controller_status": controller_status,
+        "controller_phase": controller_phase,
+        "terminal_reason": terminal_reason,
+        "calibration_recorded": calibration_recorded,
+        "next_pair_index": next_pair_index,
+        "candidate_decision_count": len(decision_history),
+        "candidate_decisions": decision_history,
+        "controller_event_count": controller_event_count,
+        "controller_event_counts": event_counts,
+        "controller_prefix_sha256": controller_prefix,
+    }
+    admissions = {
+        "schema_version": SCHEMA_VERSION,
+        "record_count": len(records),
+        "records": records,
+        "effective_outcome": effective_outcome,
+        "effective_blockers": effective_blockers,
+    }
+    return manifest, controller, admissions
+
+
+def _export_autoresearch_campaign(
+    snapshot: dict[str, Any], output_root: Path
+) -> dict[str, Any]:
+    manifest, controller, admissions = _project_autoresearch_snapshot(snapshot)
+    campaign_id = manifest["campaign_id"]
+    relative = Path("campaigns") / campaign_id
+    bundle_hash, _ = _write_bundle(
+        output_root,
+        relative,
+        {
+            "admissions.json": admissions,
+            "controller.json": controller,
+            "manifest.json": manifest,
+        },
+    )
+    return {
+        "bundle_sha256": bundle_hash,
+        "campaign_id": campaign_id,
+        "evidence_kind": AUTORESEARCH_EVIDENCE_KIND,
+        "file": str(relative / "manifest.json"),
+        "status": manifest["status"],
+    }
 
 
 def _export_evidence_locked(
     *,
     results_root: Path,
     output_root: Path,
+    source_locks: ExitStack,
+    locked_autoresearch_topology: _AutoresearchSourceTopology,
     harbor_results: Sequence[Path] = (),
     replace: bool = False,
     require_existing_output: bool = False,
@@ -14119,7 +15511,10 @@ def _export_evidence_locked(
         runs: list[dict[str, Any]] = []
         loop_campaign_dirs = _loop_campaign_dirs(results_root)
         loop_campaign_paths = {path for _, path in loop_campaign_dirs}
-        autoresearch_runs = _autoresearch_run_dirs(results_root)
+        autoresearch_runs, autoresearch_campaigns = _autoresearch_sources(
+            results_root,
+            locked_topology=locked_autoresearch_topology,
+        )
         autoresearch_root = results_root / AUTORESEARCH_RESULT_ROOT
         run_dirs = sorted(
             {
@@ -14150,7 +15545,7 @@ def _export_evidence_locked(
         }
         if has_runtime_overlays:
             recognized_top.add("runtime-overlays")
-        if autoresearch_runs:
+        if autoresearch_runs or autoresearch_campaigns:
             recognized_top.add(AUTORESEARCH_RESULT_ROOT)
         published_run_ids = [run_dir.name for run_dir in run_dirs] + [
             run_id for _, run_id in autoresearch_runs
@@ -14220,6 +15615,10 @@ def _export_evidence_locked(
             )
             for root_name, campaign in loop_campaign_dirs
         )
+        campaigns.extend(
+            _export_autoresearch_campaign(snapshot, temporary)
+            for snapshot in autoresearch_campaigns
+        )
         existing_harbor = output_target / "campaigns" / HARBOR_CAMPAIGN_ID
         if harbor_results:
             campaigns.append(_export_harbor_campaign(harbor_results, temporary))
@@ -14270,6 +15669,17 @@ def _export_evidence_locked(
             _canonical({"files": checksums, "schema_version": SCHEMA_VERSION})
         )
         verification = verify_evidence(temporary)
+        # A lock-integrity failure must happen before any existing evidence is
+        # compared, replaced, or published.
+        _validate_autoresearch_source_topology(
+            results_root, locked_autoresearch_topology
+        )
+        try:
+            source_locks.close()
+        except (OSError, ValueError) as error:
+            raise EvidenceError(
+                "autoresearch campaign changed while evidence was exported"
+            ) from error
 
         if required_output_identity is not None:
             try:
@@ -14368,13 +15778,26 @@ def export_evidence(
             raise EvidenceError(
                 "Another SparkBench run holds results/.sparkbench.lock"
             ) from error
-        return _export_evidence_locked(
-            results_root=results_root,
-            output_root=output_root,
-            harbor_results=tuple(Path(path) for path in harbor_results),
-            replace=replace,
-            require_existing_output=require_existing_output,
-        )
+        try:
+            with ExitStack() as campaign_locks:
+                locked_topology = _hold_autoresearch_source_locks(
+                    results_root, campaign_locks
+                )
+                return _export_evidence_locked(
+                    results_root=results_root,
+                    output_root=output_root,
+                    source_locks=campaign_locks,
+                    locked_autoresearch_topology=locked_topology,
+                    harbor_results=tuple(Path(path) for path in harbor_results),
+                    replace=replace,
+                    require_existing_output=require_existing_output,
+                )
+        except EvidenceError:
+            raise
+        except (OSError, ValueError) as error:
+            raise EvidenceError(
+                "autoresearch campaign changed during evidence export"
+            ) from error
     finally:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
