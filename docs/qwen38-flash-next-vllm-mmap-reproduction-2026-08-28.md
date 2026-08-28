@@ -270,6 +270,33 @@ an OpenAI server on a non-A100 device reporting at least 70 GiB defaults to
 The runtime must print and verify the resolved values; relying on automatic
 hardware classification is inadmissible after the author-shape control.
 
+This waste has since received an upstream fix, but the mmap branch does not
+contain it. Commit
+[`4df2ce2`](https://github.com/peakcrosser7/vllm/commit/4df2ce22d086007a81930d93b3b657a1d197aecc)
+changes the packed view from all columns to
+`self.padded_buffer[:num_reqs, :num_tokens]` in the newer model-support branch.
+That leaves the maximum-size allocation in place but makes fill and hash work
+scale with the live physical token width. Relative to a ceiling `M` and a live
+width `T`, fill work falls by `M/T` and the leading trigram-hash dimensions by
+approximately `(M + 2)/(T + 2)`. Record the actual `T` on every call: ordinary
+C1 decode is expected to be near one, while MTP verification may be wider.
+
+The safest first optimization is therefore the exact mmap head plus only that
+one-line semantic change. The mmap head already places the whole hash-and-gather
+custom op outside compilation and graph capture, so this candidate removes
+wasted work without changing the capture boundary. It is a new integration
+identity, not the unmodified author branch, and must receive its own source-tree
+hash. The author-shape control remains the untouched `8e4e036` head.
+
+Do not fold the newer branch's
+[`0e0802f`](https://github.com/peakcrosser7/vllm/commit/0e0802f4637c73589c9943d420758177df454d9a)
+hash-only split into this first candidate. That change protects a later
+gather-only graph boundary from same-token-count/different-request-layout
+capture reuse; it adds no benefit while mmap still splits the whole operation.
+If that boundary is narrowed later, rebase at or after `0e0802f`, retain both
+the hash-only and mmap-gather operators in the split list, and compare the
+two-op design independently.
+
 This review cannot establish that PLE is the overall warm-TPS limiter. The
 backbone and active-expert LPDDR path may still dominate, consistent with the
 independent evidence summarized in the
@@ -279,23 +306,29 @@ causality from a faster microphase.
 
 After two unchanged baseline lifetimes agree, change one axis at a time:
 
-1. freeze `max-num-seqs=2`, the actual C2 product ceiling, while retaining the
-   `8192` batched-token control;
-2. with sequences fixed at two, compare `max-num-batched-tokens=2048` against
+1. reproduce the unmodified `8e4e036` control, then apply only the live-width
+   slice from `4df2ce2`; require identical IDs and outputs across C1, C2, MTP
+   verification, unequal request lengths, prefill, and same-`T`/different-layout
+   replay, with no new compile or capture;
+2. retain the winning hash implementation and freeze `max-num-seqs=2`, the
+   actual C2 product ceiling, while retaining the `8192` batched-token control;
+3. with sequences fixed at two, compare `max-num-batched-tokens=2048` against
    `8192`; bracket with `4096`, then `1024`, only when the first contrast is
-   material, scoring both resident agent-task wall and 8K/32K prefill wall;
-3. at the winning scheduler geometry, compare mmap workers 16 versus 32;
+   material, scoring both resident agent-task wall and 8K/32K prefill wall.
+   After the live-width patch this is a scheduler and prefill axis, not a decode
+   PLE-hash workaround;
+4. at the winning scheduler geometry, compare mmap workers 16 versus 32;
    changing the 2,048-row chunk cannot alter ordinary C1/C2 decode topology,
    while MTP2 can make scheduled tokens per forward exceed request count;
-4. add a measured small-call serial/thread-pool-bypass arm only if pool
+5. add a measured small-call serial/thread-pool-bypass arm only if pool
    enqueue/wait is at least 10% of PLE wall;
-5. make the hash symbolic-shape-safe and compare whole-forward split against a
-   gather-only split, stopping on any recompile, constraint violation or output
-   mismatch;
-6. test persistent pinned staging only if H2D is at least 5% of PLE wall, and
+6. compare the existing whole-forward split against the later hash-only plus
+   gather-only design, stopping on any recompile, constraint violation or
+   output mismatch;
+7. test persistent pinned staging only if H2D is at least 5% of PLE wall, and
    test chunk size only on prefill calls whose unique rows per shard exceed the
    current chunk; and
-7. keep prewarm as a cold-start experiment, never a resident-TPS arm. Its
+8. keep prewarm as a cold-start experiment, never a resident-TPS arm. Its
    built-in 8 GiB headroom is below this repository's 14 GiB safety floor, so
    it requires a safer bound before admission.
 
