@@ -271,8 +271,8 @@ an OpenAI server on a non-A100 device reporting at least 70 GiB defaults to
 The runtime must print and verify the resolved values; relying on automatic
 hardware classification is inadmissible after the author-shape control.
 
-This waste has since received an upstream fix, but the mmap branch does not
-contain it. Commit
+The mmap branch does not contain the one-line fix present on a newer unmerged
+model-support branch. Commit
 [`4df2ce2`](https://github.com/peakcrosser7/vllm/commit/4df2ce22d086007a81930d93b3b657a1d197aecc)
 changes the packed view from all columns to
 `self.padded_buffer[:num_reqs, :num_tokens]` in the newer model-support branch.
@@ -282,12 +282,13 @@ width `T`, fill work falls by `M/T` and the leading trigram-hash dimensions by
 approximately `(M + 2)/(T + 2)`. Record the actual `T` on every call: ordinary
 C1 decode is expected to be near one, while MTP verification may be wider.
 
-The safest first optimization is therefore the exact mmap head plus only that
-one-line semantic change. The mmap head already places the whole hash-and-gather
-custom op outside compilation and graph capture, so this candidate removes
-wasted work without changing the capture boundary. It is a new integration
-identity, not the unmodified author branch, and must receive its own source-tree
-hash. The author-shape control remains the untouched `8e4e036` head.
+The narrowest first optimization candidate is therefore the exact mmap head
+plus only that one-line semantic change. The mmap head already places the whole
+hash-and-gather custom op outside compilation and graph capture, so this
+candidate removes wasted work without changing the capture boundary. It is a
+new integration identity, not the unmodified author branch, and must receive
+its own source-tree hash. The author-shape control remains the untouched
+`8e4e036` head.
 
 Do not fold the newer branch's
 [`0e0802f`](https://github.com/peakcrosser7/vllm/commit/0e0802f4637c73589c9943d420758177df454d9a)
@@ -475,11 +476,13 @@ Do not enable prefix caching in Phase 1 or the first matched panel. Only after
 cache-off Phase 1 and a separate 64K/C1 cache-off admission pass may a cache-on
 candidate use one fresh 64K/C1 lifetime with the production MTP2 and
 `PIECEWISE` flags unchanged. Explicitly request and attest resolved `align`.
-Run exactly twelve deterministic, byte-distinct synthetic requests: P0
-populates a roughly 40K-token prefix, then P1 through P11 extend the fully
-rendered prefix monotonically to roughly 50K with unique suffixes. Pre-tokenize
-with the pinned tokenizer and require each adjacent pair's tokenized longest
-common prefix; retain only scalar total and common-prefix lengths.
+Run exactly twelve deterministic synthetic requests whose fully rendered byte
+strings are pairwise unequal: P0 populates a roughly 40K-token prefix, then P1
+through P11 extend the fully rendered prefix monotonically to roughly 50K with
+unique suffixes. Pre-tokenize with the pinned tokenizer; before launch, freeze
+and assert every request's total length and every adjacent pair's tokenized
+longest-common-prefix length, including monotonic growth. Retain only those
+scalar lengths.
 
 Generate at most 128 tokens per request. Before and after each request, record
 native prefix-query and hit-counter deltas, TTFT, request wall, output-token
@@ -541,15 +544,25 @@ graphs, or PLE mapping.
 
 ## Phase 2: matched single-user comparison
 
-Only after Phase 1 passes should vLLM and SGLang be compared. Both bundles use
-the same Radix revision, tokenizer, rendered prompts, MTP2 depth, temperature,
-request limits and client. This is a runtime-bundle comparison, not a causal
-isolation of mmap from every other engine difference.
+Only after Phase 1 passes should vLLM and SGLang be compared. The SGLang arm
+must be newly built and admitted on the pinned SM121 Triton fallback, including
+varied-token long-context validation; never use the historical SM121 TRT-LLM
+image as this comparator. Both bundles use the same Radix revision, tokenizer,
+rendered prompts, MTP2 depth, temperature, request limits and client. This is a
+runtime-bundle comparison, not a causal isolation of mmap from every other
+engine difference.
 
-The first panel keeps vLLM prefix caching off and uses byte-distinct requests
-with no shared prefix. Record SGLang's cache policy and require zero observed
-cross-request reuse; do not call the cache-policy implementations matched.
-Cache-on performance belongs only to the quarantine-gated follow-up above.
+The first panel keeps vLLM prefix caching off and sends identical requests to
+both runtimes. Before launch, freeze each request's tokenizer-derived prefix
+topology and require every cross-request longest common prefix to remain below
+the smallest reusable block/checkpoint unit; alternatively, use an admitted
+cache reset before every request. Record SGLang's cache policy and first admit a
+zero-hit canary, including whether absent/null request details normalize to
+zero; then require zero request-scoped hits and zero native cross-request reuse
+deltas. Any nonzero reuse is a runtime-bundle difference and invalidates a
+cache-off-equivalent interpretation; do not call the cache-policy
+implementations matched. Cache-on performance belongs only to the
+quarantine-gated follow-up above.
 
 Freeze two C2-capable 64K bundles and use fresh-lifetime ABBA order:
 
@@ -584,15 +597,17 @@ The smallest scored panel keeps three outcomes separate:
 | Outcome | Shape | Promotion rule |
 | --- | --- | --- |
 | Task latency | Frozen 12-episode strict agent/tool suite at C1, thinking enabled/low effort | Correctness first; both vLLM lifetimes must be directionally faster and the unweighted arm mean must improve at least 5% |
-| Decode TPS | Six unique no-thinking D256 requests at C1 | Full requested output and valid finish reasons required; report full case wall, TTFT and E2E |
-| Service fan-out | Two byte-distinct, token-matched six-request D256 sets, one serial and one as three C2 pairs | Report time-to-all, queue/preemption and fairness; make no decomposed coding/cowork claim |
+| Decode TPS | Six tokenizer-audited unique no-thinking D256 requests at C1, with every cross-request LCP below the reusable unit and zero native SGLang reuse | Full requested output and valid finish reasons required; report full case wall, TTFT and E2E |
+| Service fan-out | Two tokenizer-audited, token-matched six-request D256 sets, one serial and one as three C2 pairs | Report time-to-all, queue/preemption and fairness; make no decomposed coding/cowork claim |
 
-The two D256 sets have no shared prefix. A assigns set one to serial and set
-two to C2; B swaps the sets and reverses block order. Each mode must complete
-exactly six 256-token outputs. This prevents the second block from measuring
-prefix reuse as well as concurrency. Synthetic D256 fan-out is only a service
-capacity/time-to-all result, not proof that one coding or cowork task benefits
-from parallel decomposition.
+For every request in the two D256 sets, tokenizer audit must prove that no
+cross-request shared prefix is long enough to form a reusable cache block or
+checkpoint, and native SGLang reuse deltas must remain zero. A assigns set one
+to serial and set two to C2; B swaps the sets and reverses block order. Each
+mode must complete exactly six 256-token outputs. This prevents the second
+block from measuring prefix reuse as well as concurrency. Synthetic D256
+fan-out is only a service capacity/time-to-all result, not proof that one coding
+or cowork task benefits from parallel decomposition.
 
 Pin `max-num-seqs` and prove running/queued occupancy. Public vLLM data changed
 about fourfold at C8 when only that cap changed, so an offered-concurrency
