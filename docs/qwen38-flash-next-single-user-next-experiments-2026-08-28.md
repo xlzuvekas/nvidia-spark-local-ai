@@ -93,6 +93,14 @@ This has the highest direct coding/cowork value. The retired campaign's 60K
 case was a one-shot prompt, while its agent cases used small histories; neither
 measured repeated long-prefix work across tool turns.
 
+The tracked [cache-policy reducer](../bench/sglang_cache_policy_protocol.py)
+and its [contract tests](../tests/test_sglang_cache_policy_protocol.py) freeze
+the provisional A/B/B/A topology, scalar observation schema, and diagnostic
+threshold math. They are deliberately draft-only: the reducer cannot admit a
+measurement or select an arm, and no cache-policy run is authorized until its
+listed runtime, zero-hit canary, native cache/residency, workload-identity, and
+correctness contracts have been independently frozen and admitted.
+
 - Bundle A: the newly admitted C1 baseline, default Radix behavior, and requested
   `extra_buffer_lazy`; require startup `impl=UnifiedRadixCache` with hybrid SSM.
 - Bundle B: add `--disable-radix-cache`; the baseline chunked prefill then selects
