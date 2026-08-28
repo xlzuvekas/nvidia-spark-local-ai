@@ -472,8 +472,9 @@ This is a prospective C1 serving search, not a reported measurement result.
 It is the sole bounded historical exception named above and may run only under
 the linked protocol's original gates and unchanged cutoff; any result would be
 a within-runtime comparison, not a deployment-safety claim.
-The schema-2 campaign froze fourteen pristine cells from clean, pushed revision
-`aa9cca8` at 01:09 MST on 2026-08-28. Its first admission returned
+The campaign-schema-2 freeze created fourteen pristine cells from clean,
+pushed revision `aa9cca8` at 01:09 MST on 2026-08-28. Its current derived
+summary remains schema 1. The first admission returned
 `blocked_environment` with `starting_swap_above_clean_limit`: used host swap was
 868.414 MiB against the frozen 64 MiB start cap. No controller event,
 calibration record, cell summary, worker state, container, or model request was
