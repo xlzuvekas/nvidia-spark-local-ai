@@ -443,6 +443,12 @@ state-capacity-feasible for ordinary and lazy while offered C8 is feasible only
 for lazy. Treat C1/C2/C4 as the primary matched-strategy cells, C6 as a secondary
 shared offered-load/state-capacity point, and C8 as a scheduling/capacity
 outcome rather than matched-concurrency TPS.
+The first ordinary-D2 lifetime completed that five-case prefix, but its appended
+C6 tail exceeded the 512 MiB runtime swap-growth limit by reaching a
+2,473.8359375 MiB increase. The C6 case is measurement-invalid and must not be
+retried. The frozen `interaction-core-v2` recovery suite contains exactly the
+five completed prefix cases; use it for ordinary D3, lazy D2, and lazy D3, and
+compute the interaction only across the common prefix.
 The earlier 40-state ordinary D2/D3 safety
 rejections remain incompatible and must not be retried. The full frozen design
 and commands are in the

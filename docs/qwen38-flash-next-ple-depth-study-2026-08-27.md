@@ -189,19 +189,30 @@ The unchanged safety gates are 14 GiB available host memory and 512 MiB swap
 growth. Retain typed failures, early stops, and null aggregates without retries
 or gate relaxation. Commands after committing the clean harness are:
 
+The first `O2` lifetime completed the original five-case prefix, then the new
+C6 diagnostic drove swap from 51.97265625 MiB at the idle baseline to
+2,525.80859375 MiB, a 2,473.8359375 MiB increase. It was stopped and C6 was
+marked measurement-invalid. This observation invalidates C6 as a safe shared
+diagnostic in the fixed post-C8 position; it does not retroactively invalidate
+the five completed prefix cases, whose maximum swap use was 515.1875 MiB.
+
+The outcome-informed `qwen38-flash-next-sglang-lazy-depth3-interaction-core-v2`
+repair is therefore frozen for the remaining `O3`, `L2`, and `L3` lifetimes. It
+is exactly the original D256/C1/C2/C4/C8 prefix and omits C6. Compare only those
+five common cells with the completed `O2` prefix. C1/C2/C4 remain the primary
+matched-strategy interaction; D256 is the single-user decode cell and C8
+remains a capacity/scheduling result. Do not run the rejected C6 tail again.
+
 ```bash
 python3 sparkbench.py benchmark \
-  qwen38-flash-next-nvfp4-mtp2-c6-extra-ple-mapped-sglang \
-  --suite manifests/suites/qwen38_flash_next_sglang_lazy_depth3_interaction.toml
-python3 sparkbench.py benchmark \
   qwen38-flash-next-nvfp4-mtp3-c6-extra-ple-mapped-sglang \
-  --suite manifests/suites/qwen38_flash_next_sglang_lazy_depth3_interaction.toml
+  --suite manifests/suites/qwen38_flash_next_sglang_lazy_depth3_interaction_core_v2.toml
 python3 sparkbench.py benchmark \
   qwen38-flash-next-nvfp4-mtp2-c8-lazy-ple-mapped-sglang \
-  --suite manifests/suites/qwen38_flash_next_sglang_lazy_depth3_interaction.toml
+  --suite manifests/suites/qwen38_flash_next_sglang_lazy_depth3_interaction_core_v2.toml
 python3 sparkbench.py benchmark \
   qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-mapped-sglang \
-  --suite manifests/suites/qwen38_flash_next_sglang_lazy_depth3_interaction.toml
+  --suite manifests/suites/qwen38_flash_next_sglang_lazy_depth3_interaction_core_v2.toml
 ```
 
 ## Frozen artifacts and omission contract

@@ -37,6 +37,12 @@ INTERACTION_SUITE_PATH = (
     / "suites"
     / "qwen38_flash_next_sglang_lazy_depth3_interaction.toml"
 )
+INTERACTION_CORE_V2_SUITE_PATH = (
+    ROOT
+    / "manifests"
+    / "suites"
+    / "qwen38_flash_next_sglang_lazy_depth3_interaction_core_v2.toml"
+)
 QUALITY_V2_SUITE_PATH = (
     ROOT
     / "manifests"
@@ -162,10 +168,23 @@ class Qwen38FlashNextSglangNativeSuiteTests(unittest.TestCase):
         self.assertEqual(c6.concurrency, 6)
         self.assertEqual(c6.prompt_repetitions, 0)
 
+    def test_lazy_depth3_interaction_core_v2_is_exact_safe_prefix(self) -> None:
+        frozen = load_suite(DEPTH_SUITE_PATH)
+        interaction = load_suite(INTERACTION_SUITE_PATH)
+        core_v2 = load_suite(INTERACTION_CORE_V2_SUITE_PATH)
+
+        self.assertEqual(
+            core_v2.id,
+            "qwen38-flash-next-sglang-lazy-depth3-interaction-core-v2",
+        )
+        self.assertEqual(core_v2.cases, frozen.cases)
+        self.assertEqual(core_v2.cases, interaction.cases[:5])
+
     def test_ple_study_profiles_are_bound_to_their_exact_suites(self) -> None:
         models = load_models(ROOT / "manifests" / "models.toml")
         depth_suite = load_suite(DEPTH_SUITE_PATH)
         interaction_suite = load_suite(INTERACTION_SUITE_PATH)
+        interaction_core_v2_suite = load_suite(INTERACTION_CORE_V2_SUITE_PATH)
         quality_suite = load_suite(QUALITY_V2_SUITE_PATH)
         depth_ids = (
             "qwen38-flash-next-nvfp4-mtp1-c8-lazy-ple-mapped-sglang",
@@ -194,6 +213,9 @@ class Qwen38FlashNextSglangNativeSuiteTests(unittest.TestCase):
                 validate_benchmark_selection(models[profile_id], quality_suite)
         for profile_id in shared_lazy_ids:
             validate_benchmark_selection(models[profile_id], interaction_suite)
+            validate_benchmark_selection(
+                models[profile_id], interaction_core_v2_suite
+            )
         for profile_id in set(depth_ids) - set(shared_lazy_ids):
             with self.subTest(
                 profile=profile_id, suite=interaction_suite.id
@@ -203,6 +225,9 @@ class Qwen38FlashNextSglangNativeSuiteTests(unittest.TestCase):
                 )
         for profile_id in interaction_ids:
             validate_benchmark_selection(models[profile_id], interaction_suite)
+            validate_benchmark_selection(
+                models[profile_id], interaction_core_v2_suite
+            )
             for wrong_suite in (depth_suite, quality_suite):
                 with self.subTest(
                     profile=profile_id, suite=wrong_suite.id
@@ -219,7 +244,12 @@ class Qwen38FlashNextSglangNativeSuiteTests(unittest.TestCase):
             ):
                 validate_benchmark_selection(models[profile_id], depth_suite)
         unrelated = models["qwen38-flash-next-nvfp4-mtp-sglang"]
-        for suite in (depth_suite, interaction_suite, quality_suite):
+        for suite in (
+            depth_suite,
+            interaction_suite,
+            interaction_core_v2_suite,
+            quality_suite,
+        ):
             with self.subTest(suite=suite.id), self.assertRaisesRegex(
                 ManifestError, "suite requires"
             ):

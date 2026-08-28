@@ -137,6 +137,14 @@ _PLE_STUDY_PROFILE_IDS_BY_SUITE = {
             "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-mapped-sglang",
         }
     ),
+    "qwen38-flash-next-sglang-lazy-depth3-interaction-core-v2": frozenset(
+        {
+            "qwen38-flash-next-nvfp4-mtp2-c6-extra-ple-mapped-sglang",
+            "qwen38-flash-next-nvfp4-mtp3-c6-extra-ple-mapped-sglang",
+            "qwen38-flash-next-nvfp4-mtp2-c8-lazy-ple-mapped-sglang",
+            "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-mapped-sglang",
+        }
+    ),
     "qwen38-flash-next-sglang-quality-v2": frozenset(
         {
             "qwen38-flash-next-nvfp4-mtp3-quality-v2-ple-mapped-sglang",
