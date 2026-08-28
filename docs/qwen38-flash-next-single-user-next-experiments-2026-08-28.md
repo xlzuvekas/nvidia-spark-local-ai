@@ -198,17 +198,36 @@ exercised before any GPU ABBA.
 
 - Control bundle: `--cuda-graph-backend-decode full` with
   `--cuda-graph-bs-decode 1`.
-- Candidate bundle: `--cuda-graph-backend-decode disabled`, removing the batch
-  argument.
-- Design: ABBA with two independent lifetimes per arm; keep startup/capture
-  time separate from D256 and agent task wall.
+- Candidate: change only the backend to `disabled`; retain
+  `--cuda-graph-bs-decode 1` and the disabled prefill-graph setting.
+- Admission: require resolved decode backend `full`, batch list `[1]`, and
+  `max_bs=1` versus backend `disabled` with the same list and maximum. The
+  control must
+  increment `sglang:cuda_graph_passes_total{mode="decode_cuda_graph"}` and the
+  candidate only `mode="decode_none"`. Require nonzero versus zero graph
+  memory/startup fields for target verify, draft decode, and draft extend.
+- Canary: before ABBA, run one exact capability/tool/stream/cancel sequence and
+  D256. Require finish/tool/cancel equivalence and no emission after a stop.
+- Design: ABBA with two independent lifetimes per arm; keep cold ready time,
+  per-phase capture time/memory, D256, NEXTN acceptance, agent task wall,
+  MemAvailable, and swap separate.
 - Interpretation: the expected result is a control speed win. A disabled-graph
   simplification may promote only at `>=0.99x` combined speed if it also
   removes the declared graph-serving bundle or proves at least 1 GiB more
   available memory twice.
 
-Do not capture graph batches above one for a C1 objective. They are unexercised
-at one running request and add capture, startup, and headroom cost.
+This is a full speculative-decode graph treatment, not target verify alone.
+Exact source returns no target capture when decode graphs are
+[disabled](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/model_executor/model_runner_components/cuda_graph_setup.py#L410-L490),
+and NEXTN returns before draft-decode/draft-extend
+[capture](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/speculative/eagle_worker_v2.py#L343-L392).
+Do not remove the explicit batch-one list in this causal pair. When absent, the
+exact GB10 path
+[resolves](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/server_args.py#L4791-L4865)
+`max_bs=256` even with the backend disabled, and NEXTN consumes that maximum
+for chain-buffer allocation. List removal is a later configuration-cleanup
+bundle. Do not capture graph batches above one for a C1 objective; they are
+unexercised and add capture, startup, and headroom cost.
 
 ### 6. Conditional next chunk size
 
