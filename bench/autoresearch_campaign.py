@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -46,15 +47,24 @@ from .manifest import (
     SuiteSpec,
     load_models,
     load_suite,
+    model_spec_to_dict,
     validate_benchmark_selection,
 )
-from .runner import create_plan
+from .runner import _canonical_case, create_plan
 from .runtime import recover_owned_sglang
 
 
 CAMPAIGN_SCHEMA_VERSION = 1
-FROZEN_CAMPAIGN_SCHEMA_VERSION = 1
+FROZEN_CAMPAIGN_SCHEMA_VERSION = 2
 EXPECTED_SUITE_ID = "qwen38-flash-next-sglang-agent64k-autoresearch"
+EXPECTED_CAMPAIGN_RELATIVE_PATH = Path(
+    "manifests/campaigns/qwen38_flash_next_single_user_autoresearch.toml"
+)
+EXPECTED_CAMPAIGN_ID = "qwen38-flash-next-single-user-autoresearch-2026-08-28"
+EXPECTED_CAMPAIGN_CUTOFF = "2026-08-28T07:00:00-07:00"
+EXPECTED_BASELINE_ID = (
+    "qwen38-flash-next-nvfp4-mtp2-agent64k-low-ple-mapped-sglang"
+)
 EXPECTED_CASE_IDS = (
     "json-smoke",
     "tools-smoke",
@@ -78,6 +88,22 @@ EXPECTED_AXES = (
     "reasoning_policy",
     "chunked_prefill_size",
     "nextn_bundle",
+)
+EXPECTED_CANDIDATE_IDS = (
+    "qwen38-flash-next-nvfp4-mtp2-agent64k-none-ple-mapped-sglang",
+    "qwen38-flash-next-nvfp4-mtp2-agent64k-low-chunk2k-ple-mapped-sglang",
+    "qwen38-flash-next-nvfp4-mtp3-agent64k-low-ple-mapped-sglang",
+)
+# These canonical manifest projections make the protocol self-anchoring: a
+# manifest-only rewrite cannot silently freeze a different workload or model.
+EXPECTED_MODEL_SPEC_DIGESTS = {
+    EXPECTED_BASELINE_ID: "f966e9527cb5b9bf18bab737484e0cdb03cb4d358cf5a89d20150d1052b6ecbd",
+    EXPECTED_CANDIDATE_IDS[0]: "d41c6843824ffcb15e5198354dc522cf660cba940c4d5e0af8ad60ca0cc10312",
+    EXPECTED_CANDIDATE_IDS[1]: "5efdecbac20414bb36d595d72af823e362f0c31437051c635616f1be12bba38d",
+    EXPECTED_CANDIDATE_IDS[2]: "f9ccd82a08006b3a7badc032bdebaedc217101365b79444e748bc6354460f825",
+}
+EXPECTED_SUITE_SPEC_DIGEST = (
+    "260506c71f890e714b50829e69289fdc1e2490b1c7d5a8a08218c5369128a063"
 )
 HOST_SAFETY_MIN_MEMAVAILABLE_KIB = 14 * 1024 * 1024
 HOST_SAFETY_MAX_SWAP_GROWTH_KIB = 512 * 1024
@@ -221,6 +247,7 @@ class FrozenCell:
     run_dir: Path
     plan_fingerprint: str
     plan_integrity_hash: str
+    run_nonce: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +258,9 @@ class FrozenCampaign:
     baseline_id: str
     policy: CampaignPolicy
     policy_digest: str
+    preview_digest: str
+    harness_tree_sha256: str
+    harness_file_count: int
     proposals: tuple[ValidatedProposal, ...]
     cells: tuple[FrozenCell, ...]
 
@@ -377,6 +407,14 @@ def load_campaign_definition(
         candidates=tuple(candidates),
     )
     definition.cutoff_datetime
+    if definition.id != EXPECTED_CAMPAIGN_ID:
+        raise CampaignPlanningError("campaign ID does not match the audited protocol")
+    if definition.cutoff != EXPECTED_CAMPAIGN_CUTOFF:
+        raise CampaignPlanningError("campaign cutoff does not match the audited protocol")
+    if definition.baseline_id != EXPECTED_BASELINE_ID:
+        raise CampaignPlanningError(
+            "campaign baseline does not match the audited protocol"
+        )
     if definition.primary_case_ids != EXPECTED_PRIMARY_CASE_IDS:
         raise CampaignPlanningError(
             "campaign primary_case_ids do not match the audited six-case score"
@@ -388,6 +426,10 @@ def load_campaign_definition(
     if tuple(candidate.axis for candidate in definition.candidates) != EXPECTED_AXES:
         raise CampaignPlanningError(
             "candidate queue must follow reasoning, chunk, then NEXTN depth"
+        )
+    if tuple(candidate.id for candidate in definition.candidates) != EXPECTED_CANDIDATE_IDS:
+        raise CampaignPlanningError(
+            "candidate queue does not match the audited protocol"
         )
     return definition
 
@@ -437,6 +479,65 @@ def semantic_config(model: ModelSpec) -> dict[str, Any]:
     }
 
 
+def _mapping_arg_value(model: Mapping[str, Any], option: str) -> str:
+    arguments = model.get("args")
+    if not isinstance(arguments, list) or any(
+        not isinstance(argument, str) for argument in arguments
+    ):
+        raise CampaignPlanningError("frozen model args must be a string array")
+    indexes = [index for index, value in enumerate(arguments) if value == option]
+    if len(indexes) != 1 or indexes[0] + 1 >= len(arguments):
+        raise CampaignPlanningError(f"frozen model must declare one {option}")
+    value = arguments[indexes[0] + 1]
+    if value.startswith("--"):
+        raise CampaignPlanningError(f"frozen model has no value for {option}")
+    return value
+
+
+def _mapping_semantic_config(model: Mapping[str, Any]) -> dict[str, Any]:
+    request_body = model.get("request_body_json")
+    if not isinstance(request_body, str):
+        raise CampaignPlanningError("frozen model reasoning policy is missing")
+    try:
+        reasoning_policy = json.loads(request_body)
+    except json.JSONDecodeError as error:
+        raise CampaignPlanningError("frozen model reasoning policy is invalid") from error
+    if not isinstance(reasoning_policy, dict):
+        raise CampaignPlanningError("frozen model reasoning policy must be an object")
+    return {
+        "reasoning_policy": reasoning_policy,
+        "chunked_prefill_size": int(
+            _mapping_arg_value(model, "--chunked-prefill-size")
+        ),
+        "nextn_bundle": {
+            "steps": int(_mapping_arg_value(model, "--speculative-num-steps")),
+            "draft_tokens": int(
+                _mapping_arg_value(model, "--speculative-num-draft-tokens")
+            ),
+        },
+    }
+
+
+def _mapping_invariant_model_projection(model: Mapping[str, Any]) -> dict[str, Any]:
+    projection = dict(model)
+    for key in ("id", "description", "served_name", "request_body_json"):
+        projection.pop(key, None)
+    arguments = list(projection.get("args", []))
+    replacements = {
+        "--served-model-name": "<served-name>",
+        "--chunked-prefill-size": "<chunked-prefill-size>",
+        "--speculative-num-steps": "<nextn-steps>",
+        "--speculative-num-draft-tokens": "<nextn-draft-tokens>",
+    }
+    for option, replacement in replacements.items():
+        indexes = [index for index, value in enumerate(arguments) if value == option]
+        if len(indexes) != 1 or indexes[0] + 1 >= len(arguments):
+            raise CampaignPlanningError(f"frozen model must declare one {option}")
+        arguments[indexes[0] + 1] = replacement
+    projection["args"] = arguments
+    return projection
+
+
 def _invariant_model_projection(model: ModelSpec) -> dict[str, Any]:
     projection = asdict(model)
     for key in ("id", "description", "served_name", "request_body_json"):
@@ -472,6 +573,11 @@ def validate_campaign(
         raise CampaignPlanningError("campaign suite case topology changed")
     if any(case.concurrency != 1 or case.temperature != 0.0 for case in suite.cases):
         raise CampaignPlanningError("campaign suite must remain C1 at temperature zero")
+    suite_projection = asdict(suite)
+    if suite_projection.get("protocol_digest") is None:
+        suite_projection.pop("protocol_digest", None)
+    if content_hash(suite_projection, 64) != EXPECTED_SUITE_SPEC_DIGEST:
+        raise CampaignPlanningError("campaign suite content changed")
     try:
         baseline = models[definition.baseline_id]
     except KeyError as error:
@@ -490,6 +596,17 @@ def validate_campaign(
             "campaign profiles must freeze the 14 GiB, 512 MiB growth, and "
             "64 MiB starting-swap host-safety gates"
         )
+    audited_ids = (definition.baseline_id,) + tuple(
+        candidate.id for candidate in definition.candidates
+    )
+    for profile_id in audited_ids:
+        profile = models.get(profile_id)
+        if profile is None or content_hash(model_spec_to_dict(profile), 64) != (
+            EXPECTED_MODEL_SPEC_DIGESTS[profile_id]
+        ):
+            raise CampaignPlanningError(
+                f"campaign model profile {profile_id!r} changed"
+            )
 
     baseline_config = semantic_config(baseline)
     invariant = canonical_json(_invariant_model_projection(baseline))
@@ -585,6 +702,42 @@ def _cell_specs(preview: CampaignPreview) -> tuple[dict[str, str], ...]:
     return tuple(cells)
 
 
+def harness_tree_identity(workspace: Path) -> tuple[str, int]:
+    """Hash executable and frozen-protocol inputs, excluding evidence outputs."""
+
+    root = workspace.resolve(strict=True)
+    bench_root = root / "bench"
+    manifests_root = root / "manifests"
+    if bench_root.is_symlink() or not bench_root.is_dir():
+        raise CampaignPlanningError("benchmark harness directory is unsafe")
+    if manifests_root.is_symlink() or not manifests_root.is_dir():
+        raise CampaignPlanningError("benchmark manifest directory is unsafe")
+    paths = sorted(
+        {
+            *root.glob("*.py"),
+            *bench_root.rglob("*.py"),
+            *manifests_root.rglob("*.toml"),
+        }
+    )
+    if root / "sparkbench.py" not in paths:
+        raise CampaignPlanningError("benchmark CLI source is missing")
+    digest = hashlib.sha256()
+    for path in paths:
+        if path.is_symlink() or not path.is_file():
+            raise CampaignPlanningError("benchmark harness contains an unsafe source")
+        try:
+            relative = path.resolve(strict=True).relative_to(root)
+        except (OSError, ValueError) as error:
+            raise CampaignPlanningError("benchmark harness source escapes workspace") from error
+        relative_bytes = relative.as_posix().encode("utf-8")
+        payload = path.read_bytes()
+        digest.update(len(relative_bytes).to_bytes(4, "big"))
+        digest.update(relative_bytes)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return digest.hexdigest(), len(paths)
+
+
 def freeze_campaign(
     path: str | Path,
     *,
@@ -596,6 +749,7 @@ def freeze_campaign(
 
     definition = load_campaign_definition(path, workspace=workspace)
     preview, models, suite = validate_campaign(definition)
+    harness_tree_sha256, harness_file_count = harness_tree_identity(workspace)
     stamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
     campaign_dir = results_root / f"{stamp}-{definition.id}-{preview.digest[:8]}"
     campaign_dir.mkdir(parents=True, exist_ok=False)
@@ -611,6 +765,13 @@ def freeze_campaign(
             suite_path=definition.suite_path,
         )
         plan = json.loads((run_dir / "plan.json").read_text())
+        run_nonce = plan.get("run_nonce")
+        if (
+            not isinstance(run_nonce, str)
+            or len(run_nonce) != 32
+            or any(character not in "0123456789abcdef" for character in run_nonce)
+        ):
+            raise CampaignPlanningError("fresh cell plan has no ownership nonce")
         frozen_cells.append(
             {
                 **cell,
@@ -618,11 +779,19 @@ def freeze_campaign(
                 "run_dir": str(run_dir.relative_to(campaign_dir)),
                 "plan_fingerprint": plan["fingerprint"],
                 "plan_integrity_hash": plan.get("integrity_hash"),
+                "run_nonce": run_nonce,
             }
         )
+    if harness_tree_identity(workspace) != (
+        harness_tree_sha256,
+        harness_file_count,
+    ):
+        raise CampaignPlanningError("benchmark harness changed while plans were frozen")
     frozen = {
         "schema_version": FROZEN_CAMPAIGN_SCHEMA_VERSION,
         "created_at": utc_now(),
+        "harness_tree_sha256": harness_tree_sha256,
+        "harness_file_count": harness_file_count,
         "preview": preview.to_mapping(),
         "preview_digest": preview.digest,
         "cells": frozen_cells,
@@ -656,6 +825,8 @@ def load_frozen_campaign(campaign_dir: Path) -> FrozenCampaign:
     expected_top = {
         "schema_version",
         "created_at",
+        "harness_tree_sha256",
+        "harness_file_count",
         "preview",
         "preview_digest",
         "cells",
@@ -666,6 +837,17 @@ def load_frozen_campaign(campaign_dir: Path) -> FrozenCampaign:
         raise CampaignPlanningError("frozen campaign has an unknown or missing field")
     if frozen["schema_version"] != FROZEN_CAMPAIGN_SCHEMA_VERSION:
         raise CampaignPlanningError("unsupported frozen campaign schema version")
+    harness_tree_sha256 = frozen["harness_tree_sha256"]
+    harness_file_count = frozen["harness_file_count"]
+    if (
+        not isinstance(harness_tree_sha256, str)
+        or len(harness_tree_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in harness_tree_sha256)
+        or isinstance(harness_file_count, bool)
+        or not isinstance(harness_file_count, int)
+        or harness_file_count <= 0
+    ):
+        raise CampaignPlanningError("frozen campaign harness identity is invalid")
     integrity_hash = frozen["integrity_hash"]
     if not isinstance(integrity_hash, str) or len(integrity_hash) != 64:
         raise CampaignPlanningError("frozen campaign integrity hash is invalid")
@@ -701,9 +883,20 @@ def load_frozen_campaign(campaign_dir: Path) -> FrozenCampaign:
         raise CampaignPlanningError("frozen campaign execution topology changed")
     if preview["suite_id"] != EXPECTED_SUITE_ID:
         raise CampaignPlanningError("frozen campaign suite identity changed")
+    if preview["campaign_id"] != EXPECTED_CAMPAIGN_ID:
+        raise CampaignPlanningError("frozen campaign identity changed")
+    if preview["baseline_id"] != EXPECTED_BASELINE_ID:
+        raise CampaignPlanningError("frozen campaign baseline changed")
     policy = CampaignPolicy.from_mapping(preview["policy"])
     if policy.digest != preview["policy_digest"]:
         raise CampaignPlanningError("frozen campaign policy digest does not match")
+    if (
+        policy.primary_case_ids != EXPECTED_PRIMARY_CASE_IDS
+        or policy.allowed_axes != EXPECTED_AXES
+    ):
+        raise CampaignPlanningError("frozen campaign evaluator policy changed")
+    if preview["cutoff"] != EXPECTED_CAMPAIGN_CUTOFF:
+        raise CampaignPlanningError("frozen campaign cutoff changed")
     cutoff = datetime.fromisoformat(
         _require_string(preview["cutoff"], context="frozen cutoff")
     )
@@ -743,6 +936,8 @@ def load_frozen_campaign(campaign_dir: Path) -> FrozenCampaign:
         )
     if tuple(proposal.axis for proposal in proposals) != EXPECTED_AXES:
         raise CampaignPlanningError("frozen candidate order changed")
+    if tuple(proposal.candidate_id for proposal in proposals) != EXPECTED_CANDIDATE_IDS:
+        raise CampaignPlanningError("frozen candidate queue changed")
 
     cells_value = frozen["cells"]
     if not isinstance(cells_value, list) or len(cells_value) != 14:
@@ -757,8 +952,11 @@ def load_frozen_campaign(campaign_dir: Path) -> FrozenCampaign:
         "run_dir",
         "plan_fingerprint",
         "plan_integrity_hash",
+        "run_nonce",
     }
     cells: list[FrozenCell] = []
+    profile_models: dict[str, dict[str, Any]] = {}
+    frozen_suite_basis: dict[str, Any] | None = None
     expected_cells: list[dict[str, str]] = [
         {
             "cell_id": "calibration-control-a",
@@ -826,9 +1024,39 @@ def load_frozen_campaign(campaign_dir: Path) -> FrozenCampaign:
             or plan.get("integrity_hash") != raw["plan_integrity_hash"]
         ):
             raise CampaignPlanningError("frozen cell plan binding changed")
+        run_nonce = raw["run_nonce"]
+        if (
+            not isinstance(run_nonce, str)
+            or len(run_nonce) != 32
+            or any(character not in "0123456789abcdef" for character in run_nonce)
+            or plan.get("run_nonce") != run_nonce
+        ):
+            raise CampaignPlanningError("frozen cell ownership nonce changed")
         model = plan.get("model")
         if not isinstance(model, dict) or model.get("id") != raw["profile_id"]:
             raise CampaignPlanningError("frozen cell profile binding changed")
+        profile_id = str(raw["profile_id"])
+        prior_model = profile_models.get(profile_id)
+        if prior_model is not None and canonical_json(prior_model) != canonical_json(model):
+            raise CampaignPlanningError("repeated frozen profile records changed")
+        profile_models[profile_id] = model
+        suite = plan.get("suite")
+        if not isinstance(suite, dict) or not isinstance(suite.get("cases"), list):
+            raise CampaignPlanningError("frozen cell suite binding is malformed")
+        suite_basis = {
+            **suite,
+            "cases": [
+                {key: value for key, value in case.items() if key != "case_id"}
+                for case in suite["cases"]
+                if isinstance(case, dict)
+            ],
+        }
+        if len(suite_basis["cases"]) != len(suite["cases"]):
+            raise CampaignPlanningError("frozen cell suite contains a non-object case")
+        if frozen_suite_basis is None:
+            frozen_suite_basis = suite_basis
+        elif canonical_json(frozen_suite_basis) != canonical_json(suite_basis):
+            raise CampaignPlanningError("frozen cell suite protocols changed")
         if (
             model.get("host_safety_min_memavailable_gib"),
             model.get("host_safety_max_swap_growth_mib"),
@@ -850,10 +1078,53 @@ def load_frozen_campaign(campaign_dir: Path) -> FrozenCampaign:
                 run_dir=run_dir,
                 plan_fingerprint=str(raw["plan_fingerprint"]),
                 plan_integrity_hash=str(raw["plan_integrity_hash"]),
+                run_nonce=run_nonce,
             )
         )
     if len({cell.cell_id for cell in cells}) != 14:
         raise CampaignPlanningError("frozen cell IDs must be unique")
+    if len({cell.run_dir for cell in cells}) != 14:
+        raise CampaignPlanningError("frozen cell run directories must be unique")
+    if len({cell.run_nonce for cell in cells}) != 14:
+        raise CampaignPlanningError("frozen cell ownership nonces must be unique")
+    expected_profiles = {
+        str(preview["baseline_id"]),
+        *(proposal.candidate_id for proposal in proposals),
+    }
+    if set(profile_models) != expected_profiles:
+        raise CampaignPlanningError("frozen campaign profile set changed")
+    for profile_id, model in profile_models.items():
+        if content_hash(model, 64) != EXPECTED_MODEL_SPEC_DIGESTS[profile_id]:
+            raise CampaignPlanningError(
+                f"frozen campaign model profile {profile_id!r} changed"
+            )
+    if (
+        frozen_suite_basis is None
+        or frozen_suite_basis.get("id") != EXPECTED_SUITE_ID
+        or tuple(
+            case.get("id")
+            for case in frozen_suite_basis.get("cases", [])
+            if isinstance(case, dict)
+        )
+        != EXPECTED_CASE_IDS
+    ):
+        raise CampaignPlanningError("frozen campaign suite topology changed")
+    if content_hash(frozen_suite_basis, 64) != EXPECTED_SUITE_SPEC_DIGEST:
+        raise CampaignPlanningError("frozen campaign suite content changed")
+    baseline_model = profile_models[str(preview["baseline_id"])]
+    invariant = canonical_json(_mapping_invariant_model_projection(baseline_model))
+    baseline_semantic = _mapping_semantic_config(baseline_model)
+    for proposal in proposals:
+        candidate_model = profile_models[proposal.candidate_id]
+        if canonical_json(_mapping_invariant_model_projection(candidate_model)) != invariant:
+            raise CampaignPlanningError("frozen candidate changes a non-axis model field")
+        actual_delta = validate_one_axis_delta(
+            baseline_semantic,
+            _mapping_semantic_config(candidate_model),
+            allowed_axes=EXPECTED_AXES,
+        )
+        if actual_delta != proposal.delta:
+            raise CampaignPlanningError("frozen candidate semantic delta changed")
     campaign = FrozenCampaign(
         campaign_dir=root,
         campaign_id=_require_string(
@@ -865,6 +1136,9 @@ def load_frozen_campaign(campaign_dir: Path) -> FrozenCampaign:
         ),
         policy=policy,
         policy_digest=policy.digest,
+        preview_digest=str(frozen["preview_digest"]),
+        harness_tree_sha256=harness_tree_sha256,
+        harness_file_count=harness_file_count,
         proposals=tuple(proposals),
         cells=tuple(cells),
     )
@@ -1421,7 +1695,7 @@ def campaign_admission(
 
 
 def _cell_run_identity(cell: FrozenCell) -> str:
-    return f"{cell.plan_fingerprint}-{cell.run_dir.name}"
+    return f"{cell.plan_fingerprint}-{cell.run_nonce}"
 
 
 def _recover_cell(cell: FrozenCell) -> str:
@@ -1865,6 +2139,7 @@ def run_campaign(
     workspace: Path,
     now: Callable[[], datetime] = _aware_now,
     meminfo_reader: Callable[[], str] = read_host_meminfo,
+    harness_identity_reader: Callable[[Path], tuple[str, int]] = harness_tree_identity,
     cell_runner: Callable[[FrozenCell], CellProjection] | None = None,
 ) -> dict[str, Any]:
     """Run or replay the finite queue, never resuming an interrupted cell."""
@@ -1884,15 +2159,26 @@ def run_campaign(
             existing_state = replay_transitions(campaign.policy, existing_events)
             if existing_state.phase == "terminal":
                 return summarize_campaign(campaign.campaign_dir)
-        blockers = campaign_admission(
-            campaign, now=now(), meminfo_reader=meminfo_reader
+        blockers = list(
+            campaign_admission(campaign, now=now(), meminfo_reader=meminfo_reader)
         )
+        try:
+            current_harness = harness_identity_reader(workspace)
+        except (OSError, ValueError) as error:
+            raise CampaignPlanningError(
+                "campaign harness identity could not be verified"
+            ) from error
+        if current_harness != (
+            campaign.harness_tree_sha256,
+            campaign.harness_file_count,
+        ):
+            blockers.insert(0, "harness_code_changed")
         if blockers:
             summary = summarize_campaign(campaign.campaign_dir)
             summary.update(
                 {
                     "status": "blocked_environment",
-                    "blockers": list(blockers),
+                    "blockers": blockers,
                 }
             )
             write_json(campaign.campaign_dir / "summary.json", summary)

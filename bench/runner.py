@@ -226,6 +226,7 @@ def create_plan(
         "schema_version": 2,
         "created_at": utc_now(),
         "fingerprint": fingerprint,
+        "run_nonce": uuid.uuid4().hex,
         "models_manifest": str(models_path),
         "suite_manifest": str(suite_path),
         "model": model_data,
@@ -2851,7 +2852,18 @@ def execute_plan(
             raise RuntimeError("Frozen plan case identity does not match its contents")
     model = _namespace(plan["model"])
     model.resolved_image = plan.get("resolved", {}).get("image_digest")
-    model.run_identity = f"{plan['fingerprint']}-{run_dir.name}"
+    run_nonce = plan.get("run_nonce")
+    if run_nonce is None:
+        # Compatibility for schema-v2 plans frozen before per-plan ownership
+        # nonces were introduced. New plans always take the collision-proof path.
+        model.run_identity = f"{plan['fingerprint']}-{run_dir.name}"
+    else:
+        if (
+            not isinstance(run_nonce, str)
+            or re.fullmatch(r"[0-9a-f]{32}", run_nonce) is None
+        ):
+            raise RuntimeError("Frozen plan run nonce is invalid")
+        model.run_identity = f"{plan['fingerprint']}-{run_nonce}"
     if str(getattr(model, "support_status", "")) == "incompatible":
         raise PreflightError(
             "This frozen model profile is marked incompatible and cannot be executed"

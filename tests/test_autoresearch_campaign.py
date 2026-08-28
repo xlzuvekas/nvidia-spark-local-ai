@@ -128,6 +128,34 @@ class AutoresearchCampaignPlanningTests(unittest.TestCase):
             with self.assertRaisesRegex(CampaignPlanningError, "inside the workspace"):
                 load_campaign_definition(escaped, workspace=ROOT)
 
+    def test_definition_rejects_manifest_only_protocol_rewrites(self) -> None:
+        source = (
+            CAMPAIGN_PATH.read_text()
+            .replace('../models.toml', '../../models.toml')
+            .replace('../suites/', '../../suites/')
+        )
+        with tempfile.TemporaryDirectory(dir=CAMPAIGN_PATH.parent) as directory:
+            root = Path(directory)
+            changed_id = root / "changed-id.toml"
+            changed_id.write_text(
+                source.replace(
+                    "qwen38-flash-next-single-user-autoresearch-2026-08-28",
+                    "qwen38-flash-next-single-user-autoresearch-rewritten",
+                )
+            )
+            with self.assertRaisesRegex(CampaignPlanningError, "campaign ID"):
+                load_campaign_definition(changed_id, workspace=ROOT)
+
+            changed_candidate = root / "changed-candidate.toml"
+            changed_candidate.write_text(
+                source.replace(
+                    "qwen38-flash-next-nvfp4-mtp3-agent64k-low-ple-mapped-sglang",
+                    "qwen38-flash-next-nvfp4-mtp2-agent64k-low-ple-mapped-sglang",
+                )
+            )
+            with self.assertRaisesRegex(CampaignPlanningError, "candidate queue"):
+                load_campaign_definition(changed_candidate, workspace=ROOT)
+
     def test_freeze_uses_unique_cell_roots_and_never_executes(self) -> None:
         calls: list[dict[str, object]] = []
 
@@ -146,8 +174,10 @@ class AutoresearchCampaignPlanningTests(unittest.TestCase):
             write_json(
                 run_dir / "plan.json",
                 {
+                    "schema_version": 2,
                     "fingerprint": fingerprint,
                     "integrity_hash": "a" * 64,
+                    "run_nonce": f"{len(calls):032x}",
                 },
             )
             return run_dir
@@ -171,7 +201,11 @@ class AutoresearchCampaignPlanningTests(unittest.TestCase):
 
 
 def _freeze_campaign_fixture(root: Path) -> Path:
+    plan_ordinal = 0
+
     def fake_create_plan(**kwargs: object) -> Path:
+        nonlocal plan_ordinal
+        plan_ordinal += 1
         results_root = kwargs["results_root"]
         model = kwargs["model"]
         suite = kwargs["suite"]
@@ -191,6 +225,7 @@ def _freeze_campaign_fixture(root: Path) -> Path:
             "schema_version": 2,
             "created_at": "2026-08-28T00:00:00+00:00",
             "fingerprint": fingerprint,
+            "run_nonce": f"{plan_ordinal:032x}",
             "models_manifest": "ignored",
             "suite_manifest": "ignored",
             "model": model_data,
@@ -270,6 +305,58 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
             ):
                 load_frozen_campaign(campaign_dir)
 
+    def test_loader_rejects_rehashed_cutoff_and_profile_content(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            cutoff_root = Path(directory) / "cutoff"
+            cutoff_root.mkdir()
+            campaign_dir = _freeze_campaign_fixture(cutoff_root)
+            campaign_path = campaign_dir / "campaign.json"
+            frozen = json.loads(campaign_path.read_text())
+            frozen["preview"]["cutoff"] = "2099-01-01T07:00:00-07:00"
+            frozen["preview_digest"] = content_hash(frozen["preview"], 64)
+            frozen.pop("integrity_hash")
+            frozen["integrity_hash"] = content_hash(frozen, 64)
+            write_json(campaign_path, frozen)
+            with self.assertRaisesRegex(CampaignPlanningError, "cutoff changed"):
+                load_frozen_campaign(campaign_dir)
+
+            profile_root = Path(directory) / "profile"
+            profile_root.mkdir()
+            campaign_dir = _freeze_campaign_fixture(profile_root)
+            campaign_path = campaign_dir / "campaign.json"
+            frozen = json.loads(campaign_path.read_text())
+            candidate_id = frozen["preview"]["proposals"][0]["candidate_id"]
+            for cell in frozen["cells"]:
+                if cell["profile_id"] != candidate_id:
+                    continue
+                plan_path = campaign_dir / cell["run_dir"] / "plan.json"
+                plan = json.loads(plan_path.read_text())
+                plan["model"]["description"] += " rewritten"
+                suite_basis = {
+                    **plan["suite"],
+                    "cases": [
+                        {key: value for key, value in case.items() if key != "case_id"}
+                        for case in plan["suite"]["cases"]
+                    ],
+                }
+                plan["fingerprint"] = content_hash(
+                    {
+                        "model": plan["model"],
+                        "suite": suite_basis,
+                        "resolved": plan["resolved"],
+                    }
+                )
+                plan.pop("integrity_hash")
+                plan["integrity_hash"] = content_hash(plan, 64)
+                write_json(plan_path, plan)
+                cell["plan_fingerprint"] = plan["fingerprint"]
+                cell["plan_integrity_hash"] = plan["integrity_hash"]
+            frozen.pop("integrity_hash")
+            frozen["integrity_hash"] = content_hash(frozen, 64)
+            write_json(campaign_path, frozen)
+            with self.assertRaisesRegex(CampaignPlanningError, "model profile"):
+                load_frozen_campaign(campaign_dir)
+
             safety_root = Path(directory) / "safety"
             safety_root.mkdir()
             campaign_dir = _freeze_campaign_fixture(safety_root)
@@ -342,6 +429,23 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
         self.assertEqual(summary["blockers"], ["starting_swap_above_clean_limit"])
         self.assertEqual(cell_calls, [])
         self.assertFalse(events_exists)
+
+    def test_run_blocks_before_journal_when_executable_harness_changed(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            cell_calls: list[str] = []
+            summary = run_campaign(
+                campaign_dir,
+                workspace=ROOT,
+                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
+                meminfo_reader=_admission_meminfo,
+                harness_identity_reader=lambda _workspace: ("0" * 64, 1),
+                cell_runner=lambda cell: cell_calls.append(cell.cell_id),  # type: ignore[arg-type,return-value]
+            )
+
+        self.assertEqual(summary["status"], "blocked_environment")
+        self.assertEqual(summary["blockers"], ["harness_code_changed"])
+        self.assertEqual(cell_calls, [])
 
     def test_controller_calibrates_confirms_promotes_and_stops_fixed_queue(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
