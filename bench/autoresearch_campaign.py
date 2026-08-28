@@ -8,6 +8,7 @@ screening, and reverse-order confirmation.  Planning never executes a plan.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import fcntl
@@ -16,13 +17,13 @@ import json
 import math
 import os
 from pathlib import Path
-import signal
+import stat
 import statistics
 import subprocess
 import sys
 import time
 import tomllib
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from .autoresearch import (
     CampaignPolicy,
@@ -38,6 +39,12 @@ from .autoresearch import (
     pair_order,
     replay_transitions,
     validate_one_axis_delta,
+)
+from .autoresearch_worker import (
+    WorkerLifecycleError,
+    WorkerRunResult,
+    recover_owned_worker,
+    run_owned_worker,
 )
 from .host_safety import parse_meminfo, read_host_meminfo
 from .journal import Journal, canonical_json, content_hash, utc_now, write_json
@@ -1257,6 +1264,19 @@ def _validate_plan_integrity(plan: Mapping[str, Any]) -> None:
     }
     if len(suite_without_case_ids["cases"]) != len(cases):
         raise CellProjectionError("cell plan contains a non-object case")
+    protocol_digest = suite_without_case_ids.get("protocol_digest")
+    expected_cases = [
+        _canonical_case(
+            model,
+            case,
+            protocol_digest=(
+                protocol_digest if isinstance(protocol_digest, str) else None
+            ),
+        )
+        for case in suite_without_case_ids["cases"]
+    ]
+    if canonical_json(cases) != canonical_json(expected_cases):
+        raise CellProjectionError("cell plan case identities are not model-bound")
     expected = content_hash(
         {"model": model, "suite": suite_without_case_ids, "resolved": resolved}
     )
@@ -1716,6 +1736,60 @@ def _recover_cell(cell: FrozenCell) -> str:
     return outcome
 
 
+@contextmanager
+def _private_append_log(path: Path) -> Iterator[Any]:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise CellProjectionError("controller log requires no-follow support")
+    try:
+        descriptor = os.open(path, flags | nofollow, 0o600)
+    except OSError as error:
+        raise CellProjectionError("controller log path is unsafe") from error
+    stream = None
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+        ):
+            raise CellProjectionError("controller log must be a private regular file")
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            os.fchmod(descriptor, 0o600)
+        stream = os.fdopen(descriptor, "a", encoding="utf-8")
+        descriptor = -1
+        yield stream
+    finally:
+        if stream is not None:
+            stream.close()
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+_WORKER_OWNERSHIP_FAILURES = frozenset(
+    {
+        "identity_mismatch",
+        "ownership_ambiguous",
+        "process_group_probe_failed",
+        "process_lookup_race",
+        "proc_stat_malformed",
+        "proc_stat_unreadable",
+        "run_nonce_mismatch",
+        "worker_state_changed",
+        "worker_state_malformed",
+        "worker_state_unreadable",
+        "worker_state_unsafe",
+    }
+)
+
+
+def _worker_failure_kind(error: WorkerLifecycleError) -> str:
+    if error.code in _WORKER_OWNERSHIP_FAILURES:
+        return "ownership_ambiguity"
+    return "cleanup_breach"
+
+
 def run_frozen_cell(
     cell: FrozenCell,
     *,
@@ -1723,6 +1797,7 @@ def run_frozen_cell(
     cell_timeout_s: int,
     cleanup_timeout_s: int,
     popen_factory: Callable[..., subprocess.Popen[Any]] = subprocess.Popen,
+    worker_runner: Callable[..., WorkerRunResult] = run_owned_worker,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> CellProjection:
     """Execute one pristine plan with SIGINT unwind and exact owned recovery."""
@@ -1750,46 +1825,43 @@ def run_frozen_cell(
     ]
     log_path = cell.run_dir / "controller.log"
     started = monotonic()
-    timed_out = False
-    forced_kill = False
-    with log_path.open("a", encoding="utf-8") as log:
-        process = popen_factory(
-            command,
-            cwd=str(workspace),
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            text=True,
-            start_new_session=True,
-        )
+    with _private_append_log(log_path) as log:
         try:
-            return_code = process.wait(timeout=cell_timeout_s)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            os.killpg(process.pid, signal.SIGINT)
-            try:
-                return_code = process.wait(timeout=cleanup_timeout_s)
-            except subprocess.TimeoutExpired:
-                forced_kill = True
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=10)
-                return_code = -signal.SIGKILL
+            worker = worker_runner(
+                command,
+                cell_run_dir=cell.run_dir,
+                run_nonce=cell.run_nonce,
+                timeout_s=cell_timeout_s,
+                interrupt_grace_s=cleanup_timeout_s,
+                popen_kwargs={
+                    "cwd": str(workspace),
+                    "stdin": subprocess.DEVNULL,
+                    "stdout": log,
+                    "stderr": subprocess.STDOUT,
+                    "text": True,
+                },
+                popen_factory=popen_factory,
+            )
+        except WorkerLifecycleError as error:
+            raise CellProjectionError(
+                "cell worker ownership or cleanup failed",
+                failure_kind=_worker_failure_kind(error),
+            ) from error
     wall_s = monotonic() - started
     if wall_s < 0:
         raise CellProjectionError("cell monotonic clock moved backwards")
-    if forced_kill:
+    if worker.timed_out:
         _recover_cell(cell)
-        raise CellProjectionError(
-            "cell exceeded timeout and owned cleanup grace",
-            failure_kind="cleanup_breach",
-        )
-    if timed_out:
-        _recover_cell(cell)
+        if worker.cleanup.outcome == "killed":
+            raise CellProjectionError(
+                "cell exceeded timeout and owned cleanup grace",
+                failure_kind="cleanup_breach",
+            )
         raise CellProjectionError(
             "cell exceeded its causal timeout and is invalid",
             failure_kind="measurement",
         )
-    if return_code != 0:
+    if worker.return_code != 0:
         _recover_cell(cell)
         try:
             project_completed_cell(cell.run_dir)
@@ -1800,6 +1872,46 @@ def run_frozen_cell(
     if projection.profile_id != cell.profile_id:
         raise CellProjectionError("completed cell profile binding changed")
     return projection
+
+
+def _recover_interrupted_cells(campaign: FrozenCampaign) -> None:
+    """Recover owned workers/containers before any admission decision."""
+
+    for cell in campaign.cells:
+        events_path = cell.run_dir / "events.jsonl"
+        cell_started = events_path.exists() and events_path.stat().st_size > 0
+        try:
+            cleanup = recover_owned_worker(
+                cell.run_dir,
+                expected_run_nonce=cell.run_nonce,
+                interrupt_grace_s=campaign.policy.cleanup_timeout_s,
+            )
+        except WorkerLifecycleError as error:
+            raise CellProjectionError(
+                "interrupted cell worker recovery failed",
+                failure_kind=_worker_failure_kind(error),
+            ) from error
+        recovered_worker = cleanup.outcome != "no_state"
+        if recovered_worker or cell_started:
+            _recover_cell(cell)
+        if recovered_worker and not cell_started:
+            raise CellProjectionError(
+                "interrupted cell exited before a durable measurement journal",
+                failure_kind="measurement",
+            )
+        if cell_started:
+            try:
+                projection = project_completed_cell(cell.run_dir)
+            except CellProjectionError as error:
+                raise CellProjectionError(
+                    "interrupted cell is incomplete and cannot be resumed",
+                    failure_kind=error.failure_kind,
+                ) from error
+            if projection.profile_id != cell.profile_id:
+                raise CellProjectionError(
+                    "interrupted cell profile binding changed",
+                    failure_kind="audit",
+                )
 
 
 def _transition_id(*parts: object) -> str:
@@ -2133,6 +2245,39 @@ def summarize_campaign(campaign_dir: Path) -> dict[str, Any]:
     return summary
 
 
+@contextmanager
+def _campaign_lock(path: Path) -> Iterator[None]:
+    """Hold a private, single-link lock without following or truncating files."""
+
+    flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise CampaignPlanningError("campaign lock requires no-follow support")
+    try:
+        descriptor = os.open(path, flags | nofollow, 0o600)
+    except OSError as error:
+        raise CampaignPlanningError("campaign lock path is unsafe") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+        ):
+            raise CampaignPlanningError("campaign lock must be a single-link file")
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            os.fchmod(descriptor, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise CampaignPlanningError(
+                "another autoresearch controller holds the campaign lock"
+            ) from error
+        yield
+    finally:
+        os.close(descriptor)
+
+
 def run_campaign(
     campaign_dir: Path,
     *,
@@ -2146,19 +2291,32 @@ def run_campaign(
 
     campaign = load_frozen_campaign(campaign_dir)
     lock_path = campaign.campaign_dir / ".autoresearch.lock"
-    with lock_path.open("w") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise CampaignPlanningError(
-                "another autoresearch controller holds the campaign lock"
-            ) from error
+    with _campaign_lock(lock_path):
         existing_journal = Journal(campaign.campaign_dir / "events.jsonl")
         existing_events = existing_journal.events()
-        if existing_events:
-            existing_state = replay_transitions(campaign.policy, existing_events)
-            if existing_state.phase == "terminal":
-                return summarize_campaign(campaign.campaign_dir)
+        existing_state = (
+            replay_transitions(campaign.policy, existing_events)
+            if existing_events
+            else None
+        )
+        try:
+            _recover_interrupted_cells(campaign)
+        except CellProjectionError as error:
+            if existing_state is not None and existing_state.phase == "terminal":
+                raise CampaignPlanningError(
+                    "terminal campaign cleanup could not be reverified"
+                ) from error
+            _append_campaign_started(existing_journal, campaign)
+            _append_terminal(
+                existing_journal,
+                campaign,
+                failure_kind=error.failure_kind,
+                cleanup_verified=error.failure_kind
+                not in {"cleanup_breach", "ownership_ambiguity"},
+            )
+            return summarize_campaign(campaign.campaign_dir)
+        if existing_state is not None and existing_state.phase == "terminal":
+            return summarize_campaign(campaign.campaign_dir)
         blockers = list(
             campaign_admission(campaign, now=now(), meminfo_reader=meminfo_reader)
         )
@@ -2174,6 +2332,23 @@ def run_campaign(
         ):
             blockers.insert(0, "harness_code_changed")
         if blockers:
+            if existing_events:
+                failure_kind = (
+                    "audit"
+                    if "harness_code_changed" in blockers
+                    else "swap_pressure"
+                    if "starting_swap_above_clean_limit" in blockers
+                    else "memory_pressure"
+                    if "insufficient_preflight_memavailable" in blockers
+                    else "measurement"
+                )
+                _append_terminal(
+                    existing_journal,
+                    campaign,
+                    failure_kind=failure_kind,
+                    cleanup_verified=True,
+                )
+                return summarize_campaign(campaign.campaign_dir)
             summary = summarize_campaign(campaign.campaign_dir)
             summary.update(
                 {
@@ -2184,7 +2359,7 @@ def run_campaign(
             write_json(campaign.campaign_dir / "summary.json", summary)
             return summary
 
-        runner = cell_runner or (
+        base_runner = cell_runner or (
             lambda cell: run_frozen_cell(
                 cell,
                 workspace=workspace,
@@ -2192,6 +2367,24 @@ def run_campaign(
                 cleanup_timeout_s=campaign.policy.cleanup_timeout_s,
             )
         )
+
+        def runner(cell: FrozenCell) -> CellProjection:
+            try:
+                current = harness_identity_reader(workspace)
+            except (OSError, ValueError) as error:
+                raise CellProjectionError(
+                    "campaign harness identity could not be reverified",
+                    failure_kind="audit",
+                ) from error
+            if current != (
+                campaign.harness_tree_sha256,
+                campaign.harness_file_count,
+            ):
+                raise CellProjectionError(
+                    "campaign harness changed before cell launch",
+                    failure_kind="audit",
+                )
+            return base_runner(cell)
         journal = existing_journal
         _append_campaign_started(journal, campaign)
         try:
@@ -2336,6 +2529,7 @@ def run_campaign(
                 journal,
                 campaign,
                 failure_kind=error.failure_kind,
-                cleanup_verified=error.failure_kind != "cleanup_breach",
+                cleanup_verified=error.failure_kind
+                not in {"cleanup_breach", "ownership_ambiguity"},
             )
         return summarize_campaign(campaign.campaign_dir)

@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from dataclasses import asdict, replace
 from datetime import datetime
+import fcntl
 import json
 import math
+import os
 from pathlib import Path
+import stat
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from bench.autoresearch_campaign import (
     CampaignPlanningError,
@@ -23,11 +28,17 @@ from bench.autoresearch_campaign import (
     load_campaign_definition,
     observation_from_cells,
     project_completed_cell,
+    run_frozen_cell,
     run_campaign,
     semantic_config,
     validate_campaign,
 )
 from bench.autoresearch import CampaignPolicy
+from bench.autoresearch_worker import (
+    WorkerCleanupResult,
+    WorkerLifecycleError,
+    WorkerRunResult,
+)
 from bench.journal import content_hash, write_json
 from bench.runner import _canonical_case
 
@@ -288,6 +299,121 @@ def _synthetic_projection(cell: object, *, improvement: float) -> CellProjection
     )
 
 
+def _worker_result(*, outcome: str, timed_out: bool) -> WorkerRunResult:
+    cleanup = WorkerCleanupResult(
+        outcome=outcome,  # type: ignore[arg-type]
+        identity=None,
+        return_code=-2 if timed_out else 0,
+        sigint_sent=timed_out,
+        sigkill_sent=outcome == "killed",
+        process_lookup_race=False,
+        state_removed=True,
+    )
+    return WorkerRunResult(
+        return_code=cleanup.return_code or 0,
+        timed_out=timed_out,
+        cleanup=cleanup,
+    )
+
+
+class AutoresearchFrozenCellWorkerTests(unittest.TestCase):
+    def test_timeout_uses_owned_worker_and_exact_sglang_recovery(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign = load_frozen_campaign(
+                _freeze_campaign_fixture(Path(directory))
+            )
+            cell = campaign.cells[0]
+            captured: dict[str, object] = {}
+
+            def worker(command: list[str], **kwargs: object) -> WorkerRunResult:
+                captured["command"] = command
+                captured.update(kwargs)
+                return _worker_result(outcome="interrupted", timed_out=True)
+
+            ticks = iter((10.0, 11.0))
+            with patch(
+                "bench.autoresearch_campaign._recover_cell",
+                return_value="already_absent",
+            ) as recover:
+                with self.assertRaises(CellProjectionError) as raised:
+                    run_frozen_cell(
+                        cell,
+                        workspace=ROOT,
+                        cell_timeout_s=1_800,
+                        cleanup_timeout_s=120,
+                        worker_runner=worker,
+                        monotonic=lambda: next(ticks),
+                    )
+
+            log_path = cell.run_dir / "controller.log"
+            self.assertEqual(stat.S_IMODE(log_path.stat().st_mode), 0o600)
+
+        self.assertEqual(raised.exception.failure_kind, "measurement")
+        self.assertEqual(captured["cell_run_dir"], cell.run_dir)
+        self.assertEqual(captured["run_nonce"], cell.run_nonce)
+        self.assertEqual(captured["timeout_s"], 1_800)
+        self.assertEqual(captured["interrupt_grace_s"], 120)
+        self.assertEqual(
+            captured["command"],
+            [
+                sys.executable,
+                str((ROOT / "sparkbench.py").resolve()),
+                "run",
+                str(cell.run_dir),
+                "--fail-fast",
+            ],
+        )
+        recover.assert_called_once_with(cell)
+
+    def test_forced_worker_kill_is_a_cleanup_breach(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign = load_frozen_campaign(
+                _freeze_campaign_fixture(Path(directory))
+            )
+            cell = campaign.cells[0]
+            with patch(
+                "bench.autoresearch_campaign._recover_cell",
+                return_value="already_absent",
+            ):
+                with self.assertRaises(CellProjectionError) as raised:
+                    run_frozen_cell(
+                        cell,
+                        workspace=ROOT,
+                        cell_timeout_s=1_800,
+                        cleanup_timeout_s=120,
+                        worker_runner=lambda *_args, **_kwargs: _worker_result(
+                            outcome="killed", timed_out=True
+                        ),
+                    )
+
+        self.assertEqual(raised.exception.failure_kind, "cleanup_breach")
+
+    def test_worker_identity_failure_is_ownership_ambiguity(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign = load_frozen_campaign(
+                _freeze_campaign_fixture(Path(directory))
+            )
+            cell = campaign.cells[0]
+
+            def fail_worker(*_args: object, **_kwargs: object) -> WorkerRunResult:
+                raise WorkerLifecycleError(
+                    "identity_mismatch", "synthetic worker identity mismatch"
+                )
+
+            with patch("bench.autoresearch_campaign._recover_cell") as recover:
+                with self.assertRaises(CellProjectionError) as raised:
+                    run_frozen_cell(
+                        cell,
+                        workspace=ROOT,
+                        cell_timeout_s=1_800,
+                        cleanup_timeout_s=120,
+                        worker_runner=fail_worker,
+                    )
+
+        self.assertEqual(raised.exception.failure_kind, "ownership_ambiguity")
+        recover.assert_not_called()
+
+
 class AutoresearchCampaignControllerTests(unittest.TestCase):
     def test_loader_rejects_rehashed_schedule_and_safety_tampering(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
@@ -332,6 +458,17 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
                 plan_path = campaign_dir / cell["run_dir"] / "plan.json"
                 plan = json.loads(plan_path.read_text())
                 plan["model"]["description"] += " rewritten"
+                plan["suite"]["cases"] = [
+                    _canonical_case(
+                        plan["model"],
+                        {
+                            key: value
+                            for key, value in case.items()
+                            if key != "case_id"
+                        },
+                    )
+                    for case in plan["suite"]["cases"]
+                ]
                 suite_basis = {
                     **plan["suite"],
                     "cases": [
@@ -365,6 +502,17 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
             plan_path = campaign_dir / cell["run_dir"] / "plan.json"
             plan = json.loads(plan_path.read_text())
             plan["model"]["host_safety_min_memavailable_gib"] = 1
+            plan["suite"]["cases"] = [
+                _canonical_case(
+                    plan["model"],
+                    {
+                        key: value
+                        for key, value in case.items()
+                        if key != "case_id"
+                    },
+                )
+                for case in plan["suite"]["cases"]
+            ]
             suite_without_case_ids = {
                 **plan["suite"],
                 "cases": [
@@ -446,6 +594,104 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
         self.assertEqual(summary["status"], "blocked_environment")
         self.assertEqual(summary["blockers"], ["harness_code_changed"])
         self.assertEqual(cell_calls, [])
+
+    def test_active_campaign_admission_blocker_is_durably_terminal(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+
+            def interrupt(_cell: object) -> CellProjection:
+                raise KeyboardInterrupt
+
+            with self.assertRaises(KeyboardInterrupt):
+                run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=lambda: datetime.fromisoformat(
+                        "2026-08-28T00:00:00-07:00"
+                    ),
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=interrupt,
+                )
+            summary = run_campaign(
+                campaign_dir,
+                workspace=ROOT,
+                now=lambda: datetime.fromisoformat("2026-08-28T00:01:00-07:00"),
+                meminfo_reader=lambda: _admission_meminfo(swap_used_mib=65),
+                cell_runner=lambda _cell: self.fail("blocked resume launched a cell"),
+            )
+
+        self.assertEqual(summary["status"], "terminated")
+        self.assertEqual(summary["terminal_reason"], "swap_pressure")
+
+    def test_harness_identity_is_rechecked_immediately_before_cell(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            frozen = load_frozen_campaign(campaign_dir)
+            identities = iter(
+                [
+                    (frozen.harness_tree_sha256, frozen.harness_file_count),
+                    ("0" * 64, frozen.harness_file_count),
+                ]
+            )
+            calls: list[str] = []
+            summary = run_campaign(
+                campaign_dir,
+                workspace=ROOT,
+                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
+                meminfo_reader=_admission_meminfo,
+                harness_identity_reader=lambda _workspace: next(identities),
+                cell_runner=lambda cell: calls.append(cell.cell_id),  # type: ignore[arg-type,return-value]
+            )
+
+        self.assertEqual(summary["status"], "terminated")
+        self.assertEqual(summary["terminal_reason"], "audit")
+        self.assertEqual(calls, [])
+
+    def test_campaign_lock_rejects_links_and_an_active_controller(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            lock_path = campaign_dir / ".autoresearch.lock"
+            protected = Path(directory) / "protected"
+            protected.write_text("do-not-touch")
+            lock_path.symlink_to(protected)
+            with self.assertRaisesRegex(CampaignPlanningError, "lock path is unsafe"):
+                run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
+                    meminfo_reader=_admission_meminfo,
+                )
+            self.assertEqual(protected.read_text(), "do-not-touch")
+
+            lock_path.unlink()
+            os.link(protected, lock_path)
+            with self.assertRaisesRegex(CampaignPlanningError, "single-link"):
+                run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
+                    meminfo_reader=_admission_meminfo,
+                )
+            self.assertEqual(protected.read_text(), "do-not-touch")
+
+            lock_path.unlink()
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaisesRegex(
+                    CampaignPlanningError, "another autoresearch controller"
+                ):
+                    run_campaign(
+                        campaign_dir,
+                        workspace=ROOT,
+                        now=lambda: datetime.fromisoformat(
+                            "2026-08-28T00:00:00-07:00"
+                        ),
+                        meminfo_reader=_admission_meminfo,
+                    )
+            finally:
+                os.close(descriptor)
+            self.assertFalse((campaign_dir / "events.jsonl").exists())
 
     def test_controller_calibrates_confirms_promotes_and_stops_fixed_queue(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
