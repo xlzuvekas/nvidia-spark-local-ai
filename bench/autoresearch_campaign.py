@@ -56,6 +56,7 @@ from .autoresearch_worker import (
     recover_owned_worker,
     run_owned_worker,
 )
+from .execution_admission import model_execution_blocker
 from .host_safety import parse_meminfo, read_host_meminfo
 from .journal import Journal, canonical_json, content_hash, utc_now, write_json
 from .manifest import (
@@ -782,6 +783,14 @@ def freeze_campaign(
 
     definition = load_campaign_definition(path, workspace=workspace)
     preview, models, suite = validate_campaign(definition)
+    selected_profile_ids = (
+        definition.baseline_id,
+        *(proposal.candidate_id for proposal in preview.proposals),
+    )
+    for profile_id in selected_profile_ids:
+        blocker = model_execution_blocker(models[profile_id])
+        if blocker is not None:
+            raise CampaignPlanningError(blocker)
     harness_tree_sha256, harness_file_count = harness_tree_identity(workspace)
     stamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
     campaign_dir = results_root / f"{stamp}-{definition.id}-{preview.digest[:8]}"
@@ -1698,6 +1707,25 @@ def _validate_plan_integrity(plan: Mapping[str, Any]) -> None:
         raise CellProjectionError("cell plan fingerprint does not match")
 
 
+def _bound_frozen_cell_plan_model(cell: FrozenCell) -> dict[str, Any]:
+    """Read and revalidate the exact model bound to one frozen cell."""
+
+    plan = _read_json_object(
+        cell.run_dir / "plan.json", context="frozen cell plan"
+    )
+    _validate_plan_integrity(plan)
+    if (
+        plan.get("fingerprint") != cell.plan_fingerprint
+        or plan.get("integrity_hash") != cell.plan_integrity_hash
+        or plan.get("run_nonce") != cell.run_nonce
+    ):
+        raise CellProjectionError("frozen cell plan binding changed")
+    model = plan.get("model")
+    if not isinstance(model, dict) or model.get("id") != cell.profile_id:
+        raise CellProjectionError("frozen cell profile binding changed")
+    return model
+
+
 def _normalized_flags(model: Mapping[str, Any]) -> tuple[str, ...]:
     raw = model.get("args")
     if not isinstance(raw, (list, tuple)) or any(
@@ -2336,6 +2364,9 @@ def run_frozen_cell(
 ) -> CellProjection:
     """Execute one pristine plan with SIGINT unwind and exact owned recovery."""
 
+    blocker = model_execution_blocker(_bound_frozen_cell_plan_model(cell))
+    if blocker is not None:
+        raise CellProjectionError(blocker, failure_kind="audit")
     events_path = cell.run_dir / "events.jsonl"
     if _safe_cell_journal_size(events_path):
         try:
@@ -3733,6 +3764,10 @@ def run_campaign(
     """Run or replay the finite queue, never resuming an interrupted cell."""
 
     campaign = load_frozen_campaign(campaign_dir)
+    for cell in campaign.cells:
+        blocker = model_execution_blocker(_bound_frozen_cell_plan_model(cell))
+        if blocker is not None:
+            raise CampaignPlanningError(blocker)
     lock_path = campaign.campaign_dir / ".autoresearch.lock"
     with _campaign_lock(lock_path):
         existing_journal = Journal(campaign.campaign_dir / "events.jsonl")

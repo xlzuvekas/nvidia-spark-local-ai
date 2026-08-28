@@ -36,6 +36,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .execution_admission import model_execution_blocker
 from .journal import Journal, utc_now
 from .manifest import load_models, model_spec_to_dict
 from .runner import _preflight, results_lock_path
@@ -184,6 +185,13 @@ _HALO_KEYS = frozenset(
 
 class LoopCampaignError(RuntimeError):
     """A public-safe campaign failure."""
+
+
+def _require_executable_profiles(profiles: Iterable[Any]) -> None:
+    for profile in profiles:
+        blocker = model_execution_blocker(profile)
+        if blocker is not None:
+            raise LoopCampaignError(blocker)
 
 
 def _canonical_json(value: Any) -> str:
@@ -859,6 +867,7 @@ def create_campaign_plan(
     missing = [profile_id for profile_id in profile_ids if profile_id not in models]
     if missing:
         raise LoopCampaignError(f"Campaign references missing model profiles: {missing}")
+    _require_executable_profiles(models[profile_id] for profile_id in profile_ids)
     if "chat" not in models[config["rlm"]["model_profile"]].tasks:
         raise LoopCampaignError("RLM model profile lacks chat capability")
     for profile_id in config["halo"]["model_profiles"]:
@@ -3600,6 +3609,10 @@ def execute_campaign(*, run_dir: Path, workspace: Path) -> dict[str, Any]:
     global _STOP_REQUESTED
     _STOP_REQUESTED = False
     plan = load_campaign_plan(run_dir)
+    frozen_models = plan.get("models")
+    if not isinstance(frozen_models, Mapping):
+        raise LoopCampaignError("Frozen campaign models are invalid")
+    _require_executable_profiles(frozen_models.values())
     repository = _repository_provenance(workspace, require_clean=True)
     if repository != plan.get("repository"):
         raise LoopCampaignError("Repository provenance no longer matches the frozen plan")

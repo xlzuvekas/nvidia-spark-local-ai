@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
+from .execution_admission import model_execution_blocker
 from bench.qwen38_ple_cache import (
     PINNED_LAYOUT as QWEN38_PLE_LAYOUT,
     PLECacheError,
@@ -1447,6 +1448,9 @@ def start_sglang(
 ) -> ManagedServer:
     """Start a digest-pinned SGLang server from exact cached snapshots."""
 
+    blocker = model_execution_blocker(model)
+    if blocker is not None:
+        raise RuntimeErrorWithContext(blocker)
     # Runtime acquisition is always forbidden. A typed profile may permit only
     # the pinned image's documented metadata probe after both snapshots exist.
     del allow_download

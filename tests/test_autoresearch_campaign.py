@@ -58,6 +58,25 @@ CAMPAIGN_PATH = (
 )
 
 
+_execution_admission_patcher = None
+
+
+def setUpModule() -> None:
+    """Keep historical controller mechanics independent of live retirement."""
+
+    global _execution_admission_patcher
+    _execution_admission_patcher = patch(
+        "bench.execution_admission.RETIRED_SGLANG_SOURCE_OVERLAY_DIGESTS",
+        frozenset(),
+    )
+    _execution_admission_patcher.start()
+
+
+def tearDownModule() -> None:
+    assert _execution_admission_patcher is not None
+    _execution_admission_patcher.stop()
+
+
 class AutoresearchCampaignPlanningTests(unittest.TestCase):
     def test_definition_and_three_semantic_deltas_are_exact(self) -> None:
         definition = load_campaign_definition(CAMPAIGN_PATH, workspace=ROOT)

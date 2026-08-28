@@ -36,6 +36,23 @@ from tests.test_autoresearch_replay_hardening import (
 )
 
 
+_execution_admission_patcher = None
+
+
+def setUpModule() -> None:
+    global _execution_admission_patcher
+    _execution_admission_patcher = patch(
+        "bench.execution_admission.RETIRED_SGLANG_SOURCE_OVERLAY_DIGESTS",
+        frozenset(),
+    )
+    _execution_admission_patcher.start()
+
+
+def tearDownModule() -> None:
+    assert _execution_admission_patcher is not None
+    _execution_admission_patcher.stop()
+
+
 def _no_worker() -> WorkerCleanupResult:
     return WorkerCleanupResult(
         outcome="no_state",

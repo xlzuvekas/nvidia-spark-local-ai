@@ -26,6 +26,23 @@ from tests.test_autoresearch_campaign import (
 )
 
 
+_execution_admission_patcher = None
+
+
+def setUpModule() -> None:
+    global _execution_admission_patcher
+    _execution_admission_patcher = patch(
+        "bench.execution_admission.RETIRED_SGLANG_SOURCE_OVERLAY_DIGESTS",
+        frozenset(),
+    )
+    _execution_admission_patcher.start()
+
+
+def tearDownModule() -> None:
+    assert _execution_admission_patcher is not None
+    _execution_admission_patcher.stop()
+
+
 class _Clock:
     def __init__(self) -> None:
         self.value = datetime.fromisoformat("2026-08-28T00:00:00-07:00")

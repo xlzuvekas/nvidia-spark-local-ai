@@ -26,6 +26,7 @@ from bench.autoresearch_campaign import (
 )
 from bench.diffusion_direct import run_direct_diffusion
 from bench.evidence import export_evidence, verify_evidence, verify_staged_evidence
+from bench.execution_admission import model_execution_blocker
 from bench.inventory import (
     assess_model_availability,
     collect_inventory,
@@ -347,6 +348,8 @@ def command_matrix(args: argparse.Namespace) -> int:
     availability = assess_model_availability(models, _inventory())
     selected = []
     for model in models.values():
+        if model_execution_blocker(model) is not None:
+            continue
         if model.support_status == "incompatible" or model.backend in {
             "transformers",
             "trtllm",

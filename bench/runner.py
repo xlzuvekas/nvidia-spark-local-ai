@@ -34,6 +34,7 @@ from .client import (
     stream_chat_request,
     stream_ollama_chat_request,
 )
+from .execution_admission import model_execution_blocker
 from .host_safety import HostSafetyError, HostSafetyWatchdog
 from .journal import Journal, content_hash, utc_now, write_json
 from .llamacpp_cache_metrics import (
@@ -177,6 +178,9 @@ def _canonical_case(
 def create_plan(
     *, model: Any, suite: Any, results_root: Path, models_path: Path, suite_path: Path
 ) -> Path:
+    blocker = model_execution_blocker(model)
+    if blocker is not None:
+        raise RuntimeError(blocker)
     if str(getattr(model, "support_status", "")) == "incompatible":
         raise RuntimeError("Incompatible model profiles cannot be planned")
     direct_commands = {
@@ -2850,6 +2854,9 @@ def execute_plan(
         )["case_id"]
         if case.get("case_id") != expected_case_id:
             raise RuntimeError("Frozen plan case identity does not match its contents")
+    blocker = model_execution_blocker(plan["model"])
+    if blocker is not None:
+        raise PreflightError(blocker)
     model = _namespace(plan["model"])
     model.resolved_image = plan.get("resolved", {}).get("image_digest")
     run_nonce = plan.get("run_nonce")

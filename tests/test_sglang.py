@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from bench.inventory import (
     DockerImage,
@@ -901,216 +901,77 @@ class SGLangRuntimeTests(unittest.TestCase):
             self.assertNotIn(str(workspace), serialized)
             self.assertIn(digest(model_overlay), serialized)
 
-    def test_ple_omission_launch_has_no_ple_backing_and_is_fail_closed(self) -> None:
-        profile = replace(
-            load_models(ROOT / "manifests" / "models.toml")[
-                "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-omitted-sglang"
-            ],
-            cache_dir="project",
+    def test_ple_omission_profile_is_retired_before_runtime_probes(self) -> None:
+        profile = load_models(ROOT / "manifests" / "models.toml")[
+            "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-omitted-sglang"
+        ]
+        model = SimpleNamespace(
+            **asdict(profile),
+            resolved_image=profile.image,
+            run_identity="retired-ple-omitted",
+        )
+        abort_check = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch("bench.runtime._existing_container") as existing,
+                patch("bench.runtime._port_is_free") as port_free,
+                patch("bench.runtime._exact_sglang_snapshot") as snapshot,
+                patch("bench.runtime._resolve_sglang_source_overlays") as overlays,
+                patch("bench.runtime.secrets.token_urlsafe") as token,
+                patch("bench.runtime._run") as run,
+                self.assertRaisesRegex(
+                    RuntimeErrorWithContext, "retired SGLang source overlay"
+                ),
+            ):
+                start_sglang(
+                    model,
+                    workspace=Path(directory),
+                    abort_check=abort_check,
+                )
+        for probe in (
+            abort_check,
+            existing,
+            port_free,
+            snapshot,
+            overlays,
+            token,
+            run,
+        ):
+            probe.assert_not_called()
+
+    def test_readonly_ple_profile_is_retired_before_cache_probe(self) -> None:
+        profile = load_models(ROOT / "manifests" / "models.toml")[
+            "qwen38-flash-next-nvfp4-mtp-sglang"
+        ]
+        model = SimpleNamespace(
+            **asdict(profile),
+            resolved_image=profile.image,
+            run_identity="retired-readonly-ple",
         )
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            snapshot = (
-                workspace
-                / "data"
-                / "huggingface"
-                / "hub"
-                / "models--RadixArk--Qwen3.8-Flash-Next-NVFP4"
-                / "snapshots"
-                / str(profile.revision)
-            )
-            snapshot.mkdir(parents=True)
-            overlay_root = workspace / "synthetic-overlays"
-            overlay_root.mkdir()
-            resolved_overlays = tuple(
-                (
-                    overlay_root / Path(overlay.host_path).name,
-                    overlay.container_path,
-                    overlay.digest,
-                    overlay.host_path,
-                )
-                for overlay in profile.sglang_source_overlays
-            )
-            model = SimpleNamespace(
-                **asdict(profile),
-                resolved_image=profile.image,
-                run_identity="run-ple-omitted",
-            )
-
             with (
-                patch("bench.runtime._existing_container", return_value=None),
-                patch("bench.runtime._port_is_free", return_value=True),
-                patch(
-                    "bench.runtime._resolve_sglang_source_overlays",
-                    return_value=resolved_overlays,
-                ),
-                patch("bench.runtime.wait_for_endpoint", return_value=3.0),
-                patch(
-                    "bench.runtime.secrets.token_urlsafe",
-                    return_value="omitted-ephemeral-key",
-                ),
-                patch(
-                    "bench.runtime._run",
-                    return_value=_completed(stdout="omitted-container\n"),
-                ) as run,
-            ):
-                server = start_sglang(model, workspace=workspace)
-
-            launch = run.call_args.args[0]
-            serialized_launch = " ".join(launch)
-            override_index = launch.index("--json-model-override-args")
-            self.assertEqual(
-                launch[override_index + 1], '{"sparkbench_omit_ple":true}'
-            )
-            self.assertNotIn("--ple-offload-embedding", launch)
-            self.assertNotIn("SGLANG_QWEN4_PLE_", serialized_launch)
-            self.assertNotIn(":/ple:", serialized_launch)
-            assert server.native_provenance is not None
-            self.assertIs(server.native_provenance["sglang_ple_omitted"], True)
-            self.assertIs(server.native_provenance["sglang_ple_mmap"], False)
-            self.assertIsNone(server.native_provenance["sglang_ple_cache_mode"])
-            self.assertIsNone(
-                server.native_provenance["sglang_ple_cache_marker_digest"]
-            )
-            self.assertIsNone(
-                server.native_provenance["sglang_ple_cache_payload_digest"]
-            )
-
-            invalid_models = (
-                SimpleNamespace(**{**vars(model), "sglang_ple_omitted": "true"}),
-                SimpleNamespace(**{**vars(model), "sglang_ple_mmap": True}),
-                SimpleNamespace(
-                    **{
-                        **vars(model),
-                        "args": tuple(model.args) + ("--ple-offload-embedding",),
-                    }
-                ),
-                SimpleNamespace(
-                    **{
-                        **vars(model),
-                        "args": tuple(model.args)
-                        + ("--json-model-override-args",),
-                    }
-                ),
-            )
-            for index, invalid in enumerate(invalid_models):
-                with (
-                    self.subTest(index=index),
-                    patch("bench.runtime._existing_container", return_value=None),
-                    patch("bench.runtime._port_is_free", return_value=True),
-                    patch(
-                        "bench.runtime._resolve_sglang_source_overlays",
-                        return_value=resolved_overlays,
-                    ),
-                    patch("bench.runtime._run") as invalid_run,
-                    self.assertRaises(RuntimeErrorWithContext),
-                ):
-                    start_sglang(invalid, workspace=workspace)
-                invalid_run.assert_not_called()
-
-            with (
-                patch("bench.runtime._existing_container", return_value=None),
-                patch("bench.runtime._port_is_free", return_value=True),
-                patch(
-                    "bench.runtime._resolve_sglang_source_overlays",
-                    return_value=resolved_overlays[1:],
-                ),
-                patch("bench.runtime._run") as invalid_run,
+                patch("bench.runtime._existing_container") as existing,
+                patch("bench.runtime._port_is_free") as port_free,
+                patch("bench.runtime._exact_sglang_snapshot") as snapshot,
+                patch("bench.runtime._resolve_sglang_source_overlays") as overlays,
+                patch("bench.runtime._readonly_sglang_ple_dir") as cache_probe,
+                patch("bench.runtime.secrets.token_urlsafe") as token,
+                patch("bench.runtime._run") as run,
                 self.assertRaisesRegex(
-                    RuntimeErrorWithContext, "exact ablation-capable"
+                    RuntimeErrorWithContext, "retired SGLang source overlay"
                 ),
             ):
-                start_sglang(model, workspace=workspace)
-            invalid_run.assert_not_called()
-
-    def test_explicit_readonly_ple_cache_is_verified_and_mounted_ro(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            profile = load_models(ROOT / "manifests" / "models.toml")[
-                "qwen38-flash-next-nvfp4-mtp-sglang"
-            ]
-            model = SimpleNamespace(
-                **asdict(replace(profile, cache_dir="project")),
-                resolved_image=profile.image,
-                run_identity="readonly-ple-run",
-            )
-            snapshot = (
-                workspace
-                / "data"
-                / "huggingface"
-                / "hub"
-                / "models--RadixArk--Qwen3.8-Flash-Next-NVFP4"
-                / "snapshots"
-                / model.revision
-            )
-            snapshot.mkdir(parents=True)
-            ple_dir = workspace / "completed-ple"
-            ple_dir.mkdir()
-            record = PLECacheRecord(
-                marker_sha256=model.sglang_ple_cache_marker_digest.removeprefix(
-                    "sha256:"
-                ),
-                payload_sha256=model.sglang_ple_cache_payload_digest.removeprefix(
-                    "sha256:"
-                ),
-                payload_size_bytes=51_200_245_760,
-            )
-            resolved_overlays = tuple(
-                (
-                    workspace / Path(overlay.host_path).name,
-                    overlay.container_path,
-                    overlay.digest,
-                    overlay.host_path,
-                )
-                for overlay in profile.sglang_source_overlays
-            )
-            with (
-                patch("bench.runtime._existing_container", return_value=None),
-                patch("bench.runtime._port_is_free", return_value=True),
-                patch(
-                    "bench.runtime._resolve_sglang_source_overlays",
-                    return_value=resolved_overlays,
-                ),
-                patch(
-                    "bench.runtime._readonly_sglang_ple_dir",
-                    return_value=(ple_dir, record),
-                ) as admit,
-                patch("bench.runtime.wait_for_endpoint", return_value=1.0),
-                patch(
-                    "bench.runtime.secrets.token_urlsafe",
-                    return_value="readonly-ephemeral-key",
-                ),
-                patch(
-                    "bench.runtime._run",
-                    return_value=_completed(stdout="readonly-container\n"),
-                ) as run,
-            ):
-                server = start_sglang(model, workspace=workspace)
-
-            admit.assert_called_once_with(model, resolved_overlays)
-            launch = run.call_args.args[0]
-            self.assertIn(f"{ple_dir}:/ple:ro", launch)
-            self.assertNotIn(f"{ple_dir}:/ple:rw", launch)
-            self.assertIn("SGLANG_QWEN4_PLE_CACHE_MODE=readonly", launch)
-            self.assertIn(
-                "SGLANG_QWEN4_PLE_CACHE_LOADER_CONTRACT="
-                "auto-mmap-no-prefetch",
-                launch,
-            )
-            self.assertIn(
-                "SGLANG_QWEN4_PLE_CACHE_MARKER_SHA256="
-                + record.marker_sha256,
-                launch,
-            )
-            assert server.native_provenance is not None
-            self.assertEqual(
-                server.native_provenance["sglang_ple_backing_policy"],
-                "verified_persistent_readonly",
-            )
-            self.assertEqual(
-                server.native_provenance["sglang_ple_cache_payload_digest"],
-                model.sglang_ple_cache_payload_digest,
-            )
+                start_sglang(model, workspace=Path(directory))
+        for probe in (
+            existing,
+            port_free,
+            snapshot,
+            overlays,
+            cache_probe,
+            token,
+            run,
+        ):
+            probe.assert_not_called()
 
     def test_readonly_ple_rejects_nondefault_weight_loader_modes(self) -> None:
         good = SimpleNamespace(args=["--ple-offload-embedding"])
