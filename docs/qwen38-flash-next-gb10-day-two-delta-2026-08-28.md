@@ -17,9 +17,9 @@ checks, while forced TRT-LLM produced token-zero output. This is meaningful
 corrective evidence, but the pull request is minutes old, unmerged, publicly
 red/gated, and contains no NVMe PLE reader or comparable end-to-end TPS result.
 
-The highest-value new reproduction target is an open vLLM pull request that
-maps the PLE safetensors directly instead of materializing the full table. Its
-author reports about 25.1 tok/s warm on one Spark with MTP2, exact random-row
+The highest-value new systems reproduction target is an open vLLM pull request
+that maps the PLE safetensors directly instead of materializing the full table.
+Its author reports about 25.1 tok/s warm on one Spark with MTP2, exact random-row
 checks, and no GPU-resident PLE allocation. It is still an unmerged community
 branch stacked on another open model-support pull request, so it is an
 experiment candidate rather than supported deployment guidance.
@@ -377,7 +377,8 @@ The reporter labeled failed cache-on attempts `mamba-cache-mode=align` and
 must not be interpreted as two resolved cache modes on the reviewed Qwen4Exp
 heads: the
 [model class](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/models/qwen4_exp/nvidia/model.py#L587-L603)
-does not declare the interface needed for all-mode prefix caching, so shared
+does not declare `SupportsMambaPrefixCaching`, the interface needed for all-mode
+prefix caching, so shared
 [configuration](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/model_executor/models/config.py#L622-L657)
 normalizes `all` to `align`, while model initialization
 [rejects](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/models/qwen4_exp/nvidia/model.py#L612-L624)
@@ -564,7 +565,9 @@ The support matrix at this review is therefore:
 ## What this changes in the local optimization plan
 
 The day-two evidence narrows the next work rather than changing the frozen
-campaign:
+campaign. Step 1 preserves the frozen SGLang product campaign; steps 2--10 are
+a separate post-cutoff systems/reproduction sequence and do not reorder the
+retained-SGLang serving-flag backlog:
 
 1. Resume the existing SGLang campaign only if its original preflight passes
    before cutoff. Otherwise preserve its typed blocked/cutoff state; do not
@@ -594,9 +597,10 @@ campaign:
    gates; and admit the next tier only after the prior tier is correct and
    pressure-clean. On corruption, preserve a typed failure and restart rather
    than retrying inside a poisoned process.
-8. Only after cache-off admission, run the growing-prefix cache canary in a
-   separate fresh lifetime. Repeating a fixed prompt is a negative control, not
-   evidence that cache-resume state is safe.
+8. Only after cache-off admission, run the resolved-`align` growing-prefix
+   canary defined in the reproduction plan in a separate fresh lifetime. Do
+   not add an `all` arm. Repeating a fixed prompt is not evidence that
+   cache-resume state is safe.
 9. Profile a fixed C1 decode span with CUDA/NVTX timing and process counters to
    partition target, launch, scheduler, and PLE page-fault costs. GB10 hardware
    counters require separate authorization and expose only LPDDR-facing

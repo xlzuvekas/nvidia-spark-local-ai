@@ -11,6 +11,16 @@ The product target remains one person using a coding agent or cowork-style
 assistant. Optimize correct end-to-end task wall time, later-turn latency, and
 safe residency on one DGX Spark. Aggregate multi-user throughput is secondary.
 
+This file owns the retained-SGLang **product track**: serving flags and workload
+geometry are ranked against the mapped-FP8-PLE, lazy-state, MTP2 baseline. The
+parallel **systems track** first admits exact vLLM direct mmap, then isolates
+its live-token-width patch and the mixed-FP8 artifact; see the
+[vLLM reproduction plan](qwen38-flash-next-vllm-mmap-reproduction-2026-08-28.md)
+and [bottleneck analysis](qwen38-flash-next-tps-bottleneck-2026-08-28.md).
+The tracks have different runtime and artifact baselines and are not one
+interleaved ranking. A systems candidate does not displace the retained product
+default until it passes its own admission and matched task gates.
+
 ## Evidence-backed prior
 
 The retained default is mapped FP8 PLE, `extra_buffer_lazy`, and NEXTN depth
@@ -58,7 +68,7 @@ a combined champion requires a new frozen profile and campaign.
 
 ## Ranked next experiments
 
-### 1. Long shared-prefix Radix-cache pair
+### 1. Long shared-prefix SGLang Radix-cache pair
 
 This has the highest direct coding/cowork value. The current 60K case is a
 one-shot prompt, while the agent cases have small histories; neither measures
@@ -82,6 +92,8 @@ repeated long-prefix work across tool turns.
 
 This experiment asks whether the default cache avoids repeated prefill and
 hybrid-state work. It must not infer a cache hit from latency alone.
+It does not exercise vLLM `enable_prefix_caching` or `mamba_cache_mode`; those
+belong to the separately quarantined systems track.
 
 ### 2. Two-way single-user fan-out, admission first
 
@@ -215,10 +227,11 @@ This is lower priority than compute and cache axes.
 Reduced client/SSE overhead is not a model decode gain. Do not promote on an
 apparent client TPS change while responsiveness regresses.
 
-## Diagnostics, not immediate candidates
+## Retained-SGLang product diagnostics
 
-A separate unscored lifetime should bracket three profiled C1 D256 requests
-with two unprofiled three-request blocks. Start with CUDA/NVTX timelines,
+Within the retained-SGLang product track, a separate unscored lifetime should
+bracket three profiled C1 D256 requests with two unprofiled three-request
+blocks. Start with CUDA/NVTX timelines,
 source timers, process `/proc` deltas, PSI, NVMe disk deltas and one-hertz
 device telemetry; add one deterministic varied-token long prompt only after
 the minimum trace is interpretable. Pin the collection window and report U-P-U
@@ -232,7 +245,9 @@ sectors only as an LPDDR-facing proxy, never measured LPDDR GB/s. The present
 coarse utilization and power samples cannot distinguish target-weight traffic,
 PLE page traffic, kernel overhead or another resource. This diagnostic must
 use the retained champion, remain outside a causal candidate pair, and must not
-silently change its serving flags.
+silently change its serving flags. The separately specified vLLM direct-mmap
+profile is a systems-attribution diagnostic chosen for instrumentability; it is
+not this product-track lifetime and the two diagnostics are not an A/B pair.
 
 Overlap scheduling enabled versus `--disable-overlap-schedule` is a lower-value
 C1 diagnostic. `mamba_track_interval` should remain frozen until the long

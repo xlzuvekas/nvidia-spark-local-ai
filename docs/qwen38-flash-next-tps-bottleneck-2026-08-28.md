@@ -130,7 +130,9 @@ needed.
 
 ## Measurements that would narrow the physical bottleneck
 
-Start with one separate, unscored vLLM direct-mmap, MTP-off, C1 diagnostic
+This section defines the parallel vLLM **systems-attribution track**, not the
+ranking of serving flags against the retained SGLang product baseline. Start
+with one separate, unscored vLLM direct-mmap, MTP-off, C1 diagnostic
 lifetime after that branch passes build and admission. Its direct-mmap boundary
 can be instrumented more precisely than the current SGLang path. Bracket three
 profiled D256 requests with two unprofiled three-request blocks, then expand to
@@ -166,7 +168,9 @@ run as a promotion pair.
 
 ## Practical optimization order
 
-Until that attribution exists:
+Until that attribution exists, use two parallel queues rather than reading the
+following prerequisites as one total ranking. Items 1--3 and 6--9 are the
+retained-SGLang product track; items 4--5 are the vLLM systems track:
 
 1. keep a healthy server resident when interactive latency matters;
 2. retain mapped PLE, lazy recurrent state, and MTP2 as the safe default;
@@ -184,7 +188,10 @@ Until that attribution exists:
 9. evaluate MTP off only as a cold short-task specialization, not as the
    resident decode default.
 
-The ranked protocols are in the
+The ranked product-track protocols are in the
 [single-user experiment backlog](qwen38-flash-next-single-user-next-experiments-2026-08-28.md).
+The systems track is ordered exact vLLM mmap control, isolated live-token-width
+patch, then matched mixed-FP8 artifact; its profiling lifetime remains
+diagnostic rather than promotional.
 No optimization may trade away exact task correctness, lifecycle integrity, or
 the frozen memory/swap gates for a higher token rate.

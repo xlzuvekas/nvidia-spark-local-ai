@@ -11,6 +11,8 @@ This is a serving-configuration search. It does not train or modify model
 weights. Model, tokenizer, PLE payload, SGLang image, source overlays, hardware,
 prompts, validators, sampling policy, and evaluator versions remain immutable.
 One declared serving axis or coupled NEXTN bundle may change per candidate.
+vLLM source, build, backport, artifact, and profiler work belongs to a separate
+post-campaign systems track and is outside this frozen SGLang search.
 
 ## Current status: safety-stopped, no campaign measurements
 

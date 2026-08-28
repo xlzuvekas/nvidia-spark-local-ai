@@ -495,7 +495,8 @@ that the growing sequence actually exercised cache reuse.
 
 Do not add an `all`-versus-`align` arm on the exact reviewed heads. The
 [Qwen4Exp model class](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/models/qwen4_exp/nvidia/model.py#L587-L603)
-does not declare the interface required for all-mode Mamba prefix caching;
+does not declare `SupportsMambaPrefixCaching`, the interface required for
+all-mode Mamba prefix caching;
 shared
 [configuration](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/model_executor/models/config.py#L622-L657)
 therefore normalizes `all` to `align`, while model initialization
