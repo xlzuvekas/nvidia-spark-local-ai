@@ -553,7 +553,7 @@ The support matrix at this review is therefore:
 
 | Route | One-Spark GB10 status | Local action |
 | --- | --- | --- |
-| SGLang TRT-LLM sparse decode | SM121 excluded by the reviewed `qwen4-main-squashed` gate after corruption reports; no release support | Preserve only for historical provenance and the sole already-frozen campaign exception; do not use for new integration |
+| SGLang TRT-LLM sparse decode | SM121 excluded by the reviewed `qwen4-main-squashed` gate after corruption reports; no release support | Preserve only for historical provenance; the sole frozen-campaign exception is exhausted, and this route must not be used for new integration |
 | SGLang SM121 Triton QSA | Open corrective PR directly atop the restriction; useful one-Spark correctness evidence, but unmerged and publicly red/gated | Leading SM121 Triton component candidate; build and admit before combining with storage |
 | SGLang `io_uring` PLE streaming | Open stacked PR with exact-checkpoint data, but its head predates the SM121 safety restriction and its public checks are red | Rebase/force the SM121 Triton QSA fallback before testing the reader; use narrow syscall admission |
 | vLLM direct PLE mmap | Open PR stacked on open model support; promising row and spot checks; a different mmap stack has a growing-prefix cache-on crash | Highest-priority post-cutoff reproduction target, cache-off first |
