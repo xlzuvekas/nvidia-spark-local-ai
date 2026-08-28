@@ -14,7 +14,7 @@ One declared serving axis or coupled NEXTN bundle may change per candidate.
 vLLM source, build, backport, artifact, and profiler work belongs to a separate
 post-campaign systems track and is outside this frozen SGLang search.
 
-## Current status: safety-stopped, no campaign measurements
+## Current status: time-inadmissible, no campaign measurements
 
 The campaign-schema-2 freeze created all fourteen pristine cell plans from
 clean, pushed revision `aa9cca8` at 01:09 MST on 2026-08-28. Its current
@@ -25,6 +25,24 @@ used host swap was 889,256 kB (868.414 MiB), above the frozen 64 MiB start cap;
 created no event journal, calibration record, cell summary, worker state,
 container, or model request. None of the four profiles has produced a
 measurement under this protocol.
+
+At 05:38 MST, after the inclusive 4,930-second pair-admission boundary closed
+at 05:37:51, a second pristine controller invocation returned exit status 1
+with ordered blockers `insufficient_time_for_pair`,
+`starting_swap_above_clean_limit`, and
+`insufficient_preflight_memavailable`. Its live precheck observed 116,168,316
+kB `MemAvailable` and 879,656 kB used swap. The resulting legacy summary is
+still schema 1 and says `blocked_environment`; its SHA-256 is
+`8c197a3f0dbda0bb06c3fca1e04940f54cb8f918754aa164acd8603f4afa847d`.
+That status is a schema limitation, not permission to resume: remaining time
+can only decrease, so no complete pair can ever be admitted before the fixed
+07:00 cutoff.
+
+The post-invocation audit retained the exact 30-directory/31-regular-file
+campaign topology and unchanged campaign and 84-file harness identities. It
+found no controller or cell event journal, calibration record, worker state,
+server directory, container, GPU compute process, or measurement. Do not invoke
+the controller or summarizer again for this campaign.
 
 The verified [scalar evidence index](../evidence/index.json) now contains all
 fourteen frozen cells as `nonterminal` with `measurement_terminal=false`.
@@ -39,24 +57,18 @@ tail reached 2,473.8359375 MiB of growth, and the following ordinary
 depth-three startup reached 3,173.1484375 MiB before any case began. Those
 observations belong to the earlier interaction study, not to this campaign.
 
-Do not run any inference command in this document until an operator resets the
-Spark and a fresh preflight establishes unambiguous ownership, no unrelated
-GPU or container workload, at least 14 GiB `MemAvailable`, and a new recorded
-swap baseline no greater than 64 MiB. A reset does not make either rejected
-interaction cell valid and does not authorize resuming it. If the reset and
-preflight leave less than 4,930 seconds before the frozen cutoff, record the
-campaign as stopped without starting a pair; do not move the cutoff or silently
-shorten a cell.
+Do not run any inference command in this document. A later reset can restore a
+clean host but cannot restore the elapsed admission window, make either
+rejected interaction cell valid, or authorize a shorter pair. Do not move the
+cutoff, copy a cell, or re-freeze the same runtime.
 
-**Bounded historical exception.** This already-frozen campaign is the sole
+**Historical exception exhausted.** This already-frozen campaign was the sole
 exception to the post-day-two rule excluding the digest-pinned SM121 TRT-LLM
-runtime from new inference. It may run only to disposition its immutable
-fourteen-cell protocol before the unchanged cutoff, after every original
-preflight, lifecycle, correctness, and safety gate passes. Do not rebuild or
-alter the runtime, add or copy cells, move the cutoff, or reuse its result as a
-safe deployment baseline; any measurement is a historical within-runtime
-comparison only. All later or newly frozen work must use a newly built, pinned,
-and admitted SM121 Triton runtime.
+runtime from new inference. Its pair-admission window is now closed without a
+measurement. Do not rebuild or alter the runtime, add or copy cells, move the
+cutoff, or treat the unmeasured plan as a deployment baseline. All later or
+newly frozen work must use a newly built, pinned, and admitted SM121 Triton
+runtime.
 
 ## Autoresearch adaptation
 
@@ -158,12 +170,11 @@ answers are validated; the 60K case is a synthetic exact-key capacity probe,
 not natural-document comprehension. Warm-up work from the final decode case is
 not scored.
 
-## Controller commands and time budgets
+## Historical controller commands and time budgets
 
-The current safety stop makes the execution command non-executable until the
-reset and preflight above. Verification and planning do not launch inference.
-First verify the pinned overlay and PLE payload without downloading anything,
-then inspect the exact scalar proposal:
+The commands below preserve the frozen procedure as provenance. Do not execute
+them for this campaign. Verification and planning did not launch inference;
+the historical preparation sequence was:
 
 ```bash
 python3 prepare_sglang_overlays.py --prepare-ple-ablation
@@ -175,9 +186,8 @@ python3 sparkbench.py autoresearch-plan \
   --dry-run
 ```
 
-Freeze all fourteen pristine cell plans once. The command prints the immutable
-campaign directory; substitute that exact printed path in the following
-commands:
+The historical freeze created all fourteen pristine cell plans once. Do not
+repeat it or invoke either following controller command:
 
 ```bash
 python3 sparkbench.py autoresearch-plan \
@@ -188,14 +198,12 @@ python3 sparkbench.py autoresearch-run results/autoresearch/FROZEN_CAMPAIGN_DIR
 python3 sparkbench.py autoresearch-summarize results/autoresearch/FROZEN_CAMPAIGN_DIR
 ```
 
-Do not invoke `autoresearch-summarize` after a fresh pre-journal
+Do not invoke `autoresearch-summarize` after the pre-journal
 `blocked_environment` return. The current summarizer derives controller state
 only; with no journal it would rewrite the preserved blocker summary as
-`planned` and drop its blocker codes. The frozen campaign remains
-controller-resumable only under the bounded historical exception above and
-without that command. Use the controller's run output and existing summary for
-the preflight outcome; use the summarizer only after a controller journal
-exists.
+`planned` and drop its blocker codes. The frozen campaign is no longer
+time-admissible even though schema 1 does not express `expired`; preserve the
+existing summary unchanged.
 
 The prospective
 [post-cutoff controller hardening plan](autoresearch-controller-hardening-2026-08-28.md)
@@ -368,7 +376,8 @@ safety event or the final cutoff. A failed push stops further pairs until it is
 resolved; local raw state alone is not a substitute for the requested remote
 checkpoint.
 
-The explicit workflow is:
+The explicit workflow for an admitted future campaign is below. No pair in this
+campaign completed, so do not run this workflow against its frozen directory:
 
 ```bash
 python3 sparkbench.py export-evidence \
@@ -410,11 +419,11 @@ cell, does not write or rewrite `summary.json`, and appends no failure
 transition; `autoresearch-run` prints that in-memory status and uses exit status
 3. It otherwise exits 0 for `active`/`complete` and 1 for blocked or terminated
 state. `autoresearch-checkpoint` exits 0 after a verified acknowledgement, 1
-when proof is not ready, and 2 for structural corruption. After the exact
-checkpoint is acknowledged, the same frozen campaign may resume subject to the
-bounded historical exception and unchanged cutoff. `active` means the
-just-finished pair is locally replayable; it does not by itself prove that the
-remote checkpoint exists.
+when proof is not ready, and 2 for structural corruption. In an admitted future
+campaign, an exact checkpoint may allow the next pair subject to its unchanged
+cutoff. This campaign has no completed pair and its admission window is closed;
+it cannot resume. `active` means a just-finished pair is locally replayable; it
+does not by itself prove that the remote checkpoint exists.
 `blocked_environment` starts no cell and writes no campaign transition;
 `terminated` and `complete` must not be resumed.
 
