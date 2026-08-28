@@ -419,7 +419,7 @@ Promote only as an empirically retained profile-specific setting; do not make
 it a general default from frame reduction, call it two-token coalescing, or
 extrapolate automatically to interval four.
 
-## Retained-SGLang product diagnostics
+## Newly admitted SGLang product diagnostics
 
 Within the newly admitted SGLang product track, a separate unscored lifetime should
 bracket three profiled C1 D256 requests with two unprofiled three-request
