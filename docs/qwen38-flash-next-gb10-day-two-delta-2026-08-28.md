@@ -213,6 +213,30 @@ identity, and prove an ARM64 `_storage` import with runtime building disabled.
 An `EPERM` or `ENOSYS` skip on the target is a failed `io_uring` admission, not
 a passing test.
 
+### Post-review signal: dual-Spark profiling points to kernel efficiency
+
+A same-day
+[SGLang performance report](https://github.com/sgl-project/sglang/issues/36796)
+profiles Qwen3.8-Flash-Next on two DGX Sparks with TP2, the SM121 Triton QSA
+fallback, NVFP4 routed experts, FP8 PLE, FP8 KV, NEXTN depth three, CUDA graphs,
+and overlap scheduling. Over a reported 40-step decode trace, its GPU-time
+breakdown attributes 34.0% to the FlashInfer CUTLASS NVFP4 GEMM family, 16.1%
+to grouped-MoE GEMMs, 13.1% to a large unnamed templated kernel family, 11.7%
+to `_hc_mix_persistent_kernel` plus a small combine gate, and 7.2% to NCCL.
+The author therefore asks for an SM121-tuned QSA gather, KDA-family GDN decode,
+and a torch-compile/CUDA-graph compatibility pass.
+
+This is useful directional evidence, not a local or single-Spark benchmark.
+The post reports both about 24.5 ms per token and 58.5 completion tok/s for its
+single-stream result; those values do not share an arithmetically consistent
+token-time denominator as written. Do not ingest either rate into the scalar
+archive without the raw timing definition. Its two-node TP2 topology, FP8 KV,
+and separate runtime also prevent transferring its kernel percentages directly
+to the local TP1 BF16-KV target. The result nonetheless strengthens the
+profiling priority after correctness admission: target/MoE, QSA/PLE/mHC, and
+GDN kernel efficiency are more actionable hypotheses than interconnect tuning
+for one Spark.
+
 ## SGLang: the new `io_uring` reader is useful, but its QSA stack is stale
 
 Open [SGLang PR #36567](https://github.com/sgl-project/sglang/pull/36567), at
