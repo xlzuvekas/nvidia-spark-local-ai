@@ -19,6 +19,42 @@ Triton path and varied-token long-context validation. The
 [day-two review](../../docs/qwen38-flash-next-gb10-day-two-delta-2026-08-28.md)
 records the exact ancestry, caveats and current component plan.
 
+## Current safe-reader integration candidate
+
+A read-only static replay applied storage-only commits `04648a7` and `9f101e3`
+in that order to SM121 Triton base `3681c4e`, excluding competing QSA commit
+`8ef3b3`. Both apply without content conflicts. The deterministic tree after
+the reader is `cb9b2dffb10ae70bc91915c3eade4957fa649eaa`; the tree after PLE
+streaming is `ddda8dde3b6655c4e0c0ff094d87ef1f5cc71a92`.
+
+The integration changes eleven files. No added line references QSA, TRT-LLM or
+SM121, and the safe resolver, Triton fallback, architecture detector and QSA
+test blobs remain byte-identical to `3681c4e`. Static diff, Python AST, Ruff,
+Rustfmt and locked/offline Cargo-metadata checks pass. These facts establish
+source composition only; no extension, image, server or model was built or
+run.
+
+One build-admission blocker remains. The new `_storage` extension is
+auto-discovered and built, but the prebuilt artifact staging, required-module
+check and import-smoke lists omit it. A derived source identity must add
+`storage` to `scripts/ci/utils/stage_rust_ext_modules.sh` and
+`scripts/ci/cuda/ci_install_dependency.sh`, then require:
+
+```text
+cargo clippy -p sglang-storage --all-targets -- -D warnings
+cargo test -p sglang-storage
+pytest -q test/registered/unit/models/test_qwen4_ple_nvme.py
+pytest -q test/registered/unit/storage/test_io_uring_reader.py
+pytest -q test/registered/kernels/test_qsa.py -k sm121
+```
+
+Also prove an ARM64 `_storage` build/import with runtime building disabled,
+verify artifact contents, and compare synthetic resident versus NVMe gathers.
+On the target, an `EPERM` or `ENOSYS` skip is an admission failure so the narrow
+three-syscall `io_uring` policy is tested rather than assumed.
+
+## Historical measured route identity
+
 - Container image: `lmsysorg/sglang@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4`
 - Reported SGLang base: `d91c3682b0b429e4c70df63cd57f819588ce29b0`
 - SGLang package: `0.0.0.dev1+gd91c3682b`

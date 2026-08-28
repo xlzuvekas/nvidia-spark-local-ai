@@ -193,6 +193,23 @@ onto `3681c4e`, excluding its competing QSA commit `8ef3b3`. That result needs
 its own source identity, row oracle, dispatch attestation and long-context
 validation; it is not a reproduction of either published head.
 
+A local read-only static replay now establishes that the two storage commits
+apply to `3681c4e` without content conflicts. The tree after the Rust reader is
+`cb9b2dffb10ae70bc91915c3eade4957fa649eaa`; after PLE streaming it is
+`ddda8dde3b6655c4e0c0ff094d87ef1f5cc71a92`. No added line references QSA,
+TRT-LLM or SM121, and the resolver, fallback, architecture detector and QSA
+test blobs remain byte-identical to `3681c4e`. This is static composition
+evidence, not a build or runtime result.
+
+The replay also found a packaging blocker. The new `_storage` Rust extension
+is auto-discovered by the build, but prebuilt-module staging, required-module
+checking and import smoke tests still enumerate only `server`, `grpc` and
+`multimodal`. Before building, add `storage` to the explicit lists in
+`stage_rust_ext_modules.sh` and `ci_install_dependency.sh`, produce a new tree
+identity, and prove an ARM64 `_storage` import with runtime building disabled.
+An `EPERM` or `ENOSYS` skip on the target is a failed `io_uring` admission, not
+a passing test.
+
 ## SGLang: the new `io_uring` reader is useful, but its QSA stack is stale
 
 Open [SGLang PR #36567](https://github.com/sgl-project/sglang/pull/36567), at
