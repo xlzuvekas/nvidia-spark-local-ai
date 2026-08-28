@@ -183,6 +183,12 @@ resumable without that command. Use the controller's run output and existing
 summary for the preflight outcome; use the summarizer only after a controller
 journal exists.
 
+The prospective
+[post-cutoff controller hardening plan](autoresearch-controller-hardening-2026-08-28.md)
+specifies durable non-authoritative admission records, lock-owning summary
+derivation, categorical cutoff status, and campaign-level scalar evidence. It
+does not authorize changing this frozen harness before the cutoff.
+
 The controller and `autoresearch-checkpoint` command enforce a remote evidence
 boundary between settled pairs. A run returns after each calibration, screen,
 or confirmation pair. The next pair is not admitted until the latest completed

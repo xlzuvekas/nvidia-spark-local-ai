@@ -249,6 +249,7 @@ geometries, slot counts, or validation states.
 - [Qwen3.8-Flash-Next single-user autoresearch protocol](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md)
 - [Qwen3.8-Flash-Next single-user serving backlog](docs/qwen38-flash-next-single-user-next-experiments-2026-08-28.md)
 - [Pinned Pi and cowork harness plan](docs/pi-cowork-harness-plan-2026-08-28.md)
+- [Autoresearch controller post-cutoff hardening plan](docs/autoresearch-controller-hardening-2026-08-28.md)
 - [Nemotron diffusion direct-run guide](docs/nemotron-diffusion-direct.md)
 - [Experimental NInfer SM121a patch and reproduction notes](patches/ninfer/README.md)
 - [SGLang SM121 QSA and persistent read-only PLE patch guide](patches/sglang/README.md)
