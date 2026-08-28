@@ -16,6 +16,14 @@ coding-agent and cowork-style results separate:
 This plan is prospective. Do not edit the frozen campaign's harness, profiles,
 suite, cutoff, or plans.
 
+At the audited repository boundary
+`2274111b0e5e921911124d71e49bbd706e93cdd4`, Pi is design-only. There is no
+checked-in Pi package lock or normalized prefix, core wrapper, Pi/cowork
+manifest, runner, C2 scheduler, validator, or evidence exporter. The current
+generic agentic and historical Harbor paths deliberately enforce different
+C1-only topologies; reuse their isolation and oracle patterns, but do not widen
+their schemas in place to admit Pi.
+
 ## Local Pi availability
 
 For planning, a read-only local audit independently observed a complete
@@ -60,6 +68,13 @@ The first implementation should use a small Node wrapper around
 `pi-agent-core`, not the full TUI/CLI. Give it in-memory messages, a fixed model
 object, a literal prompt, no retries, no compaction, no session/config
 discovery, and no current-directory/date/user-file injection.
+
+The native Python runner may reuse deterministic schemas and exact oracles for
+suite admission. In the Pi arm, however, pinned `pi-agent-core` owns the
+message/tool loop and the wrapper validates its event stream, tool schema, call
+IDs, limits, and terminal state. Do not double-run the Python tool parser, and
+do not route Pi or cowork results through the existing `kind="agentic"`
+manifest or evidence schema.
 
 ## Isolation and endpoint path
 
@@ -113,15 +128,19 @@ document, retrieval, or structured-data work.
 
 Pi 0.57.1's Qwen compatibility collapses every enabled thinking level to a
 boolean. It does not preserve the current deployment's nested low-effort
-policy. A pinned payload hook must assert the outgoing request schema and force
-one of exactly two mappings:
+policy. The first Pi/cowork campaign pins exactly one `thinking_low` mapping,
+and a pinned payload hook must assert the final outgoing request after every
+Pi/provider transform:
 
 ```json
 {"chat_template_kwargs":{"enable_thinking":true,"reasoning_effort":"low"}}
 ```
 
-or the frozen explicit no-thinking mapping. It must also force temperature
-zero and the frozen output limit. Do not rely on Pi's CLI thinking label.
+It must also force temperature zero and the frozen output limit. Explicit
+no-thinking is a separate frozen arm, never a fallback inside this campaign.
+Do not rely on Pi's CLI thinking label. Public evidence retains only
+`reasoning_policy="thinking_low"` and the payload-policy digest, never the
+request JSON.
 
 Unit fixtures must prove that the payload hook rejects top-level reasoning
 fields, unknown nested fields, missing effort, a changed temperature or token
@@ -223,10 +242,13 @@ Every Pi trial ends through one bounded `finally` path:
 8. delete the private key/socket; and
 9. prove no owned descendant, container, socket, key, or task state remains.
 
-A cleanup ambiguity, timeout escalation, network escape, pin mismatch, payload
-drift, oracle failure, or secret-policy violation invalidates the trial and
-stops the campaign. Never resume an interrupted task or reinterpret a Pi task
-wall result as server-only throughput.
+A wrong artifact, oracle miss, verifier reward zero, output-limit finish, or
+ordinary bounded timeout is a valid failed model trial. Preserve its scalar
+outcome and continue only after certified cleanup; stopping on those failures
+would selection-bias success evidence. Pin or payload drift, network escape,
+malformed telemetry, secret-policy failure, or uncertain/escalated cleanup
+invalidates the trial and stops the campaign. Never resume an interrupted task
+or reinterpret a Pi task-wall result as server-only throughput.
 
 ## Implementation order after cutoff
 
