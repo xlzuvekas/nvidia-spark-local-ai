@@ -12,14 +12,14 @@ quality checks, and the provenance needed to interpret each number.
 | Which models complete deterministic multi-turn tool tasks? | [Agentic tool-use results: strict success, trace correctness, MTP, and Laguna](docs/agentic-tools-results-2026-08-17.md) |
 | How does Qwen3.6 perform on a strict two-hop long-context needle? | [Two-hop retrieval: Qwen3.6 baseline versus MTP2 through the 245,760-target tier](docs/multihop-long-context-results-2026-08-18.md) |
 | How fast are Qwen3.6 and Qwen3.8 under concurrency and 61K–246K inputs? | [Cache-off NVFP4+MTP3 throughput, wall time, TTFT, retries, and validation](docs/qwen36-qwen38-long-context-tps-2026-08-25.md) |
-| How does Qwen3.8-Flash-Next run on one Spark? | [Native Radix SGLang and IQ4_XS llama.cpp throughput, validation, and memory boundaries](docs/qwen38-flash-next-gb10-2026-08-26.md) |
-| Does SGLang's native Flash-Next path run on GB10, and how does it fit? | [Measured NVFP4+MTP result, read-only NVMe PLE mechanics, exact pins, and long-context limit](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md) |
+| How has Qwen3.8-Flash-Next run on one Spark? | [Historical native Radix SGLang and IQ4_XS llama.cpp throughput, validation, and memory boundaries](docs/qwen38-flash-next-gb10-2026-08-26.md) |
+| What did the historical native SGLang Flash-Next path show on GB10? | [Measured NVFP4+MTP result, read-only NVMe PLE mechanics, exact pins, and long-context limit](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md) |
 | What did the first day of GB10 community work add? | [Primary-source review of the one-Spark vLLM mmap patch, upstream status, and dual-Spark SGLang report](docs/qwen38-flash-next-gb10-day-one-2026-08-27.md) |
 | What changed on day two for Flash-Next on GB10? | [SGLang's SM121 safety reversal, vLLM's new mmap PR and profiler evidence, and ranked reproduction targets](docs/qwen38-flash-next-gb10-day-two-delta-2026-08-28.md) |
 | How should the vLLM direct-PLE-mmap path be reproduced? | [Exact stacked source boundary, inferred Radix checkpoint, local readiness, admission, ABBA, long-context, and profiler plan](docs/qwen38-flash-next-vllm-mmap-reproduction-2026-08-28.md) |
 | What do matched PLE mapping/omission and NEXTN depths show? | [Replicated lazy-C8 depth results, semantic-ablation failures, and quality-clean exact-answer v2](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md) |
 | How is the single-user Qwen3.8-Flash-Next serving search frozen? | [Frozen 14-cell, nine-case 64K autoresearch protocol and pre-measurement swap safety stop](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md) |
-| What should the next single-user Flash-Next experiments test? | [Ranked long-prefix cache/state bundle, two-way fan-out, MTP break-even, CUDA-graph, chunk-size, adaptive-NEXTN, streaming, and source-gated candidates](docs/qwen38-flash-next-single-user-next-experiments-2026-08-28.md) |
+| What should the next single-user Flash-Next experiments test? | [Ranked cache/state, fan-out, MTP, CUDA-graph, chunk-size, and streaming protocols, plus source rejection of continuous decode and adaptive NEXTN](docs/qwen38-flash-next-single-user-next-experiments-2026-08-28.md) |
 | What is limiting single-user Flash-Next TPS on Spark? | [Evidence-backed target-pass, batching, MTP, PLE, startup, and profiler analysis](docs/qwen38-flash-next-tps-bottleneck-2026-08-28.md) |
 | How should Pi and richer cowork tasks be benchmarked locally? | [Pinned Pi-in-Harbor adapter and deterministic cowork-core-v1 plan](docs/pi-cowork-harness-plan-2026-08-28.md) |
 | What does native llama.cpp prompt-KV reuse change for Qwen3.6? | [Prefix-cache controls: 8K and 32K shared-prefix cold/warm observations](docs/qwen36-prefix-cache-results-2026-08-18.md) |
@@ -46,7 +46,8 @@ explains how to create and verify both files. The current refresh contains
 
 ## What the results say
 
-- In the matched mapped-PLE ABBA panel, NEXTN depth two beat depth one in all
+- In the historical, safety-superseded SM121 TRT-LLM mapped-PLE ABBA panel,
+  NEXTN depth two beat depth one in all
   five cells across two independent lifetimes per arm. Mean D256 and fresh
   C1/C2/C4/C8 throughput moved from 28.304 and
   27.217/46.077/73.713/109.351 tok/s at D1 to 29.402 and
@@ -58,8 +59,12 @@ explains how to create and verify both files. The current refresh contains
   quality-v2 lifetimes completed at strict 8/8 for mapped and omitted arms under
   the unchanged validator. See the
   [matched PLE/depth result](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md).
-- The full Radix Qwen3.8-Flash-Next checkpoint now completes a native SGLang
-  panel on one Spark. The [primary run](evidence/runs/20260827T032027Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-20e1283b/summary.json)
+- The full Radix Qwen3.8-Flash-Next checkpoint completed a historical native
+  SGLang panel on one Spark. These measurements used the SM121 TRT-LLM route
+  later restricted after varied-token corruption; they are evidence, not
+  current deployment guidance. New work requires a newly built and admitted
+  SM121 Triton rebaseline; see the [day-two safety review](docs/qwen38-flash-next-gb10-day-two-delta-2026-08-28.md).
+  The [primary run](evidence/runs/20260827T032027Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-20e1283b/summary.json)
   used ModelOpt NVFP4 main weights, the source FP8 PLE through a digest-pinned
   read-only NVMe mmap, and the trained BF16 `NEXTN` head. It reached 28.504
   aggregate output tok/s at D256 and 27.413/50.330/72.821 tok/s at fresh
@@ -82,7 +87,7 @@ explains how to create and verify both files. The current refresh contains
   +48.069% over C4 while holding median E2E to `1.930421x` C1; operator-log
   inspection observed all eight requests running. See the
   [native result and exact pins](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md).
-- The same native MTP route passed the repeated-word 131K exact-key case in two
+- The same historical native MTP route passed the repeated-word 131K exact-key case in two
   runs, including [one with 72.285 s TTFT](evidence/runs/20260827T024144Z-qwen38-flash-next-nvfp4-mtp-long-sglang-qwen38-flash-next-sglang-long-context-7c25f743/summary.json).
   It did not safely admit the 245K case: the MTP pool rejected the request at
   the `0.85` allocation, `0.87` was pressure-unsafe, and the capped target-only
@@ -189,10 +194,11 @@ geometries, slot counts, or validation states.
 - [Qwen3.8-Flash-Next matched PLE/depth result — 2026-08-27](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md):
   mapped-PLE depth-one/depth-two ABBA replication, matched depth-three omission
   ablation, lazy C8 throughput and safety, and strict 8/8 quality-v2 lifetimes.
-- [Qwen3.8-Flash-Next native SGLang result and optimization record — 2026-08-26](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md):
+- [Qwen3.8-Flash-Next historical native SGLang result and optimization record — 2026-08-26](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md):
   full Radix NVFP4 admission with read-only NVMe PLE and trained `NEXTN`, native
   C1-C4 and 8K/32K measurements, clean MTP3/off confirmation, bounded MTP2 C8,
-  131K admission, the incompatible 245K boundary, and earlier kernel controls.
+  131K admission, the incompatible 245K boundary, and earlier kernel controls;
+  the measured SM121 TRT-LLM route is safety-superseded.
 - [Qwen3.8-Flash-Next day-zero GB10 results — 2026-08-26](docs/qwen38-flash-next-gb10-2026-08-26.md):
   pinned IQ4_XS llama.cpp admission, quick and core throughput, bounded text
   capability checks, and the observed unified-memory and swap boundary.

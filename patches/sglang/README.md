@@ -14,8 +14,9 @@ long-context corruption on the SM121 TRT-LLM route, and SGLang restriction
 [PR #36845](https://github.com/sgl-project/sglang/pull/36845) adds an explicit
 SM121 Triton packed-varlen fallback. Preserve this directory for historical
 measurement provenance only; do not use `d91c3682-qsa-sm121-xqa.patch` in a new
-build. New integration work must use the restricted or explicitly attested
-Triton path and varied-token long-context validation. The
+build. New integration work must preserve the exact SM120 TRT-LLM restriction,
+use an explicitly attested SM121 Triton fallback, and pass varied-token
+long-context validation. The
 [day-two review](../../docs/qwen38-flash-next-gb10-day-two-delta-2026-08-28.md)
 records the exact ancestry, caveats and current component plan.
 
@@ -111,8 +112,8 @@ The retained legacy generated files are
 (`c687bf96b8adb980eaf3a1db2ad4a7c00b558537865d91674c0e1b43f4ae1d71`)
 and `qwen_sparse_attn_backend.py`
 (`e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75`).
-That exact pair is retained for already-frozen writable-mmap plans. The current
-profile uses the separate
+That exact pair is retained for already-frozen writable-mmap plans. The
+historical measured profile used the separate
 `results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-v1`
 target. Its `qwen4_exp.py` additionally applies
 `qwen38-persistent-ple-cache.py` (SHA-256
