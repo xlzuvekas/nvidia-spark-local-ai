@@ -217,14 +217,21 @@ apparent client TPS change while responsiveness regresses.
 
 ## Diagnostics, not immediate candidates
 
-A separate unscored lifetime with one D256 request and one deterministic
-varied-token long prompt should retain allowlisted scalar SM occupancy,
-memory-bandwidth, CPU-fault, and NVMe-read counters. The collection method and
-attribution window must be pinned; profiling overhead, system-wide faults, and
-page-cache state can otherwise confound timing. The present coarse GPU
-utilization and power samples cannot distinguish target-weight bandwidth, PLE
-page traffic, kernel overhead, or another resource. This diagnostic must use
-the retained champion, remain outside a causal candidate pair, and must not
+A separate unscored lifetime should bracket three profiled C1 D256 requests
+with two unprofiled three-request blocks. Start with CUDA/NVTX timelines,
+source timers, process `/proc` deltas, PSI, NVMe disk deltas and one-hertz
+device telemetry; add one deterministic varied-token long prompt only after
+the minimum trace is interpretable. Pin the collection window and report U-P-U
+overhead because profiling, system-wide faults and page-cache state can
+otherwise confound timing.
+
+Current GB10 hardware counters require separate privilege authorization, and
+the CC 12.1 metric surface exposes no direct LPDDR-byte counter. If a later
+disposable privileged lifetime is explicitly approved, treat L2 sysmem-fill
+sectors only as an LPDDR-facing proxy, never measured LPDDR GB/s. The present
+coarse utilization and power samples cannot distinguish target-weight traffic,
+PLE page traffic, kernel overhead or another resource. This diagnostic must
+use the retained champion, remain outside a causal candidate pair, and must not
 silently change its serving flags.
 
 Overlap scheduling enabled versus `--disable-overlap-schedule` is a lower-value
