@@ -18,7 +18,7 @@ quality checks, and the provenance needed to interpret each number.
 | What changed on day two for Flash-Next on GB10? | [SGLang's SM121 safety reversal, vLLM's new mmap PR and profiler evidence, and ranked reproduction targets](docs/qwen38-flash-next-gb10-day-two-delta-2026-08-28.md) |
 | How should the vLLM direct-PLE-mmap path be reproduced? | [Exact stacked source boundary, inferred Radix checkpoint, local readiness, admission, ABBA, long-context, and profiler plan](docs/qwen38-flash-next-vllm-mmap-reproduction-2026-08-28.md) |
 | What do matched PLE mapping/omission and NEXTN depths show? | [Replicated lazy-C8 depth results, semantic-ablation failures, and quality-clean exact-answer v2](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md) |
-| What happened to the single-user Qwen3.8-Flash-Next serving search? | [Frozen 14-cell, nine-case 64K protocol; admission expired without a measurement after swap, memory, and time gates](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md) |
+| What happened to the single-user Qwen3.8-Flash-Next serving search? | [Frozen 14-cell, nine-case 64K protocol; admission expired without a measurement, and its retired runtime is now blocked at every execution ingress](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md) |
 | What should the next single-user Flash-Next experiments test? | [Ranked cache/state, fan-out, MTP, CUDA-graph, chunk-size, and streaming protocols, plus source rejection of continuous decode and adaptive NEXTN](docs/qwen38-flash-next-single-user-next-experiments-2026-08-28.md) |
 | What is limiting single-user Flash-Next TPS on Spark? | [Evidence-backed target-pass, batching, MTP, PLE, startup, and profiler analysis](docs/qwen38-flash-next-tps-bottleneck-2026-08-28.md) |
 | How should Pi and richer cowork tasks be benchmarked locally? | [Pinned Pi-in-Harbor adapter and deterministic cowork-core-v1 plan](docs/pi-cowork-harness-plan-2026-08-28.md) |
@@ -62,8 +62,10 @@ explains how to create and verify both files. The current refresh contains
 - The full Radix Qwen3.8-Flash-Next checkpoint completed a historical native
   SGLang panel on one Spark. These measurements used the SM121 TRT-LLM route
   later restricted after varied-token corruption; they are evidence, not
-  current deployment guidance. New work requires a newly built and admitted
-  SM121 Triton rebaseline; see the [day-two safety review](docs/qwen38-flash-next-gb10-day-two-delta-2026-08-28.md).
+  current deployment guidance. SparkBench now rejects the exact retired overlay
+  digest across new and frozen execution paths without rewriting historical
+  profiles or evidence. New work requires a newly built and admitted SM121
+  Triton rebaseline; see the [day-two safety review](docs/qwen38-flash-next-gb10-day-two-delta-2026-08-28.md).
   The [primary run](evidence/runs/20260827T032027Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-20e1283b/summary.json)
   used ModelOpt NVFP4 main weights, the source FP8 PLE through a digest-pinned
   read-only NVMe mmap, and the trained BF16 `NEXTN` head. It reached 28.504

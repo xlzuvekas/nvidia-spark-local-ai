@@ -568,25 +568,25 @@ The support matrix at this review is therefore:
 ## What this changes in the local optimization plan
 
 The day-two evidence narrows the next work rather than changing the frozen
-campaign. Step 1 preserves the frozen SGLang product campaign; step 2 retires
-its historical runtime after cutoff; steps 3--11 are a separate post-cutoff
-systems/reproduction sequence and do not reorder the future SGLang
+campaign. Steps 1 and 2 are complete: the frozen campaign remains unchanged and
+its historical runtime was retired after cutoff. Steps 3--11 are a separate
+post-cutoff systems/reproduction sequence and do not reorder the future SGLang
 serving-flag backlog:
 
 1. Preserve the existing SGLang campaign's admission-expired, unmeasured state.
    Its bounded historical exception ended when less than one full pair budget
    remained; do not rerun or re-summarize it into a synthetic completion, and
    do not reuse its frozen plan as a deployment-safety claim.
-2. After cutoff, make every historical profile bound to QSA overlay digest
+2. **Completed in `d316cb2`.** Every historical profile bound to QSA overlay digest
    `e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75`
-   non-runnable. The current manifest contains 21 such bindings. Add a
-   fail-closed execution-admission tombstone keyed to that exact digest; do not
-   rewrite their historical `support_status`, frozen raw manifests, fingerprints,
-   or scalar evidence. Require distinct IDs for any SM121 Triton successor.
+   is non-runnable. The current manifest contains 21 such bindings. The
+   fail-closed execution-admission tombstone is keyed to that exact digest and
+   does not rewrite their historical `support_status`, frozen raw manifests,
+   fingerprints, or scalar evidence. Require distinct IDs for any SM121 Triton successor.
    Those 21 are also exactly the profiles using recipe revision
    `bf2b7c75870d3703730b6bd8f3bb93dc622c278d` with explicit
    `trtllm_mha` decode; no other overlay targets that QSA source under a
-   different digest. Enforce the digest retirement before side effects in new
+   different digest. The implementation enforces retirement before side effects in new
    generic plan and matrix selection, generic frozen-plan execution,
    autoresearch freeze/run/cell entry points, custom loop-campaign planning and
    execution, and direct SGLang runtime startup; an embedded historical
@@ -594,7 +594,8 @@ serving-flag backlog:
    checks must precede directory, lock, journal, log, reconciliation, and
    summary writes so an accidental invocation cannot mutate historical state.
    Keep historical loaders, summarizers, evidence projection, and cleanup
-   readable and non-executing.
+   readable and non-executing. Its focused and full validation passed all 833
+   repository tests.
 3. Freeze the exact stacked PR #54129 tree rather than combining it with the
    newer #53896 head, then build an immutable Linux/aarch64 image. Use the
    pinned local Radix NVFP4-backbone/FP8-PLE checkpoint as the best-supported

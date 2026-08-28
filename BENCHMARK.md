@@ -248,6 +248,9 @@ built, pinned, and admitted SM121 Triton runtime. The former bounded exception,
 the frozen fourteen-cell campaign, exhausted its admission window without a
 measurement and must not be run or summarized again; see its
 [full protocol](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md#current-status-time-inadmissible-no-campaign-measurements).
+SparkBench now enforces that retirement by the exact QSA overlay digest before
+fresh planning, frozen execution, campaign side effects, or direct SGLang
+startup. Historical loading, evidence, and cleanup remain readable.
 
 The completed native profile pins `RadixArk/Qwen3.8-Flash-Next-NVFP4` revision
 `7b719225242aacd3dbd3f9407468c2ee9a9d2594`: 206 weight files totaling

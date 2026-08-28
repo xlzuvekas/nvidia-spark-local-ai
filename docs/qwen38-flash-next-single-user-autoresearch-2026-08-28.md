@@ -44,6 +44,17 @@ found no controller or cell event journal, calibration record, worker state,
 server directory, container, GPU compute process, or measurement. Do not invoke
 the controller or summarizer again for this campaign.
 
+The final read-only closeout at 07:00:24 MST reproduced those hashes and that
+topology with all fourteen plan bindings intact and no Docker or GPU compute
+work. After the cutoff, commit `d316cb2` installed a permanent execution
+tombstone for the exact retired QSA overlay digest across fresh and frozen
+plans, matrix selection, autoresearch and loop controllers, and direct SGLang
+startup. It deliberately left the historical manifests, support statuses, raw
+plans, summaries, evidence, loaders, and cleanup paths unchanged. That code
+boundary is `9d2a91f4459d9407ff6a69effee51b3ce430f1199b0a94446eb4f3f3142435c9`
+across 85 executable harness files, so it intentionally cannot match or resume
+the frozen 84-file campaign.
+
 The verified [scalar evidence index](../evidence/index.json) now contains all
 fourteen frozen cells as `nonterminal` with `measurement_terminal=false`.
 Those entries publish the plan topology and artifact bindings only; they are
