@@ -336,10 +336,10 @@ Per-call instrumentation must include actual requests and scheduled/MTP
 tokens, raw and unique ids, shards/tasks/active workers, hash CUDA time,
 blocking D2H wall, CPU plan/pool/page-copy/inverse-copy wall, H2D and output-copy
 wall, dequant time, total custom-op wall, minor/major faults and process NVMe
-bytes. Pair that with graph launches, device idle gaps, LPDDR traffic, CPU run
-queue, requested-page hit rate, MTP acceptance and end-to-end TTFT/ITL/task
-wall. The existing `pending` log field is task count, not observed worker
-concurrency.
+bytes. Pair that with graph launches, device idle gaps, available LPDDR-facing
+proxies, CPU run queue, requested-page hit rate, MTP acceptance and end-to-end
+TTFT/ITL/task wall. The existing `pending` log field is task count, not
+observed worker concurrency.
 
 Stop a worker search when adjacent settings differ by less than 3%. Promote a
 candidate only when two fresh lifetimes move in the same direction, improve
@@ -545,25 +545,59 @@ long-context claim. Four trials detect a true independent 25% per-request
 corruption rate with only `1 - 0.75^4 = 68.36%` probability, so 4/4 is a
 minimum reproduction screen, not certification that the failure is absent.
 
-Profiler lifetimes are also separate and unscored: SGLang-P and vLLM-P, both
-MTP-off. After two profiler warmups, capture three C1 D256 requests, three C2
-pairs of D256 requests, and one separately pressure-admitted varied-token 60K
-prefill window. Run an identical unprofiled calibration span and publish the
-profiler overhead. Raw profiled TPS must not be compared with the MTP2 product
-score. Resolve GB10 counter names before freezing the plan and retain only
-allowlisted, process- and phase-attributed scalar aggregates for:
+Profiler lifetimes are separate, diagnostic and unscored. Start with one
+vLLM-P, MTP-off, C1 lifetime because that is the smallest trace that can assign
+wall time to the direct-mmap boundary. After two unique warmups, run three
+byte-distinct D256 requests with collection off, three with collection on, and
+three with collection off again. Report collection overhead as the profiled
+block divided by the mean of its two unprofiled brackets, minus one, for both
+full request wall and ITL. Keep the capture near 30--40 seconds and below five
+minutes. Add C2, long prefill or an equivalent SGLang-P trace only after this
+minimum capture is interpretable.
 
-- LPDDR read/write bandwidth and L2 traffic;
-- kernel union time, launch count/duration and inter-kernel host gaps;
-- SM activity, achieved occupancy, eligible warps and tensor-pipe activity;
-- graph replays versus ordinary launches;
-- process-attributed page faults, UVM movement, NVMe reads and PLE residency;
-- CPU submit/scheduler time and context switches;
-- scheduler running/queued/preemption/queue time; and
-- high-rate power, clocks, temperature and throttle state.
+The local tool gate is now resolved. Nsight Systems 2025.3.2 and Nsight Compute
+2025.3.1 recognize the CC 12.1 GPU as counter chip GB20B. CUDA and NVTX
+timelines are usable, but hardware counters currently fail with
+`ERR_NVGPUCTRPERM` because `RmProfilingAdminOnly=1`; CPU sampling is also
+blocked by `perf_event_paranoid=4`. No privilege change is authorized by this
+protocol. Use CUDA/NVTX timelines, source timers, process `/proc` deltas, PSI,
+NVMe disk statistics and one-hertz device telemetry for the first trace.
 
-Raw profiler traces remain private. Coarse GPU utilization alone cannot decide
-between bandwidth, occupancy, launch/scheduler, or PLE-I/O limits.
+Stock GB20B Nsight Systems metrics do not contain a memory-bandwidth counter,
+and Nsight Compute's direct DRAM-byte metrics stop at CC 12.0. Therefore this
+experiment cannot report measured LPDDR GB/s. If the user later authorizes a
+separate, no-network, disposable privileged profiler lifetime, GB20B exposes
+L2 sysmem-fill sectors, device-fill sectors, L2 bytes/hit rate, compute-memory
+request throughput, SM throughput/active warps/eligible warps and tensor
+instruction counts. Treat the fill-sector measurements only as LPDDR-facing
+proxies, never total LPDDR traffic, and never compare replayed NCU wall or TPS
+with product runs.
+
+The profiling-only source identity should add fixed NVTX ranges and scalar
+timers for decode step, total PLE lookup, GPU hash, blocking D2H, CPU plan,
+CPU pool/mmap, inverse copy, H2D and output copy, plus actual token, ID, unique
+ID, task and byte counts. Trace CUDA and NVTX with host-only CUDA-graph node
+tracing; omit OS-runtime tracing unless the first capture leaves an unexplained
+host gap. PLE dequantization and the learned layer remain inside the piecewise
+graph, so call the non-PLE GPU residual **target remainder**, not pure backbone.
+
+Attribution uses timestamp unions, not sums. Blocking D2H waits for preceding
+hash kernels, so hash GPU time overlaps its API wall; pageable-H2D API wall can
+likewise overlap the GPU copy. The direct-mmap critical interval is the outer
+lookup wall, with CPU plan, pool/mmap and inverse stages reported exclusively.
+Subtract the PLE GPU interval union from the target GPU interval union only
+after clipping to the same decode-step envelope. Snapshot worker I/O, faults,
+thread CPU/context-switch state, PSI and NVMe counters around each block; use
+`pidstat` only as a fallback.
+
+Raw profiler reports, databases, kernel strings, process/thread identifiers,
+paths, commands and request content remain private. A tracked scalar export may
+contain only fixed phase enums, counts, byte totals, latency summaries, counter
+deltas, graph/ordinary launch counts, bracketed overhead and exact version or
+digest identities. Adding that evidence kind requires a synthetic offline
+fixture, deterministic re-export and staged schema/secret verification. Coarse
+GPU utilization alone cannot decide between bandwidth, occupancy,
+launch/scheduler or PLE-I/O limits.
 
 ## Time and promotion boundary
 
