@@ -1,5 +1,13 @@
 # Qwen3.8-Flash-Next matched PLE and NEXTN-depth study — 2026-08-27
 
+**Safety supersession, 2026-08-28:** every SGLang measurement and frozen command
+in this report binds the digest-pinned SM121 TRT-LLM route later restricted
+after varied-token corruption. Preserve the results as historical
+within-runtime evidence only. Do not rerun these profiles; any new comparison
+requires newly named profiles on a newly built, pinned, and admitted SM121
+Triton runtime. See the
+[day-two safety review](qwen38-flash-next-gb10-day-two-delta-2026-08-28.md).
+
 ## Question and result
 
 This experiment asks two narrower questions on one DGX Spark / GB10:
@@ -218,8 +226,9 @@ started, the 2 x 2 interaction is not estimable, and mapped lazy D3 remains at
 one throughput lifetime rather than the requested two. Do not substitute the
 older lazy D2/D3 panel into the missing fresh block or present O2 versus the old
 panel as a causal lazy-buffer effect. D2 lazy therefore remains the fastest
-replicated, safety-clean configuration established by the preceding panel;
-ordinary D3 is not an admissible route on this host state.
+replicated, pressure-clean configuration established within the historical
+runtime; this is not a current deployment recommendation. Ordinary D3 was not
+admissible on that host state.
 
 Sanitized scalar evidence retains the [O2 completed prefix and invalid C6
 tail](../evidence/runs/20260828T034223Z-qwen38-flash-next-nvfp4-mtp2-c6-extra-ple-mapped-sglang-qwen38-flash-next-sglang-lazy-depth3-interaction-2ccfaed5/summary.json)
@@ -305,12 +314,15 @@ majority vote, relaxed answer key, or status override. The mapped arm is the
 completion gate for resolving the old synthetic failure; the omitted arm
 measures whether the semantic ablation retains this bounded behavior.
 
-## Safety and execution
+## Historical safety and execution record — do not rerun
 
-Run only one inference configuration at a time from a committed clean harness.
-Reject unrelated GPU/container work, implicit downloads, available-memory
-descent below 14 GiB, or swap growth above 512 MiB. Every lifecycle must stop
-its owned container before the next starts.
+The following commands record the frozen historical procedure and must not be
+executed: their profiles bind the safety-superseded SM121 TRT-LLM route. A new
+comparison must use newly named profiles on an admitted SM121 Triton runtime.
+The historical protocol ran only one inference configuration at a time from a
+committed clean harness and rejected unrelated GPU/container work, implicit
+downloads, available-memory descent below 14 GiB, or swap growth above 512 MiB.
+Every lifecycle stopped its owned container before the next started.
 
 ```bash
 python3 prepare_sglang_overlays.py --prepare-ple-ablation

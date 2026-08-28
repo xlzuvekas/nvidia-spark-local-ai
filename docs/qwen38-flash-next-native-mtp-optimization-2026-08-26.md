@@ -3,6 +3,14 @@
 Updated 2026-08-27 with the clean MTP3/off confirmation, native scalar counter
 audit, and bounded MTP2 C8 state-cache result.
 
+**Safety supersession, 2026-08-28:** every SGLang measurement in this report
+used the digest-pinned SM121 TRT-LLM overlay later restricted after
+varied-token corruption. The checkpoint was admitted only within that measured
+historical runtime; neither it nor these profiles is admitted for new
+inference. Preserve the results as within-runtime evidence. New work requires a
+newly built, pinned, and admitted SM121 Triton route and fresh rebaseline; see
+the [day-two safety review](qwen38-flash-next-gb10-day-two-delta-2026-08-28.md).
+
 ## Decision
 
 Keep the measured 87.249 GiB `UD-IQ4_XS` GGUF as a target-only local
@@ -11,7 +19,7 @@ ModelOpt NVFP4, PLE placement, or `NEXTN` effects.
 
 The released
 [`RadixArk/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4/tree/7b719225242aacd3dbd3f9407468c2ee9a9d2594)
-checkpoint now admits and runs on one DGX Spark. The successful route does not
+checkpoint historically admitted and ran on one DGX Spark. The measured route did not
 make its approximately 125.91 GiB tensor payload resident: it keeps the main
 routed experts in NVFP4, keeps the trained `NEXTN` module in BF16, and maps the
 exact 51,200,245,760-byte FP8 PLE table read-only from NVMe. The PLE is FP8, not
@@ -26,8 +34,9 @@ tok/s for D256, then 27.413, 50.330, and 72.821 tok/s at fresh C1, C2, and C4.
 The client-TTFT prefill approximations were 2,103.468 tok/s at 8K and 2,179.588
 tok/s at 32K.
 
-This closes full-checkpoint admission, and the clean follow-up gives a bounded
-single-stream MTP estimate. Across separate near-matched D256/C1
+This closed full-checkpoint admission only within the pinned historical
+runtime, and the clean follow-up gives a bounded single-stream MTP estimate.
+Across separate near-matched D256/C1
 lifetimes, MTP3 delivered 30.123639 aggregate output tok/s versus 16.663713
 with MTP off: `1.807739x` throughput, 137.288 seconds or 44.682% less measured
 case wall time, and `1.821397x` sampled output tokens per joule. The MTP3
@@ -40,7 +49,8 @@ pressure-unsafe. NVFP4/I4 PLE packing is therefore future memory/headroom
 optimization rather than the prerequisite for native admission. At bounded
 4K context, the clean MTP2 lazy-state profile also reached 114.5755 aggregate
 output tok/s at offered C8; operator-log inspection observed all eight requests
-running with no queue. That is the retained short-context throughput profile;
+running with no queue. That was the historically retained short-context
+throughput profile;
 it is not evidence that the long-context MTP3 allocation can support eight
 simultaneous requests.
 
@@ -349,8 +359,9 @@ observed to execute six while queuing two. Log-derived occupancy is not part of
 the machine evidence archive. Increasing the same strategy to 40 states was
 stopped at the frozen swap-growth gate, while an earlier MTP3/40-state attempt
 was stopped when host `MemAvailable` crossed below 14 GiB during graph capture.
-These are safe capacity rejections, not model crashes. The lazy 32-state
-profile is therefore the retained C8 arm; its all-eight-running designation is
+These are pressure-gated capacity rejections, not model crashes. The lazy
+32-state profile was therefore the historically retained C8 arm; its
+all-eight-running designation is
 an operator-log observation, not a tracked occupancy counter.
 
 Long-context escalation established a narrower boundary. The 131K
@@ -398,8 +409,9 @@ Open [SGLang PR #36845](https://github.com/sgl-project/sglang/pull/36845) now
 provides an explicit SM121 Triton packed-varlen fallback directly atop that
 restriction. Therefore the two-line local patch is retained only to reproduce
 the measured historical image; do not use it for a new build or support claim.
-New work must start from the restricted or explicitly attested Triton path and
-pass varied-token long-context validation. See the
+New work must preserve the exact SM120 TRT-LLM restriction, use an explicitly
+attested SM121 Triton fallback, and pass varied-token long-context validation.
+See the
 [day-two review](qwen38-flash-next-gb10-day-two-delta-2026-08-28.md) for the
 exact ancestry and evidence boundary.
 
@@ -488,7 +500,7 @@ requirements are in the
 The current [TokenSpeed recipe](https://lightseek.org/tokenspeed/recipes/models#qwen38-flash-next)
 publishes FP8 TP4 plus MTP3 and has no native single-Spark NVFP4/I4 route.
 
-## Build sequence
+## Historical build sequence
 
 The completed admission path was:
 
@@ -507,7 +519,9 @@ The completed admission path was:
 8. confirm MTP3 against MTP off from a clean revision, then complete offered C8
    at bounded 4K context with the MTP2 lazy recurrent-state strategy.
 
-The next optimization sequence is deliberately narrower:
+The pre-supersession optimization sequence was deliberately narrower. It is
+retained as historical planning context, not authorization to execute the old
+SGLang profiles:
 
 1. **Depth-two versus depth-three replication.** The clean off/MTP3 result
    establishes a bounded MTP gain, but the dirty five-request sweep cannot
@@ -516,7 +530,8 @@ The next optimization sequence is deliberately narrower:
    the current recipe/C8 roles.
 2. **Quality confirmation.** Investigate the failed code-reasoning item and run
    a larger fixed battery without changing runtime settings.
-3. **Memory-safe context.** Treat 131K as the current upper validated boundary.
+3. **Memory-pressure boundary.** Treat 131K as the historical route's upper
+   bounded retrieval observation.
    Do not rerun the incompatible 245K profile until the projected and observed
    reserve close without swap or PSI pressure.
 4. **Packed PLE optimization.** Extend the zero-error group-16 primitive through

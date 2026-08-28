@@ -3,10 +3,19 @@
 Updated 2026-08-27 with clean MTP controls, the bounded C8 result, and the
 day-one upstream/community boundary.
 
+**Safety supersession, 2026-08-28:** every SGLang measurement in this report
+used the digest-pinned SM121 TRT-LLM overlay later restricted after
+varied-token corruption. Preserve the numbers as historical within-runtime
+evidence only. Do not launch these SGLang profiles for new inference or treat
+their pressure-clean cells as deployment-safety evidence. New SGLang work
+requires a newly built, pinned, and admitted SM121 Triton runtime plus a fresh
+rebaseline; see the [day-two safety review](qwen38-flash-next-gb10-day-two-delta-2026-08-28.md).
+
 ## Result
 
-The full released Qwen3.8-Flash-Next language stack now runs on one 128 GB DGX
-Spark through SGLang with its Radix main model in NVFP4, its 51B-parameter PLE
+The full released Qwen3.8-Flash-Next language stack historically ran on one
+128 GB DGX Spark through SGLang with its Radix main model in NVFP4, its
+51B-parameter PLE
 table retained exactly in FP8 but mapped read-only from NVMe, and its trained
 NEXTN module retained in BF16. The terminal native run completed all 12 planned
 cases and delivered 28.504 aggregate output tok/s at D256, 27.413 at C1,
@@ -36,8 +45,8 @@ eight running requests; the tracked machine evidence is the scalar client
 result and telemetry, not an occupancy counter.
 
 The primary native lifecycle started in 581.652 seconds and retained at least
-16.564 GiB sampled host `MemAvailable` with no sampled swap growth. That safe
-operating claim ends at the measured 32K tier. Two independent 131K C1 needles
+16.564 GiB sampled host `MemAvailable` with no sampled swap growth. That bounded
+memory-pressure claim ends at the measured 32K tier. Two independent 131K C1 needles
 passed, but 245K was unsafe: the `.85` C4/MTP allocation rejected it at a
 179,514-token pool boundary; `.87` entered severe memory pressure; and the
 bounded target-only 245K diagnostic was stopped at 0.046 GiB sampled
@@ -75,12 +84,12 @@ template. They otherwise differed materially.
 
 | Deployment | Main model | PLE | MTP | Serving geometry | Measured scope |
 | --- | --- | --- | --- | --- | --- |
-| Native SGLang baseline | released Radix ModelOpt NVFP4 | released FP8, 51,200,245,760-byte read-only NVMe mmap | released BF16 NEXTN, steps 3 / top-k 1 / four total speculative tokens | max running 4; 20 recurrent-state slots; `.85` static fraction; 262,144 declared context | D256, C1/C2/C4, 8K/32K prefill and needles |
-| Native SGLang MTP controls | same | same | near-matched MTP3 and off lifetimes | max running 4; 20 recurrent-state slots for MTP3; D256/C1 | clean 20-request estimate plus one separate MTP3 counter audit |
-| Native SGLang bounded C8 | same | same | BF16 NEXTN, steps 2 / three total speculative tokens | max running 8; 32 lazy recurrent-state slots; 4,096 context; 32,768 total-token cap | fresh C1/C2/C4/C8 and one separate MTP2 counter audit |
+| Historical native SGLang baseline | released Radix ModelOpt NVFP4 | released FP8, 51,200,245,760-byte read-only NVMe mmap | released BF16 NEXTN, steps 3 / top-k 1 / four total speculative tokens | max running 4; 20 recurrent-state slots; `.85` static fraction; 262,144 declared context | D256, C1/C2/C4, 8K/32K prefill and needles |
+| Historical native SGLang MTP controls | same | same | near-matched MTP3 and off lifetimes | max running 4; 20 recurrent-state slots for MTP3; D256/C1 | clean 20-request estimate plus one separate MTP3 counter audit |
+| Historical native SGLang bounded C8 | same | same | BF16 NEXTN, steps 2 / three total speculative tokens | max running 8; 32 lazy recurrent-state slots; 4,096 context; 32,768 total-token cap | fresh C1/C2/C4/C8 and one separate MTP2 counter audit |
 | Provisional llama.cpp | Unsloth `UD-IQ4_XS` GGUF | GGUF-converted representation | omitted by converter | eight slots, each 32,768 context; F16 K/V | target-only D256, C1/C2/C4/C8 and bounded context |
 
-The native path used Triton prefill attention, the pinned SM121 TRT-LLM/XQA
+The historical native path used Triton prefill attention, the pinned SM121 TRT-LLM/XQA
 decode overlay, `modelopt_fp4`, 1,024-token chunked prefill, and the exact
 released Radix snapshot. The completed PLE file and marker were mounted
 read-only. The MTP3/off pair is a near-matched same-runtime control; comparisons to
@@ -192,8 +201,8 @@ simultaneous-eight execution result. Increasing that strategy to 40 states was
 safety-stopped before measurement when swap growth reached 602.48 MiB, above
 the frozen 512 MiB limit. An MTP3/40-state attempt independently crossed the
 14 GiB host-availability floor during graph capture. Both are capacity
-rejections, not model crashes; the lazy 32-state MTP2 profile is the retained
-bounded C8 route.
+rejections, not model crashes; the lazy 32-state MTP2 profile was the
+historically retained bounded C8 route within that runtime.
 
 ### Fair local GGUF comparison
 
@@ -479,11 +488,13 @@ audit, but did not clear those validation or artifact blockers. Neither the
 artifact nor runtime path was therefore suitable for a memory-admissible,
 valid long-context Spark benchmark.
 
-## Reproduce
+## Historical native reproduction record — do not execute
 
-Fetch once, then run without implicit downloads. For the native path, prepare
-the two digest-pinned overlays from the cached image and materialize and verify
-the exact PLE file before launching the server:
+The native commands below preserve the exact historical procedure; do not run
+them. They launch the safety-superseded SM121 TRT-LLM profile. A new SGLang run
+needs newly named profiles on a built and admitted SM121 Triton runtime. The
+llama.cpp commands farther below remain separately runnable under their stated
+memory and provenance gates.
 
 ```bash
 python3 sparkbench.py inventory --sizes
@@ -537,7 +548,7 @@ silently merged into the final run.
 | [`20260827T024144Z-qwen38-flash-next-nvfp4-mtp-long-sglang-qwen38-flash-next-sglang-long-context-7c25f743`](../evidence/runs/20260827T024144Z-qwen38-flash-next-nvfp4-mtp-long-sglang-qwen38-flash-next-sglang-long-context-7c25f743/manifest.json) | `d2f7aca7` | `.85`, five recurrent slots, MTP3/C1 | operator-abort after 1/2 cases | independent 131K pass, 72.285-second TTFT; no 245K result |
 | [`20260827T025734Z-qwen38-flash-next-nvfp4-long-sglang-qwen38-flash-next-sglang-long-context-b8e9080e`](../evidence/runs/20260827T025734Z-qwen38-flash-next-nvfp4-long-sglang-qwen38-flash-next-sglang-long-context-b8e9080e/manifest.json) | `a14b3aee` | target-only `.85`, one recurrent slot, C1 | startup abort; 0 cases | one slot was below the five-slot request floor |
 | [`20260827T030636Z-qwen38-flash-next-nvfp4-long-sglang-qwen38-flash-next-sglang-long-context-7b88e52c`](../evidence/runs/20260827T030636Z-qwen38-flash-next-nvfp4-long-sglang-qwen38-flash-next-sglang-long-context-7b88e52c/manifest.json) | `d0e53f45` | target-only `.85`, five BF16 recurrent slots, 246,272-token cap, C1 | safety abort during only case | 0.046 GiB sampled minimum; about 6.1 GiB observed swap and PSI memory `avg10` 19.84; profile retired |
-| [`20260827T032027Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-20e1283b`](../evidence/runs/20260827T032027Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-20e1283b/manifest.json) | `717b17c3` | `.85`, 20 recurrent slots, MTP3/C4; 8K/32K cap | `completed` / `partial`; 12/12 cases | primary safe bounded run; only publication failure was exact answers 3/4 |
+| [`20260827T032027Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-20e1283b`](../evidence/runs/20260827T032027Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-20e1283b/manifest.json) | `717b17c3` | `.85`, 20 recurrent slots, MTP3/C4; 8K/32K cap | `completed` / `partial`; 12/12 cases | primary pressure-clean historical run; semantic safety later superseded; exact answers 3/4 |
 
 ### Native MTP and C8 optimization attempts
 
@@ -554,7 +565,7 @@ revisions.
 | [`617007f4`](../evidence/runs/20260827T183912Z-qwen38-flash-next-nvfp4-mtp-c8-sglang-qwen38-flash-next-sglang-c8-617007f4/manifest.json) | `efceae4` clean | MTP3, 40 ordinary states, planned C8 | startup safety abort; 0 cases | host availability crossed below 14 GiB during graph capture; capacity rejection |
 | [`a8f54d30`](../evidence/runs/20260827T185155Z-qwen38-flash-next-nvfp4-mtp2-c8-sglang-qwen38-flash-next-sglang-c8-a8f54d30/manifest.json) | `5948de1` clean | MTP2, 32 ordinary states, offered C8 | completed; 6/6 cases | 80.5772 tok/s offered C8; operator-log observation showed six running/two queued |
 | [`85e3ddfb`](../evidence/runs/20260827T192011Z-qwen38-flash-next-nvfp4-mtp2-c8-sglang-qwen38-flash-next-sglang-c8-85e3ddfb/manifest.json) | `e3e719b` clean | MTP2, 40 ordinary states, planned C8 | startup safety abort; 0 cases | 602.48 MiB swap growth exceeded frozen 512 MiB gate |
-| [`9597ea2a`](../evidence/runs/20260827T193218Z-qwen38-flash-next-nvfp4-mtp2-c8-lazy-sglang-qwen38-flash-next-sglang-c8-9597ea2a/manifest.json) | `2ce8b29` clean | MTP2, 32 lazy states, C8 | completed; 6/6 cases | retained C8 arm, 114.5755 tok/s; scalar gates passed and all-eight-running was observed only in operator logs |
+| [`9597ea2a`](../evidence/runs/20260827T193218Z-qwen38-flash-next-nvfp4-mtp2-c8-lazy-sglang-qwen38-flash-next-sglang-c8-9597ea2a/manifest.json) | `2ce8b29` clean | MTP2, 32 lazy states, C8 | completed; 6/6 cases | historically retained C8 arm, 114.5755 tok/s; scalar gates passed and all-eight-running was observed only in operator logs |
 | [`af30d00f`](../evidence/runs/20260827T194940Z-qwen38-flash-next-nvfp4-mtp-depth3-sglang-qwen38-flash-next-sglang-mtp-depth-confirm-af30d00f/manifest.json) | `2ce8b29` clean | MTP3, D256/C1, 20 requests | completed | 30.123639 tok/s plus separate 175/243 native audit |
 | [`aa26aac9`](../evidence/runs/20260827T200256Z-qwen38-flash-next-nvfp4-mtp-depth0-sglang-qwen38-flash-next-sglang-mtp-depth-confirm-aa26aac9/manifest.json) | `2ce8b29` clean | MTP off, D256/C1, 20 requests | completed | near-matched 16.663713 tok/s control |
 
