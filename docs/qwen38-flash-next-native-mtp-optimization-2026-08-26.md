@@ -364,7 +364,7 @@ sampled `MemAvailable` reached 0.046 GiB, while the operator observed roughly
 6.1 GiB of swap growth and memory PSI full `avg10` of 19.84. That profile is
 retained as `incompatible`; 245K is not a supported one-Spark result.
 
-#### Smallest credible QSA fix
+#### Historical SM121 QSA admission, superseded for new runs
 
 Read-only inspection of the exact image isolates the SM121 fallback. QSA's
 `_resolve_trtllm_sparse_decode()` admits only `is_sm100_supported()`. GB10 fails
@@ -375,7 +375,7 @@ with `QwenSparseAttnBackend` for the hybrid GDN/QSA architecture.
 
 The installed FlashInfer `0.6.17` XQA implementation already admits compute
 capability major 12, page size 64, and QSA's supported head geometry. The
-smallest credible upstream experiment is therefore to admit
+historical local experiment therefore admitted
 `is_sm120_supported()` alongside the SM100 check and let FlashInfer's existing
 auto dispatch select XQA on SM120/SM121.
 
@@ -391,6 +391,17 @@ SM12x packed-XQA parity test and pinned derived-image rerun remain prerequisites
 for an upstream support claim.
 The exact source hashes, patch, and boundaries are preserved in the
 [experimental SGLang SM121 XQA guide](../patches/sglang/README.md).
+
+Subsequent multi-trial varied-token testing found corruption on the SM121
+TRT-LLM route, and upstream restriction `99c9362` returned it to exact SM120.
+Open [SGLang PR #36845](https://github.com/sgl-project/sglang/pull/36845) now
+provides an explicit SM121 Triton packed-varlen fallback directly atop that
+restriction. Therefore the two-line local patch is retained only to reproduce
+the measured historical image; do not use it for a new build or support claim.
+New work must start from the restricted or explicitly attested Triton path and
+pass varied-token long-context validation. See the
+[day-two review](qwen38-flash-next-gb10-day-two-delta-2026-08-28.md) for the
+exact ancestry and evidence boundary.
 
 The remaining packed-PLE path is promising because the measured image imported
 the relevant class,

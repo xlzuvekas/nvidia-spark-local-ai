@@ -8,6 +8,17 @@ measured full-checkpoint result. They remain an experimental local route, not
 upstream SGLang or general SM121 support, and the two-line QSA patch alone is
 not a full-model admission recipe.
 
+**Safety supersession, 2026-08-28:** later varied-token testing found
+long-context corruption on the SM121 TRT-LLM route, and SGLang restriction
+`99c9362` returned that kernel to exact SM120. Open
+[PR #36845](https://github.com/sgl-project/sglang/pull/36845) adds an explicit
+SM121 Triton packed-varlen fallback. Preserve this directory for historical
+measurement provenance only; do not use `d91c3682-qsa-sm121-xqa.patch` in a new
+build. New integration work must use the restricted or explicitly attested
+Triton path and varied-token long-context validation. The
+[day-two review](../../docs/qwen38-flash-next-gb10-day-two-delta-2026-08-28.md)
+records the exact ancestry, caveats and current component plan.
+
 - Container image: `lmsysorg/sglang@sha256:14ed582518584c5c830206b5318a2c2769e68229c3422e48a28b952b3a888bd4`
 - Reported SGLang base: `d91c3682b0b429e4c70df63cd57f819588ce29b0`
 - SGLang package: `0.0.0.dev1+gd91c3682b`
@@ -161,8 +172,9 @@ natural-document quality or worst-case cold/varied-token NVMe PLE cost.
 
 Before proposing this as supported behavior:
 
-1. Add a resolver unit test for SM100 false / SM120 true and the all-false and
-   missing-FlashInfer cases.
+1. Do not extend this historical TRT-LLM overlay. Reproduce the explicit SM121
+   Triton fallback at `3681c4e` or a later reviewed descendant, with dispatch
+   attestation and varied-token long-context coverage.
 2. Add an SM12x GPU parity test for page size 64, BF16, GQA, and sequence
    lengths crossing a page boundary against an independent reference.
 3. Repeat the full-checkpoint route through a pinned derived image rather than
