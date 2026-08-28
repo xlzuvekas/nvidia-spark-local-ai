@@ -113,28 +113,41 @@ page-cache working set. The current repeated-word prefixes are explicitly poor
 proxies for that question. Native page-fault and NVMe-byte attribution is still
 needed.
 
-## Measurements that would resolve the physical bottleneck
+## Measurements that would narrow the physical bottleneck
 
-Run one separate, unscored diagnostic lifetime on the existing 4K C8-capable
-mapped-MTP2 profile for D256 plus fresh C1/C2/C8 counters. Use a separately
-admitted 64K profile, or an eventual promoted 64K champion, for one
-deterministic varied-token long prompt. A later MTP-off comparison requires its
-own frozen matched pair; do not mix any of these diagnostics into a promotion
-score. Publish only allowlisted aggregates.
+Start with one separate, unscored vLLM direct-mmap, MTP-off, C1 diagnostic
+lifetime after that branch passes build and admission. Its direct-mmap boundary
+can be instrumented more precisely than the current SGLang path. Bracket three
+profiled D256 requests with two unprofiled three-request blocks, then expand to
+the existing 4K C8-capable mapped-MTP2 profile and C1/C2/C8 only if the minimum
+trace is interpretable. Use a separately admitted 64K profile for one
+deterministic varied-token long prompt. None of these diagnostics belongs in a
+promotion score; publish only allowlisted aggregates.
+
+The local Nsight gate materially limits the claim. CUDA/NVTX timelines work,
+but hardware counters currently require profiling privilege, and the stock
+CC 12.1/GB20B metric sets expose no direct DRAM-byte counter. Even with a
+separately authorized privileged lifetime, L2 sysmem-fill sectors are only an
+LPDDR-facing proxy. Model-implied dense bytes divided by a clipped GEMV-kernel
+union can be reported as an effective lower-bound proxy, not measured LPDDR
+bandwidth or proof of saturation.
 
 | Diagnostic | Bandwidth/weight-traffic signature | Kernel/scheduler signature |
 | --- | --- | --- |
-| C1 fixed-depth device counters | Sustained memory traffic near a pinned, locally measured sustainable-bandwidth reference with low arithmetic intensity | Material idle/launch gaps, low eligible warps, or low achieved occupancy while bandwidth remains below that reference |
-| Matched C1/C2/C8 counters | Similar traffic ceiling but higher useful tokens per byte as concurrency rises | Smaller host gaps or better kernel occupancy as concurrency rises without a fixed bandwidth ceiling |
+| C1 fixed-depth timeline and optional counters | High target GEMV union plus rising L2 sysmem-fill proxy and stable model-implied bytes per step | Material host/launch gaps, low eligible warps, or low achieved occupancy; no direct LPDDR-ceiling claim is available |
+| Matched C1/C2/C8 timelines | Similar target-kernel time or proxy traffic per pass but more useful tokens per pass as concurrency rises | Smaller host gaps or better kernel occupancy as concurrency rises |
 | Continuous decode steps 1 versus 2 | Little change if target kernels/traffic dominate | Wall/TPS gain with unchanged output and no memory change implicates scheduler round trips |
 | Decode CUDA graph on versus off | Small effect if launches are already amortized | Large resident-C1 regression when disabled implicates launch/capture benefits |
 | Warm versus varied PLE rows | Warm page faults/NVMe reads near zero; varied rows add attributable reads and stalls | Similar I/O but unchanged decode bottleneck points back to target kernels |
 | MTP off versus fixed depth | Target bytes/verification calls per useful token fall with accepted length | Gains instead track fewer launches or larger verification kernels |
 
-Pin counter names, collection windows, profiler versions, and overhead. System
-page faults and disk counters need exact process/phase attribution; raw traces,
-commands, paths, prompts, completions, and request identifiers remain private.
-Do not treat a profiler run as a promotion pair.
+Pin counter names, collection windows, profiler versions, and U-P-U overhead.
+Use timestamp unions: blocking D2H overlaps preceding hash work and pageable
+H2D API wall can overlap its GPU copy, so summing phase durations would
+double-count the critical path. System page faults and disk counters need exact
+process/phase attribution; raw traces, commands, paths, prompts, completions,
+kernel strings and request identifiers remain private. Do not treat a profiler
+run as a promotion pair.
 
 ## Practical optimization order
 
@@ -144,11 +157,13 @@ Until that attribution exists:
 2. retain mapped PLE, lazy recurrent state, and MTP2 as the safe default;
 3. finish the frozen low/no-thinking, chunk-size, and MTP2/MTP3 task-wall
    comparisons only after a clean host preflight;
-4. measure repeated long-prefix Radix reuse for multi-turn agents;
-5. test continuous decode steps and the decode-graph causal control;
-6. admit a separate C2-capable geometry for independent single-user fan-out;
+4. on the direct-mmap vLLM branch, test the isolated live-token hash slice
+   before scheduler ceilings or mmap worker tuning;
+5. measure repeated long-prefix Radix reuse for multi-turn agents;
+6. test continuous decode steps and the decode-graph causal control;
+7. admit a separate C2-capable geometry for independent single-user fan-out;
    and
-7. evaluate MTP off only as a cold short-task specialization, not as the
+8. evaluate MTP off only as a cold short-task specialization, not as the
    resident decode default.
 
 The ranked protocols are in the
