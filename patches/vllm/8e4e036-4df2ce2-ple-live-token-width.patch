@@ -2,9 +2,7 @@ diff --git a/vllm/models/qwen4_exp/nvidia/ple_layer.py b/vllm/models/qwen4_exp/n
 index 2663a60..c6f3a81 100644
 --- a/vllm/models/qwen4_exp/nvidia/ple_layer.py
 +++ b/vllm/models/qwen4_exp/nvidia/ple_layer.py
-@@ -376,7 +376,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
-             )
- 
+@@ -378,5 +378,5 @@ class Qwen4ExpNGramEmbedding(nn.Module):
          positions = self.positions_buffer[:num_tokens]
 -        packed = self.padded_buffer[:num_reqs]
 +        packed = self.padded_buffer[:num_reqs, :num_tokens]

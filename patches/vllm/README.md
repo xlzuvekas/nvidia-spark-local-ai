@@ -13,7 +13,7 @@ upstream branch, or a measured result.
 - base blob: `2663a60bf4f077ef70111269164b51f2fe99c32a`
 - base file SHA-256: `956239e7754098b480734a0b8e0a32447333c41fc22645e2035bc858781e6738`
 - patch: `8e4e036-4df2ce2-ple-live-token-width.patch`
-- patch SHA-256: `ab6804086965c89cab7018abaa2de61445e43c5879ceb1ace2eb2ce0a7ea93bd`
+- patch SHA-256: `a15d4246fefeb3210c5015d5b60061ded8c48dba931c537be5ed0e30e73b4e18`
 - patched blob: `c6f3a811cd4e558aa75d96d289dce6c05ba4eff1`
 - patched file SHA-256: `f887c4925d021c5a0db4c059ac1520065a47bce804ed7902f8bd8630b1a4f688`
 - patched tree: `3735794739795044e792066854d601d429ba0836`
@@ -40,7 +40,7 @@ test "$(git -C "$VLLM_SOURCE" rev-parse \
   HEAD:vllm/models/qwen4_exp/nvidia/ple_layer.py)" = \
   2663a60bf4f077ef70111269164b51f2fe99c32a
 test "$(sha256sum "$VLLM_PATCH" | cut -d' ' -f1)" = \
-  ab6804086965c89cab7018abaa2de61445e43c5879ceb1ace2eb2ce0a7ea93bd
+  a15d4246fefeb3210c5015d5b60061ded8c48dba931c537be5ed0e30e73b4e18
 
 git -C "$VLLM_SOURCE" apply --check --index "$VLLM_PATCH"
 git -C "$VLLM_SOURCE" apply --index "$VLLM_PATCH"
