@@ -247,6 +247,9 @@ class CellProjection:
     minimum_memavailable_gib: float
     maximum_swap_growth_mib: float
     normalized_flags: tuple[str, ...]
+    run_nonce: str | None = None
+    plan_integrity_hash: str | None = None
+    run_completed_at: datetime | None = None
 
     def measurement(self, case_id: str) -> CaseMeasurement:
         matches = tuple(
@@ -1609,6 +1612,19 @@ def _one_event(
     return matches[0]
 
 
+def _aware_event_timestamp(event: Mapping[str, Any], *, context: str) -> datetime:
+    raw = event.get("timestamp")
+    if not isinstance(raw, str):
+        raise CellProjectionError(f"{context} event has no timestamp")
+    try:
+        value = datetime.fromisoformat(raw)
+    except ValueError as error:
+        raise CellProjectionError(f"{context} timestamp is invalid") from error
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise CellProjectionError(f"{context} timestamp is not timezone-aware")
+    return value
+
+
 def _validate_plan_integrity(plan: Mapping[str, Any]) -> None:
     if plan.get("schema_version") != 2:
         raise CellProjectionError("cell plan must use frozen schema version 2")
@@ -1968,7 +1984,17 @@ def project_completed_cell(run_dir: Path) -> CellProjection:
     _one_event(events, "server_ready")
     measurement_complete = _one_event(events, "measurement_complete")
     server_stopped = _one_event(events, "server_stopped")
-    _one_event(events, "run_complete")
+    run_complete = _one_event(events, "run_complete")
+    server_stopped_at = _aware_event_timestamp(
+        server_stopped, context="server_stopped"
+    )
+    run_completed_at = _aware_event_timestamp(run_complete, context="run_complete")
+    finalization_elapsed_s = (run_completed_at - server_stopped_at).total_seconds()
+    if not 0 <= finalization_elapsed_s <= FINALIZATION_TIMEOUT_S:
+        raise CellProjectionError(
+            "run completion exceeds the frozen finalization budget",
+            failure_kind="cleanup_breach",
+        )
     forbidden = {
         "run_aborted",
         "case_failed",
@@ -2029,7 +2055,28 @@ def project_completed_cell(run_dir: Path) -> CellProjection:
         minimum_memavailable_gib=minimum_memory,
         maximum_swap_growth_mib=swap_growth,
         normalized_flags=_normalized_flags(model),
+        run_nonce=run_nonce,
+        plan_integrity_hash=str(plan["integrity_hash"]),
+        run_completed_at=run_completed_at,
     )
+
+
+def _project_frozen_cell(cell: FrozenCell) -> CellProjection:
+    """Project raw artifacts only when they still bind to the frozen cell."""
+
+    projection = project_completed_cell(cell.run_dir)
+    if (
+        projection.profile_id != cell.profile_id
+        or projection.plan_fingerprint != cell.plan_fingerprint
+        or projection.plan_integrity_hash != cell.plan_integrity_hash
+        or projection.run_nonce != cell.run_nonce
+        or projection.run_completed_at is None
+    ):
+        raise CellProjectionError(
+            "completed cell projection does not match the frozen schedule",
+            failure_kind="audit",
+        )
+    return projection
 
 
 def observation_from_cells(
@@ -2453,6 +2500,22 @@ def _deduplicated_controller_events(
     return tuple(unique)
 
 
+def _durable_pair_audit_reserve_s(
+    campaign: FrozenCampaign, projections: Mapping[str, CellProjection]
+) -> float:
+    """Derive score-time reserve from the pair's durable final completion."""
+
+    if set(projections) != {"champion", "candidate"}:
+        raise CampaignPlanningError("score-bearing pair projections are incomplete")
+    completed_at = tuple(
+        projection.run_completed_at for projection in projections.values()
+    )
+    if any(value is None for value in completed_at):
+        raise CampaignPlanningError("score-bearing projection has no completion time")
+    last_completed = max(value for value in completed_at if value is not None)
+    return max(0.0, (campaign.cutoff - last_completed).total_seconds())
+
+
 def _replay_frozen_campaign(
     campaign: FrozenCampaign, events: list[dict[str, Any]] | tuple[dict[str, Any], ...]
 ) -> ReplayState:
@@ -2469,6 +2532,10 @@ def _replay_frozen_campaign(
     proposal_cursor = 0
     pair_counts: dict[str, int] = {}
     pair_stages: dict[tuple[str, int], str] = {}
+    pair_cells: dict[tuple[str, int], dict[str, FrozenCell]] = {}
+    pair_projections: dict[
+        tuple[str, int], dict[str, CellProjection]
+    ] = {}
     started_candidates: set[str] = set()
     for event in unique:
         expected_id = _bound_transition_id(campaign, event)
@@ -2514,29 +2581,55 @@ def _replay_frozen_campaign(
                     "controller candidate exceeds screen and confirmation"
                 )
             stage = "screen" if occurrence == 0 else "confirmation"
-            campaign.cells_for(candidate_id=candidate_id, stage=stage)
+            cells = campaign.cells_for(candidate_id=candidate_id, stage=stage)
             pair_counts[candidate_id] = occurrence + 1
-            pair_stages[(candidate_id, pair_index)] = stage
+            pair_key = (candidate_id, pair_index)
+            pair_stages[pair_key] = stage
+            pair_cells[pair_key] = cells
+            pair_projections[pair_key] = {}
             continue
         if name in {"autoresearch_cell_completed", "autoresearch_pair_scored"}:
             candidate_id = event.get("candidate_id")
             pair_index = event.get("pair_index")
             if not isinstance(candidate_id, str) or not isinstance(pair_index, int):
                 raise CampaignPlanningError("controller pair binding is malformed")
-            stage = pair_stages.get((candidate_id, pair_index))
+            pair_key = (candidate_id, pair_index)
+            stage = pair_stages.get(pair_key)
             if stage is None:
                 raise CampaignPlanningError(
                     "controller completion has no frozen pair occurrence"
                 )
+            cells = pair_cells[pair_key]
+            projections = pair_projections[pair_key]
             if name == "autoresearch_cell_completed":
                 arm = event.get("arm")
                 if not isinstance(arm, str):
                     raise CampaignPlanningError("controller cell arm is malformed")
-                cells = campaign.cells_for(candidate_id=candidate_id, stage=stage)
                 if arm not in cells:
                     raise CampaignPlanningError(
                         "controller cell does not map to the frozen schedule"
                     )
+                projections[arm] = _project_frozen_cell(cells[arm])
+                continue
+            if set(projections) != {"champion", "candidate"}:
+                raise CampaignPlanningError(
+                    "controller score has no complete raw frozen pair"
+                )
+            expected_observation = observation_from_cells(
+                campaign.policy,
+                pair_index=pair_index,
+                champion=projections["champion"],
+                candidate=projections["candidate"],
+                audit_reserve_remaining_s=_durable_pair_audit_reserve_s(
+                    campaign, projections
+                ),
+            )
+            if canonical_json(event.get("observation")) != canonical_json(
+                expected_observation.to_mapping()
+            ):
+                raise CampaignPlanningError(
+                    "controller score does not match the frozen raw pair"
+                )
 
     return state
 
@@ -2809,9 +2902,7 @@ def _run_search_pair(
     projections: dict[str, CellProjection] = {}
     last_completion: datetime | None = None
     for completed_arm in state.completed_arms:
-        projections[completed_arm] = project_completed_cell(
-            cells[completed_arm].run_dir
-        )
+        projections[completed_arm] = _project_frozen_cell(cells[completed_arm])
         last_completion = _server_stopped_at(cells[completed_arm])
     for arm in state.active_order[len(state.completed_arms) :]:
         if last_completion is not None:
@@ -2832,9 +2923,12 @@ def _run_search_pair(
                     "first cell exceeded its measurement or cleanup budget"
                 )
         projection = cell_runner(cells[arm])
-        if projection.profile_id != cells[arm].profile_id:
-            raise CellProjectionError("cell projection profile does not match schedule")
-        projections[arm] = projection
+        if (
+            projection.profile_id != cells[arm].profile_id
+            or projection.plan_fingerprint != cells[arm].plan_fingerprint
+        ):
+            raise CellProjectionError("cell projection does not match schedule")
+        projections[arm] = _project_frozen_cell(cells[arm])
         _append_frozen_transition(
             journal,
             campaign,
@@ -2849,21 +2943,15 @@ def _run_search_pair(
             },
         )
         state = _replay_frozen_campaign(campaign, _controller_events(journal))
-        stopped_events = cells[arm].run_dir / "events.jsonl"
-        # Production runners can return a projection only after the durable
-        # stop marker exists.  The fallback keeps the explicitly injected,
-        # artifact-free unit runner deterministic without weakening CLI runs.
-        last_completion = (
-            _server_stopped_at(cells[arm])
-            if _safe_cell_journal_size(stopped_events)
-            else now()
-        )
+        last_completion = _server_stopped_at(cells[arm])
     observation = observation_from_cells(
         campaign.policy,
         pair_index=state.active_pair_index,
         champion=projections["champion"],
         candidate=projections["candidate"],
-        audit_reserve_remaining_s=_remaining_s(campaign, now),
+        audit_reserve_remaining_s=_durable_pair_audit_reserve_s(
+            campaign, projections
+        ),
     )
     _append_frozen_transition(
         journal,

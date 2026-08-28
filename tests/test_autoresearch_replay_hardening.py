@@ -13,6 +13,7 @@ from bench.autoresearch_campaign import (
     CampaignPlanningError,
     CellProjection,
     FrozenCell,
+    load_frozen_campaign,
     project_completed_cell,
     run_campaign,
     summarize_campaign,
@@ -43,6 +44,10 @@ class _CompleteCellHarness:
         self.improvement = improvement
         self.calls: list[str] = []
         self.crash_after_cell: str | None = None
+        self.delay_after_cell: str | None = None
+        self.delay_after_s = 0.0
+        self.finalize_after_cell: str | None = None
+        self.finalization_s = 0.0
 
     @staticmethod
     def _arg_value(model: dict[str, object], option: str) -> int:
@@ -56,6 +61,11 @@ class _CompleteCellHarness:
         started = self.clock()
         self.clock.advance(10.0)
         stopped = self.clock()
+        run_completed = (
+            stopped + timedelta(seconds=self.finalization_s)
+            if self.finalize_after_cell == cell.cell_id
+            else stopped
+        )
 
         plan = json.loads((cell.run_dir / "plan.json").read_text())
         model = plan["model"]
@@ -184,7 +194,7 @@ class _CompleteCellHarness:
                     "monotonic_ns": server_stopped_ns,
                 },
                 {
-                    "timestamp": stopped.isoformat(),
+                    "timestamp": run_completed.isoformat(),
                     "event": "run_complete",
                     "status": "completed",
                 },
@@ -213,6 +223,8 @@ class _CompleteCellHarness:
         projection = project_completed_cell(cell.run_dir)
         if self.crash_after_cell == cell.cell_id:
             raise KeyboardInterrupt
+        if self.delay_after_cell == cell.cell_id:
+            self.clock.advance(self.delay_after_s)
         return projection
 
 
@@ -275,7 +287,6 @@ class AutoresearchReplayHardeningTests(unittest.TestCase):
                 )
             self.assertEqual(launched, [])
 
-    @unittest.skip("awaiting frozen score recomputation source")
     def test_summary_recomputes_and_rejects_a_tampered_pair_score(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
             campaign_dir = _freeze_campaign_fixture(Path(directory))
@@ -297,24 +308,139 @@ class AutoresearchReplayHardeningTests(unittest.TestCase):
                     cell_runner=harness,
                 )
 
-            events_path = campaign_dir / "events.jsonl"
-            records = _events(events_path)
-            scored = next(
-                event
-                for event in records
-                if event.get("event") == "autoresearch_pair_scored"
+            campaign = load_frozen_campaign(campaign_dir)
+            candidate_id = campaign.proposals[0].candidate_id
+            candidate_cell = campaign.cells_for(
+                candidate_id=candidate_id, stage="screen"
+            )["candidate"]
+            plan = json.loads((candidate_cell.run_dir / "plan.json").read_text())
+            frozen_case_id = next(
+                case["case_id"]
+                for case in plan["suite"]["cases"]
+                if case["id"] == "agentic-select-and-call"
             )
-            observation = scored["observation"]
-            assert isinstance(observation, dict)
-            ratios = observation["primary_speed_ratios"]
-            assert isinstance(ratios, list)
-            ratios[0] = float(ratios[0]) * 1.0001
+            summary_path = candidate_cell.run_dir / "summary.json"
+            raw_summary = json.loads(summary_path.read_text())
+            raw_case = next(
+                case
+                for case in raw_summary["cases"]
+                if case["case_id"] == frozen_case_id
+            )
+            raw_case["median_agentic_task_wall_s"] = (
+                float(raw_case["median_agentic_task_wall_s"]) * 1.0001
+            )
+            summary_path.write_text(json.dumps(raw_summary, sort_keys=True) + "\n")
+
+            with self.assertRaises(CampaignPlanningError):
+                summarize_campaign(campaign_dir)
+
+    def test_replay_projects_each_completed_frozen_cell_with_nonce_binding(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            clock = _Clock()
+            harness = _CompleteCellHarness(clock)
+            with patch.object(campaign_module, "_recover_cell", return_value="absent"):
+                run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=clock,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=harness,
+                )
+                campaign = load_frozen_campaign(campaign_dir)
+                candidate_id = campaign.proposals[0].candidate_id
+                cells = campaign.cells_for(
+                    candidate_id=candidate_id, stage="screen"
+                )
+                harness.crash_after_cell = cells["candidate"].cell_id
+                with self.assertRaises(KeyboardInterrupt):
+                    run_campaign(
+                        campaign_dir,
+                        workspace=ROOT,
+                        now=clock,
+                        meminfo_reader=_admission_meminfo,
+                        cell_runner=harness,
+                    )
+
+            controller_events = _events(campaign_dir / "events.jsonl")
+            self.assertEqual(
+                sum(
+                    event.get("event") == "autoresearch_cell_completed"
+                    for event in controller_events
+                ),
+                1,
+            )
+            events_path = cells["champion"].run_dir / "events.jsonl"
+            raw_events = _events(events_path)
+            run_start = next(
+                event for event in raw_events if event.get("event") == "run_start"
+            )
+            run_start["run_nonce"] = "f" * 32
             events_path.write_text(
-                "".join(json.dumps(event, sort_keys=True) + "\n" for event in records)
+                "".join(json.dumps(event, sort_keys=True) + "\n" for event in raw_events)
             )
 
             with self.assertRaises(CampaignPlanningError):
                 summarize_campaign(campaign_dir)
+
+    def test_pair_score_reserve_replays_from_durable_run_completion(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            clock = _Clock()
+            harness = _CompleteCellHarness(clock)
+            with patch.object(campaign_module, "_recover_cell", return_value="absent"):
+                run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=clock,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=harness,
+                )
+                campaign = load_frozen_campaign(campaign_dir)
+                candidate_id = campaign.proposals[0].candidate_id
+                second = campaign.cells_for(
+                    candidate_id=candidate_id, stage="screen"
+                )["candidate"]
+                harness.delay_after_cell = second.cell_id
+                harness.delay_after_s = 600.0
+                harness.finalize_after_cell = second.cell_id
+                harness.finalization_s = 7.0
+                run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=clock,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=harness,
+                )
+
+            score = next(
+                event
+                for event in _events(campaign_dir / "events.jsonl")
+                if event.get("event") == "autoresearch_pair_scored"
+            )
+            observation = score["observation"]
+            assert isinstance(observation, dict)
+            timing = observation["timing"]
+            assert isinstance(timing, dict)
+            completed = next(
+                event
+                for event in _events(second.run_dir / "events.jsonl")
+                if event.get("event") == "run_complete"
+            )
+            completed_at = datetime.fromisoformat(str(completed["timestamp"]))
+            stopped = next(
+                event
+                for event in _events(second.run_dir / "events.jsonl")
+                if event.get("event") == "server_stopped"
+            )
+            stopped_at = datetime.fromisoformat(str(stopped["timestamp"]))
+            durable_reserve = (campaign.cutoff - completed_at).total_seconds()
+            current_reserve = (campaign.cutoff - clock()).total_seconds()
+            self.assertEqual(
+                timing["audit_reserve_remaining_s"], durable_reserve
+            )
+            self.assertEqual(completed_at - stopped_at, timedelta(seconds=7.0))
+            self.assertEqual(durable_reserve - current_reserve, 593.0)
 
     @unittest.skip("awaiting raw-complete pair reconciliation source")
     def test_replay_scores_both_raw_complete_cells_without_new_inference(self) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import datetime
 import fcntl
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from typing import Callable, Iterator
 
 from bench.autoresearch_campaign import (
     CampaignPlanningError,
@@ -309,6 +311,32 @@ def _synthetic_projection(cell: object, *, improvement: float) -> CellProjection
         0.0,
         ("--same",),
     )
+
+
+@contextmanager
+def _synthetic_projection_boundary(
+    projector: Callable[[object], CellProjection],
+    *,
+    stopped_at: datetime,
+    audit_reserve_s: float,
+) -> Iterator[None]:
+    """Isolate controller-policy tests from the raw replay boundary."""
+
+    with (
+        patch(
+            "bench.autoresearch_campaign._project_frozen_cell",
+            side_effect=projector,
+        ),
+        patch(
+            "bench.autoresearch_campaign._server_stopped_at",
+            return_value=stopped_at,
+        ),
+        patch(
+            "bench.autoresearch_campaign._durable_pair_audit_reserve_s",
+            return_value=audit_reserve_s,
+        ),
+    ):
+        yield
 
 
 def _worker_result(
@@ -856,41 +884,50 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
             campaign_dir = _freeze_campaign_fixture(Path(directory))
             calls: list[str] = []
 
-            def runner(cell: object) -> CellProjection:
-                calls.append(str(getattr(cell, "cell_id")))
+            def projection_for(cell: object) -> CellProjection:
                 projection = _synthetic_projection(cell, improvement=1.05)
                 if "agent64k-none" in str(getattr(cell, "profile_id")):
                     return replace(projection, normalized_flags=())
                 return projection
 
-            summary = run_campaign(
-                campaign_dir,
-                workspace=ROOT,
-                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
-                meminfo_reader=_admission_meminfo,
-                cell_runner=runner,  # type: ignore[arg-type]
-            )
-            screened = run_campaign(
-                campaign_dir,
-                workspace=ROOT,
-                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
-                meminfo_reader=_admission_meminfo,
-                cell_runner=runner,  # type: ignore[arg-type]
-            )
-            promoted = run_campaign(
-                campaign_dir,
-                workspace=ROOT,
-                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
-                meminfo_reader=_admission_meminfo,
-                cell_runner=runner,  # type: ignore[arg-type]
-            )
-            replayed = run_campaign(
-                campaign_dir,
-                workspace=ROOT,
-                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
-                meminfo_reader=_admission_meminfo,
-                cell_runner=runner,  # type: ignore[arg-type]
-            )
+            def runner(cell: object) -> CellProjection:
+                calls.append(str(getattr(cell, "cell_id")))
+                return projection_for(cell)
+
+            stopped_at = datetime.fromisoformat("2026-08-28T00:00:00-07:00")
+            with _synthetic_projection_boundary(
+                projection_for,
+                stopped_at=stopped_at,
+                audit_reserve_s=25_200.0,
+            ):
+                summary = run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=lambda: stopped_at,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=runner,  # type: ignore[arg-type]
+                )
+                screened = run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=lambda: stopped_at,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=runner,  # type: ignore[arg-type]
+                )
+                promoted = run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=lambda: stopped_at,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=runner,  # type: ignore[arg-type]
+                )
+                replayed = run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=lambda: stopped_at,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=runner,  # type: ignore[arg-type]
+                )
 
         self.assertEqual(summary["status"], "active")
         self.assertTrue(summary["calibration_recorded"])
@@ -912,20 +949,29 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
             campaign_dir = _freeze_campaign_fixture(Path(directory))
             calls: list[str] = []
 
-            def runner(cell: object) -> CellProjection:
-                calls.append(str(getattr(cell, "cell_id")))
+            def projection_for(cell: object) -> CellProjection:
                 return _synthetic_projection(cell, improvement=1.0)
 
-            summaries = [
-                run_campaign(
-                    campaign_dir,
-                    workspace=ROOT,
-                    now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
-                    meminfo_reader=_admission_meminfo,
-                    cell_runner=runner,  # type: ignore[arg-type]
-                )
-                for _ in range(4)
-            ]
+            def runner(cell: object) -> CellProjection:
+                calls.append(str(getattr(cell, "cell_id")))
+                return projection_for(cell)
+
+            stopped_at = datetime.fromisoformat("2026-08-28T00:00:00-07:00")
+            with _synthetic_projection_boundary(
+                projection_for,
+                stopped_at=stopped_at,
+                audit_reserve_s=25_200.0,
+            ):
+                summaries = [
+                    run_campaign(
+                        campaign_dir,
+                        workspace=ROOT,
+                        now=lambda: stopped_at,
+                        meminfo_reader=_admission_meminfo,
+                        cell_runner=runner,  # type: ignore[arg-type]
+                    )
+                    for _ in range(4)
+                ]
             summary = summaries[-1]
 
         self.assertEqual(summary["status"], "complete")
@@ -941,26 +987,35 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
             campaign_dir = _freeze_campaign_fixture(Path(directory))
 
-            def runner(cell: object) -> CellProjection:
+            def projection_for(cell: object) -> CellProjection:
                 projection = _synthetic_projection(cell, improvement=1.05)
-                if getattr(cell, "stage") == "screen" and getattr(cell, "arm") == "candidate":
+                if (
+                    getattr(cell, "stage") == "screen"
+                    and getattr(cell, "arm") == "candidate"
+                ):
                     return replace(projection, measurement_elapsed_s=1800.001)
                 return projection
 
-            calibrated = run_campaign(
-                campaign_dir,
-                workspace=ROOT,
-                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
-                meminfo_reader=_admission_meminfo,
-                cell_runner=runner,  # type: ignore[arg-type]
-            )
-            summary = run_campaign(
-                campaign_dir,
-                workspace=ROOT,
-                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
-                meminfo_reader=_admission_meminfo,
-                cell_runner=runner,  # type: ignore[arg-type]
-            )
+            stopped_at = datetime.fromisoformat("2026-08-28T00:00:00-07:00")
+            with _synthetic_projection_boundary(
+                projection_for,
+                stopped_at=stopped_at,
+                audit_reserve_s=800.0,
+            ):
+                calibrated = run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=lambda: stopped_at,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=projection_for,  # type: ignore[arg-type]
+                )
+                summary = run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=lambda: stopped_at,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=projection_for,  # type: ignore[arg-type]
+                )
 
         self.assertEqual(calibrated["status"], "active")
         self.assertEqual(summary["status"], "terminated")
@@ -1204,6 +1259,36 @@ class AutoresearchCellProjectionTests(unittest.TestCase):
                     with self.assertRaises(CellProjectionError) as raised:
                         project_completed_cell(run_dir)
                     self.assertEqual(raised.exception.failure_kind, failure_kind)
+
+    def test_projection_enforces_durable_finalization_timestamp(self) -> None:
+        fixtures = (
+            ("2026-08-28T00:00:10+00:00", True),
+            ("2026-08-28T00:00:10.000001+00:00", False),
+            ("2026-08-27T23:59:59.999999+00:00", False),
+        )
+        for completed_at, passes in fixtures:
+            with self.subTest(
+                completed_at=completed_at
+            ), tempfile.TemporaryDirectory() as directory:
+                run_dir = self._write_cell(Path(directory))
+                events_path = run_dir / "events.jsonl"
+                events = [
+                    json.loads(line) for line in events_path.read_text().splitlines()
+                ]
+                run_complete = next(
+                    event for event in events if event["event"] == "run_complete"
+                )
+                run_complete["timestamp"] = completed_at
+                events_path.write_text(
+                    "".join(json.dumps(event, sort_keys=True) + "\n" for event in events)
+                )
+
+                if passes:
+                    project_completed_cell(run_dir)
+                else:
+                    with self.assertRaises(CellProjectionError) as raised:
+                        project_completed_cell(run_dir)
+                    self.assertEqual(raised.exception.failure_kind, "cleanup_breach")
 
     def test_projection_rejects_duplicate_and_wrong_bound_markers(self) -> None:
         for mutation in ("duplicate", "wrong_nonce"):
