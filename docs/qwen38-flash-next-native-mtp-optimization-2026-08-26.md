@@ -541,11 +541,14 @@ SGLang profiles:
 5. **Only if justified, quantize MTP experts.** Preserve the non-expert MTP path
    in BF16 and require acceptance/quality gains to exceed conversion risk.
 
-## Optimization matrix after admission
+## Historical optimization matrix — superseded
 
-Change one axis at a time and restart the server between context tiers.
-The seed is the successful TP1, exact-FP8-PLE, BF16-MTP, depth-3, 0.85/C4
-profile above; it is a measured baseline, not a proven optimum.
+This matrix records the pre-supersession plan; do not execute it or use the
+historical TP1, exact-FP8-PLE, BF16-MTP, depth-3, 0.85/C4 seed. If any axis is
+reconsidered, first build and admit an SM121 Triton runtime, establish a fresh
+baseline, and freeze a new profile, estimator, and promotion protocol. The
+[current product backlog](qwen38-flash-next-single-user-next-experiments-2026-08-28.md)
+owns that work.
 
 | Axis | Screening values | Rule |
 | --- | --- | --- |
@@ -616,14 +619,17 @@ repository does not manufacture retroactive counters for measured cases.
 Periodic `/metrics` or server-log acceptance gauges remain activity
 cross-checks only; they are not cumulative proposed/accepted-token evidence.
 
-The remaining protocol work is to add clean replicated depth-two/depth-three
+The pre-supersession remaining work listed replicated depth-two/depth-three
 confirmation, isolated 16K/32K/64K/128K lifetimes, streaming/non-streaming
-parity at longer context, and a separate prefix-cache cold/warm protocol.
-Persist only sanitized scalar evidence—never prompts, completions, reasoning,
-tool payloads, request identifiers, local paths, commands or raw logs.
+parity, and prefix-cache cold/warm testing. It is retired for these profiles;
+revive an item only in a newly frozen protocol on a built and admitted SM121
+Triton runtime. Persist only sanitized scalar evidence—never prompts,
+completions, reasoning, tool payloads, request identifiers, local paths,
+commands or raw logs.
 
 The manifest retains the explicitly labeled tiny/dummy diagnostics, the
 measured full-checkpoint profiles, the MTP controls, and the bounded lazy C8
-arm. Keep every route pinned to the exact FP8 PLE payload/marker and overlay
-digests. None may be relabeled as tagged upstream GB10 support; the 245K
-profile remains incompatible.
+arm for provenance. Their records remain pinned to the exact FP8 PLE
+payload/marker and overlay digests, but they are not runnable guidance. None
+may be relabeled as tagged upstream GB10 support; the 245K profile remains
+incompatible.
