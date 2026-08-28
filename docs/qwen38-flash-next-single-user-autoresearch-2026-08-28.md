@@ -25,10 +25,11 @@ the earlier interaction study, not to this campaign.
 Do not run any inference command in this document until an operator resets the
 Spark and a fresh preflight establishes unambiguous ownership, no unrelated
 GPU or container workload, at least 14 GiB `MemAvailable`, and a new recorded
-swap baseline. A reset does not make either rejected interaction cell valid and
-does not authorize resuming it. If the reset and preflight leave less than
-4,620 seconds before the frozen cutoff, record the campaign as stopped without
-starting a pair; do not move the cutoff or silently shorten a cell.
+swap baseline no greater than 64 MiB. A reset does not make either rejected
+interaction cell valid and does not authorize resuming it. If the reset and
+preflight leave less than 4,620 seconds before the frozen cutoff, record the
+campaign as stopped without starting a pair; do not move the cutoff or silently
+shorten a cell.
 
 ## Autoresearch adaptation
 
@@ -117,51 +118,46 @@ answers are validated; the 60K case is a synthetic exact-key capacity probe,
 not natural-document comprehension. Warm-up work from the final decode case is
 not scored.
 
-## Execution commands and time budgets
+## Controller commands and time budgets
 
-The commands below document the frozen queue; the current safety stop makes
-them non-executable until the reset and preflight above. First verify the
-pinned overlay and PLE payload without downloading anything:
+The current safety stop makes the execution command non-executable until the
+reset and preflight above. Verification and planning do not launch inference.
+First verify the pinned overlay and PLE payload without downloading anything,
+then inspect the exact scalar proposal:
 
 ```bash
 python3 prepare_sglang_overlays.py --prepare-ple-ablation
 python3 prepare_sglang_overlays.py --verify-ple-cache
 python3 sparkbench.py inventory --sizes
 python3 sparkbench.py list --verbose
+python3 sparkbench.py autoresearch-plan \
+  --campaign manifests/campaigns/qwen38_flash_next_single_user_autoresearch.toml \
+  --dry-run
 ```
 
-Each fresh cell has a 30-minute inclusive envelope. `timeout` sends `INT` at
-that boundary so SparkBench enters its owned-cleanup path, then allows at most
-the separate 120-second cleanup grace before a last-resort kill:
+Freeze all fourteen pristine cell plans once. The command prints the immutable
+campaign directory; substitute that exact printed path in the following
+commands:
 
 ```bash
-/usr/bin/timeout --signal=INT --kill-after=120s 30m \
-  python3 sparkbench.py benchmark \
-  qwen38-flash-next-nvfp4-mtp2-agent64k-low-ple-mapped-sglang \
-  --suite manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml
+python3 sparkbench.py autoresearch-plan \
+  --campaign manifests/campaigns/qwen38_flash_next_single_user_autoresearch.toml \
+  --results results/autoresearch
 
-/usr/bin/timeout --signal=INT --kill-after=120s 30m \
-  python3 sparkbench.py benchmark \
-  qwen38-flash-next-nvfp4-mtp2-agent64k-none-ple-mapped-sglang \
-  --suite manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml
-
-/usr/bin/timeout --signal=INT --kill-after=120s 30m \
-  python3 sparkbench.py benchmark \
-  qwen38-flash-next-nvfp4-mtp2-agent64k-low-chunk2k-ple-mapped-sglang \
-  --suite manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml
-
-/usr/bin/timeout --signal=INT --kill-after=120s 30m \
-  python3 sparkbench.py benchmark \
-  qwen38-flash-next-nvfp4-mtp3-agent64k-low-ple-mapped-sglang \
-  --suite manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml
+python3 sparkbench.py autoresearch-run results/autoresearch/FROZEN_CAMPAIGN_DIR
+python3 sparkbench.py autoresearch-summarize results/autoresearch/FROZEN_CAMPAIGN_DIR
 ```
 
-These are individual cell invocations, not a four-cell unmatched sequence.
-Freeze both plans before a pair, then invoke the appropriate two commands in
-the counterbalanced order. Their causal envelopes sum to the frozen 60-minute
-pair budget. The 120-second cleanup allowance is outside the score, and the
-900-second audit reserve is outside the pair. A timeout, interruption, or
-inter-cell gap over 120 seconds invalidates the pair; never resume it.
+One `autoresearch-run` invocation crosses at most one complete pair boundary:
+first calibration, then one screen or confirmation pair. This deliberate stop
+lets the operator export, verify, commit, and push the scalar checkpoint before
+explicitly invoking the same command again. The controller counterbalances
+cell order, starts each frozen cell in a new process group, sends `SIGINT` at
+the 1,800-second causal boundary, allows 120 seconds for owned cleanup, and
+uses `SIGKILL` only as a last resort. The two causal envelopes sum to the frozen
+3,600-second pair budget; the 900-second audit reserve remains outside it. A
+timeout, interruption, or inter-cell gap over 120 seconds invalidates the pair;
+never resume that cell.
 
 ## Evaluator hierarchy
 
@@ -235,16 +231,25 @@ later cells would inherit contaminated state. Never relax a gate, retry a
 safety rejection, resume a measured cell, use implicit downloads, or stop an
 unowned process.
 
-The controller replays these states:
+Each admitted campaign profile also enables a separate fail-closed 250 ms host
+watchdog. Its synchronous starting sample requires at least 14 GiB
+`MemAvailable` and no more than 64 MiB used swap; later samples enforce the same
+memory floor and at most 512 MiB additional swap. Missing, malformed, or
+internally inconsistent `/proc/meminfo`, a changed `SwapTotal`, or a dead
+monitor thread terminates the run. A breach interrupts only the exact owned
+SGLang container, remains authoritative over a concurrent request error, and
+forces removal before optional log collection. Safety-enabled profiles reject
+`--keep-server`.
 
-`prepared -> proposed -> pair_frozen -> admitted -> cell_started ->
-cell_terminal -> second_cell_started -> pair_complete -> audited ->
-provisional|discarded`
-
-A provisional candidate continues through `confirmation_frozen` and the same
-cell states to `promoted|discarded`. Separate terminal classifications are
-`candidate_crash`, `safety_rejected`, `pair_invalid`, `blocked_environment`,
-`blocked_cleanup`, and `stopped`.
+The controller replays a smaller append-only state machine: campaign start,
+candidate start, pair start with frozen order, two ordered cell completions,
+pair score, and candidate decision. A passing screen returns the candidate to
+the pair-start state for its reverse-order confirmation. Rejection returns to
+the fixed queue; promotion or queue exhaustion completes the campaign. The
+control-to-control calibration is integrity-bound in a separate admission
+record and never consumes a search pair index. Pressure, OOM, ownership,
+cleanup, audit, validation, or measurement failures terminate the campaign.
+`blocked_environment` is pre-journal admission state, not a measured result.
 
 If interrupted before a cell starts, replay may continue. If interrupted while
 a cell owns a server, recover only that exact lifecycle and invalidate the
@@ -273,6 +278,12 @@ Never stage `results/`, raw journals, server logs, telemetry streams, prompts,
 completions, reasoning, tool payloads, request identifiers, local paths, or
 commands. Frequent pushes do not relax the scalar-only publication contract,
 and Git work never enters a measured 30-minute cell or 60-minute pair.
+
+The controller enforces that boundary by returning after at most one pair. A
+status of `active` means the just-finished pair is locally replayable and the
+same frozen campaign directory may be passed to `autoresearch-run` after the
+checkpoint is pushed. `blocked_environment` starts no cell and writes no
+campaign transition; `terminated` and `complete` must not be resumed.
 
 ## Evidence and interpretation
 

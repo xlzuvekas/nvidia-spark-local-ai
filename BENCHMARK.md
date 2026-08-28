@@ -484,37 +484,31 @@ authorize composing candidate axes or editing a live profile.
 One fresh server lifetime has an inclusive 30-minute envelope. A frozen
 two-cell pair has a 60-minute envelope, followed by separately attributed
 cleanup and audit reserves. After the current host safety stop is cleared by
-an operator reset and clean preflight, the exact per-cell commands are:
+an operator reset and clean preflight, validate and freeze the exact campaign:
 
 ```bash
-/usr/bin/timeout --signal=INT --kill-after=120s 30m \
-  python3 sparkbench.py benchmark \
-  qwen38-flash-next-nvfp4-mtp2-agent64k-low-ple-mapped-sglang \
-  --suite manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml
+python3 sparkbench.py autoresearch-plan \
+  --campaign manifests/campaigns/qwen38_flash_next_single_user_autoresearch.toml \
+  --dry-run
 
-/usr/bin/timeout --signal=INT --kill-after=120s 30m \
-  python3 sparkbench.py benchmark \
-  qwen38-flash-next-nvfp4-mtp2-agent64k-none-ple-mapped-sglang \
-  --suite manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml
+python3 sparkbench.py autoresearch-plan \
+  --campaign manifests/campaigns/qwen38_flash_next_single_user_autoresearch.toml \
+  --results results/autoresearch
 
-/usr/bin/timeout --signal=INT --kill-after=120s 30m \
-  python3 sparkbench.py benchmark \
-  qwen38-flash-next-nvfp4-mtp2-agent64k-low-chunk2k-ple-mapped-sglang \
-  --suite manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml
-
-/usr/bin/timeout --signal=INT --kill-after=120s 30m \
-  python3 sparkbench.py benchmark \
-  qwen38-flash-next-nvfp4-mtp3-agent64k-low-ple-mapped-sglang \
-  --suite manifests/suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml
+python3 sparkbench.py autoresearch-run results/autoresearch/FROZEN_CAMPAIGN_DIR
+python3 sparkbench.py autoresearch-summarize results/autoresearch/FROZEN_CAMPAIGN_DIR
 ```
 
-These are cell commands, not permission to run four unmatched lifetimes.
-Freeze and counterbalance each control/candidate pair before starting either
-cell. Do not resume a timed-out cell or cross the 120-second inter-cell gap.
-Checkpoint the private append-only state after each cell, but do not mutate Git
-between paired cells. After every audited pair, and after any terminal safety
+Substitute the exact directory printed by the freeze command. Each run
+invocation executes at most one calibration, screen, or confirmation pair and
+then returns, enforcing a Git checkpoint boundary before another pair. Do not
+resume a timed-out cell or cross the 120-second inter-cell gap. The four
+profiles also freeze a fail-closed 250 ms host watchdog: at least 14 GiB
+available memory, at most 64 MiB starting swap, and at most 512 MiB additional
+swap. It interrupts only the exact owned SGLang container; safety profiles
+reject `--keep-server`. After every audited pair, and after any terminal safety
 stop, export only allowlisted scalar evidence, verify the staged projection,
-commit, and push before starting another pair. Raw prompts, completions,
+commit, and push before explicitly resuming. Raw prompts, completions,
 reasoning, tool payloads, logs, identifiers, and commands remain ignored.
 
 No campaign-admitted Pi harness is available. The nine cases are deterministic
