@@ -1,5 +1,10 @@
 # Qwen3.8-Flash-Next on GB10: day-one literature review — 2026-08-27
 
+> Update: the [day-two delta](qwen38-flash-next-gb10-day-two-delta-2026-08-28.md)
+> records SGLang's subsequent SM121 safety restriction, vLLM's open direct-mmap
+> implementation, and newer one-Spark community evidence. This report remains
+> frozen at its original cutoff.
+
 ## Conclusion
 
 The first day of public GB10 work converged on the same fit mechanism measured
