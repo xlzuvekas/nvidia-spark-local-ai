@@ -587,9 +587,12 @@ serving-flag backlog:
    `bf2b7c75870d3703730b6bd8f3bb93dc622c278d` with explicit
    `trtllm_mha` decode; no other overlay targets that QSA source under a
    different digest. Enforce the digest retirement before side effects in new
-   generic plan and matrix selection, generic frozen-plan execution, custom
-   loop-campaign planning and execution, and direct SGLang runtime startup; an
-   embedded historical `support_status` must not bypass the post-cutoff gate.
+   generic plan and matrix selection, generic frozen-plan execution,
+   autoresearch freeze/run/cell entry points, custom loop-campaign planning and
+   execution, and direct SGLang runtime startup; an embedded historical
+   `support_status` must not bypass the post-cutoff gate. Controller-level
+   checks must precede directory, lock, journal, log, reconciliation, and
+   summary writes so an accidental invocation cannot mutate historical state.
    Keep historical loaders, summarizers, evidence projection, and cleanup
    readable and non-executing.
 3. Freeze the exact stacked PR #54129 tree rather than combining it with the
