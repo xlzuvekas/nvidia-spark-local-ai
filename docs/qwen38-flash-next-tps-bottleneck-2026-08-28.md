@@ -174,7 +174,7 @@ run as a promotion pair.
 
 Until that attribution exists, use two parallel queues rather than reading the
 following prerequisites as one total ranking. Items 1--3 and 6--9 are the
-retained-SGLang product track; items 4--5 are the vLLM systems track:
+newly admitted SGLang product track; items 4--5 are the vLLM systems track:
 
 1. keep a healthy server resident when interactive latency matters;
 2. retain the PLE-capacity, lazy-state, and MTP2 geometry as a historical
@@ -188,7 +188,7 @@ retained-SGLang product track; items 4--5 are the vLLM systems track:
 5. after that runtime baseline, compare the mixed-FP8 dense-projection
    checkpoint as a quality-first artifact arm with DeepGEMM disabled and the
    resolved CUTLASS path attested;
-6. measure the retained long-prefix Radix/lazy-state bundle against its
+6. measure the reproduced long-prefix Radix/lazy-state bundle against its
    coupled ChunkCache/one-live-state control for multi-turn agents;
 7. admit a separate C2-capable geometry for independent single-user fan-out;
 8. evaluate MTP off only as a cold short-task specialization, not as the
