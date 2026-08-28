@@ -10,7 +10,7 @@ public artifact/runtime identities.  It contains no raw request or response text
 media, token sequences, credentials, API keys, commands, environment variables, or
 absolute paths.
 
-`index.json` accounts for every discovered run, matrix, custom campaign, and
-standalone battery.  Aborted and nonterminal attempts remain explicitly classified;
-they are not promoted to completed measurements.  `checksums.json` covers only the
-sanitized files in this directory.
+`index.json` accounts for every discovered run, declared nested autoresearch cell,
+matrix, custom campaign, and standalone battery.  Aborted and nonterminal attempts
+remain explicitly classified; they are not promoted to completed measurements.
+`checksums.json` covers only the sanitized files in this directory.
