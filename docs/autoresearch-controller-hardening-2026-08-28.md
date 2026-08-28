@@ -201,7 +201,10 @@ staged verification remain mandatory.
 1. In `bench/autoresearch_campaign.py`, introduce the typed live-admission
    result, strict admission journal, locked summary split, schema-2 derivation,
    and explicit cutoff mapping. Keep `campaign_admission` as a compatibility
-   wrapper if external tests use its blocker tuple.
+   wrapper if external tests use its blocker tuple. Route the later calibration
+   and search-pair time checks through the same typed boundary in this slice;
+   never leave an admitted record able to become a generic measurement-time
+   failure.
 2. In `bench/autoresearch.py`, add the categorical cutoff failure kind and its
    replay validation.
 3. In `bench/evidence.py`, return validated campaign descriptors alongside
@@ -213,8 +216,10 @@ staged verification remain mandatory.
    the implementation, fixtures, deterministic export, and staged verifier all
    pass.
 
-Commit and push each passing logical slice separately: admission/summary,
-cutoff semantics, campaign evidence, then refreshed documentation/evidence.
+Commit and push each passing logical slice separately: admission/summary plus
+cutoff semantics as one executable slice, campaign evidence, then refreshed
+documentation/evidence. If review needs separate preparatory commits, keep
+`autoresearch-run` fail-closed until both halves are present and tested.
 
 ## Regression matrix
 
