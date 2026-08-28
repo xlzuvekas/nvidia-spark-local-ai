@@ -2,10 +2,11 @@
 
 ## Scope
 
-This is the ranked backlog after the frozen 64K autoresearch campaign. It is
-not part of that immutable campaign and does not authorize changing its plans,
-cutoff, suite, or profile queue. Freeze a new protocol only after the current
-campaign is terminal and its scalar evidence is published.
+This is the ranked backlog for after the frozen 64K autoresearch campaign. The
+campaign remains pre-measurement and safety-stopped; this file is not part of
+that immutable campaign and does not authorize changing its plans, cutoff,
+suite, or profile queue. Freeze a new protocol only after the campaign is
+terminal and its scalar evidence is published.
 
 The product target remains one person using a coding agent or cowork-style
 assistant. Optimize correct end-to-end task wall time, later-turn latency, and
@@ -24,10 +25,14 @@ default until it passes its own admission and matched task gates.
 That baseline is a historical measured prior and the immutable campaign's
 frozen identity, not a runtime for new work: it uses the superseded SM121
 TRT-LLM overlay. Before any backlog experiment, build and admit a newly pinned
-safe SM121 Triton runtime, reproduce the baseline geometry and correctness, and
-establish fresh C1 rates. The ranking below orders product questions, not
-permission to reuse the historical image. Never pool performance across the
-d91-image composition and a `3681c4e`-derived or later safe runtime.
+safe SM121 Triton runtime, admit a safe PLE-capacity mechanism, reproduce the
+baseline geometry and correctness, and establish fresh C1 rates. The current
+`3681c4e`-derived safe composition uses the `io_uring` PLE reader; it does not
+by itself preserve the historical persistent-mmap overlay. Treat a future mmap
+port as a separate integration and admission gate. The ranking below orders
+product questions, not permission to reuse the historical image. Never pool
+performance across the d91-image composition and a `3681c4e`-derived or later
+safe runtime.
 
 ## Evidence-backed prior
 
@@ -99,16 +104,25 @@ repeated long-prefix work across tool turns.
 - Primary outcomes: strict task correctness, later-turn TTFT, T1+T2 resident
   wall, and full T0--T2 task wall. Decode TPS is secondary.
 - Identity gate: render with the same pinned tokenizer, template, tools,
-  serialization, reasoning policy, sampling and output cap. Retain only scalar
-  token counts, exact common-prefix counts, and domain-separated token-ID
-  digests from volatile `return_prompt_token_ids=true` responses; discard raw
-  token IDs and reject mismatched histories.
-- Hit gate: use non-streaming `return_cached_tokens_details=true` responses and
-  before/after deltas for
+  serialization, reasoning policy, sampling and output cap. Compute
+  domain-separated token-ID digests from volatile
+  `return_prompt_token_ids=true` responses, compare them privately, then
+  discard IDs and digests. Publish only scalar token/common-prefix counts and
+  `prompt_identity_verified`; reject mismatched histories.
+- Hit gate: make non-streaming `return_cached_tokens_details=true` responses
+  primary. Require T0 device/host/storage cached counts to be zero in both
+  bundles. First admit a zero-hit canary: on the reviewed implementation an
+  omitted or null detail object means zero only when native counters also
+  prove no hit. Normalize that admitted response to zero; otherwise reject
+  missing or malformed request details. Before freezing, derive a numeric
+  expected interval for every A T1/T2 device hit from the rendered common
+  prefix, `input_len-1` cap, page alignment, and admitted Mamba checkpoint
+  grid; require B to remain zero.
+  Reconcile request values after quiescent metric settle with deltas for
   `sglang:prefill_effective_tokens_total{mode="device_hit"}` and
-  `sglang:cached_tokens_total{cache_source="device"}`. Require B to remain zero
-  and A's T1/T2 to be positive near the page- and Mamba-checkpoint-aligned
-  common prefix. `sglang:cache_hit_rate` alone is insufficient.
+  `sglang:cached_tokens_total{cache_source="device"}`; do not treat an
+  instantaneous scrape as request attribution. `sglang:cache_hit_rate` alone
+  is insufficient.
 - Residency gate: record KV/Mamba available, used, and evictable token gauges
   around every turn. Any other request, eviction, retraction, pressure breach,
   or missing counter invalidates the lifetime.
@@ -121,9 +135,10 @@ disabling Radix also suppresses `extra_buffer_lazy`; the cache
 selects `ChunkCache`. Bundle A has a four-slot lazy peak at C1 while B needs one
 live recurrent-state slot, but the explicit four-slot pool likely remains
 allocated in both, so do not claim reclaimed model memory. The public d91 tree
-predates public Qwen4/QSA support; attest the exact retained overlay before
-claiming that a matched hybrid prefix restores full/QSA KV and that matched
-Mamba-slot copy-on-write restores PLE side state.
+predates public Qwen4/QSA support; these mechanics are a historical source
+prior only. Re-audit them on the newly admitted safe source and attest its exact
+runtime before claiming that a matched hybrid prefix restores full/QSA KV or
+that matched Mamba-slot copy-on-write restores PLE side state.
 The result estimates whether the retained cache/state bundle avoids repeated
 prefill for iterative work. It must not infer a hit from latency or attribute
 the delta to Radix bookkeeping alone.
@@ -145,17 +160,25 @@ parallel work.
 - Capacity gate: precompute the sum of both requests' fully rendered inputs,
   reserved outputs, and draft allowances. It must fit the shared pool with an
   explicit safety margin; full-60K requests are therefore outside this arm.
-- Geometry control: compare the C2-capable profile at C1 against the retained
-  C1 profile before using it. Reject it if the extra graph/cache geometry
-  breaches pressure gates or materially slows one-request work.
+- Geometry control: compare the C2-capable profile at C1 against the newly
+  admitted safe C1 profile before using it. Before launch, freeze an exact
+  fixed-agent workload, an unscored warmup, a lifetime-level resident-wall
+  estimator, at least two fresh lifetimes per profile, and a numeric
+  non-inferiority bound. Require every oracle and pressure gate; keep D256 as a
+  separate secondary rather than averaging it into task wall.
 - Scheduling control: inside the same admitted C2 profile, run two fixed,
   independent, strictly validated native cowork/agent subtasks serially and
   then in parallel. Counterbalance serial/parallel order across fresh lifetimes
-  and keep total prompts, output budgets, tools, and oracle work identical. Add
-  Pi only after its separate client-stack admission.
+  and keep total prompts, output budgets, tools, and oracle work identical.
+  Prepare both task environments before the timed release in both modes;
+  parallel releases both, while serial releases the second only after the first
+  terminal result. Add Pi only after its separate client-stack admission.
 - Primary outcome: time until both correct artifacts are complete. Retain
   per-task E2E, TTFT, output-limit hits, memory, swap, and fairness as
-  guardrails.
+  guardrails. Before launch, freeze at least two fresh lifetime pairs, the
+  lifetime-level time-to-both estimator, a numeric minimum speedup, and numeric
+  per-task E2E/TTFT fairness bounds. Do not pool request ratios or choose a
+  threshold after observing the results.
 
 Promote fan-out only for genuinely decomposable work with disjoint virtual
 workspaces or an exact deterministic merge. Sequential tool chains and one
@@ -226,12 +249,19 @@ cadence test proving the branch is exercised before any GPU ABBA.
   assumed.
 - Design: ABBA with two independent lifetimes per arm. In every lifetime use
   the same unscored warmup, five D256 repetitions, and one fixed agent/tool
-  fixture. Keep cold ready time, per-phase capture time/memory, D256, NEXTN
+  fixture. Flush and attest the request cache before each timed repetition. If
+  that is unavailable, use an admitted private per-request salt in the first
+  cacheable block, share its schedule across arms, prove its pre-tokenized LCP
+  is below the reusable unit, and require request-scoped cached-token count
+  zero. Keep cold ready time, per-phase capture time/memory, D256, NEXTN
   acceptance, agent task wall, MemAvailable, and swap separate.
 - Interpretation: the expected result is a control speed win. A disabled-graph
-  simplification may promote only at `>=0.99x` combined speed if it also
-  removes the declared graph-serving bundle or proves at least 1 GiB more
-  available memory twice.
+  simplification uses correct fixed-agent resident wall as its sole promotion
+  primary. Require the exact oracle in every replicate and a candidate/control
+  lifetime-level wall ratio at most `1.0102` (equivalent to at least `0.99x`
+  speed), plus removal of the graph bundle or at least 1 GiB more available
+  memory twice. Keep D256 as a separate secondary; never combine heterogeneous
+  speed measures.
 
 This is a full speculative-decode graph treatment, not target verify alone.
 Exact source returns no target capture when decode graphs are
@@ -253,6 +283,11 @@ Never pool those lifetimes. Public d91 also predates native Qwen3.8
 Flash-Next/QSA support; the historical serving identity is the digest-pinned
 image plus baked patches and tracked overlays. Treat specialized QSA capture as
 a runtime-attested fact, not an inference from pristine d91 source.
+Per-phase memory/startup fields attest capture construction and footprint, not
+draft replay counts; without a native draft-replay counter, attribute speed
+only to the complete graph bundle. Bracket fixed-width verify/accept counters
+after the unscored warmup and separately around D256 and the agent fixture;
+never publish a whole-lifetime rate that mixes those blocks.
 
 ### 6. Conditional next chunk size
 
@@ -317,8 +352,10 @@ This remains lower priority than compute and cache axes. For OpenAI chat,
 control `stream_interval=1` versus a candidate changing only
 `--stream-interval 2`; reject any raw `/generate` request-level override. The
 field is a real output-side axis on both reviewed pins, but neither server nor
-request parsing validates a positive value, so statically require exactly one
-or two before launch.
+request parsing validates a positive value. Those pins provide historical
+mechanics only: re-audit consumption and parser behavior on the newly admitted
+safe runtime, pin its source identity, and statically require exactly one or
+two before launch.
 
 Do not describe the candidate as a two-token buffer. The exact
 [output streamer](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/managers/scheduler_components/output_streamer.py#L362-L390)
@@ -338,18 +375,25 @@ semantic wire delta because reasoning/tool parsers may hold that batch.
 - Wire attestation: timestamp loopback SSE privately and group parser-created
   frames by cumulative completion-token value. Send identical
   `stream_options={"include_usage":true,"continuous_usage_stats":true}` in both
-  arms and admit its semantics first. Publish only semantic frame and
+  arms and admit its semantics first. Before launch, define a semantic frame as
+  a choice delta with non-empty content, reasoning, or tool-call material;
+  count role-only, finish-only, usage-only, extension, error, and `[DONE]`
+  frames separately, excluding them from semantic-gap statistics. Freeze the
+  zero/one-semantic-frame behavior. Publish only semantic frame and
   distinct-usage counts, first semantic delta, median/p95/maximum wire gap,
   first tool-name time, valid-tool-JSON time, finish time, total wall, final
-  token count, and canonical final text/tool hash. Event arrays stay private.
+  token count, `final_output_exact_match`, and exact-tool/oracle booleans. Event
+  arrays and content-derived hashes stay private.
 - Server controls: bracket requests with TTFT/E2E, generation/request, verify,
   and abort counters plus acceptance and active-width gauges/log snapshots.
   Server inter-token latency is token-normalized at output batches, not a
   wire-gap metric.
 - Gates: exact final text/tool hash, token count, tool name/arguments, finish
-  reason, complete terminal flush, no retraction/error, comparable NEXTN
-  evidence, non-inferior first/tool-ready latency, and a frozen p95/maximum gap
-  budget. Any wall/TPS gain must exceed lifetime noise.
+  reason, complete terminal flush, no retraction/error, and comparable NEXTN
+  evidence in each arm independently. Freeze the lifetime-level estimator and
+  numeric first-semantic, tool-ready, p95/maximum-gap, and minimum wall-gain
+  thresholds before launch; never pool request ratios or define
+  non-inferiority after seeing results.
 
 Reduced IPC, detokenizer/parser work, or SSE frames is not a model-forward gain.
 Promote only as an empirically retained profile-specific setting; do not make
