@@ -72,10 +72,10 @@ Across the replicated mapped panel, depth two beat depth one in every cell by
 2.385–12.572%. The single depth-three lifetime was only 1.122% above the D2
 mean at C8, up to 9.586% above at D256, and violated the first-request memory
 floor. This supports MTP2 as the pressure-safe depth choice within the
-historical measured geometry, while leaving the exact depth-two/depth-three
-task-wall comparison to the frozen campaign. It is not an overall runtime
-safety claim and requires revalidation on a newly built and admitted SM121
-Triton route.
+historical measured geometry. The frozen campaign's admission window expired,
+so it did not measure the exact depth-two/depth-three task-wall comparison. A
+future comparison must be newly frozen and admitted on a newly built SM121
+Triton route; this is not an overall runtime safety claim.
 
 ## Likely resident-C1 mechanism
 

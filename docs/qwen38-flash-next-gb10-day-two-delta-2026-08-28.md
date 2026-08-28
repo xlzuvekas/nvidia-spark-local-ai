@@ -54,9 +54,10 @@ The operational decision is:
   before its cutoff;
 - keep the local clean MTP3/off and replicated mapped-PLE MTP2 results as the
   measured anchors;
-- outside the sole bounded exception for the already-frozen fourteen-cell
-  campaign, keep TRT-LLM excluded on SM121 and treat the new explicit Triton
-  fallback as an unmerged corrective candidate, not release support;
+- the former bounded exception for the frozen fourteen-cell campaign exhausted
+  its admission window without a measurement, so keep TRT-LLM excluded on SM121
+  and treat the new explicit Triton fallback as an unmerged corrective
+  candidate, not release support;
 - treat SGLang's new `io_uring` reader as a component candidate, not permission
   to run its exact stale SM121 QSA stack; and
 - after the frozen campaign closes, reproduce the vLLM mmap branch under the
@@ -144,10 +145,11 @@ This changes the confidence boundary, not the historical local measurements:
 - repeated-word exact-key retention is too narrow to rule out stochastic or
   varied-token corruption at 120K and above.
 
-The frozen campaign's 60K repeated-word exact-key case remains a mandatory
-synthetic capacity gate. It must not be weakened or replaced to accommodate
-the new literature, but it cannot address varied-token corruption. Natural
-varied-token validation belongs in a separate post-campaign protocol.
+The expired campaign planned a 60K repeated-word exact-key synthetic capacity
+gate but never measured it. A future admitted runtime must freeze that gate
+again without weakening or replacing it; the case still cannot address
+varied-token corruption. Natural varied-token validation belongs in a separate
+future protocol.
 
 ## SGLang: an explicit SM121 Triton fallback is now inspectable
 

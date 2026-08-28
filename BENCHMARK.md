@@ -217,7 +217,7 @@ lifecycle records needed to reproduce the historical Harbor bundle are retained
 locally and are inputs, not tracked artifacts. A first export requires both;
 subsequent refreshes may carry the existing canonical Harbor bundle forward only
 after its schema and checksums verify. The current tracked refresh contains
-1,883 files and 293 run bundles. It publishes the four day-zero llama.cpp Flash
+1,965 files and 309 run bundles. It publishes the four day-zero llama.cpp Flash
 Next attempts under
 [`evidence/runs/`](evidence/runs/), including the
 [core bundle](evidence/runs/20260826T165913Z-qwen38-flash-next-ud-iq4-xs-llamacpp-p8-core-b5a0f9ad/manifest.json),
@@ -244,8 +244,9 @@ embedding symbols imported successfully.
 this section bind the historical SM121 TRT-LLM overlay later restricted after
 varied-token corruption. Preserve them as provenance only; do not run the
 commands or use these profiles for new inference. New work requires a newly
-built, pinned, and admitted SM121 Triton runtime. The sole bounded exception is
-the already-frozen fourteen-cell campaign under its unchanged cutoff and
+built, pinned, and admitted SM121 Triton runtime. The former bounded exception,
+the frozen fourteen-cell campaign, exhausted its admission window without a
+measurement and must not be run or summarized again; see its
 [full protocol](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md#current-status-time-inadmissible-no-campaign-measurements).
 
 The completed native profile pins `RadixArk/Qwen3.8-Flash-Next-NVFP4` revision
