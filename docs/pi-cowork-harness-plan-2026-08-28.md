@@ -148,9 +148,10 @@ An **episode** is one task executed by one fresh Pi instance in one fresh task
 container, private home, in-memory history, and workspace. A C1 **block** is
 the fixed ordered six coding episodes or the fixed ordered twelve cowork
 episodes, all served by one newly started model-server lifetime. Clean every
-episode's Pi, task, relay, home, and workspace before starting the next one;
+C1 episode's Pi, task, relay, home, and workspace before starting the next one;
 keep only the admitted server, bridge, and private endpoint infrastructure
-alive until the block ends.
+alive until the block ends. The serial C2 pair uses the pair-level teardown
+defined below so cleanup cannot enter its makespan.
 
 A scored **replicate** is one complete identical block, not one task or model
 request. Every coding or C1 cowork claim requires at least two complete blocks
@@ -207,10 +208,10 @@ the counts, and never infer a cache hit from TTFT.
 
 ## C1 and C2 scheduling admission
 
-The newly safe-rebaselined 64K profile is C1-only. Freeze a separate C2 bundle
+The newly built, admitted, and rebaselined 64K profile is C1-only. Freeze a separate C2 bundle
 with the same 65,536-token context/pool, `--max-running-requests 2`,
 `--max-mamba-cache-size 8`, and `--cuda-graph-bs-decode 1 2`. Before fan-out,
-compare this eight-lazy-slot profile at C1 with the newly admitted safe C1
+compare this eight-lazy-slot profile at C1 with the newly admitted C1
 profile. Use the same exact serial cowork pair in fresh ABBA lifetimes with two
 independent lifetimes per profile. The primary is the ratio of arithmetic-mean
 lifetime resident wall; require `C2-profile/C1-profile <= 1.0102`, every exact
@@ -218,8 +219,9 @@ oracle, sampled `MemAvailable >= 14 GiB`, starting used swap `<= 64 MiB`, and
 swap growth `<= 64 MiB`. Keep D256 separate. Do not define the workload,
 replicate count, estimator, or threshold after seeing results.
 
-For every C2 pair, both fully rendered histories plus reserved outputs and MTP
-allowance must total at most 61,440 tokens, leaving 4,096 tokens unallocated.
+For every C2 pair, the maximum combined fully rendered histories, reserved
+outputs, and MTP allowance over every legal simultaneous path must total at
+most 61,440 tokens, leaving 4,096 tokens unallocated.
 Run two independent Pi instances and process groups with private homes,
 histories, and workspaces behind one common release barrier. In both serial and
 parallel modes, prepare and admit both task containers, Pi processes, homes,
@@ -227,6 +229,15 @@ and workspaces before the timed release. Parallel releases both tasks; serial
 releases the second only after the first terminal result. C2 means two
 independent subtasks for one user; it is not a multi-user result or permission
 to parallelize a sequential tool chain.
+
+For serial C2, the common orchestrator timestamps task one's terminal result and
+releases task two in the same transition. Task one's terminal state must already
+prohibit further model or tool work, but do not run its verifier, remove its
+container, delete its workspace, or perform other heavy cleanup before that
+release. After task two terminates, verify and clean both tasks before ending
+the server lifetime. Parallel C2 uses the same pair-level teardown after both
+terminal results. This keeps cleanup out of both makespans without allowing an
+active first task to contaminate the second.
 
 The smallest admission-only sequence is one C1 `fix-git` trial, one C1
 `cowork-write-conflict-recovery` variant, then one C2 pair containing
@@ -248,9 +259,9 @@ lifetimes, and two observations for every set/mode. For each panel, divide the
 sum of its two parallel makespans by the sum of its two serial makespans;
 require both ratios to be at most `0.90`. For every task variant, require its
 parallel per-task resident wall to be at most `1.25x` its matched serial
-per-task resident wall and its relay-measured parallel first-turn TTFT no more
+per-task resident wall and its common-bridge-measured parallel first-turn TTFT no more
 than `0.50` seconds above its matched serial TTFT. Every oracle and the exact
-memory/swap gates above must pass. Keep relay model E2E separate. Keep the
+memory/swap gates above must pass. Keep common-bridge model E2E separate. Keep the
 six-task coding result C1-only and separate from cowork; never pool their
 scores.
 
@@ -328,8 +339,11 @@ Use scenario-specific virtual tools such as `read_source`, `search_sources`,
 `submit_table`, and `commit_document`. Deterministic lexical retrieval replaces
 embeddings, and exact oracles replace an LLM judge.
 
-Freeze temperature zero, concurrency one, at most eight turns and sixteen tool
-calls, 1,536 output tokens per turn, and a 4 KiB canonical argument limit. For
+Freeze temperature zero, client concurrency one per Pi instance/episode, at
+most eight turns and sixteen tool calls, 1,536 output tokens per turn, and a
+4 KiB canonical argument limit. The C2 campaign runs two such independent
+concurrency-one Pi instances at once; no global client limiter may serialize
+their model requests. For
 the selected profile, precompute every request's maximum tokenizer-rendered
 input plus its reserved output and speculative allowance across every legal
 path. Require that total to remain at or below 61,440 tokens, leaving 4,096
@@ -338,7 +352,7 @@ tokens unallocated in the 65,536-token server pool.
 The twelve episodes should target roughly 6,500–8,000 assistant-emitted tokens,
 including reasoning and serialized tool calls. The historical superseded
 runtime's ~29.4 tok/s C1 result is a planning prior only; refreeze timing and
-the suite ceiling after the safe runtime baseline. A provisional seven-to-ten
+the suite ceiling after the newly built and admitted runtime baseline. A provisional seven-to-ten
 minute resident target and 15-minute (900-second) suite cap must not be carried
 forward as measured expectations without that rebaseline. Cold server startup
 remains separate.
@@ -373,14 +387,15 @@ exports, and staged blobs.
 
 ## Cleanup and failure rules
 
-Every episode ends through one bounded `finally` path:
+Every C1 episode and every terminating C2 pair ends through one bounded task-level
+`finally` path. Apply each step to both tasks in a pair:
 
 1. abort Pi;
 2. TERM/KILL the Pi wrapper's exact owned process group within grace;
 3. restore network deny-all;
 4. run the external verifier;
-5. remove the exact task/relay containers and ephemeral task image;
-6. delete the isolated Pi home/session/temp state, workspace, and shell spill
+5. remove each exact task/relay container and ephemeral task image;
+6. delete each isolated Pi home/session/temp state, workspace, and shell spill
    files;
 7. prove no episode-owned descendant, container, home, workspace, or task state
    remains.
