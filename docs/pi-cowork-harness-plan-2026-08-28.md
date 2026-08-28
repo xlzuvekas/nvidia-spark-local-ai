@@ -22,8 +22,9 @@ C1/C2 cowork fan-out campaign and profile. They may share admitted code and
 pins, but require distinct campaign IDs and evidence bundles. Never pool coding
 capability, cowork capability, and scheduling results.
 
-At the audited repository boundary
-`2274111b0e5e921911124d71e49bbd706e93cdd4`, Pi is design-only. There is no
+At the frozen 84-file executable boundary
+`33170881721d0dce0f4466495110b336a7451fcd1635c5667f7fc5f722f7599f`, Pi is
+design-only. There is no
 checked-in Pi package lock or normalized prefix, core wrapper, Pi/cowork
 manifest, runner, C2 scheduler, validator, or evidence exporter. The current
 generic agentic and historical Harbor paths deliberately enforce different
@@ -174,8 +175,11 @@ The retained 64K profile is C1-only. Freeze a separate C2 bundle with the same
 65,536-token context/pool, `--max-running-requests 2`,
 `--max-mamba-cache-size 8`, and `--cuda-graph-bs-decode 1 2`. Before fan-out,
 compare this eight-lazy-slot profile at C1 with the retained C1 profile and
-reject it if the extra geometry breaches pressure gates or materially slows
-the control workload.
+reject it if the extra geometry breaches pressure gates or fails a numerical
+slowdown gate frozen before execution. Use the same exact serial cowork pair in
+fresh counterbalanced lifetimes with at least two independent lifetimes per
+profile; do not define the workload, replicate count, or threshold after seeing
+results.
 
 For every C2 pair, both fully rendered histories plus reserved outputs and MTP
 allowance must total at most 61,440 tokens, leaving 4,096 tokens unallocated.
@@ -203,6 +207,12 @@ two-lifetime block before promotion so every set/mode has two independent
 observations. Keep the six-task coding result C1-only and separate from cowork;
 never pool their scores.
 
+Record bounded common-release skew and require at least one pair of model
+request intervals to overlap. If an admitted scheduler metric exists, also
+require the maximum running-request count to reach two. Otherwise label the
+result dual-client offered load, not observed C2 execution. Retain per-task
+wall/fairness, running/queued maxima, memory, swap, and cleanup as guardrails.
+
 ## Pi timing and scalar evidence
 
 Record cold server start-to-ready, task-container/Pi setup, resident task wall,
@@ -222,13 +232,15 @@ result. For serial work, it is release of the first task through the second
 terminal result. Never substitute summed per-task walls for makespan or fold
 setup, verifier, or cleanup into resident task wall.
 
-Publish first-turn and median later-turn TTFT, per-turn request and tool wall,
-total resident task wall or makespan, model-request count, turn count, tool
-counts by category, tool-error count, timeout and stop enums, external verifier
-reward, and cleanup/admission booleans. Pi-reported input, cache-read, output,
-and total tokens may be published only after a canary validates their semantics
-against the admitted native source. Label them `pi_usage`; they are not native
-server decode counters, and client-stack task wall is not server TPS.
+Publish first-turn and median later-turn TTFT, summed and maximum request/tool
+wall, total resident task wall or makespan, model-request count, turn count,
+tool counts by category, tool-error count, bounded overlap/release-skew fields,
+timeout and stop enums, external verifier reward, and cleanup/admission
+booleans. Per-turn timing arrays and traces remain private. Pi-reported input,
+cache-read, output, and total tokens may be published only after a canary
+validates their semantics against the admitted native source. Label them
+`pi_usage`; they are not native server decode counters, and client-stack task
+wall is not server TPS.
 
 Wrapper stdout is one exact scalar JSON object. Keep prompts, completions,
 reasoning, tool arguments/results, commands, diffs, paths, sessions, request
@@ -238,9 +250,11 @@ Reject unknown output keys and secret-scan the exact staged evidence tree.
 ## Deterministic cowork-core-v1
 
 The cowork suite should use an in-memory synthetic virtual workspace, not
-shell or host filesystem access. Reuse the existing bounded tool-loop parser,
-strict call-ID handling, lifecycle, telemetry, journals, protocol digests, and
-exact JSON oracles. Add four three-variant cases:
+shell or host filesystem access. The native admission runner may reuse the
+bounded Python parser. The Pi arm reuses only canonical scenarios, tool
+schemas, limits, exact oracles, protocol-digest construction, and scalar
+validators; `pi-agent-core` remains the sole message/tool-loop owner. Add four
+three-variant cases:
 
 | Case | Synthetic workload | Exact pass condition | Target live context |
 | --- | --- | --- | ---: |
