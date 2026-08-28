@@ -2414,11 +2414,16 @@ def run_frozen_cell(
 
 
 def _recover_interrupted_cells(campaign: FrozenCampaign) -> None:
-    """Recover owned workers/containers before any admission decision."""
+    """Recover every owned worker/container before inspecting raw semantics."""
 
+    worker_recovered: dict[str, bool] = {}
+    journal_sizes: dict[str, int | None] = {}
+    failures: list[tuple[str, BaseException]] = []
+    container_mismatches: list[CellProjectionError] = []
+    exact_container_stopped = False
+
+    # Never let one ambiguous worker prevent cleanup attempts for later cells.
     for cell in campaign.cells:
-        events_path = cell.run_dir / "events.jsonl"
-        cell_started = _safe_cell_journal_size(events_path) > 0
         try:
             cleanup = recover_owned_worker(
                 cell.run_dir,
@@ -2426,31 +2431,71 @@ def _recover_interrupted_cells(campaign: FrozenCampaign) -> None:
                 interrupt_grace_s=campaign.policy.cleanup_timeout_s,
             )
         except WorkerLifecycleError as error:
-            raise CellProjectionError(
-                "interrupted cell worker recovery failed",
-                failure_kind=_worker_failure_kind(error),
-            ) from error
-        recovered_worker = cleanup.outcome != "no_state"
-        if recovered_worker or cell_started:
-            _recover_cell(cell)
-        if recovered_worker and not cell_started:
-            raise CellProjectionError(
-                "interrupted cell exited before a durable measurement journal",
-                failure_kind="measurement",
+            worker_recovered[cell.cell_id] = True
+            failures.append((_worker_failure_kind(error), error))
+        else:
+            worker_recovered[cell.cell_id] = cleanup.outcome != "no_state"
+
+    # Journal topology is evidence for exact container cleanup, not permission
+    # to semantically project a possibly incomplete cell during recovery.
+    for cell in campaign.cells:
+        try:
+            journal_sizes[cell.cell_id] = _safe_cell_journal_size(
+                cell.run_dir / "events.jsonl"
             )
-        if cell_started:
-            try:
-                projection = project_completed_cell(cell.run_dir)
-            except CellProjectionError as error:
-                raise CellProjectionError(
-                    "interrupted cell is incomplete and cannot be resumed",
-                    failure_kind=error.failure_kind,
-                ) from error
-            if projection.profile_id != cell.profile_id:
-                raise CellProjectionError(
-                    "interrupted cell profile binding changed",
-                    failure_kind="audit",
+        except CellProjectionError as error:
+            journal_sizes[cell.cell_id] = None
+            failures.append((error.failure_kind, error))
+
+    for cell in campaign.cells:
+        try:
+            outcome = _recover_cell(cell)
+        except CellProjectionError as error:
+            if error.failure_kind == "ownership_ambiguity":
+                if exact_container_stopped:
+                    failures.append((error.failure_kind, error))
+                else:
+                    container_mismatches.append(error)
+            else:
+                failures.append((error.failure_kind, error))
+        else:
+            if outcome == "stopped_owned_container":
+                exact_container_stopped = True
+                container_mismatches.clear()
+
+    # SGLang has one fixed container name. Probing that sole container against
+    # an earlier frozen identity can mismatch before a later exact identity
+    # stops it. Keep mismatches terminal unless this campaign proves ownership
+    # by stopping the exact named container during the same exhaustive pass.
+    failures.extend(
+        ("ownership_ambiguity", error) for error in container_mismatches
+    )
+
+    for cell in campaign.cells:
+        if worker_recovered[cell.cell_id] and journal_sizes[cell.cell_id] == 0:
+            failures.append(
+                (
+                    "measurement",
+                    CellProjectionError(
+                        "interrupted cell exited before a durable measurement journal"
+                    ),
                 )
+            )
+
+    if failures:
+        priority = {
+            "measurement": 0,
+            "audit": 1,
+            "cleanup_breach": 2,
+            "ownership_ambiguity": 3,
+        }
+        failure_kind, cause = max(
+            failures, key=lambda item: priority.get(item[0], 0)
+        )
+        raise CellProjectionError(
+            f"interrupted cleanup failed for {len(failures)} frozen cell condition(s)",
+            failure_kind=failure_kind,
+        ) from cause
 
 
 def _validate_search_artifact_admission(
@@ -2553,7 +2598,10 @@ def _durable_pair_audit_reserve_s(
 
 
 def _replay_frozen_campaign(
-    campaign: FrozenCampaign, events: list[dict[str, Any]] | tuple[dict[str, Any], ...]
+    campaign: FrozenCampaign,
+    events: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    *,
+    verify_raw: bool = True,
 ) -> ReplayState:
     """Replay plus exact frozen-instance and queue bindings."""
 
@@ -2645,11 +2693,14 @@ def _replay_frozen_campaign(
                     raise CampaignPlanningError(
                         "controller cell does not map to the frozen schedule"
                     )
-                projections[arm] = _project_frozen_cell(cells[arm])
-                if set(projections) == {"champion", "candidate"}:
+                if verify_raw:
+                    projections[arm] = _project_frozen_cell(cells[arm])
+                if verify_raw and set(projections) == {"champion", "candidate"}:
                     _validate_completed_pair_gap(
                         campaign, cells, pair_index=pair_index
                     )
+                continue
+            if not verify_raw:
                 continue
             if set(projections) != {"champion", "candidate"}:
                 raise CampaignPlanningError(
@@ -2672,6 +2723,15 @@ def _replay_frozen_campaign(
                 )
 
     return state
+
+
+def _replay_frozen_controller(
+    campaign: FrozenCampaign,
+    events: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> ReplayState:
+    """Replay exact frozen controller bindings without dereferencing raw cells."""
+
+    return _replay_frozen_campaign(campaign, events, verify_raw=False)
 
 
 def _append_frozen_transition(
@@ -3092,14 +3152,14 @@ def _run_search_pair(
         state = _replay_frozen_campaign(campaign, _controller_events(journal))
     if state.phase != "pair" or state.active_pair_index is None:
         raise CampaignPlanningError("candidate is not in an executable pair phase")
+    raw_prefix = frozenset(_raw_search_prefix(campaign, state))
     projections: dict[str, CellProjection] = {}
     last_completion: datetime | None = None
     for completed_arm in state.completed_arms:
         projections[completed_arm] = _project_frozen_cell(cells[completed_arm])
         last_completion = _server_stopped_at(cells[completed_arm])
     for arm in state.active_order[len(state.completed_arms) :]:
-        events_path = cells[arm].run_dir / "events.jsonl"
-        raw_complete = _safe_cell_journal_size(events_path) > 0
+        raw_complete = arm in raw_prefix
         if last_completion is not None:
             current = _run_started_at(cells[arm]) if raw_complete else now()
             if current.tzinfo is None or current.utcoffset() is None:
@@ -3167,12 +3227,10 @@ def _run_search_pair(
     return observation
 
 
-def _reconcile_raw_search_prefix(
-    campaign: FrozenCampaign,
-    journal: Journal,
-    state: ReplayState | None,
-) -> ReplayState | None:
-    """Durably index an ordered raw-complete prefix without launching work."""
+def _raw_search_prefix(
+    campaign: FrozenCampaign, state: ReplayState | None
+) -> tuple[str, ...]:
+    """Return the active ordered nonempty raw prefix without projecting it."""
 
     if (
         state is None
@@ -3180,7 +3238,7 @@ def _reconcile_raw_search_prefix(
         or state.candidate_id is None
         or state.active_pair_index is None
     ):
-        return state
+        return ()
     stage = (
         "screen" if len(state.candidate_observations) == 0 else "confirmation"
     )
@@ -3201,7 +3259,31 @@ def _reconcile_raw_search_prefix(
                 failure_kind="audit",
             )
         raw_prefix.append(arm)
-    for arm in raw_prefix:
+    return tuple(raw_prefix)
+
+
+def _reconcile_raw_search_prefix(
+    campaign: FrozenCampaign,
+    journal: Journal,
+    state: ReplayState | None,
+    *,
+    raw_prefix: tuple[str, ...] | None = None,
+) -> ReplayState | None:
+    """Durably index an ordered raw-complete prefix without launching work."""
+
+    if (
+        state is None
+        or state.phase != "pair"
+        or state.candidate_id is None
+        or state.active_pair_index is None
+    ):
+        return state
+    stage = (
+        "screen" if len(state.candidate_observations) == 0 else "confirmation"
+    )
+    cells = campaign.cells_for(candidate_id=state.candidate_id, stage=stage)
+    prefix = _raw_search_prefix(campaign, state) if raw_prefix is None else raw_prefix
+    for arm in prefix:
         _project_frozen_cell(cells[arm])
         state = _append_frozen_transition(
             journal,
@@ -3224,25 +3306,33 @@ def _reconcile_raw_search_prefix(
 
 
 def _search_reconciliation_needs_admission(
-    campaign: FrozenCampaign, state: ReplayState | None
+    campaign: FrozenCampaign,
+    state: ReplayState | None,
+    events: tuple[dict[str, Any], ...],
+    *,
+    calibration_ready: bool,
 ) -> bool:
-    """Return whether advancing current search truth can launch inference."""
+    """Derive launch possibility solely from reconciled durable state."""
 
-    if state is None or not _calibration_path(campaign).exists():
+    if state is None or not calibration_ready:
         return True
     if state.phase == "scored":
         return False
-    if state.phase != "pair" or state.candidate_id is None:
-        return True
-    stage = (
-        "screen" if len(state.candidate_observations) == 0 else "confirmation"
-    )
-    cells = campaign.cells_for(candidate_id=state.candidate_id, stage=stage)
-    missing_arms = state.active_order[len(state.completed_arms) :]
-    return any(
-        _safe_cell_journal_size(cells[arm].run_dir / "events.jsonl") == 0
-        for arm in missing_arms
-    )
+    if state.phase == "pair":
+        return state.completed_arms != state.active_order
+    if state.phase == "idle":
+        decisions = _candidate_decisions(events)
+        if any(
+            decision in {"promote", "promote_simplification"}
+            for decision in decisions.values()
+        ):
+            return False
+        if all(
+            decisions.get(proposal.candidate_id) == "reject"
+            for proposal in campaign.proposals
+        ):
+            return False
+    return True
 
 
 def summarize_campaign(campaign_dir: Path) -> dict[str, Any]:
@@ -3321,20 +3411,85 @@ def run_campaign(
     lock_path = campaign.campaign_dir / ".autoresearch.lock"
     with _campaign_lock(lock_path):
         existing_journal = Journal(campaign.campaign_dir / "events.jsonl")
+        recovery_error: CellProjectionError | None = None
+        try:
+            _recover_interrupted_cells(campaign)
+        except CellProjectionError as error:
+            recovery_error = error
+
+        # Controller corruption must not prevent exact-owned cleanup. Structural
+        # replay is sufficient to establish whether a terminal append is legal;
+        # raw-attested replay follows topology inspection below.
         existing_events = _controller_events(existing_journal)
         existing_state = (
-            _replay_frozen_campaign(campaign, existing_events)
+            _replay_frozen_controller(campaign, existing_events)
             if existing_events
             else None
         )
-        calibration_reconciled = False
+        if recovery_error is not None:
+            if existing_state is not None and existing_state.phase == "terminal":
+                raise CampaignPlanningError(
+                    "terminal campaign cleanup could not be reverified"
+                ) from recovery_error
+            try:
+                _append_campaign_started(existing_journal, campaign)
+                _append_terminal(
+                    existing_journal,
+                    campaign,
+                    failure_kind=recovery_error.failure_kind,
+                    cleanup_verified=False,
+                )
+            except CampaignPlanningError as replay_error:
+                raise CampaignPlanningError(
+                    "cleanup failed and controller truth could not be terminalized"
+                ) from replay_error
+            return summarize_campaign(campaign.campaign_dir)
+
+        raw_prefix: tuple[str, ...] = ()
+        topology_error: CellProjectionError | None = None
         try:
-            _recover_interrupted_cells(campaign)
             _validate_search_artifact_admission(
                 campaign, tuple(existing_events)
             )
+            raw_prefix = _raw_search_prefix(campaign, existing_state)
+        except CellProjectionError as error:
+            topology_error = error
+
+        # An already-indexed raw mutation is frozen/controller corruption, not a
+        # new recoverable cell failure. Cleanup is complete, but do not mutate
+        # controller truth when its exact prior state no longer attests.
+        try:
+            existing_state = (
+                _replay_frozen_campaign(campaign, existing_events)
+                if existing_events
+                else None
+            )
+        except CellProjectionError as error:
+            raise CampaignPlanningError(
+                "controller-bound raw artifacts could not be exactly replayed"
+            ) from error
+
+        if topology_error is not None:
+            if existing_state is not None and existing_state.phase == "terminal":
+                raise CampaignPlanningError(
+                    "terminal campaign raw topology could not be reverified"
+                ) from topology_error
+            _append_campaign_started(existing_journal, campaign)
+            _append_terminal(
+                existing_journal,
+                campaign,
+                failure_kind=topology_error.failure_kind,
+                cleanup_verified=True,
+            )
+            return summarize_campaign(campaign.campaign_dir)
+
+        calibration_reconciled = False
+        try:
             existing_state = _reconcile_raw_search_prefix(
-                campaign, existing_journal, existing_state
+                campaign,
+                existing_journal,
+                existing_state,
+                raw_prefix=raw_prefix,
             )
             existing_events = _controller_events(existing_journal)
             calibration_reconciled = _reconcile_raw_calibration(campaign)
@@ -3356,7 +3511,13 @@ def run_campaign(
             return summarize_campaign(campaign.campaign_dir)
         if calibration_reconciled:
             return summarize_campaign(campaign.campaign_dir)
-        if _search_reconciliation_needs_admission(campaign, existing_state):
+        calibration_ready = _calibration_path(campaign).exists()
+        if _search_reconciliation_needs_admission(
+            campaign,
+            existing_state,
+            tuple(existing_events),
+            calibration_ready=calibration_ready,
+        ):
             blockers = list(
                 campaign_admission(
                     campaign, now=now(), meminfo_reader=meminfo_reader

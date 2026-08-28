@@ -635,6 +635,14 @@ class AutoresearchFrozenCellWorkerTests(unittest.TestCase):
 
 
 class AutoresearchCampaignControllerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        container_recovery = patch(
+            "bench.autoresearch_campaign._recover_cell",
+            return_value="already_absent",
+        )
+        container_recovery.start()
+        self.addCleanup(container_recovery.stop)
+
     def test_loader_rejects_rehashed_schedule_and_safety_tampering(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
             schedule_root = Path(directory) / "schedule"
