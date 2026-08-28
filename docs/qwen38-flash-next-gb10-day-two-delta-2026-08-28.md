@@ -147,10 +147,12 @@ author reports the following on one Spark at 32K with MTP2:
 
 This is stronger implementation evidence than a throughput-only forum post,
 but it still lacks a merged release, a locally frozen container lineage, a
-matched SGLang protocol, and tracked request-level SparkBench evidence. The
-reported Spark smoke used an FP8 checkpoint, and GitHub reported merge
-conflicts after the reviewed head; extending it to Radix NVFP4 would be a
-separate unsupported experiment.
+matched SGLang protocol, and tracked request-level SparkBench evidence. The PR
+calls the input an "FP8 checkpoint" without publishing its model ID or
+revision. Its roughly 78 GiB backbone plus 47.68 GiB FP8 PLE footprint strongly
+suggests the Radix NVFP4-backbone/FP8-PLE artifact, but that is an inference,
+not author-confirmed provenance. The reviewed head resolved the earlier merge
+conflict; the PR remains open without upstream code-test CI.
 
 Model-support [PR #53896](https://github.com/vllm-project/vllm/pull/53896)
 also remains open. Its reviewed head was
@@ -158,7 +160,9 @@ also remains open. Its reviewed head was
 A new correctness commit,
 [`0e0802f4637c73589c9943d420758177df454d9a`](https://github.com/peakcrosser7/vllm/commit/0e0802f4637c73589c9943d420758177df454d9a),
 moves request-layout-dependent PLE n-gram ID computation into the splitting
-custom operation used with piecewise CUDA graphs.
+custom operation used with piecewise CUDA graphs. That commit belongs to the
+newer #53896 head and is not contained in reviewed PR #54129 head `8e4e036`;
+combining them would be a new integration arm rather than exact reproduction.
 
 **Supplemental:** the pull request also contains useful one-GB10 community
 data that was not included in the day-one report. One
@@ -195,11 +199,13 @@ not as a local hardware counter or proof of a single root cause.
 [vLLM PR #53899](https://github.com/vllm-project/vllm/pull/53899) remains open.
 There was no post-cutoff code change; the reviewed head remained
 [`95dc96d1d012a25ff5c3823a1e77197c8dae4654`](https://github.com/peakcrosser7/vllm/commit/95dc96d1d012a25ff5c3823a1e77197c8dae4654),
-dated `2026-08-27T06:00:29Z`. Its CPU-offload route uses `pidfd_getfd`;
-contributor testing found that the default Docker seccomp profile returns
-`EPERM` unless the container receives
-`CAP_SYS_PTRACE` or `--cap-add SYS_PTRACE`. The branch does not yet provide a
-clear preflight or actionable error for that condition.
+dated `2026-08-27T06:00:29Z`. Its CPU-offload route uses `pidfd_getfd`.
+Contributor testing first identified the default Docker seccomp profile; a
+[later correction](https://github.com/vllm-project/vllm/issues/53960#issuecomment-5443452996)
+identified Linux Yama `ptrace_scope=1` as another sibling-process block,
+including on bare metal. `CAP_SYS_PTRACE` bypasses that Yama gate. The branch
+does not yet provide a clear preflight or actionable error for these
+conditions.
 
 That capability expansion conflicts with this repository's preference for a
 strictly scoped inference container. It makes the direct mmap branch the
@@ -319,10 +325,11 @@ campaign:
 1. Resume the existing SGLang campaign only if its original preflight passes
    before cutoff. Otherwise preserve its typed blocked/cutoff state; do not
    mutate or re-summarize it into a synthetic completion.
-2. Freeze a separate vLLM reproduction from exact commits for PR #53896 and
-   PR #54129, plus an immutable Linux/aarch64 image. First reproduce the exact
-   FP8 checkpoint named by the PR at a pinned revision; treat Radix NVFP4 as a
-   separate extension only after the base path passes.
+2. Freeze the exact stacked PR #54129 tree rather than combining it with the
+   newer #53896 head, then build an immutable Linux/aarch64 image. Use the
+   pinned local Radix NVFP4-backbone/FP8-PLE checkpoint as the best-supported
+   reconstruction target while clearly labeling the checkpoint identity as
+   inferred until the author confirms it.
 3. Use direct read-only mmap without `SYS_PTRACE`, implicit downloads, mutable
    branches, wildcard cache selection, or public API exposure.
 4. Reuse the clean local D256 prompts and client geometry while freezing a new
@@ -348,3 +355,7 @@ useful output token through a well-accepted speculative head. The best newly
 actionable systems hypothesis is that direct PLE mmap can preserve fit without
 broad container capability, while the strongest new caution is that short or
 repeated-word success cannot certify the GB10 long-context kernel path.
+
+The exact source/checkpoint inference, local readiness audit, build boundary
+and staged comparison are frozen in the
+[direct-mmap reproduction plan](qwen38-flash-next-vllm-mmap-reproduction-2026-08-28.md).
