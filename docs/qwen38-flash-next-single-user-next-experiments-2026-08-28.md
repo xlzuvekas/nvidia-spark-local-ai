@@ -3,10 +3,11 @@
 ## Scope
 
 This is the ranked backlog for after the frozen 64K autoresearch campaign. The
-campaign remains pre-measurement and safety-stopped; this file is not part of
-that immutable campaign and does not authorize changing its plans, cutoff,
-suite, or profile queue. Freeze a new protocol only after the campaign is
-terminal and its scalar evidence is published.
+campaign is unmeasured and admission-expired, although its legacy summary
+remains nonterminal; this file is not part of that immutable campaign and does
+not authorize changing its plans, cutoff, suite, or profile queue. Wait for the
+fixed 07:00 cutoff, retire the superseded runtime, and land the required
+controller hardening before freezing a new protocol.
 
 The product target remains one person using a coding agent or cowork-style
 assistant. Optimize correct end-to-end task wall time, later-turn latency, and
@@ -77,8 +78,8 @@ planned three one-axis questions in order:
    (`steps=3`, `draft_tokens=4`).
 
 None of those cells started, so all three questions remain unanswered. Do not
-duplicate or alter the cells before terminal disposition. Afterward, re-freeze
-any still-valued axis against the newly built and admitted runtime; there is no
+duplicate or alter the cells before the fixed cutoff. Afterward, re-freeze any
+still-valued axis against the newly built and admitted runtime; there is no
 winner to combine or promote from this campaign.
 
 ## Ranked next experiments
@@ -455,7 +456,7 @@ prefix-cache pair proves that hybrid-state reuse is material.
   increasing it primarily buys capacity rather than C1 decode speed.
 - Medium or xhigh reasoning is a correctness-rescue treatment, not a speed
   axis. Low versus no-thinking was frozen but remains unmeasured; re-freeze it
-  only after the stopped campaign is terminal.
+  only after cutoff, runtime retirement, and fresh baseline admission.
 - PLE omission changes semantics and previously produced incomplete C4/C8
   requests; it is not a deployment speed candidate.
 - Ordinary-buffer depth three has an unsafe pressure history.
