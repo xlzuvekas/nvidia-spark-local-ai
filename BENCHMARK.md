@@ -217,7 +217,7 @@ lifecycle records needed to reproduce the historical Harbor bundle are retained
 locally and are inputs, not tracked artifacts. A first export requires both;
 subsequent refreshes may carry the existing canonical Harbor bundle forward only
 after its schema and checksums verify. The current tracked refresh contains
-1,835 files and 285 run bundles. It publishes the four day-zero llama.cpp Flash
+1,883 files and 293 run bundles. It publishes the four day-zero llama.cpp Flash
 Next attempts under
 [`evidence/runs/`](evidence/runs/), including the
 [core bundle](evidence/runs/20260826T165913Z-qwen38-flash-next-ud-iq4-xs-llamacpp-p8-core-b5a0f9ad/manifest.json),
@@ -399,9 +399,34 @@ thinking on, `reasoning_effort=low`, temperature zero, C1, a 512-token cap, and
 two repetitions of all four exact-answer items. Protocol v2 keeps timestamped
 request IDs out of the prompt. Passing requires 8/8 under the original strict
 validator; answer keys, retry policy, and partial-run semantics are unchanged.
+
+All eight planned lifetimes reached terminal `run_complete`. The D1/D2 ABBA
+replicates completed every case and give these unweighted lifetime means:
+
+| Case | D1 mapped | D2 mapped | D2 vs D1 | D3 mapped | D3 omitted |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Warmed D256/C1 | 28.304 tok/s | 29.402 tok/s | +3.881% | 32.221 tok/s | 31.286 tok/s |
+| Fresh C1 | 27.217 tok/s | 29.594 tok/s | +8.734% | 30.762 tok/s | 33.171 tok/s |
+| Fresh C2 | 46.077 tok/s | 51.870 tok/s | +12.572% | 53.230 tok/s | 55.050 tok/s |
+| Fresh C4 | 73.713 tok/s | 75.471 tok/s | +2.385% | 80.143 tok/s | — |
+| Fresh C8 | 109.351 tok/s | 117.140 tok/s | +7.123% | 118.454 tok/s | — |
+
+The D3 mapped points come from one lifetime and its startup measurement is
+invalid: the first request crossed the 14 GiB floor at 13.9045677185 GiB. All
+five serving cases still completed and remain case-valid. The omitted D3 arm
+completed D256/C1/C2 but stopped one C4 request at 172/256 tokens and one C8
+request at 232/256; its run is honestly partial and those two official
+aggregates are null. Descriptive incomplete-work rates must not fill the table.
+PLE omission therefore has no valid high-concurrency speedup result and remains
+a semantic ablation, not a deployable optimization.
+
+Both separate quality-v2 lifetimes completed at strict 8/8. This resolves the
+old 3/4 synthetic result through stable prompt text and a frozen thinking-low
+quality configuration, without changing the validator or partial-run policy.
 See the
-[frozen PLE/depth study](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md)
-for exact order, pins, safety gates, and interpretation limits.
+[PLE/depth result](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md) for
+individual lifetimes, exact evidence links, wall time, memory, safety gates,
+artifact pins, and interpretation limits.
 
 #### Retained day-zero diagnostics
 

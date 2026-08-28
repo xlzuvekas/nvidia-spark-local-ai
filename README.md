@@ -15,7 +15,7 @@ quality checks, and the provenance needed to interpret each number.
 | How does Qwen3.8-Flash-Next run on one Spark? | [Native Radix SGLang and IQ4_XS llama.cpp throughput, validation, and memory boundaries](docs/qwen38-flash-next-gb10-2026-08-26.md) |
 | Does SGLang's native Flash-Next path run on GB10, and how does it fit? | [Measured NVFP4+MTP result, read-only NVMe PLE mechanics, exact pins, and long-context limit](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md) |
 | What did the first day of GB10 community work add? | [Primary-source review of the one-Spark vLLM mmap patch, upstream status, and dual-Spark SGLang report](docs/qwen38-flash-next-gb10-day-one-2026-08-27.md) |
-| How are PLE mapping, PLE omission, and NEXTN depths being compared? | [Matched lazy-C8 PLE/depth protocol and quality-clean exact-answer v2 gate](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md) |
+| What do matched PLE mapping/omission and NEXTN depths show? | [Replicated lazy-C8 depth results, semantic-ablation failures, and quality-clean exact-answer v2](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md) |
 | What does native llama.cpp prompt-KV reuse change for Qwen3.6? | [Prefix-cache controls: 8K and 32K shared-prefix cold/warm observations](docs/qwen36-prefix-cache-results-2026-08-18.md) |
 | How did Qwen3-Coder-Next fare on terminal coding tasks? | [Harbor/Terminal-Bench-derived results: Qwen Code versus OpenCode](docs/harbor-terminal-results-2026-08-18.md) |
 | How are offline coding-agent harnesses compared? | [Qwen3-Coder-Next Harbor campaign protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign) |
@@ -36,10 +36,22 @@ data. Its [human-readable map](evidence/README.md) and
 aborted, and nonterminal attempts without publishing raw payloads. The
 [evidence publication section](BENCHMARK.md#publishing-sanitized-evidence)
 explains how to create and verify both files. The current refresh contains
-1,835 files covering 285 run bundles.
+1,883 files covering 293 run bundles.
 
 ## What the results say
 
+- In the matched mapped-PLE ABBA panel, NEXTN depth two beat depth one in all
+  five cells across two independent lifetimes per arm. Mean D256 and fresh
+  C1/C2/C4/C8 throughput moved from 28.304 and
+  27.217/46.077/73.713/109.351 tok/s at D1 to 29.402 and
+  29.594/51.870/75.471/117.140 tok/s at D2, gains of 2.4--12.6%. The single D3
+  mapped lifetime reached 118.454 tok/s at C8, only 1.1% above the D2 mean, and
+  crossed the 14 GiB startup memory floor. PLE omission was valid through C2
+  (-2.9%/+7.8%/+3.4% at D256/C1/C2) but ended one C4 and one C8 request early,
+  so no official high-concurrency aggregate is published. Separate stable-prompt
+  quality-v2 lifetimes completed at strict 8/8 for mapped and omitted arms under
+  the unchanged validator. See the
+  [matched PLE/depth result](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md).
 - The full Radix Qwen3.8-Flash-Next checkpoint now completes a native SGLang
   panel on one Spark. The [primary run](evidence/runs/20260827T032027Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-20e1283b/summary.json)
   used ModelOpt NVFP4 main weights, the source FP8 PLE through a digest-pinned
@@ -168,6 +180,9 @@ geometries, slot counts, or validation states.
 
 ### Measured results
 
+- [Qwen3.8-Flash-Next matched PLE/depth result — 2026-08-27](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md):
+  mapped-PLE depth-one/depth-two ABBA replication, matched depth-three omission
+  ablation, lazy C8 throughput and safety, and strict 8/8 quality-v2 lifetimes.
 - [Qwen3.8-Flash-Next native SGLang result and optimization record — 2026-08-26](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md):
   full Radix NVFP4 admission with read-only NVMe PLE and trained `NEXTN`, native
   C1-C4 and 8K/32K measurements, clean MTP3/off confirmation, bounded MTP2 C8,
