@@ -466,19 +466,30 @@ rejections remain incompatible and must not be retried. The full frozen design
 and commands are in the
 [follow-up protocol](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md#lazy-buffer--depth-follow-up--frozen-2026-08-28).
 
-#### Single-user 64K autoresearch campaign (frozen; safety-blocked)
+#### Single-user 64K autoresearch campaign (frozen; admission-expired)
 
-This is a prospective C1 serving search, not a reported measurement result.
-It is the sole bounded historical exception named above and may run only under
-the linked protocol's original gates and unchanged cutoff; any result would be
-a within-runtime comparison, not a deployment-safety claim.
+This was a prospective C1 serving search, not a reported measurement result.
+Its sole bounded historical exception is exhausted: no pair may now run, and
+the plan is not a deployment-safety baseline.
 The campaign-schema-2 freeze created fourteen pristine cells from clean,
 pushed revision `aa9cca8` at 01:09 MST on 2026-08-28. Its current derived
 summary remains schema 1. The first admission returned
 `blocked_environment` with `starting_swap_above_clean_limit`: used host swap was
 868.414 MiB against the frozen 64 MiB start cap. No controller event,
 calibration record, cell summary, worker state, container, or model request was
-created. The scalar archive therefore publishes all fourteen plans as
+created.
+
+At 05:38 MST, after the inclusive pair-admission boundary closed at 05:37:51,
+a second pristine invocation returned exit status 1 with
+`insufficient_time_for_pair`, `starting_swap_above_clean_limit`, and
+`insufficient_preflight_memavailable`. The legacy schema-1 summary still calls
+this `blocked_environment`, but the window cannot reopen before the fixed
+cutoff. Its post-invocation audit found no controller or cell journal,
+calibration, worker state, server, container, GPU compute process, or
+measurement. The 30-directory/31-file campaign topology and frozen identities
+remained exact. Do not invoke its controller or summarizer again.
+
+The scalar archive therefore publishes all fourteen plans as
 `nonterminal` with `measurement_terminal=false`; they are not benchmark
 observations. The frozen profile queue is, in order:
 
@@ -511,10 +522,10 @@ remaining: `2 * 1,800` measurement + `2 * 120` cleanup + `2 * 30` start-marker
 allowance + `120` inter-cell gap + `10` final-cell finalization + `900` audit
 reserve. The first finalization fits inside the inter-cell allowance.
 Search-pair scores derive the durable audit reserve from the later cell's
-`run_complete` wall timestamp, not a later replay clock. After the current host
-safety stop is cleared by an operator reset and clean preflight, resume the
-existing frozen campaign; do not refreeze it or change its cutoff. The planning
-commands below reproduce and inspect the protocol for a future revision:
+`run_complete` wall timestamp, not a later replay clock. A reset cannot restore
+the elapsed admission window. Do not resume, refreeze, copy, or shorten this
+campaign. The historical commands below are preserved as provenance only; do
+not run them against this campaign:
 
 ```bash
 python3 sparkbench.py autoresearch-plan \
@@ -529,17 +540,16 @@ python3 sparkbench.py autoresearch-run results/autoresearch/FROZEN_CAMPAIGN_DIR
 python3 sparkbench.py autoresearch-summarize results/autoresearch/FROZEN_CAMPAIGN_DIR
 ```
 
-Do not invoke `autoresearch-summarize` after a fresh pre-journal
+Do not invoke `autoresearch-summarize` after the pre-journal
 `blocked_environment` return. The current summarizer derives controller state
 only; with no journal it would rewrite the preserved blocker summary as
-`planned` and drop its blocker codes. The frozen campaign remains safely
-resumable without that command. Use the controller's run output and existing
-summary for the preflight outcome; use the summarizer only after a controller
-journal exists.
+`planned` and drop its blocker codes. Schema 1 does not express `expired`, but
+the frozen campaign is no longer time-admissible; preserve its summary.
 
-Substitute the exact directory printed by the freeze command. Each run
-invocation executes at most one calibration, screen, or confirmation pair and
-then returns. Frozen cells are one-use: an incomplete started cell or an
+In the historical procedure, the exact directory printed by the freeze command
+was substituted above. Each run invocation would execute at most one
+calibration, screen, or confirmation pair and then return. Frozen cells are
+one-use: an incomplete started cell or an
 inter-cell gap over 120 seconds invalidates the pair and terminates the
 campaign; neither arm is restarted. A raw-complete cell may instead be
 reprojected and reconciled without inference only when its fingerprint, plan
@@ -554,7 +564,9 @@ commit, and push before explicitly resuming. Raw prompts, completions,
 reasoning, tool payloads, logs, identifiers, and commands remain ignored.
 
 The controller enforces the remote checkpoint boundary before it admits a new
-pair. Use this explicit workflow after each completed pair:
+pair. The workflow below applies to an admitted future campaign after a
+completed pair. This campaign completed none; do not run it against this frozen
+directory:
 
 ```bash
 python3 sparkbench.py export-evidence \
