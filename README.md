@@ -259,6 +259,7 @@ geometries, slot counts, or validation states.
 - [Nemotron diffusion direct-run guide](docs/nemotron-diffusion-direct.md)
 - [Experimental NInfer SM121a patch and reproduction notes](patches/ninfer/README.md)
 - [SGLang SM121 QSA and persistent read-only PLE patch guide](patches/sglang/README.md)
+- [vLLM direct-mmap live-token-width semantic backport](patches/vllm/README.md)
 
 ## Reproduce the original Qwen3.8 path
 
