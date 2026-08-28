@@ -362,6 +362,53 @@ This phase may use the network, but it must be separate from measurement:
    and
 6. disable network access for admission and all measured lifetimes.
 
+### GB10 ARM64 build gate
+
+The exact source identity is commit `8e4e036a311604800334989485b4ee23925956da`,
+tree `fb926ea1d0b897caa4f26a5885d6867f72b67905`, deterministic Git-archive
+SHA-256 `7f2e6cb97e20de305a475c344a666bfc36935db7a8d16d7c95f2ebbc590830bc`,
+and Dockerfile SHA-256
+`36e37c1afc5df0d237dab3b71b257530e3f77027c29a75d0e4b94af2c20391f3`.
+The repository has no submodules. Verify all four facts before the build.
+
+The Dockerfile default builder is AMD64-only, so a default build is invalid on
+Spark. The branch's own
+[ARM64 instructions](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/docs/getting_started/installation/gpu.cuda.inc.md#L373-L413)
+require the `manylinuxaarch64` variant. Freeze these Linux/ARM64 base children:
+
+| Role | Pinned image |
+| --- | --- |
+| Builder | `pytorch/manylinuxaarch64-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359@sha256:f91599c49f526c77d01b68286f2bf943a5fd6a432d7e3f0afcc5784825908fe9` |
+| Runtime | `nvidia/cuda:13.0.3-base-ubuntu24.04@sha256:56d9d8183e2181a20be6b0d3801d1f056a0e75c17706df939ba207b126e1cb9c` |
+
+Build target `vllm-openai` for `linux/arm64` from a clean detached checkout,
+using those values as `BUILD_BASE_IMAGE` and `FINAL_BASE_IMAGE`. Retain the
+branch defaults for Python 3.12, CUDA 13.0.3, Ubuntu 24.04, NCCL 2.30.7 and
+FlashInfer 0.6.17. Set `torch_cuda_arch_list=12.1`, `max_jobs=20`,
+`nvcc_threads=2`, `USE_SCCACHE=0`, `GIT_REPO_CHECK=1` and
+`RUN_WHEEL_CHECK=true`; record the exact build arguments and BuildKit
+provenance privately. At this Dockerfile head, `max_jobs` is divided by NVCC
+threads, so the stock `2/8` settings collapse to one compiler job while `20/2`
+permits ten on the Spark's 20 ARM cores.
+
+This remains an observational, provenance-complete build rather than a
+bit-reproducible one. The Dockerfile fetches mutable installers and dependency
+ranges, builds TileLang from source on ARM, and unconditionally builds DeepEP
+for architectures irrelevant to this single-node workload. Rehash fetched
+installers, preserve the resolved package and OS inventories privately, and
+record the final OCI digest. The ARM builder is about 6.90 GB compressed; a
+cold Spark build is estimated at 35--75 minutes, so reserve 90 minutes and
+50--100 GB transient disk. This duration is a planning inference, not a local
+measurement.
+
+Run BuildKit's Dockerfile check before the real build. Afterward, verify the
+image architecture, import vLLM and the PLE mmap module, confirm CUDA 13.0 and
+device capability `(12, 1)`, and inspect native objects and CUDA images for
+AArch64 and SM12x code. An existing local `vllm-openai:qwen38` image comes from
+older vLLM source and is not admissible evidence. Do not start this cold build
+until the frozen campaign has reached cutoff or been explicitly abandoned and
+the original workload, memory and swap gates pass.
+
 The author reported:
 
 ```text
