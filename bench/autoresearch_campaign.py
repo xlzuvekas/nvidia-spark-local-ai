@@ -2453,6 +2453,42 @@ def _recover_interrupted_cells(campaign: FrozenCampaign) -> None:
                 )
 
 
+def _validate_search_artifact_admission(
+    campaign: FrozenCampaign, events: tuple[dict[str, Any], ...]
+) -> None:
+    """Reject raw search cells that have no preceding durable pair start."""
+
+    admitted: set[str] = set()
+    occurrences: dict[str, int] = {}
+    for event in _deduplicated_controller_events(events):
+        if event.get("event") != "autoresearch_pair_started":
+            continue
+        candidate_id = event.get("candidate_id")
+        if not isinstance(candidate_id, str):
+            raise CampaignPlanningError("controller pair candidate is malformed")
+        occurrence = occurrences.get(candidate_id, 0)
+        stage = "screen" if occurrence == 0 else "confirmation"
+        if occurrence > 1:
+            raise CampaignPlanningError(
+                "controller candidate exceeds screen and confirmation"
+            )
+        admitted.update(
+            cell.cell_id
+            for cell in campaign.cells_for(
+                candidate_id=candidate_id, stage=stage
+            ).values()
+        )
+        occurrences[candidate_id] = occurrence + 1
+    for cell in campaign.cells:
+        if cell.stage == "calibration" or cell.cell_id in admitted:
+            continue
+        if _safe_cell_journal_size(cell.run_dir / "events.jsonl"):
+            raise CellProjectionError(
+                "raw search cell has no preceding durable pair admission",
+                failure_kind="audit",
+            )
+
+
 def _bound_transition_id(
     campaign: FrozenCampaign, event: Mapping[str, Any]
 ) -> str:
@@ -2610,6 +2646,10 @@ def _replay_frozen_campaign(
                         "controller cell does not map to the frozen schedule"
                     )
                 projections[arm] = _project_frozen_cell(cells[arm])
+                if set(projections) == {"champion", "candidate"}:
+                    _validate_completed_pair_gap(
+                        campaign, cells, pair_index=pair_index
+                    )
                 continue
             if set(projections) != {"champion", "candidate"}:
                 raise CampaignPlanningError(
@@ -2852,21 +2892,49 @@ def _require_score_eligible(
     )
 
 
-def _server_stopped_at(cell: FrozenCell) -> datetime:
+def _cell_event_at(cell: FrozenCell, event_name: str) -> datetime:
     event = _one_event(
         _read_jsonl(cell.run_dir / "events.jsonl", context="cell event journal"),
-        "server_stopped",
+        event_name,
     )
     raw = event.get("timestamp")
     if not isinstance(raw, str):
-        raise CellProjectionError("server_stopped event has no timestamp")
+        raise CellProjectionError(f"{event_name} event has no timestamp")
     try:
         value = datetime.fromisoformat(raw)
     except ValueError as error:
-        raise CellProjectionError("server_stopped timestamp is invalid") from error
+        raise CellProjectionError(f"{event_name} timestamp is invalid") from error
     if value.tzinfo is None or value.utcoffset() is None:
-        raise CellProjectionError("server_stopped timestamp is not timezone-aware")
+        raise CellProjectionError(
+            f"{event_name} timestamp is not timezone-aware"
+        )
     return value
+
+
+def _server_stopped_at(cell: FrozenCell) -> datetime:
+    return _cell_event_at(cell, "server_stopped")
+
+
+def _run_started_at(cell: FrozenCell) -> datetime:
+    return _cell_event_at(cell, "run_start")
+
+
+def _validate_completed_pair_gap(
+    campaign: FrozenCampaign,
+    cells: Mapping[str, FrozenCell],
+    *,
+    pair_index: int,
+) -> float:
+    order = pair_order(pair_index)
+    gap_s = (
+        _run_started_at(cells[order[1]])
+        - _server_stopped_at(cells[order[0]])
+    ).total_seconds()
+    if gap_s < 0 or gap_s > campaign.policy.cleanup_timeout_s:
+        raise CellProjectionError(
+            "inter-cell gap exceeded the frozen cleanup bound"
+        )
+    return gap_s
 
 
 def _run_search_pair(
@@ -2879,7 +2947,16 @@ def _run_search_pair(
     now: Callable[[], datetime],
 ) -> PairObservation:
     state = _replay_frozen_campaign(campaign, _controller_events(journal))
+    cells = campaign.cells_for(candidate_id=candidate_id, stage=stage)
     if state.phase == "candidate":
+        if any(
+            _safe_cell_journal_size(cell.run_dir / "events.jsonl")
+            for cell in cells.values()
+        ):
+            raise CellProjectionError(
+                "raw search cell exists before its durable pair admission",
+                failure_kind="audit",
+            )
         if _remaining_s(campaign, now) < PAIR_ADMISSION_REMAINING_S:
             raise CellProjectionError("insufficient time remains for a search pair")
         _append_frozen_transition(
@@ -2898,15 +2975,16 @@ def _run_search_pair(
         state = _replay_frozen_campaign(campaign, _controller_events(journal))
     if state.phase != "pair" or state.active_pair_index is None:
         raise CampaignPlanningError("candidate is not in an executable pair phase")
-    cells = campaign.cells_for(candidate_id=candidate_id, stage=stage)
     projections: dict[str, CellProjection] = {}
     last_completion: datetime | None = None
     for completed_arm in state.completed_arms:
         projections[completed_arm] = _project_frozen_cell(cells[completed_arm])
         last_completion = _server_stopped_at(cells[completed_arm])
     for arm in state.active_order[len(state.completed_arms) :]:
+        events_path = cells[arm].run_dir / "events.jsonl"
+        raw_complete = _safe_cell_journal_size(events_path) > 0
         if last_completion is not None:
-            current = now()
+            current = _run_started_at(cells[arm]) if raw_complete else now()
             if current.tzinfo is None or current.utcoffset() is None:
                 raise CampaignPlanningError("campaign clock must be timezone-aware")
             gap_s = (current - last_completion).total_seconds()
@@ -2922,12 +3000,15 @@ def _run_search_pair(
                 raise CellProjectionError(
                     "first cell exceeded its measurement or cleanup budget"
                 )
-        projection = cell_runner(cells[arm])
-        if (
-            projection.profile_id != cells[arm].profile_id
-            or projection.plan_fingerprint != cells[arm].plan_fingerprint
-        ):
-            raise CellProjectionError("cell projection does not match schedule")
+        if raw_complete:
+            projection = _project_frozen_cell(cells[arm])
+        else:
+            projection = cell_runner(cells[arm])
+            if (
+                projection.profile_id != cells[arm].profile_id
+                or projection.plan_fingerprint != cells[arm].plan_fingerprint
+            ):
+                raise CellProjectionError("cell projection does not match schedule")
         projections[arm] = _project_frozen_cell(cells[arm])
         _append_frozen_transition(
             journal,
@@ -2967,6 +3048,84 @@ def _run_search_pair(
         },
     )
     return observation
+
+
+def _reconcile_raw_search_prefix(
+    campaign: FrozenCampaign,
+    journal: Journal,
+    state: ReplayState | None,
+) -> ReplayState | None:
+    """Durably index an ordered raw-complete prefix without launching work."""
+
+    if (
+        state is None
+        or state.phase != "pair"
+        or state.candidate_id is None
+        or state.active_pair_index is None
+    ):
+        return state
+    stage = (
+        "screen" if len(state.candidate_observations) == 0 else "confirmation"
+    )
+    cells = campaign.cells_for(candidate_id=state.candidate_id, stage=stage)
+    missing_arms = state.active_order[len(state.completed_arms) :]
+    raw_prefix: list[str] = []
+    saw_pristine = False
+    for arm in missing_arms:
+        raw_complete = (
+            _safe_cell_journal_size(cells[arm].run_dir / "events.jsonl") > 0
+        )
+        if not raw_complete:
+            saw_pristine = True
+            continue
+        if saw_pristine:
+            raise CellProjectionError(
+                "later search arm has raw artifacts before its ordered predecessor",
+                failure_kind="audit",
+            )
+        raw_prefix.append(arm)
+    for arm in raw_prefix:
+        _project_frozen_cell(cells[arm])
+        state = _append_frozen_transition(
+            journal,
+            campaign,
+            {
+                "event": "autoresearch_cell_completed",
+                "transition_id": _transition_id(
+                    state.candidate_id,
+                    "pair",
+                    state.active_pair_index,
+                    arm,
+                    "completed",
+                ),
+                "candidate_id": state.candidate_id,
+                "pair_index": state.active_pair_index,
+                "arm": arm,
+            },
+        )
+    return state
+
+
+def _search_reconciliation_needs_admission(
+    campaign: FrozenCampaign, state: ReplayState | None
+) -> bool:
+    """Return whether advancing current search truth can launch inference."""
+
+    if state is None or not _calibration_path(campaign).exists():
+        return True
+    if state.phase == "scored":
+        return False
+    if state.phase != "pair" or state.candidate_id is None:
+        return True
+    stage = (
+        "screen" if len(state.candidate_observations) == 0 else "confirmation"
+    )
+    cells = campaign.cells_for(candidate_id=state.candidate_id, stage=stage)
+    missing_arms = state.active_order[len(state.completed_arms) :]
+    return any(
+        _safe_cell_journal_size(cells[arm].run_dir / "events.jsonl") == 0
+        for arm in missing_arms
+    )
 
 
 def summarize_campaign(campaign_dir: Path) -> dict[str, Any]:
@@ -3053,6 +3212,13 @@ def run_campaign(
         )
         try:
             _recover_interrupted_cells(campaign)
+            _validate_search_artifact_admission(
+                campaign, tuple(existing_events)
+            )
+            existing_state = _reconcile_raw_search_prefix(
+                campaign, existing_journal, existing_state
+            )
+            existing_events = _controller_events(existing_journal)
         except CellProjectionError as error:
             if existing_state is not None and existing_state.phase == "terminal":
                 raise CampaignPlanningError(
@@ -3069,47 +3235,50 @@ def run_campaign(
             return summarize_campaign(campaign.campaign_dir)
         if existing_state is not None and existing_state.phase == "terminal":
             return summarize_campaign(campaign.campaign_dir)
-        blockers = list(
-            campaign_admission(campaign, now=now(), meminfo_reader=meminfo_reader)
-        )
-        try:
-            current_harness = harness_identity_reader(workspace)
-        except (OSError, ValueError) as error:
-            raise CampaignPlanningError(
-                "campaign harness identity could not be verified"
-            ) from error
-        if current_harness != (
-            campaign.harness_tree_sha256,
-            campaign.harness_file_count,
-        ):
-            blockers.insert(0, "harness_code_changed")
-        if blockers:
-            if existing_events:
-                failure_kind = (
-                    "audit"
-                    if "harness_code_changed" in blockers
-                    else "swap_pressure"
-                    if "starting_swap_above_clean_limit" in blockers
-                    else "memory_pressure"
-                    if "insufficient_preflight_memavailable" in blockers
-                    else "measurement"
+        if _search_reconciliation_needs_admission(campaign, existing_state):
+            blockers = list(
+                campaign_admission(
+                    campaign, now=now(), meminfo_reader=meminfo_reader
                 )
-                _append_terminal(
-                    existing_journal,
-                    campaign,
-                    failure_kind=failure_kind,
-                    cleanup_verified=True,
-                )
-                return summarize_campaign(campaign.campaign_dir)
-            summary = summarize_campaign(campaign.campaign_dir)
-            summary.update(
-                {
-                    "status": "blocked_environment",
-                    "blockers": blockers,
-                }
             )
-            write_json(campaign.campaign_dir / "summary.json", summary)
-            return summary
+            try:
+                current_harness = harness_identity_reader(workspace)
+            except (OSError, ValueError) as error:
+                raise CampaignPlanningError(
+                    "campaign harness identity could not be verified"
+                ) from error
+            if current_harness != (
+                campaign.harness_tree_sha256,
+                campaign.harness_file_count,
+            ):
+                blockers.insert(0, "harness_code_changed")
+            if blockers:
+                if existing_events:
+                    failure_kind = (
+                        "audit"
+                        if "harness_code_changed" in blockers
+                        else "swap_pressure"
+                        if "starting_swap_above_clean_limit" in blockers
+                        else "memory_pressure"
+                        if "insufficient_preflight_memavailable" in blockers
+                        else "measurement"
+                    )
+                    _append_terminal(
+                        existing_journal,
+                        campaign,
+                        failure_kind=failure_kind,
+                        cleanup_verified=True,
+                    )
+                    return summarize_campaign(campaign.campaign_dir)
+                summary = summarize_campaign(campaign.campaign_dir)
+                summary.update(
+                    {
+                        "status": "blocked_environment",
+                        "blockers": blockers,
+                    }
+                )
+                write_json(campaign.campaign_dir / "summary.json", summary)
+                return summary
 
         base_runner = cell_runner or (
             lambda cell: run_frozen_cell(

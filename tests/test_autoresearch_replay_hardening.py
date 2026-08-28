@@ -232,7 +232,47 @@ def _events(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
+def _set_event_timestamp(
+    cell: FrozenCell, event_name: str, timestamp: datetime
+) -> None:
+    events_path = cell.run_dir / "events.jsonl"
+    events = _events(events_path)
+    event = next(item for item in events if item.get("event") == event_name)
+    event["timestamp"] = timestamp.isoformat()
+    events_path.write_text(
+        "".join(json.dumps(item, sort_keys=True) + "\n" for item in events)
+    )
+
+
 class AutoresearchReplayHardeningTests(unittest.TestCase):
+    def _write_raw_complete_screen_pair(
+        self,
+        campaign_dir: Path,
+        clock: _Clock,
+        harness: _CompleteCellHarness,
+    ) -> tuple[object, dict[str, FrozenCell]]:
+        run_campaign(
+            campaign_dir,
+            workspace=ROOT,
+            now=clock,
+            meminfo_reader=_admission_meminfo,
+            cell_runner=harness,
+        )
+        campaign = load_frozen_campaign(campaign_dir)
+        candidate_id = campaign.proposals[0].candidate_id
+        cells = campaign.cells_for(candidate_id=candidate_id, stage="screen")
+        harness.crash_after_cell = cells["candidate"].cell_id
+        with self.assertRaises(KeyboardInterrupt):
+            run_campaign(
+                campaign_dir,
+                workspace=ROOT,
+                now=clock,
+                meminfo_reader=_admission_meminfo,
+                cell_runner=harness,
+            )
+        harness.crash_after_cell = None
+        return campaign, cells
+
     def test_copied_journal_is_rejected_by_exact_frozen_instance(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
             root = Path(directory)
@@ -442,7 +482,6 @@ class AutoresearchReplayHardeningTests(unittest.TestCase):
             self.assertEqual(completed_at - stopped_at, timedelta(seconds=7.0))
             self.assertEqual(durable_reserve - current_reserve, 593.0)
 
-    @unittest.skip("awaiting raw-complete pair reconciliation source")
     def test_replay_scores_both_raw_complete_cells_without_new_inference(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
             campaign_dir = _freeze_campaign_fixture(Path(directory))
@@ -469,9 +508,10 @@ class AutoresearchReplayHardeningTests(unittest.TestCase):
                         now=clock,
                         meminfo_reader=_admission_meminfo,
                         cell_runner=harness,
-                    )
+                )
 
                 calls_at_crash = tuple(harness.calls)
+                admission_calls: list[str] = []
                 before = _events(campaign_dir / "events.jsonl")
                 self.assertEqual(
                     sum(
@@ -489,16 +529,29 @@ class AutoresearchReplayHardeningTests(unittest.TestCase):
 
                 harness.crash_after_cell = None
                 clock.value = datetime.fromisoformat("2026-08-28T08:00:00-07:00")
+
+                def dirty_meminfo() -> str:
+                    admission_calls.append("memory")
+                    return _admission_meminfo(swap_used_mib=65)
+
+                def changed_harness(_workspace: Path) -> tuple[str, int]:
+                    admission_calls.append("harness")
+                    return "0" * 64, 1
+
                 summary = run_campaign(
                     campaign_dir,
                     workspace=ROOT,
                     now=clock,
-                    meminfo_reader=lambda: _admission_meminfo(swap_used_mib=65),
-                    cell_runner=harness,
+                    meminfo_reader=dirty_meminfo,
+                    harness_identity_reader=changed_harness,
+                    cell_runner=lambda _cell: self.fail(
+                        "raw-complete reconciliation launched inference"
+                    ),
                 )
 
             after = _events(campaign_dir / "events.jsonl")
             self.assertEqual(tuple(harness.calls), calls_at_crash)
+            self.assertEqual(admission_calls, [])
             self.assertEqual(
                 sum(
                     event.get("event") == "autoresearch_cell_completed"
@@ -513,8 +566,254 @@ class AutoresearchReplayHardeningTests(unittest.TestCase):
                 ),
                 1,
             )
+            self.assertEqual(
+                sum(
+                    event.get("event") == "autoresearch_candidate_decided"
+                    for event in after
+                ),
+                1,
+            )
             self.assertNotEqual(summary["status"], "terminated")
             self.assertEqual(summary["next_pair_index"], 1)
+
+    def test_raw_complete_prefix_is_preserved_before_dirty_launch_admission(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            clock = _Clock()
+            harness = _CompleteCellHarness(clock)
+            with patch.object(campaign_module, "_recover_cell", return_value="absent"):
+                run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=clock,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=harness,
+                )
+                campaign = load_frozen_campaign(campaign_dir)
+                candidate_id = campaign.proposals[0].candidate_id
+                cells = campaign.cells_for(
+                    candidate_id=candidate_id, stage="screen"
+                )
+                harness.crash_after_cell = cells["champion"].cell_id
+                with self.assertRaises(KeyboardInterrupt):
+                    run_campaign(
+                        campaign_dir,
+                        workspace=ROOT,
+                        now=clock,
+                        meminfo_reader=_admission_meminfo,
+                        cell_runner=harness,
+                    )
+                harness.crash_after_cell = None
+                calls_before_resume = tuple(harness.calls)
+                summary = run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=clock,
+                    meminfo_reader=lambda: _admission_meminfo(swap_used_mib=65),
+                    cell_runner=lambda _cell: self.fail(
+                        "dirty admission launched the pristine second arm"
+                    ),
+                )
+
+            events = _events(campaign_dir / "events.jsonl")
+
+        self.assertEqual(tuple(harness.calls), calls_before_resume)
+        self.assertEqual(summary["status"], "terminated")
+        self.assertEqual(summary["terminal_reason"], "swap_pressure")
+        self.assertEqual(
+            sum(
+                event.get("event") == "autoresearch_cell_completed"
+                for event in events
+            ),
+            1,
+        )
+
+    def test_later_raw_arm_without_ordered_prefix_fails_before_admission(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            clock = _Clock()
+            harness = _CompleteCellHarness(clock)
+            with patch.object(campaign_module, "_recover_cell", return_value="absent"):
+                run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=clock,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=harness,
+                )
+                campaign = load_frozen_campaign(campaign_dir)
+                candidate_id = campaign.proposals[0].candidate_id
+                cells = campaign.cells_for(
+                    candidate_id=candidate_id, stage="screen"
+                )
+
+                def interrupt_before_raw(_cell: FrozenCell) -> CellProjection:
+                    raise KeyboardInterrupt
+
+                with self.assertRaises(KeyboardInterrupt):
+                    run_campaign(
+                        campaign_dir,
+                        workspace=ROOT,
+                        now=clock,
+                        meminfo_reader=_admission_meminfo,
+                        cell_runner=interrupt_before_raw,
+                    )
+                harness(cells["candidate"])
+                calls_before_resume = tuple(harness.calls)
+                summary = run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=clock,
+                    meminfo_reader=lambda: self.fail(
+                        "out-of-order raw artifacts consulted memory admission"
+                    ),
+                    harness_identity_reader=lambda _workspace: self.fail(
+                        "out-of-order raw artifacts consulted harness admission"
+                    ),
+                    cell_runner=lambda _cell: self.fail(
+                        "out-of-order raw artifacts launched inference"
+                    ),
+                )
+
+            events = _events(campaign_dir / "events.jsonl")
+
+        self.assertEqual(tuple(harness.calls), calls_before_resume)
+        self.assertEqual(summary["status"], "terminated")
+        self.assertEqual(summary["terminal_reason"], "audit")
+        self.assertFalse(
+            any(
+                event.get("event") == "autoresearch_cell_completed"
+                for event in events
+            )
+        )
+
+    def test_raw_complete_pair_accepts_inclusive_durable_inter_cell_gap(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            clock = _Clock()
+            harness = _CompleteCellHarness(clock)
+            with patch.object(campaign_module, "_recover_cell", return_value="absent"):
+                _campaign, cells = self._write_raw_complete_screen_pair(
+                    campaign_dir, clock, harness
+                )
+                stopped = next(
+                    event
+                    for event in _events(cells["champion"].run_dir / "events.jsonl")
+                    if event.get("event") == "server_stopped"
+                )
+                _set_event_timestamp(
+                    cells["candidate"],
+                    "run_start",
+                    datetime.fromisoformat(str(stopped["timestamp"]))
+                    + timedelta(seconds=120),
+                )
+                clock.value = datetime.fromisoformat("2026-08-28T08:00:00-07:00")
+                summary = run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=clock,
+                    meminfo_reader=lambda: self.fail(
+                        "durable reconciliation consulted memory admission"
+                    ),
+                    harness_identity_reader=lambda _workspace: self.fail(
+                        "durable reconciliation consulted harness admission"
+                    ),
+                    cell_runner=lambda _cell: self.fail(
+                        "durable reconciliation launched inference"
+                    ),
+                )
+
+        self.assertNotEqual(summary["status"], "terminated")
+        self.assertEqual(summary["next_pair_index"], 1)
+
+    def test_raw_complete_pair_rejects_durable_inter_cell_gap_over_limit(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            clock = _Clock()
+            harness = _CompleteCellHarness(clock)
+            with patch.object(campaign_module, "_recover_cell", return_value="absent"):
+                _campaign, cells = self._write_raw_complete_screen_pair(
+                    campaign_dir, clock, harness
+                )
+                stopped = next(
+                    event
+                    for event in _events(cells["champion"].run_dir / "events.jsonl")
+                    if event.get("event") == "server_stopped"
+                )
+                _set_event_timestamp(
+                    cells["candidate"],
+                    "run_start",
+                    datetime.fromisoformat(str(stopped["timestamp"]))
+                    + timedelta(seconds=120.001),
+                )
+                summary = run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=clock,
+                    meminfo_reader=lambda: self.fail(
+                        "invalid durable pair consulted memory admission"
+                    ),
+                    harness_identity_reader=lambda _workspace: self.fail(
+                        "invalid durable pair consulted harness admission"
+                    ),
+                    cell_runner=lambda _cell: self.fail(
+                        "invalid durable pair launched inference"
+                    ),
+                )
+
+            events = _events(campaign_dir / "events.jsonl")
+
+        self.assertEqual(summary["status"], "terminated")
+        self.assertEqual(summary["terminal_reason"], "measurement")
+        self.assertEqual(
+            sum(
+                event.get("event") == "autoresearch_cell_completed"
+                for event in events
+            ),
+            1,
+        )
+        self.assertFalse(
+            any(event.get("event") == "autoresearch_pair_scored" for event in events)
+        )
+
+    def test_future_raw_search_cell_is_rejected_without_inference(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            clock = _Clock()
+            harness = _CompleteCellHarness(clock)
+            with patch.object(campaign_module, "_recover_cell", return_value="absent"):
+                run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=clock,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=harness,
+                )
+                campaign = load_frozen_campaign(campaign_dir)
+                candidate_id = campaign.proposals[0].candidate_id
+                future = campaign.cells_for(
+                    candidate_id=candidate_id, stage="confirmation"
+                )["candidate"]
+                harness(future)
+                calls_before_resume = tuple(harness.calls)
+                summary = run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=clock,
+                    meminfo_reader=lambda: self.fail(
+                        "orphan rejection consulted memory admission"
+                    ),
+                    harness_identity_reader=lambda _workspace: self.fail(
+                        "orphan rejection consulted harness admission"
+                    ),
+                    cell_runner=lambda _cell: self.fail(
+                        "orphan rejection launched inference"
+                    ),
+                )
+
+        self.assertEqual(tuple(harness.calls), calls_before_resume)
+        self.assertEqual(summary["status"], "terminated")
+        self.assertEqual(summary["terminal_reason"], "audit")
 
 
 if __name__ == "__main__":

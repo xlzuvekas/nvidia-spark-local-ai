@@ -335,6 +335,10 @@ def _synthetic_projection_boundary(
             "bench.autoresearch_campaign._durable_pair_audit_reserve_s",
             return_value=audit_reserve_s,
         ),
+        patch(
+            "bench.autoresearch_campaign._validate_completed_pair_gap",
+            return_value=0.0,
+        ),
     ):
         yield
 
