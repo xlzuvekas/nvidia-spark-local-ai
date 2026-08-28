@@ -14,11 +14,11 @@ bottleneck. Coarse GPU utilization near 95–96% is not proof of saturation: two
 replicated C8 lifetimes delivered about four times C1 aggregate throughput at
 nearly the same utilization reading and only about 10–11% more sampled power.
 
-The exact read-only NVMe mapping of the trained PLE is primarily an
-admission/capacity mechanism. Nothing measured so far shows that storage tactic
-dominating warm short-prompt decode. Memory headroom and swap are hard
-configuration/safety limits, but they are not themselves a demonstrated
-per-token rate limiter.
+In the historical measured route, the exact read-only NVMe mapping of the
+trained PLE is primarily an admission/capacity mechanism. Nothing measured so
+far shows that storage tactic dominating warm short-prompt decode. Memory
+headroom and swap are hard configuration/safety limits, but they are not
+themselves a demonstrated per-token rate limiter.
 
 For the user's actual wall time, the hierarchy changes by workload:
 
@@ -71,8 +71,11 @@ high-rate cap or throttle-reason counters.
 Across the replicated mapped panel, depth two beat depth one in every cell by
 2.385–12.572%. The single depth-three lifetime was only 1.122% above the D2
 mean at C8, up to 9.586% above at D256, and violated the first-request memory
-floor. This supports MTP2 as the safe default while leaving the exact
-depth-two/depth-three task-wall comparison to the frozen campaign.
+floor. This supports MTP2 as the pressure-safe depth choice within the
+historical measured geometry, while leaving the exact depth-two/depth-three
+task-wall comparison to the frozen campaign. It is not an overall runtime
+safety claim and requires revalidation on a newly built and admitted SM121
+Triton route.
 
 ## Likely resident-C1 mechanism
 
@@ -114,9 +117,10 @@ pinned revision, matched perplexity and strict task/long-context gates.
 
 ## Why PLE and NVMe are not the current headline
 
-The exact 47.684 GiB FP8 PLE payload is read-only and demand-mapped from NVMe,
-which is what lets the full checkpoint fit. Warm short prompts may reuse PLE
-rows or page-cache state, but no tracked row-set, residency, page-fault, or NVMe
+In the historical measured route, the exact 47.684 GiB FP8 PLE payload was
+read-only and demand-mapped from NVMe, which is what let the full checkpoint
+fit. Warm short prompts may revisit the same PLE row IDs and benefit from
+page-cache residency, but no tracked row-set, residency, page-fault, or NVMe
 counter establishes that working set. The semantic omission arm did not
 produce a large consistent speedup before its high-concurrency failures. That
 is weak evidence against PLE lookup being the dominant warm short-decode cost,
@@ -131,13 +135,13 @@ needed.
 ## Measurements that would narrow the physical bottleneck
 
 This section defines the parallel vLLM **systems-attribution track**, not the
-ranking of serving flags against the retained SGLang product baseline. Start
+ranking of serving flags against the historical SGLang product prior. Start
 with one separate, unscored vLLM direct-mmap, MTP-off, C1 diagnostic
 lifetime after that branch passes build and admission. Its direct-mmap boundary
 can be instrumented more precisely than the current SGLang path. Bracket three
 profiled D256 requests with two unprofiled three-request blocks, then expand to
-the existing 4K C8-capable mapped-MTP2 profile and C1/C2/C8 only if the minimum
-trace is interpretable. Use a separately admitted 64K profile for one
+the historical 4K C8-capable mapped-MTP2 geometry and C1/C2/C8 only if the
+minimum trace is interpretable. Use a separately admitted 64K profile for one
 deterministic varied-token long prompt. None of these diagnostics belongs in a
 promotion score; publish only allowlisted aggregates.
 
@@ -173,10 +177,12 @@ following prerequisites as one total ranking. Items 1--3 and 6--9 are the
 retained-SGLang product track; items 4--5 are the vLLM systems track:
 
 1. keep a healthy server resident when interactive latency matters;
-2. retain mapped PLE, lazy recurrent state, and MTP2 as the historical measured
-   geometry, but rebaseline them on the newly admitted safe SM121 Triton runtime;
+2. retain the PLE-capacity, lazy-state, and MTP2 geometry as a historical
+   measured prior, but reproduce it on a newly built and admitted SM121 Triton
+   runtime; treat a persistent-mmap port as a separate integration gate;
 3. finish the frozen low/no-thinking, chunk-size, and MTP2/MTP3 task-wall
-   comparisons only after a clean host preflight;
+   comparisons only under that protocol's bounded historical exception and
+   after a clean host preflight; otherwise disposition it without inference;
 4. on the direct-mmap vLLM branch, test the isolated live-token hash slice
    before scheduler ceilings or mmap worker tuning;
 5. after that runtime baseline, compare the mixed-FP8 dense-projection
