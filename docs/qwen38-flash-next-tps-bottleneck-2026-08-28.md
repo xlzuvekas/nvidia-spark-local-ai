@@ -180,9 +180,9 @@ newly admitted SGLang product track; items 4--5 are the vLLM systems track:
 2. retain the PLE-capacity, lazy-state, and MTP2 geometry as a historical
    measured prior, but reproduce it on a newly built and admitted SM121 Triton
    runtime; treat a persistent-mmap port as a separate integration gate;
-3. finish the frozen low/no-thinking, chunk-size, and MTP2/MTP3 task-wall
-   comparisons only under that protocol's bounded historical exception and
-   after a clean host preflight; otherwise disposition it without inference;
+3. preserve the admission-expired frozen queue as unmeasured, then re-freeze
+   the low/no-thinking, chunk-size, and MTP2/MTP3 task-wall comparisons only
+   against the newly built and admitted runtime;
 4. on the direct-mmap vLLM branch, test the isolated live-token hash slice
    before scheduler ceilings or mmap worker tuning;
 5. after that runtime baseline, compare the mixed-FP8 dense-projection
