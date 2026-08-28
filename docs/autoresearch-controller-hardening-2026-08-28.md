@@ -2,31 +2,50 @@
 
 ## Status and scope
 
-This is an implementation plan, not a change to the admission-expired frozen
-campaign.
-Do not edit the campaign-bound Python or manifest tree before the 07:00 MST
-cutoff or an explicit decision to abandon that campaign. Its fourteen cell
-plans, policy, queue, and executable harness identity remain immutable.
+This is the implemented post-cutoff hardening record, not a change to the
+admission-expired frozen campaign. Its fourteen cell plans, policy, queue, raw
+summary, and frozen executable-harness identity remain immutable. The exact
+legacy campaign is content-sealed and refuses run and checkpoint entry points;
+its public summary path is read-only and byte-preserving.
 
-The first campaign-schema-2 run/admission attempt safely stopped before measurement,
-without launching a cell, container, or request, but it exposed four reporting
-gaps:
+The implementation is complete:
 
-1. a fresh pre-journal blocker exists only in `summary.json`, and the public
-   summarizer can replace it with `planned`;
-2. the public summarizer does not own the campaign lock;
-3. a cutoff at an active boundary becomes a generic measurement termination;
-   and
-4. the evidence exporter publishes all cell plans but no typed campaign-level
+- fresh frozen campaigns use schema 3 and require a chained mode-0600
+  `admissions.jsonl`;
+- summary derivation, evidence snapshots, and evidence export hold the exact
+  campaign lock;
+- cutoff is a typed terminal reason with an effective `expired` status;
+- the exporter publishes a strict scalar-only `autoresearch_campaign` bundle;
+  and
+- the exact schema-2 legacy campaign is published with
+  `sealed_legacy_unjournaled` provenance, zero invented admission records, and
+  its exact sealed blocker state.
+
+The final gates passed Python compilation, all 894 repository tests,
+deterministic full temporary export, normal verification, and exact staged
+verification. Admission/controller hardening landed from `bfe8f86` through
+`264ac96`, resume coverage in `47d4fa7`, read-only snapshots in `f5db2b7`,
+campaign export in `1af6e83`, and the tracked bundle in `b668306`.
+
+The first campaign-schema-2 run/admission attempt safely stopped before
+measurement, without launching a cell, container, or request, but it exposed
+four reporting gaps that the implementation now closes:
+
+1. a fresh pre-journal blocker existed only in `summary.json`, and the public
+   summarizer could replace it with `planned`;
+2. the public summarizer did not own the campaign lock;
+3. a cutoff at an active boundary could become a generic measurement
+   termination; and
+4. the evidence exporter published all cell plans but no typed campaign-level
    admission or cutoff record.
 
 A second pristine invocation after the pair budget expired again launched
 nothing and added time, swap, and memory blocker codes to the same legacy
 summary. Both observations are preserved in documentation, but neither has a
 durable admission journal. Do not manufacture a retroactive admission record
-from either one. The design below records future campaigns' launch attempts
-exactly and gives the current legacy summary a non-destructive compatibility
-path.
+from either one. Fresh schema-3 campaigns now record launch-capable admission
+attempts exactly, while the current legacy summary uses the non-destructive
+compatibility path.
 
 ## Authority model
 
@@ -47,10 +66,10 @@ passed.
 
 ## Durable admission journal
 
-Add a mode-0600 `admissions.jsonl` under the frozen campaign directory. Under
-the campaign lock, append and durably flush one record immediately before each
-new calibration, screen, or confirmation pair is either admitted or denied.
-A failed append launches nothing.
+Fresh schema-3 campaigns use a mode-0600 `admissions.jsonl` under the frozen
+campaign directory. Under the campaign lock, append and durably flush one
+record immediately before each new calibration, screen, or confirmation pair
+is either admitted or denied. A failed append launches nothing.
 
 Use a strict schema with contiguous sequence numbers, a chained integrity
 digest, and exact frozen-campaign/controller-prefix bindings. Each record
@@ -74,20 +93,22 @@ determines an active campaign's terminal reason. Do not include paths,
 processes, commands, environment, run nonces, request identifiers, prompts,
 outputs, reasoning, tool payloads, or logs.
 
-Every `run_campaign` invocation must recompute admission from its current
-clock, `/proc/meminfo`, and harness identity. It must never consult a valid old
-admission record or `summary.json` to decide the live result. Before appending
-the new observation, however, it must strictly verify the existing chain. A
-malformed chain makes the required append fail and therefore launches nothing
-as an audit failure. Prior records can never authorize a launch.
+Each `run_campaign` invocation that reaches a new calibration, screen, or
+confirmation launch boundary recomputes admission from its current clock,
+`/proc/meminfo`, and harness identity. Terminal replay, checkpoint pauses, and
+cleanup- or reconciliation-only returns append no new admission because none
+can launch inference. A prior record never authorizes a launch. Before any
+required append, the implementation strictly verifies the existing chain. A
+malformed chain raises `CampaignPlanningError` before reconciliation or
+controller mutation and launches nothing; it does not create an audit terminal
+transition.
 
 ## Exact cutoff behavior
 
-Preserve the inclusive boundary: exactly 4,930.0 seconds remaining admits a
-pair; anything below it does not. Centralize that check immediately before the
-durable pair-launch boundary. Remove or route the later generic time checks in
-calibration and search through the same typed decision so time cannot be
-reclassified as a measurement failure.
+The inclusive boundary is exact: 4,930.0 seconds remaining admits a pair;
+anything below it does not. The single typed check runs immediately before the
+durable pair-launch boundary; no later generic calibration or search-pair time
+check can reclassify cutoff as a measurement failure.
 
 Use an explicit `cutoff` failure kind when cutoff is the decisive blocker for
 an already active controller. A fresh campaign whose decisive denial is short
@@ -97,32 +118,41 @@ boundary is cutoff appends a terminal cutoff transition and also reports
 `expired`. A completed or otherwise terminal controller never resumes.
 
 When cutoff and an audit or pressure blocker occur together, record every code
-in the admission entry and apply one frozen terminal precedence. Harness
-audit, swap, and memory safety remain stronger causal terminal labels than
-cutoff. A combined denial therefore remains `terminated` with the stronger
-reason rather than `expired`; do not hide a safety failure merely because the
-clock also expired. Ownership failures are handled earlier during recovery and
-are not live-admission blocker codes.
+in the admission entry and apply one frozen precedence. Harness audit, swap,
+and memory safety remain stronger causal labels than cutoff. For a fresh
+controller, that mixed denial stays `blocked_environment`/`planned`, but cutoff
+makes it non-resumable. For an active controller, it becomes `terminated` with
+the stronger safety reason rather than `expired`. Do not hide a safety failure
+merely because the clock also expired. Ownership failures are handled earlier
+during recovery and are not live-admission blocker codes.
 
 ## Summary schema and locking
 
-Split the current summarizer into:
+The summarizer is split into:
 
 - a private lock-assuming helper used by `run_campaign`; and
-- a public `summarize_campaign` that loads the campaign, acquires its exact
-  lock, reloads under that lock, derives one snapshot, and writes atomically.
+- for normal campaigns, a public `summarize_campaign` that loads the campaign,
+  acquires its exact lock, reloads under that lock, derives one snapshot, and
+  writes atomically.
 
 This avoids a mixed controller/admission snapshot without making internal run
-paths recursively acquire the same non-blocking lock. The summary remains a
-cache and must be derived from strict journals rather than replayed as state.
+paths recursively acquire the same non-blocking lock. For normal campaigns,
+the summary remains a derived cache built from strict controller/admission
+journals and the integrity-verified calibration record; it is never execution
+authority. The sealed legacy summary is the explicit read-only compatibility
+exception.
 
-Move the campaign summary to schema version 2 with at least:
+Schema numbers are independent: a fresh freeze uses campaign schema 3,
+admission records use schema 1, and normal summaries use schema 2. The exact
+legacy freeze and summary remain schema 2 and schema 1 respectively.
+
+Normal campaign summaries contain:
 
 - effective `status`;
 - `controller_status` and `controller_phase`;
 - terminal reason;
 - calibration-recorded boolean and next pair index;
-- ordered candidate decisions;
+- candidate-decision mapping;
 - admission count and exact last-admission projection;
 - campaign, preview, policy, controller-prefix, and last-admission hashes.
 
@@ -131,8 +161,9 @@ Use these status semantics:
 | Situation | Effective status | Controller status | Resumable? |
 | --- | --- | --- | --- |
 | Frozen, never attempted | `planned` | `planned` | Yes |
-| Fresh host/harness denial | `blocked_environment` | `planned` | Yes, after a new live preflight |
+| Fresh non-cutoff host/harness denial | `blocked_environment` | `planned` | Yes, after a new live preflight |
 | Fresh decisive cutoff denial | `expired` | `planned` | No new work |
+| Fresh mixed cutoff + safety denial | `blocked_environment` | `planned` | No; cutoff cannot reopen |
 | Active host/safety denial | `terminated` | `terminated` | No |
 | Active decisive cutoff denial | `expired` | `terminated` | No |
 | Queue completed | `complete` | `complete` | No |
@@ -141,23 +172,25 @@ Use these status semantics:
 summary nor admission history. Acknowledging it changes only the separate
 private checkpoint state.
 
-For the current legacy campaign only, if both journals are absent and the
-existing exact schema-1 summary says `blocked_environment`, public summarize
-must preserve that summary rather than downgrade it or invent observation
-fields. Its admission window is closed, so it must never create a schema-2
-admission record through another launch attempt. The blocker observations
-remain only in the legacy raw summary and documentation; they cannot enter
-typed evidence retroactively.
+For the exact sealed legacy campaign, public summarize acquires the existing
+safe lock, verifies the complete sealed topology and content, and returns the
+exact schema-1 `blocked_environment` summary without rewriting it. It can
+create neither `admissions.jsonl` nor controller state; admission records
+themselves use schema version 1. The campaign evidence bundle instead publishes
+`sealed_legacy_unjournaled` provenance, zero admission records, and the exact
+sealed summary's effective blocker state. No historical observation is
+reconstructed as a typed admission record.
 
 ## Resume and reconciliation invariants
 
-- A fresh environmental denial is resumable only after a new live preflight;
-  the prior admission record is observational.
+- A fresh non-cutoff environmental denial is resumable only after a new live
+  preflight; the prior admission record is observational.
 - A fresh cutoff denial never launches because the immutable deadline has
   passed.
 - A terminal controller never resumes, regardless of later host state.
-- Raw-complete cell reconciliation remains permitted after cutoff because it
-  launches no inference.
+- Previously admitted raw-complete cell reconciliation remains permitted after
+  cutoff because it launches no inference; schema-3 raw work without a valid
+  preceding admission fails closed.
 - An incomplete one-use cell is never relaunched; exact-owned recovery either
   proves a terminal raw cell or terminalizes the campaign.
 - A checkpoint pause changes no controller, admission, cell, or summary file.
@@ -166,86 +199,91 @@ typed evidence retroactively.
 
 ## Campaign-level scalar evidence
 
-Add a specialized `autoresearch_campaign` evidence kind rather than forcing
-campaign state into one of the fourteen cell bundles. Export one campaign
-directory containing a strict manifest, sanitized admission projection, and
-checksums.
+The exporter uses a specialized `autoresearch_campaign` evidence kind rather
+than forcing campaign state into one of the fourteen cell bundles. It exports
+one campaign directory containing `manifest.json`, `controller.json`,
+`admissions.json`, and `checksums.json`.
 
-The manifest should contain only:
+The manifest contains only frozen public identity and provenance:
 
 - public campaign ID and frozen campaign/preview/policy hashes;
 - creation and cutoff timestamps;
-- planned cell count and ordered published cell IDs;
-- effective/controller status and phase, terminal reason, and calibration
-  boolean;
-- next pair index and ordered candidate decisions;
-- controller event count and prefix hash;
-- admission count and latest admission hash; and
+- planned cell count, baseline ID, suite ID, and ordered candidate identities;
+- frozen harness hash and file count, plus each candidate's axis and delta
+  hash;
+- frozen schema and admission-journal requirement;
+- effective status and provenance mode; and
 - strict scalar-only sanitization flags.
 
-The admissions projection contains the allowlisted records above, never the
-raw journal bytes. Source export must replay controller and admission truth
-under the campaign lock; it must not trust or copy `summary.json`. Preserve the
-existing fourteen nonterminal cell bundles and add one campaign bundle, rather
-than converting a blocked admission into a synthetic cell result.
+The controller projection carries effective/controller status, phase, terminal
+reason, calibration state, next pair index, ordered decision history, exact
+event counts, and the controller-prefix hash. The admissions projection carries
+the complete allowlisted record chain plus its effective tail state.
+
+The admissions projection contains the allowlisted records above, never raw
+journal bytes. For normal schema-2 and schema-3 campaigns, source export replays
+controller and admission truth under the campaign lock and does not trust or
+copy `summary.json`. The exact sealed legacy campaign is the sole exception:
+its read-only snapshot verifies and reads the hash-sealed schema-1 summary for
+compatibility status and blockers. The exporter preserves the existing
+fourteen nonterminal cell bundles and adds one campaign bundle rather than
+converting a blocked admission into a synthetic cell result.
 
 Because the current legacy campaign has no admission journal and cannot launch
-again, its typed bundle can project only controller status `planned`, zero
-admissions, and no admission outcome. It must not infer
-`blocked_environment` or `expired` from the legacy summary. The documentation
-remains the only tracked account of both preflight observations.
+again, its typed bundle projects controller status `planned`, zero admission
+records, and provenance mode `sealed_legacy_unjournaled`. Its effective outcome
+is the exact sealed `blocked_environment` compatibility state with the three
+sealed blocker codes; this is not a reconstructed live admission record and it
+does not relabel the campaign `expired`. The documentation remains the detailed
+account of both historical preflight observations.
 
-The exporter and verifier must reject unknown fields/files, changed ordering,
-bad hashes, broken controller-prefix bindings, missing or extra cell IDs,
-paths, secrets, and private payload surfaces. Deterministic re-export and exact
-staged verification remain mandatory.
+Source validation rejects journal, prefix-binding, topology, and
+missing/extra-cell failures before projection. The published verifier rejects
+unknown fields/files, inconsistent scalar relationships, admission-chain/hash
+errors, ordering changes, paths, secrets, and private payload surfaces.
+Deterministic re-export and exact staged verification remain mandatory.
 
-## Implementation map after cutoff
+## Landed implementation
 
-1. In `bench/autoresearch_campaign.py`, introduce the typed live-admission
-   result, strict admission journal, locked summary split, schema-2 derivation,
-   and explicit cutoff mapping. Keep `campaign_admission` as a compatibility
-   wrapper if external tests use its blocker tuple. Route the later calibration
-   and search-pair time checks through the same typed boundary in this slice;
-   never leave an admitted record able to become a generic measurement-time
-   failure.
-2. In `bench/autoresearch.py`, add the categorical cutoff failure kind and its
-   replay validation.
-3. In `bench/evidence.py`, return validated campaign descriptors alongside
-   cell run directories, then add specialized campaign export and verification
-   before generic campaign dispatch.
-4. Update the CLI only where status-to-exit mapping changes: `expired` returns
-   failure, while checkpoint pause retains its distinct exit code.
-5. Refresh the protocol documentation and tracked scalar evidence only after
-   the implementation, fixtures, deterministic export, and staged verifier all
-   pass.
+1. `bench/autoresearch_admission.py` owns typed observations, the strict
+   chained journal, frozen bindings, and controller-prefix validation.
+2. `bench/autoresearch_campaign.py` owns live admission, cutoff mapping,
+   lock-consistent schema-2 summaries, the sealed-legacy compatibility path,
+   and read-only snapshots.
+3. `bench/autoresearch.py` owns categorical `FailureKind.CUTOFF` plus the
+   controller event, decision, and terminal grammar; the numeric cutoff
+   threshold lives in `bench/autoresearch_campaign.py`.
+4. `bench/evidence.py` holds a fixed lock-protected source set while exporting
+   the campaign bundle and fourteen cell bundles, and rejects both topology
+   races and checksum-refreshed tampering.
+5. The CLI retains failure exit status for `expired`, exit code 3 for a
+   checkpoint pause, and refuses run or checkpoint entry for the sealed legacy
+   campaign.
 
-Commit and push each passing logical slice separately: admission/summary plus
-cutoff semantics as one executable slice, campaign evidence, then refreshed
-documentation/evidence. If review needs separate preparatory commits, keep
-`autoresearch-run` fail-closed until both halves are present and tested.
+## Verification coverage
 
-## Regression matrix
-
-At minimum, add tests for:
+Regression coverage includes:
 
 - blocker preservation across public summarize;
 - the exact 4,930.0/4,929.999-second boundary;
-- fresh host denial followed by a clean resume;
+- partial calibration and search-pair resumes require fresh duplicate
+  admissions;
 - fresh and active cutoff behavior;
-- simultaneous blocker order and terminal precedence;
+- simultaneous blocker order and fresh mixed-denial classification;
 - admitted and denied record schema, chaining, and frozen bindings;
 - a valid stale admission record not deciding live admission, while a malformed
   chain prevents the required append and any launch;
 - public summarize lock contention and internal non-recursive summarization;
 - checkpoint pause writing no summary or admission record;
-- raw-complete reconciliation after cutoff with no new cell launch;
+- previously admitted raw-complete reconciliation after cutoff with no new
+  cell launch;
 - deterministic campaign evidence export and verification;
 - preservation of fourteen cell bundles while campaign count increases by
   one; and
 - staged secret/path scans and refreshed-checksum tamper rejection.
 
-Run full unittest discovery and Python compilation. Evidence changes also
-require an offline fixture export, deterministic temporary re-export, normal
-verification, exact staged verification, and a final frozen-harness decision:
-the old campaign is already past cutoff before any executable input changes.
+The completed gate ran full unittest discovery and Python compilation.
+Evidence coverage also includes offline fixtures, deterministic temporary
+re-export, normal verification, exact staged verification, lock-contention and
+source-set race injection, refreshed-checksum tamper rejection, and scalar
+privacy scans.

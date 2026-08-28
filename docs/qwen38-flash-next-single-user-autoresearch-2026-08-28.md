@@ -1,30 +1,27 @@
 # Qwen3.8-Flash-Next single-user autoresearch protocol — 2026-08-28
 
-## Objective
+## Historical objective
 
-Optimize one pinned Qwen3.8-Flash-Next NVFP4 deployment on one DGX Spark for a
-single interactive user doing coding-agent and cowork-style work. The primary
-product outcome is less wall time for a correct task, not maximum aggregate
-throughput under concurrent users.
+This retired protocol was designed to optimize one pinned
+Qwen3.8-Flash-Next NVFP4 deployment on one DGX Spark for a single interactive
+user doing coding-agent and cowork-style work. The primary product outcome was
+less wall time for a correct task, not maximum aggregate throughput under
+concurrent users.
 
-This is a serving-configuration search. It does not train or modify model
-weights. Model, tokenizer, PLE payload, SGLang image, source overlays, hardware,
-prompts, validators, sampling policy, and evaluator versions remain immutable.
-One declared serving axis or coupled NEXTN bundle may change per candidate.
-vLLM source, build, backport, artifact, and profiler work belongs to a separate
-post-campaign systems track and is outside this frozen SGLang search.
+It was a serving-configuration search; it did not train or modify model
+weights.
 
-## Current status: time-inadmissible, no campaign measurements
+## Current status: sealed and time-inadmissible; no campaign measurements
 
 The campaign-schema-2 freeze created all fourteen pristine cell plans from
-clean, pushed revision `aa9cca8` at 01:09 MST on 2026-08-28. Its current
-derived summary remains schema 1. The first admission returned
+clean, pushed revision `aa9cca8` at 01:09 MST on 2026-08-28. Its exact sealed
+summary remains schema 1. The first legacy pre-journal preflight returned
 `blocked_environment` with `starting_swap_above_clean_limit`. At that preflight,
 used host swap was 889,256 kB (868.414 MiB), above the frozen 64 MiB start cap;
 `MemAvailable` was 118,269,252 kB and no container was running. The controller
-created no event journal, calibration record, cell summary, worker state,
-container, or model request. None of the four profiles has produced a
-measurement under this protocol.
+created no durable admission record, event journal, calibration record, cell
+summary, worker state, container, or model request. None of the four profiles
+has produced a measurement under this protocol.
 
 At 05:38 MST, after the inclusive 4,930-second pair-admission boundary closed
 at 05:37:51, a second pristine controller invocation returned exit status 1
@@ -41,8 +38,10 @@ can only decrease, so no complete pair can ever be admitted before the fixed
 The post-invocation audit retained the exact 30-directory/31-regular-file
 campaign topology and unchanged campaign and 84-file harness identities. It
 found no controller or cell event journal, calibration record, worker state,
-server directory, container, GPU compute process, or measurement. Do not invoke
-the controller or summarizer again for this campaign.
+server directory, container, GPU compute process, or measurement. Execution and
+checkpoint entry remain forbidden. The public summarizer is now a read-only
+compatibility path that returns the exact sealed summary without rewriting it;
+it does not authorize work.
 
 The final read-only closeout at 07:00:24 MST reproduced those hashes and that
 topology with all fourteen plan bindings intact and no Docker or GPU compute
@@ -64,14 +63,25 @@ private lock, complete topology, full tree, individual campaign and summary
 hashes, and before/after metadata snapshots all match. Any difference fails
 closed; run and checkpoint entry points refuse the sealed campaign before
 recovery or controller work. Normal campaign summaries are lock/reload
-serialized. The focused checks and all 845 repository tests passed.
+serialized. The final closeout passed Python compilation and all 894 repository
+tests. Controller and evidence hardening spans `bfe8f86` through `1af6e83`;
+the tracked campaign bundle is `b668306`.
 
-The verified [scalar evidence index](../evidence/index.json) now contains all
-fourteen frozen cells as `nonterminal` with `measurement_terminal=false`.
-Those entries publish the plan topology and artifact bindings only; they are
-not throughput, wall-time, quality, or memory observations. The prior schema-1
-freeze was measurement-free and was moved intact into the ignored private
-archive before this schema-2 export.
+The verified [scalar evidence index](../evidence/index.json) now contains one
+typed
+[`autoresearch_campaign` bundle](../evidence/campaigns/qwen38-flash-next-single-user-autoresearch-2026-08-28/manifest.json)
+plus all fourteen frozen cell bundles. The campaign manifest records frozen
+schema 2, `provenance_mode=sealed_legacy_unjournaled`, and effective status
+`blocked_environment`. Its controller projection is `planned`/`new` with zero
+events, decisions, or calibration, while its admissions projection contains
+zero records and preserves the sealed effective outcome and ordered blockers.
+This does not manufacture a retroactive admission journal or measurement.
+
+All fourteen cells remain `nonterminal` with `measurement_terminal=false`.
+They publish plan topology and artifact bindings only, not throughput,
+wall-time, quality, or memory observations. A separate earlier schema-1 freeze
+was also measurement-free and remains intact only in the ignored private
+archive.
 
 The host stop originated when the preceding buffer-strategy interaction block
 crossed the frozen 512 MiB swap-growth limit twice: the ordinary depth-two C6
@@ -91,6 +101,10 @@ measurement. Do not rebuild or alter the runtime, add or copy cells, move the
 cutoff, or treat the unmeasured plan as a deployment baseline. All later or
 newly frozen work must use a newly built, pinned, and admitted SM121 Triton
 runtime.
+
+The remaining sections preserve the retired protocol in historical normative
+form. They are not an active run plan and do not report campaign measurements
+unless explicitly identified as evidence from an earlier study.
 
 ## Autoresearch adaptation
 
@@ -209,7 +223,7 @@ python3 sparkbench.py autoresearch-plan \
 ```
 
 The historical freeze created all fourteen pristine cell plans once. Do not
-repeat it or invoke either following controller command:
+repeat it or invoke either following command:
 
 ```bash
 python3 sparkbench.py autoresearch-plan \
@@ -217,21 +231,21 @@ python3 sparkbench.py autoresearch-plan \
   --results results/autoresearch
 
 python3 sparkbench.py autoresearch-run results/autoresearch/FROZEN_CAMPAIGN_DIR
-python3 sparkbench.py autoresearch-summarize results/autoresearch/FROZEN_CAMPAIGN_DIR
 ```
 
-Do not invoke `autoresearch-summarize` after the pre-journal
-`blocked_environment` return. The current summarizer derives controller state
-only; with no journal it would rewrite the preserved blocker summary as
-`planned` and drop its blocker codes. The frozen campaign is no longer
-time-admissible even though schema 1 does not express `expired`; preserve the
-existing summary unchanged.
+Do not invoke `autoresearch-summarize` for operational use on this sealed
+campaign. The implemented legacy compatibility path recognizes only the exact
+sealed identity and leaves the existing schema-1 blocked-summary bytes
+unchanged. Any changed lock, topology, content, or identity fails closed. The
+execution tombstone and elapsed cutoff independently prevent resume.
 
-The prospective
-[post-cutoff controller hardening plan](autoresearch-controller-hardening-2026-08-28.md)
-specifies durable non-authoritative admission records, lock-owning summary
-derivation, categorical cutoff status, and campaign-level scalar evidence. It
-does not authorize changing this frozen harness before the cutoff.
+The
+[post-cutoff controller hardening design](autoresearch-controller-hardening-2026-08-28.md)
+is now implemented. Future schema-3 campaigns append chained,
+non-authoritative admission records, derive schema-2 summaries under lock,
+classify cutoff explicitly, and export typed campaign-level scalar evidence.
+The retired schema-2 campaign remains sealed, legacy, and unjournaled; the
+implementation neither mutated nor reauthorized it.
 
 The controller and `autoresearch-checkpoint` command enforce a remote evidence
 boundary between settled pairs. A run returns after each calibration, screen,
@@ -297,10 +311,11 @@ diagnostic. The content battery covers code, technical explanation, reasoning,
 and prose, but its minimum-length check is not semantic correctness; its rates
 cannot promote a candidate that fails the agentic gate.
 
-Consequently, this campaign can compare deterministic JSON, tool use,
-exact-answer behavior, synthetic 60K retention, and C1 decode under the four
-serving profiles. It cannot support a claim about Pi, autonomous repository
-editing, cowork document handling, or end-to-end single-user productivity.
+Had it been admitted, the frozen suite could have compared deterministic JSON,
+tool use, exact-answer behavior, synthetic 60K retention, and C1 decode across
+the four profiles. Because no cell started, this campaign supports none of
+those comparisons and no claim about Pi, autonomous repository editing, cowork
+document handling, or end-to-end single-user productivity.
 
 Primary speed is the geometric mean of six fixed-task speed factors. For the
 four agentic cases, each factor is control/candidate median task wall time. For
@@ -458,8 +473,8 @@ tracked. Each candidate record must retain its exact profile delta, cell order,
 run status, gate outcomes, aggregate C1 metrics, agent success and wall time,
 TTFT diagnostics, memory/swap extrema, and keep/discard decision.
 
-This one-night finite serving-configuration search is local and sequential.
-Even a confirmed local
-winner is not a general Qwen3.8 recommendation, an official agent benchmark,
-or evidence about a different context length, reasoning policy, runtime,
-quantization, checkpoint, workload, or machine.
+The frozen one-night search design was local and sequential, but it produced no
+winner. Any winner from a future campaign would still not be a general
+Qwen3.8 recommendation, an official agent benchmark, or evidence about another
+context length, reasoning policy, runtime, quantization, checkpoint, workload,
+or machine.

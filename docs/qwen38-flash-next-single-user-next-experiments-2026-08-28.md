@@ -2,12 +2,12 @@
 
 ## Scope
 
-This is the ranked backlog for after the frozen 64K autoresearch campaign. The
-campaign is unmeasured and admission-expired, although its legacy summary
-remains nonterminal; this file is not part of that immutable campaign and does
-not authorize changing its plans, cutoff, suite, or profile queue. Wait for the
-fixed 07:00 cutoff, retire the superseded runtime, and land the required
-controller hardening before freezing a new protocol.
+This is the ranked backlog following the sealed 64K autoresearch campaign. The
+campaign produced no measurements. Its legacy schema-1 summary remains
+`blocked_environment`, but the exact seal, elapsed cutoff, and execution
+tombstone make it non-resumable. The cutoff has passed, the superseded runtime
+is retired, and the required controller hardening has landed. This file does
+not authorize changing the historical plans, cutoff, suite, or queue.
 
 The product target remains one person using a coding agent or cowork-style
 assistant. Optimize correct end-to-end task wall time, later-turn latency, and
@@ -24,13 +24,15 @@ The tracks have different runtime and artifact baselines and are not one
 interleaved ranking. A systems candidate does not displace the newly admitted
 product baseline until it passes its own admission and matched task gates.
 
-That baseline is a historical measured prior and the immutable campaign's
-frozen identity, not a runtime for new work: it uses the superseded SM121
-TRT-LLM overlay. Before any backlog experiment, build and admit a newly pinned
-SM121 Triton runtime and PLE-capacity mechanism, reproduce the baseline geometry
-and correctness, and establish fresh C1 rates. The current statically composed
-`3681c4e`-derived candidate uses the `io_uring` PLE reader; it does not
-by itself preserve the historical persistent-mmap overlay. Treat a future mmap
+The target serving geometry is a measured historical prior and, separately,
+the identity copied into the unmeasured frozen campaign. The campaign itself
+did not measure or validate that baseline, and its superseded SM121 TRT-LLM
+overlay is not a runtime for new work. Before any backlog experiment, build and
+admit a newly pinned SM121 Triton runtime and PLE-capacity mechanism, reproduce
+the baseline geometry and correctness, and establish fresh C1 rates. The
+current statically composed `3681c4e`-derived candidate uses the `io_uring` PLE
+reader; it does not by itself preserve the historical persistent-mmap overlay.
+Treat a future mmap
 port as a separate integration and admission gate. The ranking below orders
 product questions, not permission to reuse the historical image. Never pool
 performance across the d91-image composition and a `3681c4e`-derived or later
@@ -69,7 +71,8 @@ when requests would otherwise pay cold start. Residency also consumes the
 Spark's memory and device availability and must remain an explicit operator
 choice.
 
-The current [frozen campaign](qwen38-flash-next-single-user-autoresearch-2026-08-28.md)
+The sealed
+[historical campaign](qwen38-flash-next-single-user-autoresearch-2026-08-28.md)
 planned three one-axis questions in order:
 
 1. low reasoning versus explicit no-thinking;
@@ -77,18 +80,18 @@ planned three one-axis questions in order:
 3. NEXTN depth two (`steps=2`, `draft_tokens=3`) versus depth three
    (`steps=3`, `draft_tokens=4`).
 
-None of those cells started, so all three questions remain unanswered. Do not
-duplicate or alter the cells before the fixed cutoff. Afterward, re-freeze any
-still-valued axis against the newly built and admitted runtime; there is no
-winner to combine or promote from this campaign.
+None of those cells started, so all three questions remain unanswered. The
+historical cells must not be copied or altered. Re-freeze any still-valued axis
+only against a newly built, pinned, and admitted runtime; there is no campaign
+winner to combine or promote.
 
 ## Ranked next experiments
 
 ### 1. Long shared-prefix SGLang cache-policy bundle
 
-This has the highest direct coding/cowork value. The current 60K case is a
-one-shot prompt, while the agent cases have small histories; neither measures
-repeated long-prefix work across tool turns.
+This has the highest direct coding/cowork value. The retired campaign's 60K
+case was a one-shot prompt, while its agent cases used small histories; neither
+measured repeated long-prefix work across tool turns.
 
 - Bundle A: the newly admitted C1 baseline, default Radix behavior, and requested
   `extra_buffer_lazy`; require startup `impl=UnifiedRadixCache` with hybrid SSM.
@@ -157,9 +160,10 @@ belong to the separately quarantined systems track.
 
 This is an application-scheduling experiment for one person decomposing one
 task into two independent subtasks. It is not a multi-user throughput claim.
-The historical 64K prior admitted only one running request. First establish a
-new C1 baseline, then freeze a separate C2-capable profile and prove its C1
-behavior and safety before scoring parallel work.
+The historical 64K deployment geometry allowed only one running request; the
+retired autoresearch campaign itself admitted no request. First establish a new
+C1 baseline, then freeze a separate C2-capable profile and prove its C1 behavior
+and safety before scoring parallel work.
 
 - Admission bundle: keep the 65,536-token pool, raise running requests from one
   to two, provide eight lazy recurrent-state slots for two four-slot sequences,
@@ -237,10 +241,11 @@ the exact
 retain one plan/run/process cycle per iteration.
 
 Values one and two are therefore equivalent on those public trees. Pristine
-d91 predates Qwen4/QSA, while the measured image contains baked changes plus
-tracked overlays. Before considering its exact historical runtime, statically
-attest that the image's server/scheduler/worker files also have no consumer; if
-they match, reject without a GPU lifetime. Reconsider only on a new admitted
+d91 predates Qwen4/QSA, while the historically measured digest-pinned image
+contains baked changes plus tracked overlays. Before considering its exact
+historical runtime, statically attest that the image's
+server/scheduler/worker files also have no consumer; if they match, reject
+without a GPU lifetime. Reconsider only on a new admitted
 source identity that actually reads the field, with a unit or instrumented
 cadence test proving the branch is exercised before any GPU ABBA.
 
@@ -420,11 +425,11 @@ Promote only as an empirically retained profile-specific setting; do not make
 it a general default from frame reduction, call it two-token coalescing, or
 extrapolate automatically to interval four.
 
-## Newly admitted SGLang product diagnostics
+## Diagnostics after a new SGLang product baseline is admitted
 
-Within the newly admitted SGLang product track, a separate unscored lifetime should
-bracket three profiled C1 D256 requests with two unprofiled three-request
-blocks. Start with CUDA/NVTX timelines,
+After a new SGLang product runtime is admitted, a separate unscored lifetime
+should bracket three profiled C1 D256 requests with two unprofiled
+three-request blocks. Start with CUDA/NVTX timelines,
 source timers, process `/proc` deltas, PSI, NVMe disk deltas and one-hertz
 device telemetry; add one deterministic varied-token long prompt only after
 the minimum trace is interpretable. Pin the collection window and report U-P-U
@@ -456,7 +461,7 @@ prefix-cache pair proves that hybrid-state reuse is material.
   increasing it primarily buys capacity rather than C1 decode speed.
 - Medium or xhigh reasoning is a correctness-rescue treatment, not a speed
   axis. Low versus no-thinking was frozen but remains unmeasured; re-freeze it
-  only after cutoff, runtime retirement, and fresh baseline admission.
+  only against a newly built, pinned, and admitted baseline.
 - PLE omission changes semantics and previously produced incomplete C4/C8
   requests; it is not a deployment speed candidate.
 - Ordinary-buffer depth three has an unsafe pressure history.

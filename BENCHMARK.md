@@ -217,7 +217,7 @@ lifecycle records needed to reproduce the historical Harbor bundle are retained
 locally and are inputs, not tracked artifacts. A first export requires both;
 subsequent refreshes may carry the existing canonical Harbor bundle forward only
 after its schema and checksums verify. The current tracked refresh contains
-1,965 files and 309 run bundles. It publishes the four day-zero llama.cpp Flash
+1,969 files, 309 run bundles, and 21 campaign bundles. It publishes the four day-zero llama.cpp Flash
 Next attempts under
 [`evidence/runs/`](evidence/runs/), including the
 [core bundle](evidence/runs/20260826T165913Z-qwen38-flash-next-ud-iq4-xs-llamacpp-p8-core-b5a0f9ad/manifest.json),
@@ -246,8 +246,9 @@ varied-token corruption. Preserve them as provenance only; do not run the
 commands or use these profiles for new inference. New work requires a newly
 built, pinned, and admitted SM121 Triton runtime. The former bounded exception,
 the frozen fourteen-cell campaign, exhausted its admission window without a
-measurement and must not be run or summarized again; see its
-[full protocol](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md#current-status-time-inadmissible-no-campaign-measurements).
+measurement and must not re-enter planning, execution, checkpoint, or direct
+startup paths; see its
+[full protocol](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md#current-status-sealed-and-time-inadmissible-no-campaign-measurements).
 SparkBench now enforces that retirement by the exact QSA overlay digest before
 fresh planning, frozen execution, campaign side effects, or direct SGLang
 startup. Historical loading, evidence, and cleanup remain readable.
@@ -479,12 +480,12 @@ This was a prospective C1 serving search, not a reported measurement result.
 Its sole bounded historical exception is exhausted: no pair may now run, and
 the plan is not a deployment-safety baseline.
 The campaign-schema-2 freeze created fourteen pristine cells from clean,
-pushed revision `aa9cca8` at 01:09 MST on 2026-08-28. Its current derived
-summary remains schema 1. The first admission returned
+pushed revision `aa9cca8` at 01:09 MST on 2026-08-28. Its exact sealed summary
+remains schema 1. The first legacy pre-journal preflight invocation returned
 `blocked_environment` with `starting_swap_above_clean_limit`: used host swap was
-868.414 MiB against the frozen 64 MiB start cap. No controller event,
-calibration record, cell summary, worker state, container, or model request was
-created.
+868.414 MiB against the frozen 64 MiB start cap. No durable admission record,
+controller event, calibration record, cell summary, worker state, container,
+or model request was created.
 
 At 05:38 MST, after the inclusive pair-admission boundary closed at 05:37:51,
 a second pristine invocation returned exit status 1 with
@@ -494,11 +495,17 @@ this `blocked_environment`, but the window cannot reopen before the fixed
 cutoff. Its post-invocation audit found no controller or cell journal,
 calibration, worker state, server, container, GPU compute process, or
 measurement. The 30-directory/31-file campaign topology and frozen identities
-remained exact. Do not invoke its controller or summarizer again.
+remained exact. Do not invoke its execution controller again. The public
+summarizer can only validate and return the exact sealed schema-1 summary
+without mutation.
 
-The scalar archive therefore publishes all fourteen plans as
-`nonterminal` with `measurement_terminal=false`; they are not benchmark
-observations. The frozen profile queue is, in order:
+The scalar archive publishes all fourteen plans as `nonterminal` with
+`measurement_terminal=false` plus one campaign-level
+[`autoresearch_campaign` bundle](evidence/campaigns/qwen38-flash-next-single-user-autoresearch-2026-08-28/manifest.json).
+The latter reports `blocked_environment`, controller `planned`/phase `new`,
+frozen schema 2, `sealed_legacy_unjournaled`, zero admissions, events, or
+decisions, and the three sealed blockers. These are provenance projections,
+not benchmark observations. The frozen profile queue is, in order:
 
 1. `qwen38-flash-next-nvfp4-mtp2-agent64k-low-ple-mapped-sglang`
    (baseline: mapped PLE, lazy recurrent state, NEXTN depth two, 1,024-token
@@ -544,14 +551,29 @@ python3 sparkbench.py autoresearch-plan \
   --results results/autoresearch
 
 python3 sparkbench.py autoresearch-run results/autoresearch/FROZEN_CAMPAIGN_DIR
-python3 sparkbench.py autoresearch-summarize results/autoresearch/FROZEN_CAMPAIGN_DIR
 ```
 
-Do not invoke `autoresearch-summarize` after the pre-journal
-`blocked_environment` return. The current summarizer derives controller state
-only; with no journal it would rewrite the preserved blocker summary as
-`planned` and drop its blocker codes. Schema 1 does not express `expired`, but
-the frozen campaign is no longer time-admissible; preserve its summary.
+The one supported controller closeout command is read-only for this exact
+sealed identity:
+
+```bash
+python3 sparkbench.py autoresearch-summarize \
+  results/autoresearch/FROZEN_CAMPAIGN_DIR
+```
+
+It validates the seal and topology and returns the preserved schema-1
+`blocked_environment` summary without writing. It cannot create admission
+records, change status, or authorize execution. No admission record or
+`expired` status is reconstructed. Fresh schema-3 campaigns instead classify
+a pure time-only denial as `cutoff`/`expired`; mixed time plus safety denials
+preserve every blocker and retain the stronger safety outcome.
+
+Fresh freezes use campaign schema 3 with `admission_journal_required=true`.
+On an invocation that can reach a launch, the controller verifies the chained
+admission journal before reconciliation or controller mutation. It appends a
+current, target-bound live admission immediately before a calibration or
+search-pair launch decision. Prior records never authorize execution. The
+schema-2 legacy campaign remains frozen and unjournaled.
 
 In the historical procedure, the exact directory printed by the freeze command
 was substituted above. Each run invocation would execute at most one
@@ -570,17 +592,24 @@ stop, export only allowlisted scalar evidence, verify the staged projection,
 commit, and push before explicitly resuming. Raw prompts, completions,
 reasoning, tool payloads, logs, identifiers, and commands remain ignored.
 
-The controller enforces the remote checkpoint boundary before it admits a new
-pair. The workflow below applies to an admitted future campaign after a
-completed pair. This campaign completed none; do not run it against this frozen
-directory:
+Read-only evidence closeout remains valid for the sealed campaign:
 
 ```bash
+python3 sparkbench.py autoresearch-summarize \
+  results/autoresearch/FROZEN_CAMPAIGN_DIR
 python3 sparkbench.py export-evidence \
   --results results --output evidence --replace
 python3 sparkbench.py verify-evidence evidence
+git diff --exit-code -- evidence
 git add evidence
 python3 sparkbench.py verify-evidence evidence --staged
+```
+
+The controller enforces the remote checkpoint boundary before it admits a new
+pair. The following tail applies only to an admitted fresh schema-3 campaign
+after a completed pair, never to this sealed directory:
+
+```bash
 git commit -m "Record autoresearch pair evidence"
 git push
 python3 sparkbench.py autoresearch-checkpoint \

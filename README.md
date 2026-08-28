@@ -42,7 +42,7 @@ data. Its [human-readable map](evidence/README.md) and
 aborted, and nonterminal attempts without publishing raw payloads. The
 [evidence publication section](BENCHMARK.md#publishing-sanitized-evidence)
 explains how to create and verify both files. The current refresh contains
-1,965 files covering 309 run bundles.
+1,969 files covering 309 run bundles and 21 campaign bundles.
 
 ## What the results say
 
@@ -263,7 +263,7 @@ geometries, slot counts, or validation states.
 - [Qwen3.8-Flash-Next single-user serving backlog](docs/qwen38-flash-next-single-user-next-experiments-2026-08-28.md)
 - [Qwen3.8-Flash-Next TPS bottleneck analysis](docs/qwen38-flash-next-tps-bottleneck-2026-08-28.md)
 - [Pinned Pi and cowork harness plan](docs/pi-cowork-harness-plan-2026-08-28.md)
-- [Autoresearch controller post-cutoff hardening plan](docs/autoresearch-controller-hardening-2026-08-28.md)
+- [Autoresearch controller hardening and campaign-evidence record](docs/autoresearch-controller-hardening-2026-08-28.md)
 - [Nemotron diffusion direct-run guide](docs/nemotron-diffusion-direct.md)
 - [Experimental NInfer SM121a patch and reproduction notes](patches/ninfer/README.md)
 - [SGLang SM121 QSA and persistent read-only PLE patch guide](patches/sglang/README.md)
