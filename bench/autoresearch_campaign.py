@@ -26,12 +26,14 @@ import tomllib
 from typing import Any, Callable, Iterator, Mapping
 
 from .autoresearch import (
+    AUDIT_RESERVE_S,
     CELL_TIMEOUT_S,
     CLEANUP_TIMEOUT_S,
     CampaignPolicy,
     CandidateDelta,
     EligibilityInputs,
     PairObservation,
+    ReplayState,
     SimplificationEvidence,
     TimingInputs,
     append_transition,
@@ -120,11 +122,19 @@ EXPECTED_SUITE_SPEC_DIGEST = (
 HOST_SAFETY_MIN_MEMAVAILABLE_KIB = 14 * 1024 * 1024
 HOST_SAFETY_MAX_SWAP_GROWTH_KIB = 512 * 1024
 HOST_SAFETY_MAX_STARTING_SWAP_KIB = 64 * 1024
-PAIR_ADMISSION_REMAINING_S = 4_620
 EXPECTED_HOST_SAFETY_THRESHOLDS = (14, 512, 64)
 START_MARKER_TIMEOUT_S = 30
 FINALIZATION_TIMEOUT_S = 10
+PAIR_ADMISSION_REMAINING_S = (
+    2 * CELL_TIMEOUT_S
+    + 2 * CLEANUP_TIMEOUT_S
+    + 2 * START_MARKER_TIMEOUT_S
+    + CLEANUP_TIMEOUT_S
+    + FINALIZATION_TIMEOUT_S
+    + AUDIT_RESERVE_S
+)
 MAX_PROGRESS_LINE_BYTES = 16 * 1024 * 1024
+MAX_PROGRESS_JOURNAL_BYTES = 64 * 1024 * 1024
 
 _TOP_LEVEL_KEYS = frozenset({"schema_version", "campaign", "candidates"})
 _CAMPAIGN_KEYS = frozenset(
@@ -268,6 +278,7 @@ class FrozenCell:
 @dataclass(frozen=True, slots=True)
 class FrozenCampaign:
     campaign_dir: Path
+    integrity_hash: str
     campaign_id: str
     cutoff: datetime
     baseline_id: str
@@ -1142,6 +1153,7 @@ def load_frozen_campaign(campaign_dir: Path) -> FrozenCampaign:
             raise CampaignPlanningError("frozen candidate semantic delta changed")
     campaign = FrozenCampaign(
         campaign_dir=root,
+        integrity_hash=integrity_hash,
         campaign_id=_require_string(
             preview["campaign_id"], context="frozen campaign ID"
         ),
@@ -1276,6 +1288,7 @@ class _CellLifecycleProgress:
         self._identity: tuple[int, int] | None = None
         self._offset = 0
         self._tail = b""
+        self._marker_lines: list[tuple[int, bytes]] = []
         self._run_started = False
         self._measurement_started_ns: int | None = None
         self._measurement_complete_ns: int | None = None
@@ -1414,7 +1427,7 @@ class _CellLifecycleProgress:
                 context="server_stopped",
             )
             if (
-                self._measurement_complete_ns is None
+                self._measurement_started_ns is None
                 or self._server_stopped_ns is not None
             ):
                 raise WorkerLifecycleError(
@@ -1433,11 +1446,17 @@ class _CellLifecycleProgress:
                 raise WorkerLifecycleError(
                     "worker_progress_malformed", "server cleanup elapsed time is invalid"
                 ) from error
-            if (
+            if stopped_ns < self._measurement_started_ns or cleanup_s > (
+                self.cleanup_timeout_s
+            ):
+                raise WorkerLifecycleError(
+                    "worker_progress_cleanup_budget",
+                    "server cleanup marker exceeds its causal budget",
+                )
+            if self._measurement_complete_ns is not None and (
                 stopped_ns < self._measurement_complete_ns
                 or stopped_ns - self._measurement_complete_ns
                 > self.cleanup_timeout_s * 1_000_000_000
-                or cleanup_s > self.cleanup_timeout_s
             ):
                 raise WorkerLifecycleError(
                     "worker_progress_cleanup_budget",
@@ -1483,6 +1502,10 @@ class _CellLifecycleProgress:
                 raise WorkerLifecycleError(
                     "worker_progress_unsafe", "cell journal topology is unsafe"
                 )
+            if metadata.st_size > MAX_PROGRESS_JOURNAL_BYTES:
+                raise WorkerLifecycleError(
+                    "worker_progress_malformed", "cell journal exceeds its size bound"
+                )
             identity = (metadata.st_dev, metadata.st_ino)
             if self._identity is None:
                 self._identity = identity
@@ -1490,6 +1513,13 @@ class _CellLifecycleProgress:
                 raise WorkerLifecycleError(
                     "worker_progress_regressed", "cell journal was replaced or truncated"
                 )
+            for marker_offset, marker_line in self._marker_lines:
+                if os.pread(descriptor, len(marker_line), marker_offset) != marker_line:
+                    raise WorkerLifecycleError(
+                        "worker_progress_changed",
+                        "a durable cell lifecycle marker changed in place",
+                    )
+            payload_start = self._offset - len(self._tail)
             os.lseek(descriptor, self._offset, os.SEEK_SET)
             chunks: list[bytes] = []
             while True:
@@ -1505,6 +1535,7 @@ class _CellLifecycleProgress:
                 raise WorkerLifecycleError(
                     "worker_progress_malformed", "cell journal line is too large"
                 )
+            line_offset = payload_start
             for line in lines:
                 if not line or len(line) > MAX_PROGRESS_LINE_BYTES:
                     raise WorkerLifecycleError(
@@ -1528,6 +1559,15 @@ class _CellLifecycleProgress:
                         "worker_progress_malformed", "cell journal event is not an object"
                     )
                 self._consume(event)
+                if event.get("event") in {
+                    "run_start",
+                    "measurement_started",
+                    "measurement_complete",
+                    "server_stopped",
+                    "run_complete",
+                }:
+                    self._marker_lines.append((line_offset, line))
+                line_offset += len(line) + 1
         finally:
             os.close(descriptor)
 
@@ -1663,7 +1703,10 @@ def _normalized_flags(model: Mapping[str, Any]) -> tuple[str, ...]:
         )
     elif set(template) != {"enable_thinking"}:
         raise CellProjectionError("no-thinking request policy topology changed")
-    return tuple(arguments)
+    # This is a semantic flag bundle, not argv: repeated scalar values (for
+    # example two independent options both set to ``4``) must not make an
+    # otherwise strict simplification record structurally invalid.
+    return tuple(dict.fromkeys(arguments))
 
 
 def _expected_nextn_depth(model: Mapping[str, Any]) -> int:
@@ -2162,6 +2205,29 @@ def _private_append_log(path: Path) -> Iterator[Any]:
             os.close(descriptor)
 
 
+def _safe_cell_journal_size(path: Path) -> int:
+    """Return a fresh cell journal size without following links."""
+
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return 0
+    except OSError as error:
+        raise CellProjectionError(
+            "cell journal topology could not be inspected", failure_kind="audit"
+        ) from error
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_uid != os.geteuid()
+    ):
+        raise CellProjectionError(
+            "cell journal must be an owned single-link regular file",
+            failure_kind="audit",
+        )
+    return metadata.st_size
+
+
 _WORKER_OWNERSHIP_FAILURES = frozenset(
     {
         "identity_mismatch",
@@ -2204,7 +2270,7 @@ def run_frozen_cell(
     """Execute one pristine plan with SIGINT unwind and exact owned recovery."""
 
     events_path = cell.run_dir / "events.jsonl"
-    if events_path.exists() and events_path.stat().st_size:
+    if _safe_cell_journal_size(events_path):
         try:
             projection = project_completed_cell(cell.run_dir)
         except CellProjectionError as error:
@@ -2305,7 +2371,7 @@ def _recover_interrupted_cells(campaign: FrozenCampaign) -> None:
 
     for cell in campaign.cells:
         events_path = cell.run_dir / "events.jsonl"
-        cell_started = events_path.exists() and events_path.stat().st_size > 0
+        cell_started = _safe_cell_journal_size(events_path) > 0
         try:
             cleanup = recover_owned_worker(
                 cell.run_dir,
@@ -2340,6 +2406,170 @@ def _recover_interrupted_cells(campaign: FrozenCampaign) -> None:
                 )
 
 
+def _bound_transition_id(
+    campaign: FrozenCampaign, event: Mapping[str, Any]
+) -> str:
+    """Bind one timestamp-free controller transition to this exact freeze."""
+
+    name = event.get("event")
+    if not isinstance(name, str) or not name.startswith("autoresearch_"):
+        raise CampaignPlanningError("controller transition has no stable event name")
+    payload = {
+        key: value
+        for key, value in event.items()
+        if key not in {"timestamp", "transition_id"}
+    }
+    kind = name.removeprefix("autoresearch_").replace("_", "-")
+    digest = content_hash(
+        {
+            "campaign_integrity_hash": campaign.integrity_hash,
+            "preview_digest": campaign.preview_digest,
+            "event": payload,
+        },
+        64,
+    )
+    return f"{kind}-{digest}"
+
+
+def _deduplicated_controller_events(
+    events: tuple[dict[str, Any], ...]
+) -> tuple[dict[str, Any], ...]:
+    unique: list[dict[str, Any]] = []
+    seen: dict[str, str] = {}
+    for event in events:
+        transition_id = event.get("transition_id")
+        if not isinstance(transition_id, str):
+            raise CampaignPlanningError("controller transition ID is malformed")
+        payload = canonical_json(
+            {key: value for key, value in event.items() if key != "timestamp"}
+        )
+        prior = seen.get(transition_id)
+        if prior is not None:
+            if prior != payload:
+                raise CampaignPlanningError("controller transition ID was reused")
+            continue
+        seen[transition_id] = payload
+        unique.append(event)
+    return tuple(unique)
+
+
+def _replay_frozen_campaign(
+    campaign: FrozenCampaign, events: list[dict[str, Any]] | tuple[dict[str, Any], ...]
+) -> ReplayState:
+    """Replay plus exact frozen-instance and queue bindings."""
+
+    records = tuple(events)
+    state = replay_transitions(campaign.policy, records)
+    if not records:
+        return state
+    unique = _deduplicated_controller_events(records)
+    if not unique or unique[0].get("event") != "autoresearch_campaign_started":
+        raise CampaignPlanningError("controller journal has no first campaign start")
+
+    proposal_cursor = 0
+    pair_counts: dict[str, int] = {}
+    pair_stages: dict[tuple[str, int], str] = {}
+    started_candidates: set[str] = set()
+    for event in unique:
+        expected_id = _bound_transition_id(campaign, event)
+        if event.get("transition_id") != expected_id:
+            raise CampaignPlanningError(
+                "controller transition is not bound to this frozen campaign"
+            )
+        name = event.get("event")
+        if name == "autoresearch_campaign_started":
+            if (
+                event.get("campaign_id") != campaign.campaign_id
+                or event.get("policy_digest") != campaign.policy_digest
+            ):
+                raise CampaignPlanningError(
+                    "controller start does not match the frozen campaign"
+                )
+            continue
+        if name == "autoresearch_candidate_started":
+            if proposal_cursor >= len(campaign.proposals):
+                raise CampaignPlanningError("controller started an extra candidate")
+            proposal = campaign.proposals[proposal_cursor]
+            if (
+                event.get("candidate_id") != proposal.candidate_id
+                or event.get("axis") != proposal.axis
+                or event.get("delta_digest") != proposal.delta.digest
+            ):
+                raise CampaignPlanningError(
+                    "controller candidate is not the next frozen proposal"
+                )
+            if proposal.candidate_id in started_candidates:
+                raise CampaignPlanningError("controller candidate was started twice")
+            started_candidates.add(proposal.candidate_id)
+            proposal_cursor += 1
+            continue
+        if name == "autoresearch_pair_started":
+            candidate_id = event.get("candidate_id")
+            pair_index = event.get("pair_index")
+            if not isinstance(candidate_id, str) or not isinstance(pair_index, int):
+                raise CampaignPlanningError("controller pair identity is malformed")
+            occurrence = pair_counts.get(candidate_id, 0)
+            if occurrence > 1:
+                raise CampaignPlanningError(
+                    "controller candidate exceeds screen and confirmation"
+                )
+            stage = "screen" if occurrence == 0 else "confirmation"
+            campaign.cells_for(candidate_id=candidate_id, stage=stage)
+            pair_counts[candidate_id] = occurrence + 1
+            pair_stages[(candidate_id, pair_index)] = stage
+            continue
+        if name in {"autoresearch_cell_completed", "autoresearch_pair_scored"}:
+            candidate_id = event.get("candidate_id")
+            pair_index = event.get("pair_index")
+            if not isinstance(candidate_id, str) or not isinstance(pair_index, int):
+                raise CampaignPlanningError("controller pair binding is malformed")
+            stage = pair_stages.get((candidate_id, pair_index))
+            if stage is None:
+                raise CampaignPlanningError(
+                    "controller completion has no frozen pair occurrence"
+                )
+            if name == "autoresearch_cell_completed":
+                arm = event.get("arm")
+                if not isinstance(arm, str):
+                    raise CampaignPlanningError("controller cell arm is malformed")
+                cells = campaign.cells_for(candidate_id=candidate_id, stage=stage)
+                if arm not in cells:
+                    raise CampaignPlanningError(
+                        "controller cell does not map to the frozen schedule"
+                    )
+
+    return state
+
+
+def _append_frozen_transition(
+    journal: Journal,
+    campaign: FrozenCampaign,
+    event: Mapping[str, Any],
+) -> ReplayState:
+    """Append one exact-freeze-bound transition and audit the resulting journal."""
+
+    existing = _controller_events(journal)
+    _replay_frozen_campaign(campaign, existing)
+    payload = {
+        key: value
+        for key, value in event.items()
+        if key not in {"timestamp", "transition_id"}
+    }
+    payload["transition_id"] = _bound_transition_id(campaign, payload)
+    _replay_frozen_campaign(campaign, [*existing, payload])
+    append_transition(journal, campaign.policy, payload)
+    return _replay_frozen_campaign(campaign, _controller_events(journal))
+
+
+def _controller_events(journal: Journal) -> list[dict[str, Any]]:
+    """Read controller truth without silently filtering durable corruption."""
+
+    try:
+        return journal.strict_events(max_bytes=MAX_PROGRESS_JOURNAL_BYTES)
+    except (OSError, ValueError) as error:
+        raise CampaignPlanningError("controller journal is unsafe or malformed") from error
+
+
 def _transition_id(*parts: object) -> str:
     value = "-".join(str(part).lower().replace("_", "-") for part in parts)
     if len(value) <= 128:
@@ -2350,12 +2580,12 @@ def _transition_id(*parts: object) -> str:
 def _append_campaign_started(
     journal: Journal, campaign: FrozenCampaign
 ) -> None:
-    if journal.events():
-        replay_transitions(campaign.policy, journal.events())
+    if _controller_events(journal):
+        _replay_frozen_campaign(campaign, _controller_events(journal))
         return
-    append_transition(
+    _append_frozen_transition(
         journal,
-        campaign.policy,
+        campaign,
         {
             "event": "autoresearch_campaign_started",
             "transition_id": "campaign-started",
@@ -2372,12 +2602,12 @@ def _append_terminal(
     failure_kind: str,
     cleanup_verified: bool,
 ) -> None:
-    state = replay_transitions(campaign.policy, journal.events())
+    state = _replay_frozen_campaign(campaign, _controller_events(journal))
     if state.phase == "terminal":
         return
-    append_transition(
+    _append_frozen_transition(
         journal,
-        campaign.policy,
+        campaign,
         {
             "event": "autoresearch_campaign_terminated",
             "transition_id": _transition_id("campaign", "terminated", failure_kind),
@@ -2555,13 +2785,13 @@ def _run_search_pair(
     cell_runner: Callable[[FrozenCell], CellProjection],
     now: Callable[[], datetime],
 ) -> PairObservation:
-    state = replay_transitions(campaign.policy, journal.events())
+    state = _replay_frozen_campaign(campaign, _controller_events(journal))
     if state.phase == "candidate":
         if _remaining_s(campaign, now) < PAIR_ADMISSION_REMAINING_S:
             raise CellProjectionError("insufficient time remains for a search pair")
-        append_transition(
+        _append_frozen_transition(
             journal,
-            campaign.policy,
+            campaign,
             {
                 "event": "autoresearch_pair_started",
                 "transition_id": _transition_id(
@@ -2572,7 +2802,7 @@ def _run_search_pair(
                 "order": list(pair_order(state.next_pair_index)),
             },
         )
-        state = replay_transitions(campaign.policy, journal.events())
+        state = _replay_frozen_campaign(campaign, _controller_events(journal))
     if state.phase != "pair" or state.active_pair_index is None:
         raise CampaignPlanningError("candidate is not in an executable pair phase")
     cells = campaign.cells_for(candidate_id=candidate_id, stage=stage)
@@ -2605,9 +2835,9 @@ def _run_search_pair(
         if projection.profile_id != cells[arm].profile_id:
             raise CellProjectionError("cell projection profile does not match schedule")
         projections[arm] = projection
-        append_transition(
+        _append_frozen_transition(
             journal,
-            campaign.policy,
+            campaign,
             {
                 "event": "autoresearch_cell_completed",
                 "transition_id": _transition_id(
@@ -2618,14 +2848,14 @@ def _run_search_pair(
                 "arm": arm,
             },
         )
-        state = replay_transitions(campaign.policy, journal.events())
+        state = _replay_frozen_campaign(campaign, _controller_events(journal))
         stopped_events = cells[arm].run_dir / "events.jsonl"
         # Production runners can return a projection only after the durable
         # stop marker exists.  The fallback keeps the explicitly injected,
         # artifact-free unit runner deterministic without weakening CLI runs.
         last_completion = (
             _server_stopped_at(cells[arm])
-            if stopped_events.exists() and stopped_events.stat().st_size
+            if _safe_cell_journal_size(stopped_events)
             else now()
         )
     observation = observation_from_cells(
@@ -2635,9 +2865,9 @@ def _run_search_pair(
         candidate=projections["candidate"],
         audit_reserve_remaining_s=_remaining_s(campaign, now),
     )
-    append_transition(
+    _append_frozen_transition(
         journal,
-        campaign.policy,
+        campaign,
         {
             "event": "autoresearch_pair_scored",
             "transition_id": _transition_id(
@@ -2654,8 +2884,8 @@ def _run_search_pair(
 def summarize_campaign(campaign_dir: Path) -> dict[str, Any]:
     campaign = load_frozen_campaign(campaign_dir)
     journal = Journal(campaign.campaign_dir / "events.jsonl")
-    events = tuple(journal.events())
-    state = replay_transitions(campaign.policy, events) if events else None
+    events = tuple(_controller_events(journal))
+    state = _replay_frozen_campaign(campaign, events) if events else None
     calibration_path = _calibration_path(campaign)
     summary = {
         "schema_version": 1,
@@ -2727,9 +2957,9 @@ def run_campaign(
     lock_path = campaign.campaign_dir / ".autoresearch.lock"
     with _campaign_lock(lock_path):
         existing_journal = Journal(campaign.campaign_dir / "events.jsonl")
-        existing_events = existing_journal.events()
+        existing_events = _controller_events(existing_journal)
         existing_state = (
-            replay_transitions(campaign.policy, existing_events)
+            _replay_frozen_campaign(campaign, existing_events)
             if existing_events
             else None
         )
@@ -2832,17 +3062,17 @@ def run_campaign(
             if not calibration_already_recorded:
                 return summarize_campaign(campaign.campaign_dir)
             while True:
-                state = replay_transitions(campaign.policy, journal.events())
+                state = _replay_frozen_campaign(campaign, _controller_events(journal))
                 if state.phase == "terminal":
                     break
-                decisions = _candidate_decisions(tuple(journal.events()))
+                decisions = _candidate_decisions(tuple(_controller_events(journal)))
                 if any(
                     decision in {"promote", "promote_simplification"}
                     for decision in decisions.values()
                 ):
-                    append_transition(
+                    _append_frozen_transition(
                         journal,
-                        campaign.policy,
+                        campaign,
                         {
                             "event": "autoresearch_campaign_completed",
                             "transition_id": "campaign-completed-after-promotion",
@@ -2859,18 +3089,18 @@ def run_campaign(
                         None,
                     )
                     if proposal is None:
-                        append_transition(
+                        _append_frozen_transition(
                             journal,
-                            campaign.policy,
+                            campaign,
                             {
                                 "event": "autoresearch_campaign_completed",
                                 "transition_id": "campaign-completed-queue-exhausted",
                             },
                         )
                         break
-                    append_transition(
+                    _append_frozen_transition(
                         journal,
-                        campaign.policy,
+                        campaign,
                         {
                             "event": "autoresearch_candidate_started",
                             "transition_id": _transition_id(
@@ -2881,7 +3111,9 @@ def run_campaign(
                             "delta_digest": proposal.delta.digest,
                         },
                     )
-                    state = replay_transitions(campaign.policy, journal.events())
+                    state = _replay_frozen_campaign(
+                        campaign, _controller_events(journal)
+                    )
                 if state.candidate_id is None:
                     raise CampaignPlanningError("active search state has no candidate")
                 if state.phase in {"candidate", "pair"}:
@@ -2898,7 +3130,9 @@ def run_campaign(
                         cell_runner=runner,
                         now=now,
                     )
-                    state = replay_transitions(campaign.policy, journal.events())
+                    state = _replay_frozen_campaign(
+                        campaign, _controller_events(journal)
+                    )
                 if state.phase != "scored" or state.candidate_id is None:
                     raise CampaignPlanningError("search pair did not reach scored state")
                 observations = state.candidate_observations
@@ -2950,9 +3184,9 @@ def run_campaign(
                         )
                 else:
                     raise CampaignPlanningError("candidate has an invalid score count")
-                append_transition(
+                _append_frozen_transition(
                     journal,
-                    campaign.policy,
+                    campaign,
                     {
                         "event": "autoresearch_candidate_decided",
                         "transition_id": _transition_id(
@@ -2963,23 +3197,25 @@ def run_campaign(
                     },
                 )
                 if decision in {"promote", "promote_simplification"}:
-                    append_transition(
+                    _append_frozen_transition(
                         journal,
-                        campaign.policy,
+                        campaign,
                         {
                             "event": "autoresearch_campaign_completed",
                             "transition_id": "campaign-completed-after-promotion",
                         },
                     )
                 elif decision == "reject":
-                    final_decisions = _candidate_decisions(tuple(journal.events()))
+                    final_decisions = _candidate_decisions(
+                        tuple(_controller_events(journal))
+                    )
                     if all(
                         final_decisions.get(proposal.candidate_id) == "reject"
                         for proposal in campaign.proposals
                     ):
-                        append_transition(
+                        _append_frozen_transition(
                             journal,
-                            campaign.policy,
+                            campaign,
                             {
                                 "event": "autoresearch_campaign_completed",
                                 "transition_id": "campaign-completed-queue-exhausted",

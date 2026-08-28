@@ -21,6 +21,7 @@ from bench.autoresearch_campaign import (
     EXPECTED_AXES,
     EXPECTED_CASE_IDS,
     EXPECTED_PRIMARY_CASE_IDS,
+    _CellLifecycleProgress,
     _cell_specs,
     _normalized_flags,
     freeze_campaign,
@@ -331,6 +332,99 @@ def _worker_result(
 
 
 class AutoresearchFrozenCellWorkerTests(unittest.TestCase):
+    def test_failure_cleanup_stop_marker_advances_to_finalization(self) -> None:
+        timestamp = "2026-08-28T00:00:00+00:00"
+        fingerprint = "0123456789abcdef"
+        nonce = "1234567890abcdef1234567890abcdef"
+        with tempfile.TemporaryDirectory() as directory:
+            events_path = Path(directory) / "events.jsonl"
+            events = (
+                {
+                    "event": "run_start",
+                    "timestamp": timestamp,
+                    "completed_cases_at_resume": [],
+                    "plan_fingerprint": fingerprint,
+                    "run_nonce": nonce,
+                },
+                {
+                    "event": "measurement_started",
+                    "timestamp": timestamp,
+                    "monotonic_ns": 1_000_000_000,
+                    "plan_fingerprint": fingerprint,
+                    "run_nonce": nonce,
+                },
+                {
+                    "event": "server_stopped",
+                    "timestamp": timestamp,
+                    "backend": "sglang",
+                    "cleanup_elapsed_s": 10.0,
+                    "monotonic_ns": 11_000_000_000,
+                },
+                {
+                    "event": "run_aborted",
+                    "timestamp": timestamp,
+                    "stage": "host_safety",
+                },
+            )
+            events_path.write_text(
+                "".join(json.dumps(event, sort_keys=True) + "\n" for event in events)
+            )
+            probe = _CellLifecycleProgress(
+                events_path=events_path,
+                plan_fingerprint=fingerprint,
+                run_nonce=nonce,
+                measurement_timeout_s=1_800,
+                cleanup_timeout_s=120,
+            )
+
+            progress = probe()
+
+        self.assertIsNotNone(progress)
+        self.assertEqual(progress.phase, "finalization")  # type: ignore[union-attr]
+
+    def test_progress_probe_detects_in_place_marker_rewrite(self) -> None:
+        timestamp = "2026-08-28T00:00:00+00:00"
+        fingerprint = "0123456789abcdef"
+        nonce = "1234567890abcdef1234567890abcdef"
+        with tempfile.TemporaryDirectory() as directory:
+            events_path = Path(directory) / "events.jsonl"
+            events = [
+                {
+                    "event": "run_start",
+                    "timestamp": timestamp,
+                    "completed_cases_at_resume": [],
+                    "plan_fingerprint": fingerprint,
+                    "run_nonce": nonce,
+                },
+                {
+                    "event": "measurement_started",
+                    "timestamp": timestamp,
+                    "monotonic_ns": 1_000_000_000,
+                    "plan_fingerprint": fingerprint,
+                    "run_nonce": nonce,
+                },
+            ]
+            events_path.write_text(
+                "".join(json.dumps(event, sort_keys=True) + "\n" for event in events)
+            )
+            probe = _CellLifecycleProgress(
+                events_path=events_path,
+                plan_fingerprint=fingerprint,
+                run_nonce=nonce,
+                measurement_timeout_s=1_800,
+                cleanup_timeout_s=120,
+            )
+            probe()
+            events[1]["monotonic_ns"] = 2_000_000_000
+            events_path.write_text(
+                "".join(json.dumps(event, sort_keys=True) + "\n" for event in events)
+            )
+
+            with self.assertRaisesRegex(
+                WorkerLifecycleError, "marker changed in place"
+            ):
+                probe()
+
     def test_timeout_uses_owned_worker_and_exact_sglang_recovery(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
             campaign = load_frozen_campaign(
@@ -1050,6 +1144,9 @@ class AutoresearchCellProjectionTests(unittest.TestCase):
         )
         self.assertEqual(projection.measurement_elapsed_s, 100.0)
         self.assertEqual(projection.cleanup_elapsed_s, 10.0)
+        self.assertEqual(
+            len(projection.normalized_flags), len(set(projection.normalized_flags))
+        )
 
     def test_projection_rejects_each_safety_boundary_breach(self) -> None:
         fixtures = (

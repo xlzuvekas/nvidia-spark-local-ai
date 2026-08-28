@@ -50,6 +50,7 @@ class WorkerProgress:
 
 
 ProgressProbe: TypeAlias = Callable[[], WorkerProgress | None]
+ProgressObserver: TypeAlias = Callable[[WorkerProgress | None], None]
 
 
 class WorkerLifecycleError(RuntimeError):
@@ -555,12 +556,51 @@ def _terminate_current_process(
         raise WorkerLifecycleError(
             "cleanup_timeout_invalid", "worker cleanup bounds are invalid"
         )
-    sigint_sent = _signal_exact_group(
-        identity,
-        signal.SIGINT,
-        proc_reader=proc_reader,
-        signal_group=signal_group,
-    )
+    poll = getattr(process, "poll", None)
+    if callable(poll):
+        try:
+            already_exited = poll()
+        except BaseException as error:
+            raise WorkerLifecycleError(
+                "reap_failed", "worker exit state could not be polled", identity=identity
+            ) from error
+        if already_exited is not None:
+            return _certify_absent_and_remove(
+                cell_run_dir,
+                identity,
+                outcome="already_exited",
+                return_code=already_exited,
+                sigint_sent=False,
+                sigkill_sent=False,
+                process_lookup_race=False,
+                signal_group=signal_group,
+                require_state=require_state,
+            )
+    try:
+        sigint_sent = _signal_exact_group(
+            identity,
+            signal.SIGINT,
+            proc_reader=proc_reader,
+            signal_group=signal_group,
+        )
+    except WorkerLifecycleError as error:
+        if error.code != "owned_process_missing":
+            raise
+        try:
+            return_code = process.wait(timeout=0)
+        except subprocess.TimeoutExpired:
+            raise error
+        return _certify_absent_and_remove(
+            cell_run_dir,
+            identity,
+            outcome="already_exited",
+            return_code=return_code,
+            sigint_sent=False,
+            sigkill_sent=False,
+            process_lookup_race=True,
+            signal_group=signal_group,
+            require_state=require_state,
+        )
     lookup_race = not sigint_sent
     try:
         return_code = process.wait(timeout=interrupt_grace_s)
@@ -776,6 +816,8 @@ def _wait_with_progress_deadlines(
     start_marker_timeout_s: float,
     poll_interval_s: float,
     monotonic: MonotonicClock,
+    phase_durations_s: Mapping[WorkerTimeoutPhase, float],
+    progress_observer: ProgressObserver,
 ) -> tuple[int | None, WorkerTimeoutPhase | None]:
     """Wait until exit or the active durable lifecycle phase expires."""
 
@@ -783,16 +825,30 @@ def _wait_with_progress_deadlines(
     progress: WorkerProgress | None = None
     while True:
         progress = _validated_worker_progress(progress_probe(), progress)
+        progress_observer(progress)
         deadline = (
             start_deadline
             if progress is None
             else float(progress.deadline_monotonic_s)
         )
         now = monotonic()
+        if progress is not None:
+            duration = phase_durations_s.get(progress.phase)
+            if (
+                duration is None
+                or not math.isfinite(duration)
+                or duration < 0
+                or deadline > now + duration + 0.01
+            ):
+                raise WorkerLifecycleError(
+                    "worker_progress_deadline_invalid",
+                    "worker progress deadline is not bound to the observed clock",
+                )
         if now >= deadline:
             # Re-probe immediately at the boundary so a just-fsynced marker
             # wins the race against a terminating signal.
             refreshed = _validated_worker_progress(progress_probe(), progress)
+            progress_observer(refreshed)
             if refreshed != progress:
                 progress = refreshed
                 continue
@@ -906,6 +962,12 @@ def run_owned_worker(
         raise error from persistence_error
 
     timeout_phase: WorkerTimeoutPhase | None = None
+    active_progress: WorkerProgress | None = None
+
+    def observe_progress(value: WorkerProgress | None) -> None:
+        nonlocal active_progress
+        active_progress = value
+
     try:
         if progress_probe is None:
             try:
@@ -920,20 +982,38 @@ def run_owned_worker(
                 start_marker_timeout_s=min(start_marker_timeout_s, timeout_s),
                 poll_interval_s=progress_poll_interval_s,
                 monotonic=monotonic,
+                phase_durations_s={
+                    "measurement": timeout_s,
+                    "cleanup": interrupt_grace_s,
+                    "finalization": kill_grace_s,
+                },
+                progress_observer=observe_progress,
             )
     except BaseException as original_error:
         try:
-            _terminate_current_process(
+            cleanup = _terminate_current_process(
                 process,
                 cell_run_dir,
                 identity,
-                interrupt_grace_s=interrupt_grace_s,
+                interrupt_grace_s=(
+                    0.0
+                    if active_progress is not None
+                    and active_progress.phase in {"cleanup", "finalization"}
+                    else interrupt_grace_s
+                ),
                 kill_grace_s=kill_grace_s,
                 proc_reader=proc_reader,
                 signal_group=signal_group,
             )
         except WorkerLifecycleError as cleanup_error:
             raise cleanup_error from original_error
+        if cleanup.outcome == "killed":
+            raise WorkerLifecycleError(
+                "interrupt_cleanup_escalated",
+                "worker interruption required forced cleanup",
+                identity=identity,
+                cleanup=cleanup,
+            ) from original_error
         raise
 
     if timeout_phase is not None:

@@ -3042,6 +3042,7 @@ def execute_plan(
                 "run_nonce": run_nonce,
             }
         )
+        measurement_complete_ns: int | None = None
         try:
             host_safety = _host_safety_watchdog(model)
             if host_safety is not None and keep_server:
@@ -3260,7 +3261,11 @@ def execute_plan(
                 failure_stage = "server_cleanup"
                 telemetry.set_phase("server_shutdown")
                 effective_keep_server = keep_server
-                cleanup_started_ns = time.monotonic_ns()
+                cleanup_started_ns = (
+                    measurement_complete_ns
+                    if measurement_complete_ns is not None
+                    else time.monotonic_ns()
+                )
                 try:
                     if server:
                         try:

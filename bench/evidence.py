@@ -780,6 +780,8 @@ _KNOWN_EVENTS = {
     "case_start",
     "first_request_complete",
     "llamacpp_spec_decode_metrics_snapshot",
+    "measurement_complete",
+    "measurement_started",
     "measurement_annotation",
     "model_loaded",
     "perplexity_complete",
@@ -8855,13 +8857,28 @@ def _validate_memory_source_events(
     if not isinstance(cases, list):
         raise EvidenceError("memory source suite cases are missing")
     allowed_events = set(_MEMORY_PROTOCOL_EVENT_COUNTS) | {
-        "llamacpp_spec_decode_metrics_snapshot"
+        "llamacpp_spec_decode_metrics_snapshot",
+        "measurement_complete",
+        "measurement_started",
     }
     names = [event.get("event") for event in events]
     if any(name not in allowed_events for name in names) or names.count(
         "llamacpp_spec_decode_metrics_snapshot"
     ) > 1:
         raise EvidenceError("memory source journal contains a nonprotocol event")
+    marker_counts = (
+        names.count("measurement_started"),
+        names.count("measurement_complete"),
+    )
+    if marker_counts not in {(0, 0), (1, 1)}:
+        raise EvidenceError("memory source lifecycle marker cardinality changed")
+    if marker_counts == (1, 1) and not (
+        names.index("run_start")
+        < names.index("measurement_started")
+        < names.index("measurement_complete")
+        < names.index("server_stopped")
+    ):
+        raise EvidenceError("memory source lifecycle markers are out of order")
     if "llamacpp_spec_decode_metrics_snapshot" in names and names.index(
         "llamacpp_spec_decode_metrics_snapshot"
     ) != names.index("server_stopped") - 1:

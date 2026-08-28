@@ -472,6 +472,38 @@ class AutoresearchWorkerTests(unittest.TestCase):
         self.assertEqual(actions, [signal.SIGINT, 0])
         self.assertIn(0.12, process.timeouts)
 
+    def test_progress_deadline_cannot_be_moved_beyond_observed_clock(self) -> None:
+        clock = _Clock()
+        process = _TimedProcess(clock)
+        actions: list[int] = []
+
+        def signal_group(_pgid: int, action: int) -> None:
+            actions.append(action)
+            if action == signal.SIGINT:
+                process.return_code = -signal.SIGINT
+                process.exit_at = clock.value
+            elif action == 0 and process.exited:
+                raise ProcessLookupError
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(WorkerLifecycleError) as raised:
+                run_owned_worker(
+                    ["synthetic"],
+                    cell_run_dir=Path(directory),
+                    run_nonce=RUN_NONCE,
+                    timeout_s=1.8,
+                    interrupt_grace_s=0.12,
+                    progress_probe=lambda: WorkerProgress("measurement", 100.0),
+                    progress_poll_interval_s=0.05,
+                    popen_factory=lambda *_args, **_kwargs: process,
+                    proc_reader=lambda _pid: _proc_stat(),
+                    signal_group=signal_group,
+                    monotonic=clock.monotonic,
+                )
+
+        self.assertEqual(raised.exception.code, "worker_progress_deadline_invalid")
+        self.assertEqual(actions, [signal.SIGINT, 0])
+
     def test_keyboard_interrupt_cleans_then_reraises_original_exception(self) -> None:
         process = _FakeProcess([KeyboardInterrupt(), -signal.SIGINT])
         actions: list[int] = []
