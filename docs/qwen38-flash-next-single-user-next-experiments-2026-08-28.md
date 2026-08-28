@@ -256,9 +256,11 @@ latency or pressure safety.
 
 ### 7. Rejected at source gate: adaptive NEXTN
 
-Adaptive execution is real on both reviewed pins: NEXTN normalizes to EAGLE,
-which instantiates and switches an adaptive controller. It is not a valid
-benchmark arm yet. The
+The generic adaptive EAGLE machinery exists at both reviewed public pins, and
+safe `3681c4e` makes the Qwen4Exp draft load path inspectable. Public d91 lacks
+native Qwen4Exp draft support, so the historical Qwen path still depends on the
+digest-pinned image, baked patches, and overlays; pristine d91 alone cannot
+attest its Qwen-specific consumption. This does not admit a benchmark arm. The
 [default candidate union](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/speculative/adaptive_spec_params.py#L22-L47)
 are `{0, 1, 3, 7}`, so the retained depth-two setting fails the exact
 [membership gate](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/arg_groups/speculative_hook.py#L788-L810)
