@@ -229,6 +229,11 @@ for chain-buffer allocation. List removal is a later configuration-cleanup
 bundle. Do not capture graph batches above one for a C1 objective; they are
 unexercised and add capture, startup, and headroom cost.
 
+Keep graph results source-pin-local. Safe candidate `3681c4e` adds Qwen
+QSA-specific draft backend and index-sharing wiring, so identical flags need
+not imply identical graph topology or overlap behavior across d91 and 368.
+Never pool those lifetimes.
+
 ### 6. Conditional next chunk size
 
 Propose another value only if the current queue reaches and completes a valid
@@ -245,22 +250,33 @@ At concurrency one, larger chunks have no scheduling-fairness justification.
 They must win on actual prefill or task wall time without harming interactive
 latency or pressure safety.
 
-### 7. Adaptive NEXTN, admission first
+### 7. Rejected at source gate: adaptive NEXTN
 
-The fixed-depth evidence shows declining marginal acceptance at deeper
-positions, so adaptive proposal length is plausible for mixed code and tool
-turns. Do not freeze this treatment until the exact pinned runtime confirms the
-accepted adaptive configuration and Qwen3.8-Flash-Next compatibility.
+Adaptive execution is real on both reviewed pins: NEXTN normalizes to EAGLE,
+which instantiates and switches an adaptive controller. It is not a valid
+benchmark arm yet. The
+[default adaptive tiers](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/speculative/adaptive_spec_params.py#L22-L47)
+are `{0, 1, 3, 7}`, so the retained depth-two setting fails the exact
+[membership gate](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/arg_groups/speculative_hook.py#L788-L810)
+rather than becoming the baseline tier. A custom adaptive config is therefore
+a coupled bundle, not a one-flag treatment. On the safe source, adaptive mode
+also
+[disables Qwen QSA index sharing](https://github.com/sgl-project/sglang/blob/3681c4e03f6848dff82972b3f572602d3b8394cc/python/sglang/srt/speculative/eagle_worker_v2.py#L382-L389).
 
-- Control: the promoted fixed-depth champion, top-k one.
-- Candidate: one exact adaptive-speculation bundle; do not combine a different
-  top-k, chunk size, or reasoning policy.
-- Required evidence: per-case proposed and accepted token counts plus position
-  histograms, exact output/finish validation, task wall time, memory, and swap.
-- Failure rule: an unsupported flag, schema ambiguity, or missing native
-  counters rejects the candidate before scored inference. After source and CLI
-  audit, at most one explicit unscored counter-admission smoke may establish
-  that the required native surface exists.
+The decisive blocker is measurement validity. The scheduler records verify
+count and accepted totals but not the active tier/proposal depth. The tokenizer
+then
+[computes proposed drafts](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/managers/tokenizer_manager.py#L2780-L2803)
+as verify count times the startup fixed draft width. That formula becomes wrong
+after any adaptive tier switch. There is no native tier-residence histogram or
+per-position proposed counter, so even aggregate acceptance rate is not
+attestable for this arm.
+
+Do not spend a GPU lifetime or publish native acceptance metrics for adaptive
+NEXTN on these pins. Reconsider only after an admitted source change records
+exact proposed tokens per verify, active-tier residence, and accepted position;
+then freeze one custom tier bundle containing the retained depth, verify graph
+and QSA coupling, and run an unscored counter oracle before any ABBA.
 
 ### 8. Stream coalescing
 
