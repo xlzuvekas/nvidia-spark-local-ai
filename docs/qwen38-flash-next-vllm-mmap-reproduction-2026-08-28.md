@@ -471,16 +471,27 @@ cache-hit TTFT reduction. That report uses vLLM `8e685d198` and the separate
 `blazux/qwen3.8-Flash-DGX` mmap patch, not this exact branch, so it is a risk
 signal rather than evidence that `8e4e036` fails.
 
-Do not enable prefix caching in Phase 1 or the first matched panel. A cache-on
-candidate requires a separate fresh lifetime after cache-off admission: first
-confirm three identical-prefix hits as an unscored negative control, then run
-at least twelve requests whose deterministic varied-token 40K--50K prefix is
-extended monotonically by a unique suffix on every turn. Record native cache
-hits, prefix and suffix token counts, TTFT, request wall, memory, swap and typed
-engine health. Validate task facts rather than requiring byte-identical greedy
-text. Stop at the first CUDA, engine, correctness or pressure fault, preserve
-the failure, clean up the process, and reject cache-on; never retry inside that
-lifetime.
+Do not enable prefix caching in Phase 1 or the first matched panel. Only after
+cache-off Phase 1 and a separate 64K/C1 cache-off admission pass may a cache-on
+candidate use one fresh 64K/C1 lifetime with the production MTP2 and
+`PIECEWISE` flags unchanged. Explicitly request and attest resolved `align`.
+Run exactly twelve deterministic, byte-distinct synthetic requests: P0
+populates a roughly 40K-token prefix, then P1 through P11 extend the fully
+rendered prefix monotonically to roughly 50K with unique suffixes. Pre-tokenize
+with the pinned tokenizer and require each adjacent pair's tokenized longest
+common prefix; retain only scalar total and common-prefix lengths.
+
+Generate at most 128 tokens per request. Before and after each request, record
+native prefix-query and hit-counter deltas, TTFT, request wall, output-token
+count, memory, swap and typed engine health. Require positive aggregate cache
+hits after P0 or classify the gate as inconclusive. Validate task facts rather
+than requiring byte-identical greedy text. Stop at the first CUDA, engine,
+correctness or pressure fault, preserve the failure, clean up the process, and
+reject cache-on; never retry inside that lifetime. A pass means only that this
+exact configuration survived one growing-prefix admission and may proceed to
+replicated evaluation. It does not disprove the reported bug or identify a
+cause. Fixed-prompt replay is unnecessary because native counters must attest
+that the growing sequence actually exercised cache reuse.
 
 Do not add an `all`-versus-`align` arm on the exact reviewed heads. The
 [Qwen4Exp model class](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/models/qwen4_exp/nvidia/model.py#L587-L603)
@@ -492,6 +503,39 @@ therefore normalizes `all` to `align`, while model initialization
 an `all` value that survives normalization. A launch flag is not evidence of a
 distinct treatment. Any later cache-mode experiment needs an admitted source
 change plus persisted resolved configuration before it can be scored.
+
+### Exact-head cache-state risk surface
+
+The mmap and current model-support heads have byte-identical model-runner,
+Mamba state-copy, bundled Flash Linear Attention and cache-configuration blobs.
+The mmap branch therefore inherits the same cache-state machinery; its PLE
+mapping change is not source attribution for the reported fault.
+
+Both heads retain the accepted-count and state-copy paths implicated by open
+[PR #50021](https://github.com/vllm-project/vllm/pull/50021). Their bundled
+`fused_recurrent.py`, `fused_sigmoid_gating.py`, `causal_conv1d.py`, and
+`mamba_ssm.py` are byte-identical to that pull request's pre-fix blobs, while
+their diverged `mamba_utils.py` still performs unbounded block-table column
+loads during
+[state copy](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/v1/worker/mamba_utils.py#L241-L264).
+The exact runner also retains the accepted-count device-to-host and alignment
+[postprocessing](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/v1/worker/gpu_model_runner.py#L1621-L1677),
+and the fused recurrent kernel retains the corresponding unbounded
+[state-row load](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/third_party/flash_linear_attention/ops/fused_recurrent.py#L103-L116).
+
+Neither #50021 head
+[`9a198c0`](https://github.com/vllm-project/vllm/pull/50021/commits/9a198c0f8452d0eb251509f02753853903d9f17f)
+nor the separate overlap-ordering [PR #53613](https://github.com/vllm-project/vllm/pull/53613)
+head
+[`93490dc`](https://github.com/vllm-project/vllm/pull/53613/commits/93490dcdf0f10ee3ad4ccc076dcc743b6a1afa86)
+is an ancestor of either reviewed head. This makes #50021 a plausible isolated
+port candidate, not a demonstrated fix for issue #54173: its validation used a
+different Qwen generation, cache shape and graph mode, while the issue uses
+Qwen3.8, `PIECEWISE`, and also faults with async scheduling disabled. #53613
+addresses a separate overlap race and must not be bundled into the first
+causal arm. CUDA reports the device fault asynchronously in generic forward
+frames, so the traceback alone cannot attribute it to GDN, cache reuse, CUDA
+graphs, or PLE mapping.
 
 ## Phase 2: matched single-user comparison
 
