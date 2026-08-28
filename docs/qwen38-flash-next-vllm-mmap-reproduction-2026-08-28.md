@@ -141,6 +141,7 @@ The branch's default-off path is activated with the following exact settings:
 | CUDA graph mode | `PIECEWISE` | Author-recommended reconstruction setting |
 | Maximum batched tokens | `8192`, subject to resolved-config confirmation | Source-derived OpenAI-server default on a non-A100 device reporting at least 70 GiB; not published by the author |
 | Maximum sequences | `1024`, subject to resolved-config confirmation | Same source-derived default; a feasibility control, not the eventual single-user setting |
+| Prefix caching | Disabled for Phase 1 | A separate GB10 mmap stack crashes on growing cached prefixes; cache-on requires its own gate |
 
 The source refuses full and full-and-piecewise graph modes and requires
 `CompilationMode.VLLM_COMPILE` when mmap is on. It also refuses an
@@ -435,6 +436,7 @@ Admission requires:
 - read-only direct mapping of the checkpoint shards, no offload worker and no
   added container capability;
 - piecewise compiled graphs with the mmap op present in the split set;
+- prefix caching explicitly disabled and attested in resolved configuration;
 - a 1,000-row mmap-versus-`safe_open` oracle whose deterministic seed,
   sampling protocol and digest are frozen before launch, with 1,000/1,000
   exact matches; and
@@ -448,7 +450,7 @@ page faults, NVMe reads, native proposed/accepted counts, and exact cleanup.
 Reconstruct the published shape as a clearly derived protocol: TP1, 32K,
 text-only, greedy, MTP2, three unique unscored warmups, then three unique
 900-token requests. The author did not publish prompts, request JSON, maximum
-sequence count, KV dtype, cache policy, batched-token limit, backend choices,
+sequence count, KV dtype, batched-token limit, backend choices,
 or timing script. Freeze all of those locally and do not claim numerical
 reproduction of 25.1 tok/s.
 
@@ -457,12 +459,37 @@ before promoting the branch to a comparative panel. Any wrong-output,
 token-zero/repetition degeneration, missing native counter, pressure breach,
 or lifecycle failure rejects admission even if output TPS is high.
 
+### Prefix-cache quarantine gate
+
+[vLLM issue #54173](https://github.com/vllm-project/vllm/issues/54173)
+reports a GB10 illegal memory access when long shared prefixes grow across
+turns, while nine byte-identical prompt replays remain healthy and show a large
+cache-hit TTFT reduction. That report uses vLLM `8e685d198` and the separate
+`blazux/qwen3.8-Flash-DGX` mmap patch, not this exact branch, so it is a risk
+signal rather than evidence that `8e4e036` fails.
+
+Do not enable prefix caching in Phase 1 or the first matched panel. A cache-on
+candidate requires a separate fresh lifetime after cache-off admission: first
+confirm three identical-prefix hits as an unscored negative control, then run
+at least twelve requests whose deterministic varied-token 40K--50K prefix is
+extended monotonically by a unique suffix on every turn. Record native cache
+hits, prefix and suffix token counts, TTFT, request wall, memory, swap and typed
+engine health. Validate task facts rather than requiring byte-identical greedy
+text. Stop at the first CUDA, engine, correctness or pressure fault, preserve
+the failure, clean up the process, and reject cache-on; never retry inside that
+lifetime.
+
 ## Phase 2: matched single-user comparison
 
 Only after Phase 1 passes should vLLM and SGLang be compared. Both bundles use
 the same Radix revision, tokenizer, rendered prompts, MTP2 depth, temperature,
 request limits and client. This is a runtime-bundle comparison, not a causal
 isolation of mmap from every other engine difference.
+
+The first panel keeps vLLM prefix caching off and uses byte-distinct requests
+with no shared prefix. Record SGLang's cache policy and require zero observed
+cross-request reuse; do not call the cache-policy implementations matched.
+Cache-on performance belongs only to the quarantine-gated follow-up above.
 
 Freeze two C2-capable 64K bundles and use fresh-lifetime ABBA order:
 
