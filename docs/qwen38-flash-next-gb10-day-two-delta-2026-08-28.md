@@ -10,6 +10,13 @@ That makes the repository's digest-pinned local SGLang overlay useful measured
 evidence, but not a generally safe upstream recipe. Its two repeated-word 131K
 passes do not establish varied-token correctness at long context.
 
+An open corrective SGLang pull request now supplies the first explicit SM121
+Triton packed-varlen fallback directly atop that safety restriction. Its author
+reports clean one-Spark short, concurrent, tool and varied-token 120K--210K
+checks, while forced TRT-LLM produced token-zero output. This is meaningful
+corrective evidence, but the pull request is minutes old, unmerged, publicly
+red/gated, and contains no NVMe PLE reader or comparable end-to-end TPS result.
+
 The highest-value new reproduction target is an open vLLM pull request that
 maps the PLE safetensors directly instead of materializing the full table. Its
 author reports about 25.1 tok/s warm on one Spark with MTP2, exact random-row
@@ -47,8 +54,8 @@ The operational decision is:
   before its cutoff;
 - keep the local clean MTP3/off and replicated mapped-PLE MTP2 results as the
   measured anchors;
-- treat SGLang's general SM121 TRT-LLM route as unsafe until upstream has a
-  validated replacement with natural long-context coverage; and
+- keep TRT-LLM excluded on SM121 and treat the new explicit Triton fallback as
+  an unmerged corrective candidate, not release support;
 - treat SGLang's new `io_uring` reader as a component candidate, not permission
   to run its exact stale SM121 QSA stack; and
 - after the frozen campaign closes, reproduce the vLLM mmap branch under the
@@ -60,7 +67,7 @@ The operational decision is:
 
 This is a strict delta from the day-one review's repository cutoff. The prior
 report was committed at `2026-08-27T21:58:59Z`; this review covers public
-changes visible through `2026-08-28T10:28:40Z`. Materially relevant changes
+changes visible through `2026-08-28T10:32:52Z`. Materially relevant changes
 that began before the cutoff but were absent from the prior report are labeled
 **supplemental** or explicitly described as a sequence that straddles the
 cutoff; they are not silently counted as day-two publications.
@@ -141,6 +148,51 @@ synthetic capacity gate. It must not be weakened or replaced to accommodate
 the new literature, but it cannot address varied-token corruption. Natural
 varied-token validation belongs in a separate post-campaign protocol.
 
+## SGLang: an explicit SM121 Triton fallback is now inspectable
+
+[SGLang PR #36845](https://github.com/sgl-project/sglang/pull/36845) opened at
+`2026-08-28T10:22:31Z`. Its single reviewed commit,
+[`3681c4e03f6848dff82972b3f572602d3b8394cc`](https://github.com/sgl-project/sglang/commit/3681c4e03f6848dff82972b3f572602d3b8394cc),
+sits directly atop restriction `99c9362`. It retains TRT-LLM sparse decode for
+exact SM120 and routes SM121 to a narrow
+[Triton packed-varlen QSA kernel](https://github.com/sgl-project/sglang/blob/3681c4e03f6848dff82972b3f572602d3b8394cc/python/sglang/srt/layers/attention/qsa/sm121_varlen.py).
+This is the first source boundary in this review that both preserves the SM121
+restriction and supplies an explicit GB10 fallback.
+
+The author reports
+[68 QSA tests](https://github.com/sgl-project/sglang/blob/3681c4e03f6848dff82972b3f572602d3b8394cc/test/registered/kernels/test_qsa.py),
+including 30 BF16/FP16 differential cases
+with worst absolute error `0.001953125` and relative RMS `6.994461e-05`.
+Reported kernel times at batch one/four/seven are 0.112843/0.155732/0.210166
+ms. A separate one-Spark, TP1, 262K, NVFP4-expert, FP8-PLE, NEXTN run reported:
+
+| Author-reported gate | Result |
+| --- | ---: |
+| Cold startup | 554.32 s |
+| Sequential / concurrent exact-output requests | 20/20 / 4/4 |
+| Structured tool call | Passed |
+| Exact varied-token NIAH at 120K / 190K / 210K | Passed in 50.46 / 58.13 / 53.30 s |
+| Token-ID-zero outputs / final health | 0 / HTTP 200 |
+| Forced SM121 TRT-LLM control | Token ID 0 for all 32 generated tokens at all three lengths |
+
+These are author-reported validation results, not local measurements. The PR
+is open and unmerged; at the audit its public checks were gated/red. It does
+not pin the checkpoint revision, image digest, full launch or prompt bundle,
+and it adds no comparable end-to-end TPS measurement. Its one commit contains
+no NVMe reader, so the end-to-end run used a separate capacity mechanism not
+defined by the PR. Varied-token NIAH is much stronger than repeated-word
+retention but is still synthetic rather than broad natural-context coverage.
+
+PR #36567 and PR #36845 diverge from the earlier SM121 enablement; neither
+contains the other. The concrete storage-plus-safe-kernel candidate is a new
+integration: rebase only #36567's Rust reader
+[`04648a7`](https://github.com/jzinno/sglang/commit/04648a701501e473081ebabd2c110474f915e924)
+and PLE streaming
+[`9f101e3`](https://github.com/jzinno/sglang/commit/9f101e39ff09b356355e6a11183eaa3f7bb15f8c)
+onto `3681c4e`, excluding its competing QSA commit `8ef3b3`. That result needs
+its own source identity, row oracle, dispatch attestation and long-context
+validation; it is not a reproduction of either published head.
+
 ## SGLang: the new `io_uring` reader is useful, but its QSA stack is stale
 
 Open [SGLang PR #36567](https://github.com/sgl-project/sglang/pull/36567), at
@@ -195,9 +247,9 @@ base, extra and AMD check summaries were red.
 
 Reproduce the storage component only as a clearly named integration arm:
 
-- rebase the reader onto a source boundary that contains the SM121 restriction,
-  or explicitly force and attest the Triton fallback; never silently carry the
-  stale TRT-LLM resolver;
+- rebase storage commits `04648a7` and `9f101e3` onto `3681c4e`, excluding
+  #36567's competing QSA commit; never silently carry the stale TRT-LLM
+  resolver;
 - pin the Rust/Cargo tree, wheel and image digest, then run the full row oracle,
   compile/dispatch attestation and ascending natural long-context gate;
 - use a narrow seccomp profile that admits only `io_uring_setup`,
@@ -438,6 +490,7 @@ The support matrix at this review is therefore:
 | Route | One-Spark GB10 status | Local action |
 | --- | --- | --- |
 | SGLang TRT-LLM sparse decode | SM121 excluded by the reviewed `qwen4-main-squashed` gate after corruption reports; no release support | Keep the existing pinned overlay experimental; strengthen varied-token validation |
+| SGLang SM121 Triton QSA | Open corrective PR directly atop the restriction; useful one-Spark correctness evidence, but unmerged and publicly red/gated | Leading safe-kernel component candidate; reproduce before combining with storage |
 | SGLang `io_uring` PLE streaming | Open stacked PR with exact-checkpoint data, but its head predates the SM121 safety restriction and its public checks are red | Rebase/force the safe QSA fallback before testing the reader; use narrow syscall admission |
 | vLLM direct PLE mmap | Open PR stacked on open model support; promising row and spot checks; a different mmap stack has a growing-prefix cache-on crash | Highest-priority post-cutoff reproduction target, cache-off first |
 | vLLM CPU PLE offload | Open PR; default container isolation blocks `pidfd_getfd` | Do not add `SYS_PTRACE` merely to benchmark it; prefer mmap |
@@ -458,33 +511,34 @@ campaign:
    pinned local Radix NVFP4-backbone/FP8-PLE checkpoint as the best-supported
    reconstruction target while clearly labeling the checkpoint identity as
    inferred until the author confirms it.
-3. Use direct read-only mmap without `SYS_PTRACE`, implicit downloads, mutable
+3. After the untouched author-shape control, apply only the `4df2ce2`
+   live-width slice as a new source identity and require hash-ID/output parity
+   across decode, MTP, prefill and same-token-count/different-layout replay.
+4. Use direct read-only mmap without `SYS_PTRACE`, implicit downloads, mutable
    branches, wildcard cache selection, public API exposure, or prefix caching
    in the initial admission.
-4. Preserve SGLang PR #36567's reader and Rust commits as a second exact source
-   input, but do not execute its stale SM121 resolver. Build a separate
-   integration on the restricted/fallback-attested QSA path; add only the three
-   `io_uring` syscalls to a pinned seccomp profile and test direct reads before
-   any server launch.
-5. Reuse the clean local D256 prompts and client geometry while freezing a new
+5. Build the SGLang storage candidate only from `04648a7` and `9f101e3` atop
+   `3681c4e`; exclude `8ef3b3`. Add only the three `io_uring` syscalls to a
+   pinned seccomp profile and test direct reads before any server launch.
+6. Reuse the clean local D256 prompts and client geometry while freezing a new
    matched vLLM off/MTP2 pair; retain the local MTP3/off pair as the separate
    SGLang anchor. Then run C1/C2/C4/C8 and the deterministic coding/cowork
    battery under the same scalar telemetry, fixed `max-num-seqs`, and explicit
    queue counters.
-6. Add natural varied-token long-context trials around 60K, 120K, 160K, 190K,
+7. Add natural varied-token long-context trials around 60K, 120K, 160K, 190K,
    and 210K only as fresh-lifetime ascending admissions. Precompute token, KV,
    and workspace budgets; retain the existing MemAvailable, swap, and PSI
    gates; and admit the next tier only after the prior tier is correct and
    pressure-clean. On corruption, preserve a typed failure and restart rather
    than retrying inside a poisoned process.
-7. Only after cache-off admission, run the growing-prefix cache canary in a
+8. Only after cache-off admission, run the growing-prefix cache canary in a
    separate fresh lifetime. Repeating a fixed prompt is a negative control, not
    evidence that cache-resume state is safe.
-8. Profile a fixed C1 decode span with CUDA/NVTX timing and process counters to
+9. Profile a fixed C1 decode span with CUDA/NVTX timing and process counters to
    partition target, launch, scheduler, and PLE page-fault costs. GB10 hardware
    counters require separate authorization and expose only LPDDR-facing
    proxies, not direct DRAM bytes.
-9. Publish external claims and local measurements in separate tables; promote
+10. Publish external claims and local measurements in separate tables; promote
    no configuration without semantic, lifecycle, memory, swap, and cleanup
    gates.
 
