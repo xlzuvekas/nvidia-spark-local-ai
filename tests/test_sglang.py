@@ -417,6 +417,67 @@ class SGLangRuntimeTests(unittest.TestCase):
         self.assertEqual(mapped_quality.request_body_json, expected_body)
         self.assertEqual(omitted_quality.request_body_json, expected_body)
 
+    def test_extra_buffer_controls_change_only_strategy_identity(self) -> None:
+        profiles = load_models(ROOT / "manifests" / "models.toml")
+        for depth in (2, 3):
+            lazy = profiles[
+                f"qwen38-flash-next-nvfp4-mtp{depth}-c8-lazy-"
+                "ple-mapped-sglang"
+            ]
+            extra = profiles[
+                f"qwen38-flash-next-nvfp4-mtp{depth}-c6-extra-"
+                "ple-mapped-sglang"
+            ]
+
+            for field in (
+                "backend",
+                "source",
+                "revision",
+                "weight_file_count",
+                "weight_size_bytes",
+                "tasks",
+                "request_body_json",
+                "architecture",
+                "quantization",
+                "lifecycle",
+                "image",
+                "image_digest",
+                "cache_dir",
+                "recipe_source",
+                "recipe_revision",
+                "max_context",
+                "native_context",
+                "startup_timeout_s",
+                "estimated_ram_gib",
+                "endpoint",
+                "support_status",
+                "sglang_source_overlays",
+                "sglang_ple_mmap",
+                "sglang_ple_omitted",
+                "sglang_ple_cache_mode",
+                "sglang_ple_cache_marker_digest",
+                "sglang_ple_cache_payload_digest",
+            ):
+                with self.subTest(depth=depth, field=field):
+                    self.assertEqual(getattr(extra, field), getattr(lazy, field))
+
+            expected_args = list(lazy.args)
+            served_index = expected_args.index("--served-model-name") + 1
+            strategy_index = (
+                expected_args.index("--mamba-radix-cache-strategy") + 1
+            )
+            expected_args[served_index] = extra.served_name
+            expected_args[strategy_index] = "extra_buffer"
+            self.assertEqual(extra.args, tuple(expected_args))
+            self.assertEqual(
+                extra.args[extra.args.index("--max-mamba-cache-size") + 1],
+                "32",
+            )
+            self.assertEqual(
+                extra.args[extra.args.index("--max-running-requests") + 1],
+                "8",
+            )
+
     def test_manifest_rejects_ambiguous_ple_omission(self) -> None:
         profile = load_models(ROOT / "manifests" / "models.toml")[
             "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-omitted-sglang"

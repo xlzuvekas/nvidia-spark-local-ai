@@ -428,6 +428,26 @@ See the
 individual lifetimes, exact evidence links, wall time, memory, safety gates,
 artifact pins, and interpretation limits.
 
+The 2026-08-28 follow-up freezes a fresh mapped-PLE 2 × 2 block to measure the
+ordinary/lazy buffer-strategy effect at NEXTN depths two and three, and to give
+lazy D3 its second independent lifetime. New ordinary D2/D3 profiles differ
+from their clean lazy controls only in public identity and
+`--mamba-radix-cache-strategy`; all use 32 recurrent states and the same 4K,
+32K-token-pool, graph-1-through-8 geometry. The fixed lifetime order is
+ordinary D2, ordinary D3, lazy D2, lazy D3. Primary per-case interaction is the
+additive difference-in-differences `(L3 - L2) - (O3 - O2)` from that one block.
+
+The dedicated interaction suite preserves the prior D256/C1/C2/C4/C8 cases in
+the same order, then appends C6. Under the 32-state pool, offered C6 is
+state-capacity-feasible for ordinary and lazy while offered C8 is feasible only
+for lazy. Treat C1/C2/C4 as the primary matched-strategy cells, C6 as a secondary
+shared offered-load/state-capacity point, and C8 as a scheduling/capacity
+outcome rather than matched-concurrency TPS.
+The earlier 40-state ordinary D2/D3 safety
+rejections remain incompatible and must not be retried. The full frozen design
+and commands are in the
+[follow-up protocol](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md#lazy-buffer--depth-follow-up--frozen-2026-08-28).
+
 #### Retained day-zero diagnostics
 
 The isolated CUDA NVFP4 embedding primitive matched an independent

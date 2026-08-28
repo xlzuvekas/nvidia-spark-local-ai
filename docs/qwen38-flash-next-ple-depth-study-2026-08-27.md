@@ -133,6 +133,77 @@ Sanitized scalar evidence:
 - ABBA replication: [D1 A](../evidence/runs/20260827T232851Z-qwen38-flash-next-nvfp4-mtp1-c8-lazy-ple-mapped-sglang-qwen38-flash-next-sglang-ple-depth-c8-87836e9b/summary.json), [D2 A](../evidence/runs/20260827T234248Z-qwen38-flash-next-nvfp4-mtp2-c8-lazy-ple-mapped-sglang-qwen38-flash-next-sglang-ple-depth-c8-0c745ab5/summary.json), [D2 B](../evidence/runs/20260827T235628Z-qwen38-flash-next-nvfp4-mtp2-c8-lazy-ple-mapped-sglang-qwen38-flash-next-sglang-ple-depth-c8-0c745ab5/summary.json), and [D1 B](../evidence/runs/20260828T001017Z-qwen38-flash-next-nvfp4-mtp1-c8-lazy-ple-mapped-sglang-qwen38-flash-next-sglang-ple-depth-c8-87836e9b/summary.json); and
 - depth-three comparison: [mapped](../evidence/runs/20260828T002411Z-qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-mapped-sglang-qwen38-flash-next-sglang-ple-depth-c8-c98f473f/summary.json) and [omitted](../evidence/runs/20260828T003801Z-qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-omitted-sglang-qwen38-flash-next-sglang-ple-depth-c8-5b30b3b6/summary.json).
 
+## Lazy-buffer × depth follow-up — frozen 2026-08-28
+
+The first panel held `extra_buffer_lazy` constant, so it did not measure whether
+the lazy strategy's effect changes between NEXTN depths two and three. It also
+left mapped lazy D3 at one lifetime while D1 and D2 had two. This follow-up
+freezes one fresh 2 × 2 interaction block and one D3 replication before looking
+at its outcomes.
+
+Two mapped-PLE ordinary-buffer profiles clone the clean lazy D2 and D3 profiles.
+Apart from public profile/served names and `extra_buffer` versus
+`extra_buffer_lazy`, every model field, artifact pin, request body, allocation,
+graph batch, and NEXTN setting is identical. All four block cells use 32
+recurrent states, the 32,768-token pool, 4,096 context, eight offered running
+requests, and the ablation-capable mapped-PLE overlays. Do not reuse the legacy
+40-state ordinary profiles: D3 crossed the memory floor during graph capture
+and D2 crossed the swap-growth gate.
+
+The separate `qwen38-flash-next-sglang-lazy-depth3-interaction` suite preserves
+the original D256, C1, C2, C4, and C8 cases byte-for-byte and in the same order,
+then appends C6. This keeps the new lazy D3 lifetime comparable with the first
+lazy D3 lifetime on their five shared cells. Ordinary `extra_buffer` reserves
+five recurrent-state slots per overlapping request and lazy reserves four, so
+offered C6 is state-capacity-feasible for both under the 32-state pool while
+only lazy is state-capacity-feasible at C8. D256, C1, C2, and C4 are the primary
+matched strategy cells. C6 is the shared offered-C6/state-capacity-feasible
+upper point but remains secondary because it follows arms with different C8
+scheduling behavior. C8 is an offered load/capacity result and must not be
+labeled a matched-concurrency effect. Scheduler occupancy remains an operator
+observation unless the existing scalar exporter records it.
+
+Run one clean server lifetime at a time in this fixed order:
+
+1. ordinary buffer, depth 2 (`O2`);
+2. ordinary buffer, depth 3 (`O3`);
+3. lazy buffer, depth 2 (`L2`); and
+4. lazy buffer, depth 3 (`L3`).
+
+Keeping D2 then D3 order inside both strategy blocks makes a linear time drift
+cancel in the additive interaction `(L3 - L2) - (O3 - O2)`. Report that
+difference-in-differences in tok/s plus the four individual cells for each
+matched case. It is still one fixed-order block, not a replicated interaction;
+do not treat requests within a lifetime as independent configuration
+replicates. Report C8 separately as the capacity interaction described above.
+
+The new `L3` lifetime is the second independent mapped lazy-D3 server lifetime.
+Combine it only with the earlier `L3` lifetime for the five shared cases,
+publishing both values and their unweighted mean. The new `L2` cell exists to
+complete the fresh interaction block and C6 comparison; it does not replace or
+silently expand the original D1/D2 ABBA depth estimate. The earlier D3
+lifetime's 13.9045677185 GiB first-request floor breach remains attached to it;
+a second throughput lifetime cannot make its startup safety valid.
+
+The unchanged safety gates are 14 GiB available host memory and 512 MiB swap
+growth. Retain typed failures, early stops, and null aggregates without retries
+or gate relaxation. Commands after committing the clean harness are:
+
+```bash
+python3 sparkbench.py benchmark \
+  qwen38-flash-next-nvfp4-mtp2-c6-extra-ple-mapped-sglang \
+  --suite manifests/suites/qwen38_flash_next_sglang_lazy_depth3_interaction.toml
+python3 sparkbench.py benchmark \
+  qwen38-flash-next-nvfp4-mtp3-c6-extra-ple-mapped-sglang \
+  --suite manifests/suites/qwen38_flash_next_sglang_lazy_depth3_interaction.toml
+python3 sparkbench.py benchmark \
+  qwen38-flash-next-nvfp4-mtp2-c8-lazy-ple-mapped-sglang \
+  --suite manifests/suites/qwen38_flash_next_sglang_lazy_depth3_interaction.toml
+python3 sparkbench.py benchmark \
+  qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-mapped-sglang \
+  --suite manifests/suites/qwen38_flash_next_sglang_lazy_depth3_interaction.toml
+```
+
 ## Frozen artifacts and omission contract
 
 Every arm pins:

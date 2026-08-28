@@ -129,6 +129,14 @@ _PLE_STUDY_PROFILE_IDS_BY_SUITE = {
             "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-omitted-sglang",
         }
     ),
+    "qwen38-flash-next-sglang-lazy-depth3-interaction": frozenset(
+        {
+            "qwen38-flash-next-nvfp4-mtp2-c6-extra-ple-mapped-sglang",
+            "qwen38-flash-next-nvfp4-mtp3-c6-extra-ple-mapped-sglang",
+            "qwen38-flash-next-nvfp4-mtp2-c8-lazy-ple-mapped-sglang",
+            "qwen38-flash-next-nvfp4-mtp3-c8-lazy-ple-mapped-sglang",
+        }
+    ),
     "qwen38-flash-next-sglang-quality-v2": frozenset(
         {
             "qwen38-flash-next-nvfp4-mtp3-quality-v2-ple-mapped-sglang",
@@ -136,10 +144,15 @@ _PLE_STUDY_PROFILE_IDS_BY_SUITE = {
         }
     ),
 }
-_PLE_STUDY_SUITE_BY_PROFILE_ID = {
-    profile_id: suite_id
-    for suite_id, profile_ids in _PLE_STUDY_PROFILE_IDS_BY_SUITE.items()
-    for profile_id in profile_ids
+_PLE_STUDY_SUITE_IDS_BY_PROFILE_ID = {
+    profile_id: frozenset(
+        suite_id
+        for suite_id, profile_ids in _PLE_STUDY_PROFILE_IDS_BY_SUITE.items()
+        if profile_id in profile_ids
+    )
+    for profile_id in frozenset().union(
+        *_PLE_STUDY_PROFILE_IDS_BY_SUITE.values()
+    )
 }
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
@@ -1685,7 +1698,7 @@ def validate_benchmark_selection(
             f"the {_FLASH_NEXT_LONG_PROFILE_ID!r} profile"
         )
     ple_study_suite_profiles = _PLE_STUDY_PROFILE_IDS_BY_SUITE.get(suite.id)
-    ple_study_profile_suite = _PLE_STUDY_SUITE_BY_PROFILE_ID.get(model_id)
+    ple_study_profile_suites = _PLE_STUDY_SUITE_IDS_BY_PROFILE_ID.get(model_id)
     if (
         ple_study_suite_profiles is not None
         and model_id not in ple_study_suite_profiles
@@ -1694,10 +1707,16 @@ def validate_benchmark_selection(
             f"{context}: the {suite.id!r} suite requires one of its exact "
             "PLE-study profiles"
         )
-    if ple_study_profile_suite is not None and suite.id != ple_study_profile_suite:
+    if (
+        ple_study_profile_suites is not None
+        and suite.id not in ple_study_profile_suites
+    ):
+        allowed_suites = ", ".join(
+            repr(suite_id) for suite_id in sorted(ple_study_profile_suites)
+        )
         raise ManifestError(
-            f"{context}: the {model.id!r} profile requires the "
-            f"{ple_study_profile_suite!r} suite"
+            f"{context}: the {model.id!r} profile requires one of the "
+            f"following suites: {allowed_suites}"
         )
     if suite.id == MEMORY_OPERATION_SUITE_ID:
         try:
