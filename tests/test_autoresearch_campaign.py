@@ -36,9 +36,11 @@ from bench.autoresearch_campaign import (
     run_frozen_cell,
     run_campaign,
     semantic_config,
+    summarize_campaign,
     validate_campaign,
 )
 from bench.autoresearch import CampaignPolicy
+from bench.autoresearch_admission import AdmissionJournalError
 from bench.autoresearch_worker import (
     WorkerCleanupResult,
     WorkerLifecycleError,
@@ -290,6 +292,20 @@ def _freeze_campaign_fixture(root: Path) -> Path:
     )
 
 
+def _downgrade_pre_admission_campaign_fixture(campaign_dir: Path) -> None:
+    """Model a schema-2 campaign whose raw work predates admission journals."""
+
+    frozen_path = campaign_dir / "campaign.json"
+    frozen = json.loads(frozen_path.read_text())
+    if frozen.get("schema_version") != 3:
+        raise AssertionError("fixture is not the current frozen campaign schema")
+    frozen["schema_version"] = 2
+    frozen.pop("admission_journal_required")
+    frozen.pop("integrity_hash")
+    frozen["integrity_hash"] = content_hash(frozen, 64)
+    write_json(frozen_path, frozen)
+
+
 def _admission_meminfo(*, available_gib: int = 120, swap_used_mib: int = 0) -> str:
     total_kib = 128 * 1024**2
     swap_total_kib = 16 * 1024**2
@@ -301,6 +317,11 @@ def _admission_meminfo(*, available_gib: int = 120, swap_used_mib: int = 0) -> s
             f"SwapFree: {swap_total_kib - swap_used_mib * 1024} kB",
         )
     )
+
+
+def _admission_records(campaign_dir: Path) -> tuple[dict[str, object], ...]:
+    path = campaign_dir / "admissions.jsonl"
+    return tuple(json.loads(line) for line in path.read_text().splitlines())
 
 
 def _synthetic_projection(cell: object, *, improvement: float) -> CellProjection:
@@ -824,9 +845,19 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
                 cell_runner=lambda cell: cell_calls.append(cell.cell_id),  # type: ignore[arg-type,return-value]
             )
             events_exists = (campaign_dir / "events.jsonl").exists()
+            admissions = _admission_records(campaign_dir)
+            admission_mode = stat.S_IMODE(
+                (campaign_dir / "admissions.jsonl").stat().st_mode
+            )
 
         self.assertEqual(summary["status"], "blocked_environment")
+        self.assertEqual(summary["schema_version"], 2)
+        self.assertEqual(summary["controller_status"], "planned")
         self.assertEqual(summary["blockers"], ["starting_swap_above_clean_limit"])
+        self.assertEqual(summary["admission_count"], 1)
+        self.assertEqual(admission_mode, 0o600)
+        self.assertEqual(admissions[0]["target_kind"], "calibration")
+        self.assertEqual(admissions[0]["outcome"], "blocked_environment")
         self.assertEqual(cell_calls, [])
         self.assertFalse(events_exists)
 
@@ -842,9 +873,11 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
                 harness_identity_reader=lambda _workspace: ("0" * 64, 1),
                 cell_runner=lambda cell: cell_calls.append(cell.cell_id),  # type: ignore[arg-type,return-value]
             )
+            admissions = _admission_records(campaign_dir)
 
         self.assertEqual(summary["status"], "blocked_environment")
         self.assertEqual(summary["blockers"], ["harness_code_changed"])
+        self.assertEqual(admissions[0]["blockers"], ["harness_code_changed"])
         self.assertEqual(cell_calls, [])
 
     def test_active_campaign_admission_blocker_is_durably_terminal(self) -> None:
@@ -871,9 +904,16 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
                 meminfo_reader=lambda: _admission_meminfo(swap_used_mib=65),
                 cell_runner=lambda _cell: self.fail("blocked resume launched a cell"),
             )
+            admissions = _admission_records(campaign_dir)
 
         self.assertEqual(summary["status"], "terminated")
         self.assertEqual(summary["terminal_reason"], "swap_pressure")
+        self.assertEqual(summary["controller_status"], "terminated")
+        self.assertEqual(summary["admission_count"], 2)
+        self.assertEqual(
+            tuple(record["outcome"] for record in admissions),
+            ("admitted", "blocked_environment"),
+        )
 
     def test_harness_identity_is_rechecked_immediately_before_cell(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
@@ -898,6 +938,246 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
         self.assertEqual(summary["status"], "terminated")
         self.assertEqual(summary["terminal_reason"], "audit")
         self.assertEqual(calls, [])
+
+    def test_fresh_cutoff_is_expired_but_mixed_safety_denial_is_blocked(self) -> None:
+        cutoff_time = datetime.fromisoformat("2026-08-28T05:37:50.001-07:00")
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            root = Path(directory)
+            expired_root = root / "expired"
+            expired_root.mkdir()
+            expired_dir = _freeze_campaign_fixture(expired_root)
+            expired = run_campaign(
+                expired_dir,
+                workspace=ROOT,
+                now=lambda: cutoff_time,
+                meminfo_reader=_admission_meminfo,
+                cell_runner=lambda _cell: self.fail("cutoff launched a cell"),
+            )
+            expired_admissions = _admission_records(expired_dir)
+
+            mixed_root = root / "mixed"
+            mixed_root.mkdir()
+            mixed_dir = _freeze_campaign_fixture(mixed_root)
+            mixed = run_campaign(
+                mixed_dir,
+                workspace=ROOT,
+                now=lambda: cutoff_time,
+                meminfo_reader=lambda: _admission_meminfo(swap_used_mib=65),
+                cell_runner=lambda _cell: self.fail("mixed denial launched a cell"),
+            )
+            mixed_admissions = _admission_records(mixed_dir)
+
+        self.assertEqual(expired["status"], "expired")
+        self.assertEqual(expired["controller_status"], "planned")
+        self.assertEqual(expired["terminal_reason"], None)
+        self.assertEqual(expired_admissions[0]["outcome"], "cutoff")
+        self.assertEqual(
+            expired_admissions[0]["blockers"], ["insufficient_time_for_pair"]
+        )
+        self.assertEqual(mixed["status"], "blocked_environment")
+        self.assertEqual(
+            mixed_admissions[0]["blockers"],
+            ["insufficient_time_for_pair", "starting_swap_above_clean_limit"],
+        )
+
+    def test_active_cutoff_is_terminal_and_effectively_expired(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+
+            def interrupt(_cell: object) -> CellProjection:
+                raise KeyboardInterrupt
+
+            with self.assertRaises(KeyboardInterrupt):
+                run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=lambda: datetime.fromisoformat(
+                        "2026-08-28T00:00:00-07:00"
+                    ),
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=interrupt,
+                )
+            summary = run_campaign(
+                campaign_dir,
+                workspace=ROOT,
+                now=lambda: datetime.fromisoformat(
+                    "2026-08-28T05:37:50.001-07:00"
+                ),
+                meminfo_reader=_admission_meminfo,
+                cell_runner=lambda _cell: self.fail("active cutoff launched a cell"),
+            )
+
+        self.assertEqual(summary["status"], "expired")
+        self.assertEqual(summary["controller_status"], "terminated")
+        self.assertEqual(summary["terminal_reason"], "cutoff")
+        self.assertEqual(summary["admission_count"], 2)
+
+    def test_public_summary_preserves_denial_without_a_new_observation(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            denied = run_campaign(
+                campaign_dir,
+                workspace=ROOT,
+                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
+                meminfo_reader=lambda: _admission_meminfo(swap_used_mib=65),
+                cell_runner=lambda _cell: self.fail("denial launched a cell"),
+            )
+            before = (campaign_dir / "admissions.jsonl").read_bytes()
+            summarized = summarize_campaign(campaign_dir)
+            after = (campaign_dir / "admissions.jsonl").read_bytes()
+
+        self.assertEqual(summarized, denied)
+        self.assertEqual(after, before)
+
+    def test_malformed_admission_chain_prevents_resume_and_cell_launch(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            run_campaign(
+                campaign_dir,
+                workspace=ROOT,
+                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
+                meminfo_reader=lambda: _admission_meminfo(swap_used_mib=65),
+                cell_runner=lambda _cell: self.fail("denial launched a cell"),
+            )
+            journal_path = campaign_dir / "admissions.jsonl"
+            journal_path.write_bytes(journal_path.read_bytes() + b"torn")
+            calls: list[str] = []
+            with self.assertRaisesRegex(
+                CampaignPlanningError, "admission journal is unsafe or malformed"
+            ):
+                run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=lambda: datetime.fromisoformat(
+                        "2026-08-28T00:01:00-07:00"
+                    ),
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=lambda cell: calls.append(str(cell.cell_id)),  # type: ignore[union-attr,return-value]
+                )
+
+        self.assertEqual(calls, [])
+
+    def test_schema_three_summary_requires_calibration_and_pair_admissions(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            root = Path(directory)
+            missing_calibration_root = root / "missing-calibration"
+            missing_calibration_root.mkdir()
+            missing_calibration = _freeze_campaign_fixture(
+                missing_calibration_root
+            )
+            stopped_at = datetime.fromisoformat("2026-08-28T00:00:00-07:00")
+
+            def projection_for(cell: object) -> CellProjection:
+                return _synthetic_projection(cell, improvement=1.0)
+
+            with _synthetic_projection_boundary(
+                projection_for,
+                stopped_at=stopped_at,
+                audit_reserve_s=25_200.0,
+            ):
+                run_campaign(
+                    missing_calibration,
+                    workspace=ROOT,
+                    now=lambda: stopped_at,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=projection_for,  # type: ignore[arg-type]
+                )
+                (missing_calibration / "admissions.jsonl").unlink()
+                with self.assertRaisesRegex(
+                    CampaignPlanningError,
+                    "calibration execution has no admitted provenance",
+                ):
+                    summarize_campaign(missing_calibration)
+
+            missing_pair_root = root / "missing-pair"
+            missing_pair_root.mkdir()
+            missing_pair = _freeze_campaign_fixture(missing_pair_root)
+            with _synthetic_projection_boundary(
+                projection_for,
+                stopped_at=stopped_at,
+                audit_reserve_s=25_200.0,
+            ):
+                run_campaign(
+                    missing_pair,
+                    workspace=ROOT,
+                    now=lambda: stopped_at,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=projection_for,  # type: ignore[arg-type]
+                )
+                run_campaign(
+                    missing_pair,
+                    workspace=ROOT,
+                    now=lambda: stopped_at,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=projection_for,  # type: ignore[arg-type]
+                )
+                admission_path = missing_pair / "admissions.jsonl"
+                calibration_line = admission_path.read_text().splitlines()[0]
+                admission_path.write_text(calibration_line + "\n")
+                with self.assertRaisesRegex(
+                    CampaignPlanningError,
+                    "search pair execution has no admitted provenance",
+                ):
+                    summarize_campaign(missing_pair)
+
+    def test_admission_append_failure_precedes_controller_and_cell_mutation(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            calls: list[str] = []
+            with (
+                patch(
+                    "bench.autoresearch_campaign.append_admission_record",
+                    side_effect=AdmissionJournalError("synthetic append failure"),
+                ),
+                self.assertRaisesRegex(
+                    CampaignPlanningError,
+                    "admission journal is unsafe or malformed",
+                ),
+            ):
+                run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=lambda: datetime.fromisoformat(
+                        "2026-08-28T00:00:00-07:00"
+                    ),
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=lambda cell: calls.append(str(cell.cell_id)),  # type: ignore[union-attr,return-value]
+                )
+
+            self.assertEqual(calls, [])
+            self.assertFalse((campaign_dir / "events.jsonl").exists())
+            self.assertFalse((campaign_dir / "summary.json").exists())
+            self.assertFalse((campaign_dir / "admissions.jsonl").exists())
+
+    def test_admission_samples_clock_after_memory_and_harness(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            campaign = load_frozen_campaign(campaign_dir)
+            order: list[str] = []
+
+            def meminfo() -> str:
+                order.append("meminfo")
+                return _admission_meminfo()
+
+            def harness(_workspace: Path) -> tuple[str, int]:
+                order.append("harness")
+                return campaign.harness_tree_sha256, campaign.harness_file_count
+
+            def now() -> datetime:
+                order.append("clock")
+                return datetime.fromisoformat("2026-08-28T05:37:50.001-07:00")
+
+            summary = run_campaign(
+                campaign_dir,
+                workspace=ROOT,
+                now=now,
+                meminfo_reader=meminfo,
+                harness_identity_reader=harness,
+                cell_runner=lambda _cell: self.fail("cutoff launched a cell"),
+            )
+
+        self.assertEqual(order, ["meminfo", "harness", "clock"])
+        self.assertEqual(summary["status"], "expired")
 
     def test_campaign_lock_rejects_links_and_an_active_controller(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:

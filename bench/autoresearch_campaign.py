@@ -49,6 +49,15 @@ from .autoresearch import (
     replay_transitions,
     validate_one_axis_delta,
 )
+from .autoresearch_admission import (
+    AdmissionBinding,
+    AdmissionJournalError,
+    AdmissionTarget,
+    append_admission_record,
+    controller_prefix_sha256,
+    observe_admission,
+    read_admission_journal,
+)
 from .autoresearch_worker import (
     WorkerLifecycleError,
     WorkerProgress,
@@ -73,7 +82,7 @@ from .runtime import recover_owned_sglang
 
 
 CAMPAIGN_SCHEMA_VERSION = 1
-FROZEN_CAMPAIGN_SCHEMA_VERSION = 2
+FROZEN_CAMPAIGN_SCHEMA_VERSION = 3
 EXPECTED_SUITE_ID = "qwen38-flash-next-sglang-agent64k-autoresearch"
 EXPECTED_CAMPAIGN_RELATIVE_PATH = Path(
     "manifests/campaigns/qwen38_flash_next_single_user_autoresearch.toml"
@@ -350,6 +359,7 @@ class FrozenCampaign:
     preview_digest: str
     harness_tree_sha256: str
     harness_file_count: int
+    admission_journal_required: bool
     proposals: tuple[ValidatedProposal, ...]
     cells: tuple[FrozenCell, ...]
 
@@ -889,6 +899,7 @@ def freeze_campaign(
         "created_at": utc_now(),
         "harness_tree_sha256": harness_tree_sha256,
         "harness_file_count": harness_file_count,
+        "admission_journal_required": True,
         "preview": preview.to_mapping(),
         "preview_digest": preview.digest,
         "cells": frozen_cells,
@@ -919,6 +930,13 @@ def _require_safe_relative_path(
 def load_frozen_campaign(campaign_dir: Path) -> FrozenCampaign:
     root = campaign_dir.resolve(strict=True)
     frozen = _read_json_object(root / "campaign.json", context="frozen campaign")
+    schema_version = frozen.get("schema_version")
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version not in {2, FROZEN_CAMPAIGN_SCHEMA_VERSION}
+    ):
+        raise CampaignPlanningError("unsupported frozen campaign schema version")
     expected_top = {
         "schema_version",
         "created_at",
@@ -930,10 +948,15 @@ def load_frozen_campaign(campaign_dir: Path) -> FrozenCampaign:
         "execution_started",
         "integrity_hash",
     }
+    if schema_version == FROZEN_CAMPAIGN_SCHEMA_VERSION:
+        expected_top.add("admission_journal_required")
     if set(frozen) != expected_top:
         raise CampaignPlanningError("frozen campaign has an unknown or missing field")
-    if frozen["schema_version"] != FROZEN_CAMPAIGN_SCHEMA_VERSION:
-        raise CampaignPlanningError("unsupported frozen campaign schema version")
+    admission_journal_required = schema_version == FROZEN_CAMPAIGN_SCHEMA_VERSION
+    if admission_journal_required and frozen["admission_journal_required"] is not True:
+        raise CampaignPlanningError(
+            "frozen campaign admission-journal requirement changed"
+        )
     created_at = _require_string(
         frozen["created_at"], context="frozen campaign creation time"
     )
@@ -1253,6 +1276,7 @@ def load_frozen_campaign(campaign_dir: Path) -> FrozenCampaign:
         preview_digest=str(frozen["preview_digest"]),
         harness_tree_sha256=harness_tree_sha256,
         harness_file_count=harness_file_count,
+        admission_journal_required=admission_journal_required,
         proposals=tuple(proposals),
         cells=tuple(cells),
     )
@@ -2262,6 +2286,44 @@ def _aware_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _required_preflight_memavailable_kib(campaign: FrozenCampaign) -> int:
+    calibration = campaign.cells_for(
+        candidate_id="control", stage="calibration"
+    )
+    model = _bound_frozen_cell_plan_model(calibration["control_a"])
+    estimated = model.get("estimated_ram_gib")
+    if (
+        isinstance(estimated, bool)
+        or not isinstance(estimated, (int, float))
+        or not math.isfinite(float(estimated))
+        or float(estimated) <= 0
+    ):
+        raise CampaignPlanningError("calibration control RAM estimate is missing")
+    return int((float(estimated) + 8.0) * 1024**2)
+
+
+def _campaign_admission_binding(campaign: FrozenCampaign) -> AdmissionBinding:
+    try:
+        return AdmissionBinding(
+            campaign_id=campaign.campaign_id,
+            campaign_integrity_sha256=campaign.integrity_hash,
+            preview_sha256=campaign.preview_digest,
+            policy_sha256=campaign.policy_digest,
+            cutoff_at=campaign.cutoff.isoformat(),
+            required_remaining_s=float(PAIR_ADMISSION_REMAINING_S),
+            required_memavailable_kib=_required_preflight_memavailable_kib(
+                campaign
+            ),
+            max_starting_swap_kib=HOST_SAFETY_MAX_STARTING_SWAP_KIB,
+            harness_sha256=campaign.harness_tree_sha256,
+            harness_file_count=campaign.harness_file_count,
+        )
+    except AdmissionJournalError as error:
+        raise CampaignPlanningError(
+            "frozen campaign admission binding is invalid"
+        ) from error
+
+
 def campaign_admission(
     campaign: FrozenCampaign,
     *,
@@ -2283,23 +2345,409 @@ def campaign_admission(
         raise CampaignPlanningError("campaign host-memory admission failed closed") from error
     if sample.swap_used_kib > HOST_SAFETY_MAX_STARTING_SWAP_KIB:
         blockers.append("starting_swap_above_clean_limit")
-    calibration = campaign.cells_for(
-        candidate_id="control", stage="calibration"
-    )
-    plan = _read_json_object(
-        calibration["control_a"].run_dir / "plan.json",
-        context="calibration control plan",
-    )
-    model = plan.get("model")
-    if not isinstance(model, dict):
-        raise CampaignPlanningError("calibration control model is malformed")
-    estimated = model.get("estimated_ram_gib")
-    if isinstance(estimated, bool) or not isinstance(estimated, (int, float)):
-        raise CampaignPlanningError("calibration control RAM estimate is missing")
-    required_kib = int((float(estimated) + 8.0) * 1024**2)
+    required_kib = _required_preflight_memavailable_kib(campaign)
     if sample.memavailable_kib < required_kib:
         blockers.append("insufficient_preflight_memavailable")
     return tuple(blockers)
+
+
+def _next_admission_target(
+    campaign: FrozenCampaign,
+    state: ReplayState | None,
+    events: tuple[dict[str, Any], ...],
+    *,
+    calibration_ready: bool,
+) -> AdmissionTarget | None:
+    """Return the exact pair whose next cell could launch this invocation."""
+
+    if not calibration_ready:
+        if state is not None and not (
+            state.phase == "idle"
+            and state.next_pair_index == 0
+            and len(events) == 1
+            and events[0].get("event") == "autoresearch_campaign_started"
+        ):
+            raise CampaignPlanningError(
+                "calibration is missing after search controller activity"
+            )
+        return AdmissionTarget(
+            kind="calibration", candidate_id="control", pair_index=0
+        )
+    if state is None:
+        raise CampaignPlanningError(
+            "recorded calibration has no controller admission boundary"
+        )
+    if state.phase == "pair":
+        if (
+            state.candidate_id is None
+            or state.active_pair_index is None
+        ):
+            raise CampaignPlanningError("active pair has no frozen identity")
+        if state.completed_arms == state.active_order:
+            return None
+        return AdmissionTarget(
+            kind=(
+                "screen"
+                if len(state.candidate_observations) == 0
+                else "confirmation"
+            ),
+            candidate_id=state.candidate_id,
+            pair_index=state.active_pair_index,
+        )
+    if state.phase in {"scored", "terminal"}:
+        return None
+    if state.phase == "candidate":
+        if state.candidate_id is None:
+            raise CampaignPlanningError("active candidate has no ID")
+        return AdmissionTarget(
+            kind=(
+                "screen"
+                if len(state.candidate_observations) == 0
+                else "confirmation"
+            ),
+            candidate_id=state.candidate_id,
+            pair_index=state.next_pair_index,
+        )
+    if state.phase != "idle":
+        raise CampaignPlanningError(
+            "controller is not at a pair admission boundary"
+        )
+    decisions = _candidate_decisions(events)
+    if any(
+        decision in {"promote", "promote_simplification"}
+        for decision in decisions.values()
+    ):
+        return None
+    proposal = next(
+        (
+            item
+            for item in campaign.proposals
+            if item.candidate_id not in decisions
+        ),
+        None,
+    )
+    if proposal is None:
+        return None
+    return AdmissionTarget(
+        kind="screen",
+        candidate_id=proposal.candidate_id,
+        pair_index=state.next_pair_index,
+    )
+
+
+def _append_live_admission(
+    campaign: FrozenCampaign,
+    *,
+    target: AdmissionTarget,
+    events: tuple[dict[str, Any], ...],
+    workspace: Path,
+    now: Callable[[], datetime],
+    meminfo_reader: Callable[[], str],
+    harness_identity_reader: Callable[[Path], tuple[str, int]],
+) -> dict[str, Any]:
+    binding = _campaign_admission_binding(campaign)
+    _read_campaign_admissions(campaign, events=events, binding=binding)
+    try:
+        sample = parse_meminfo(meminfo_reader())
+    except (OSError, ValueError) as error:
+        raise CampaignPlanningError(
+            "campaign host-memory admission failed closed"
+        ) from error
+    try:
+        harness_sha256, harness_file_count = harness_identity_reader(workspace)
+    except (OSError, ValueError) as error:
+        raise CampaignPlanningError(
+            "campaign harness identity could not be verified"
+        ) from error
+    observed_at = now()
+    if (
+        not isinstance(observed_at, datetime)
+        or observed_at.tzinfo is None
+        or observed_at.utcoffset() is None
+    ):
+        raise CampaignPlanningError(
+            "campaign admission time must be timezone-aware"
+        )
+    try:
+        observation = observe_admission(
+            binding,
+            observed_at=observed_at,
+            memavailable_kib=sample.memavailable_kib,
+            swap_used_kib=sample.swap_used_kib,
+            observed_harness_sha256=harness_sha256,
+            observed_harness_file_count=harness_file_count,
+        )
+        appended = append_admission_record(
+            campaign.campaign_dir / "admissions.jsonl",
+            binding=binding,
+            target=target,
+            observation=observation,
+            controller_events=events,
+        )
+        admissions = _read_campaign_admissions(
+            campaign, events=events, binding=binding
+        )
+        if not admissions or admissions[-1] != appended:
+            raise AdmissionJournalError(
+                "appended admission is not the verified journal tail"
+            )
+        return appended
+    except AdmissionJournalError as error:
+        raise CampaignPlanningError(
+            "campaign admission journal is unsafe or malformed"
+        ) from error
+
+
+def _admission_failure_kind(blockers: tuple[str, ...]) -> str:
+    for blocker, failure_kind in (
+        ("harness_code_changed", "audit"),
+        ("starting_swap_above_clean_limit", "swap_pressure"),
+        ("insufficient_preflight_memavailable", "memory_pressure"),
+        ("insufficient_time_for_pair", "cutoff"),
+    ):
+        if blocker in blockers:
+            return failure_kind
+    raise CampaignPlanningError("blocked admission has no known causal blocker")
+
+
+def _historical_search_admission_target(
+    campaign: FrozenCampaign,
+    *,
+    events: tuple[dict[str, Any], ...],
+) -> AdmissionTarget | None:
+    if not events:
+        return None
+    state = _replay_frozen_controller(campaign, events)
+    if state.phase == "pair":
+        if state.candidate_id is None or state.active_pair_index is None:
+            raise CampaignPlanningError("historical admission pair has no identity")
+        if state.completed_arms == state.active_order:
+            return None
+        return AdmissionTarget(
+            kind=(
+                "screen"
+                if len(state.candidate_observations) == 0
+                else "confirmation"
+            ),
+            candidate_id=state.candidate_id,
+            pair_index=state.active_pair_index,
+        )
+    if state.phase == "candidate":
+        if state.candidate_id is None:
+            raise CampaignPlanningError(
+                "historical admission candidate has no identity"
+            )
+        return AdmissionTarget(
+            kind=(
+                "screen"
+                if len(state.candidate_observations) == 0
+                else "confirmation"
+            ),
+            candidate_id=state.candidate_id,
+            pair_index=state.next_pair_index,
+        )
+    if state.phase != "idle":
+        return None
+    decisions = _candidate_decisions(events)
+    if any(
+        decision in {"promote", "promote_simplification"}
+        for decision in decisions.values()
+    ):
+        return None
+    proposal = next(
+        (
+            item
+            for item in campaign.proposals
+            if item.candidate_id not in decisions
+        ),
+        None,
+    )
+    if proposal is None:
+        return None
+    return AdmissionTarget(
+        kind="screen",
+        candidate_id=proposal.candidate_id,
+        pair_index=state.next_pair_index,
+    )
+
+
+def _validate_admission_target_history(
+    campaign: FrozenCampaign,
+    admissions: tuple[dict[str, Any], ...],
+    *,
+    events: tuple[dict[str, Any], ...],
+) -> None:
+    search_seen = False
+    for record in admissions:
+        try:
+            target = AdmissionTarget(
+                kind=record["target_kind"],
+                candidate_id=record["candidate_id"],
+                pair_index=record["pair_index"],
+            )
+        except (AdmissionJournalError, KeyError) as error:
+            raise CampaignPlanningError(
+                "campaign admission target is malformed"
+            ) from error
+        count = record["controller_event_count"]
+        prefix = events[:count]
+        if target.kind == "calibration":
+            if search_seen:
+                raise CampaignPlanningError(
+                    "calibration admission follows a search admission"
+                )
+            if prefix and not (
+                len(prefix) == 1
+                and prefix[0].get("event")
+                == "autoresearch_campaign_started"
+            ):
+                raise CampaignPlanningError(
+                    "calibration admission controller prefix is invalid"
+                )
+            continue
+        search_seen = True
+        try:
+            expected = _historical_search_admission_target(
+                campaign, events=prefix
+            )
+        except AdmissionJournalError as error:
+            raise CampaignPlanningError(
+                "campaign admission target binding is invalid"
+            ) from error
+        if expected != target:
+            raise CampaignPlanningError(
+                "campaign admission target does not match its controller prefix"
+            )
+
+
+def _admission_record_target(record: Mapping[str, Any]) -> AdmissionTarget:
+    try:
+        return AdmissionTarget(
+            kind=record["target_kind"],
+            candidate_id=record["candidate_id"],
+            pair_index=record["pair_index"],
+        )
+    except (AdmissionJournalError, KeyError) as error:
+        raise CampaignPlanningError(
+            "campaign admission target is malformed"
+        ) from error
+
+
+def _admission_observed_at(record: Mapping[str, Any]) -> datetime:
+    raw = record.get("observed_at")
+    if not isinstance(raw, str):
+        raise CampaignPlanningError("campaign admission timestamp is malformed")
+    try:
+        observed = datetime.fromisoformat(raw)
+    except ValueError as error:
+        raise CampaignPlanningError(
+            "campaign admission timestamp is malformed"
+        ) from error
+    if observed.tzinfo is None or observed.utcoffset() is None:
+        raise CampaignPlanningError(
+            "campaign admission timestamp has no timezone"
+        )
+    return observed
+
+
+def _validate_admission_execution_coverage(
+    campaign: FrozenCampaign,
+    admissions: tuple[dict[str, Any], ...],
+    *,
+    events: tuple[dict[str, Any], ...],
+) -> None:
+    if not campaign.admission_journal_required:
+        return
+    calibration_cells = campaign.cells_for(
+        candidate_id="control", stage="calibration"
+    )
+    calibration_raw = tuple(
+        cell
+        for cell in calibration_cells.values()
+        if _safe_cell_journal_size(cell.run_dir / "events.jsonl") > 0
+    )
+    calibration_exists = _calibration_path(campaign).exists()
+    if calibration_raw or calibration_exists:
+        admitted_calibrations = tuple(
+            record
+            for record in admissions
+            if record["outcome"] == "admitted"
+            and _admission_record_target(record).kind == "calibration"
+        )
+        if not admitted_calibrations:
+            raise CampaignPlanningError(
+                "calibration execution has no admitted provenance"
+            )
+        if calibration_raw:
+            first_start = min(_run_started_at(cell) for cell in calibration_raw)
+            if not any(
+                _admission_observed_at(record) <= first_start
+                for record in admitted_calibrations
+            ):
+                raise CampaignPlanningError(
+                    "calibration admission does not precede execution"
+                )
+
+    for event_index, event in enumerate(events):
+        if event.get("event") != "autoresearch_pair_started":
+            continue
+        expected = _historical_search_admission_target(
+            campaign, events=events[:event_index]
+        )
+        if expected is None:
+            raise CampaignPlanningError(
+                "search pair start has no valid admission target"
+            )
+        raw_timestamp = event.get("timestamp")
+        if not isinstance(raw_timestamp, str):
+            raise CampaignPlanningError("search pair start timestamp is malformed")
+        try:
+            pair_started_at = datetime.fromisoformat(raw_timestamp)
+        except ValueError as error:
+            raise CampaignPlanningError(
+                "search pair start timestamp is malformed"
+            ) from error
+        if pair_started_at.tzinfo is None or pair_started_at.utcoffset() is None:
+            raise CampaignPlanningError(
+                "search pair start timestamp has no timezone"
+            )
+        covered = any(
+            record["outcome"] == "admitted"
+            and record["controller_event_count"] <= event_index
+            and _admission_record_target(record) == expected
+            and _admission_observed_at(record) <= pair_started_at
+            for record in admissions
+        )
+        if not covered:
+            raise CampaignPlanningError(
+                "search pair execution has no admitted provenance"
+            )
+
+
+def _read_campaign_admissions(
+    campaign: FrozenCampaign,
+    *,
+    events: tuple[dict[str, Any], ...],
+    binding: AdmissionBinding | None = None,
+) -> tuple[dict[str, Any], ...]:
+    active_binding = binding or _campaign_admission_binding(campaign)
+    try:
+        admissions = read_admission_journal(
+            campaign.campaign_dir / "admissions.jsonl",
+            binding=active_binding,
+            controller_events=events,
+        )
+    except AdmissionJournalError as error:
+        raise CampaignPlanningError(
+            "campaign admission journal is unsafe or malformed"
+        ) from error
+    _validate_admission_target_history(
+        campaign, admissions, events=events
+    )
+    _validate_admission_execution_coverage(
+        campaign, admissions, events=events
+    )
+    return admissions
 
 
 def _cell_run_identity(cell: FrozenCell) -> str:
@@ -3068,13 +3516,6 @@ def _reconcile_raw_calibration(campaign: FrozenCampaign) -> bool:
     return True
 
 
-def _remaining_s(campaign: FrozenCampaign, now: Callable[[], datetime]) -> float:
-    value = now()
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise CampaignPlanningError("campaign clock must be timezone-aware")
-    return max(0.0, (campaign.cutoff - value).total_seconds())
-
-
 def _run_calibration(
     campaign: FrozenCampaign,
     *,
@@ -3096,8 +3537,6 @@ def _run_calibration(
         if not passed:
             raise CellProjectionError("control-to-control calibration did not pass")
         return observation
-    if _remaining_s(campaign, now) < PAIR_ADMISSION_REMAINING_S:
-        raise CellProjectionError("insufficient time remains for calibration")
     if "control_a" not in projections:
         launched_a = cell_runner(cells["control_a"])
         if (
@@ -3245,8 +3684,6 @@ def _run_search_pair(
                 "raw search cell exists before its durable pair admission",
                 failure_kind="audit",
             )
-        if _remaining_s(campaign, now) < PAIR_ADMISSION_REMAINING_S:
-            raise CellProjectionError("insufficient time remains for a search pair")
         _append_frozen_transition(
             journal,
             campaign,
@@ -3414,36 +3851,6 @@ def _reconcile_raw_search_prefix(
             },
         )
     return state
-
-
-def _search_reconciliation_needs_admission(
-    campaign: FrozenCampaign,
-    state: ReplayState | None,
-    events: tuple[dict[str, Any], ...],
-    *,
-    calibration_ready: bool,
-) -> bool:
-    """Derive launch possibility solely from reconciled durable state."""
-
-    if state is None or not calibration_ready:
-        return True
-    if state.phase == "scored":
-        return False
-    if state.phase == "pair":
-        return state.completed_arms != state.active_order
-    if state.phase == "idle":
-        decisions = _candidate_decisions(events)
-        if any(
-            decision in {"promote", "promote_simplification"}
-            for decision in decisions.values()
-        ):
-            return False
-        if all(
-            decisions.get(proposal.candidate_id) == "reject"
-            for proposal in campaign.proposals
-        ):
-            return False
-    return True
 
 
 def _checkpoint_campaign_binding(campaign: FrozenCampaign) -> Any:
@@ -3629,22 +4036,56 @@ def _campaign_summary_payload(campaign: FrozenCampaign) -> dict[str, Any]:
     events = tuple(_controller_events(journal))
     state = _replay_frozen_campaign(campaign, events) if events else None
     calibration = _verify_calibration_record(campaign)
+    binding = _campaign_admission_binding(campaign)
+    try:
+        admissions = _read_campaign_admissions(
+            campaign, events=events, binding=binding
+        )
+        controller_hash = controller_prefix_sha256(events)
+    except AdmissionJournalError as error:
+        raise CampaignPlanningError(
+            "campaign admission journal is unsafe or malformed"
+        ) from error
+    terminal_reason = state.terminal_reason if state else None
+    controller_status = (
+        "planned"
+        if state is None
+        else "complete"
+        if state.phase == "terminal" and terminal_reason == "completed"
+        else "terminated"
+        if state.phase == "terminal"
+        else "active"
+    )
+    last_admission = admissions[-1] if admissions else None
+    status = controller_status
+    if controller_status == "terminated" and terminal_reason == "cutoff":
+        status = "expired"
+    elif controller_status == "planned" and last_admission is not None:
+        if last_admission["outcome"] == "cutoff":
+            status = "expired"
+        elif last_admission["outcome"] == "blocked_environment":
+            status = "blocked_environment"
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "campaign_id": campaign.campaign_id,
-        "status": (
-            "planned"
-            if state is None
-            else "complete"
-            if state.phase == "terminal" and state.terminal_reason == "completed"
-            else "terminated"
-            if state.phase == "terminal"
-            else "active"
-        ),
-        "terminal_reason": state.terminal_reason if state else None,
+        "status": status,
+        "controller_status": controller_status,
+        "controller_phase": state.phase if state else "new",
+        "terminal_reason": terminal_reason,
         "calibration_recorded": calibration is not None,
         "next_pair_index": state.next_pair_index if state else 0,
         "candidate_decisions": _candidate_decisions(events),
+        "admission_count": len(admissions),
+        "last_admission": last_admission,
+        "last_admission_sha256": (
+            last_admission["record_sha256"] if last_admission else None
+        ),
+        "blockers": list(last_admission["blockers"]) if last_admission else [],
+        "campaign_integrity_sha256": campaign.integrity_hash,
+        "preview_sha256": campaign.preview_digest,
+        "policy_sha256": campaign.policy_digest,
+        "controller_event_count": len(events),
+        "controller_prefix_sha256": controller_hash,
         "policy_digest": campaign.policy_digest,
     }
 
@@ -4334,55 +4775,32 @@ def run_campaign(
                 summary = _campaign_summary_payload(campaign)
                 summary.update(gate_payload)
                 return summary
-        if _search_reconciliation_needs_admission(
+        admission_target = _next_admission_target(
             campaign,
             existing_state,
             current_events,
             calibration_ready=calibration_ready,
-        ):
-            blockers = list(
-                campaign_admission(
-                    campaign, now=now(), meminfo_reader=meminfo_reader
-                )
+        )
+        if admission_target is not None:
+            admission = _append_live_admission(
+                campaign,
+                target=admission_target,
+                events=current_events,
+                workspace=Path(workspace),
+                now=now,
+                meminfo_reader=meminfo_reader,
+                harness_identity_reader=harness_identity_reader,
             )
-            try:
-                current_harness = harness_identity_reader(workspace)
-            except (OSError, ValueError) as error:
-                raise CampaignPlanningError(
-                    "campaign harness identity could not be verified"
-                ) from error
-            if current_harness != (
-                campaign.harness_tree_sha256,
-                campaign.harness_file_count,
-            ):
-                blockers.insert(0, "harness_code_changed")
+            blockers = tuple(admission["blockers"])
             if blockers:
-                if existing_events:
-                    failure_kind = (
-                        "audit"
-                        if "harness_code_changed" in blockers
-                        else "swap_pressure"
-                        if "starting_swap_above_clean_limit" in blockers
-                        else "memory_pressure"
-                        if "insufficient_preflight_memavailable" in blockers
-                        else "measurement"
-                    )
+                if current_events:
                     _append_terminal(
                         existing_journal,
                         campaign,
-                        failure_kind=failure_kind,
+                        failure_kind=_admission_failure_kind(blockers),
                         cleanup_verified=True,
                     )
-                    return _summarize_campaign_locked(campaign)
-                summary = _summarize_campaign_locked(campaign)
-                summary.update(
-                    {
-                        "status": "blocked_environment",
-                        "blockers": blockers,
-                    }
-                )
-                write_json(campaign.campaign_dir / "summary.json", summary)
-                return summary
+                return _summarize_campaign_locked(campaign)
 
         base_runner = cell_runner or (
             lambda cell: run_frozen_cell(

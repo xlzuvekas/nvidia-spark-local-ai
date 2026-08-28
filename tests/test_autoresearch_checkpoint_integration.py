@@ -23,6 +23,7 @@ from bench.journal import Journal, content_hash
 from tests.test_autoresearch_campaign import (
     ROOT,
     _admission_meminfo,
+    _downgrade_pre_admission_campaign_fixture,
     _freeze_campaign_fixture,
 )
 from tests.test_autoresearch_replay_hardening import (
@@ -88,6 +89,7 @@ def _append_pair_started(campaign_dir: Path) -> None:
 
 
 def _make_failed_calibration(campaign_dir: Path) -> tuple[_Clock, _CompleteCellHarness]:
+    _downgrade_pre_admission_campaign_fixture(campaign_dir)
     campaign = load_frozen_campaign(campaign_dir)
     cells = campaign.cells_for(candidate_id="control", stage="calibration")
     clock = _Clock()
@@ -359,6 +361,7 @@ class AutoresearchCheckpointIntegrationTests(unittest.TestCase):
     def test_raw_complete_calibration_reconciliation_writes_controller_start(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
             campaign_dir = _freeze_campaign_fixture(Path(directory))
+            _downgrade_pre_admission_campaign_fixture(campaign_dir)
             campaign = load_frozen_campaign(campaign_dir)
             cells = campaign.cells_for(candidate_id="control", stage="calibration")
             clock = _Clock()
@@ -386,6 +389,7 @@ class AutoresearchCheckpointIntegrationTests(unittest.TestCase):
     def test_preexisting_calibration_record_without_journal_stops_at_boundary(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
             campaign_dir = _freeze_campaign_fixture(Path(directory))
+            _downgrade_pre_admission_campaign_fixture(campaign_dir)
             campaign = load_frozen_campaign(campaign_dir)
             cells = campaign.cells_for(candidate_id="control", stage="calibration")
             clock = _Clock()

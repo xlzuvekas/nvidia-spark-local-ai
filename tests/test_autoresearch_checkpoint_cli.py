@@ -162,6 +162,7 @@ class AutoresearchCheckpointCliTests(unittest.TestCase):
             "complete": 0,
             "checkpoint_required": 3,
             "blocked_environment": 1,
+            "expired": 1,
             "terminated": 1,
         }
 

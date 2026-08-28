@@ -370,6 +370,9 @@ def append_admission_record(
                 records[-1]["record_sha256"] if records else GENESIS_RECORD_SHA256
             ),
         )
+        _validate_chain(
+            [*records, record], binding=binding, controller_events=events
+        )
         encoded = _strict_canonical_json(record) + b"\n"
         expected_payload = payload + encoded
         if len(expected_payload) > max_bytes:
@@ -468,6 +471,8 @@ def _validate_chain(
     controller_events: Sequence[Mapping[str, Any]],
 ) -> None:
     previous = GENESIS_RECORD_SHA256
+    prior_controller_count = 0
+    prior_observed_at: datetime | None = None
     for index, record in enumerate(records, start=1):
         _validate_record(
             record,
@@ -476,6 +481,18 @@ def _validate_chain(
             expected_sequence=index,
             expected_previous=previous,
         )
+        controller_count = int(record["controller_event_count"])
+        if controller_count < prior_controller_count:
+            raise AdmissionJournalError(
+                "admission controller prefix moved backward"
+            )
+        observed_at = _require_aware_timestamp(
+            record["observed_at"], name="observed_at"
+        )
+        if prior_observed_at is not None and observed_at < prior_observed_at:
+            raise AdmissionJournalError("admission observation time moved backward")
+        prior_controller_count = controller_count
+        prior_observed_at = observed_at
         previous = str(record["record_sha256"])
 
 
@@ -767,9 +784,19 @@ def _require_descriptor_entry_identity(
         )
     except OSError as error:
         raise AdmissionJournalError("admission journal path changed") from error
-    if _metadata_identity(path_metadata) != _metadata_identity(metadata):
+    if _topology_identity(path_metadata) != _topology_identity(metadata):
         raise AdmissionJournalError("admission journal path changed")
     return metadata
+
+
+def _topology_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+    )
 
 
 def _metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:

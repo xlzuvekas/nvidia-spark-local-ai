@@ -18,6 +18,7 @@ from bench.journal import content_hash
 from tests.test_autoresearch_campaign import (
     ROOT,
     _admission_meminfo,
+    _downgrade_pre_admission_campaign_fixture,
     _freeze_campaign_fixture,
 )
 from tests.test_autoresearch_replay_hardening import (
@@ -122,6 +123,7 @@ class AutoresearchCalibrationReconciliationTests(unittest.TestCase):
     def test_two_raw_calibration_cells_reconcile_before_cutoff_or_admission(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
             campaign_dir = _freeze_campaign_fixture(Path(directory))
+            _downgrade_pre_admission_campaign_fixture(campaign_dir)
             campaign = load_frozen_campaign(campaign_dir)
             cells = campaign.cells_for(candidate_id="control", stage="calibration")
             clock = _Clock()
@@ -194,6 +196,7 @@ class AutoresearchCalibrationReconciliationTests(unittest.TestCase):
     def test_valid_failed_calibration_is_terminal_and_summarizable(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
             campaign_dir = _freeze_campaign_fixture(Path(directory))
+            _downgrade_pre_admission_campaign_fixture(campaign_dir)
             campaign = load_frozen_campaign(campaign_dir)
             cells = campaign.cells_for(candidate_id="control", stage="calibration")
             clock = _Clock()
@@ -221,6 +224,7 @@ class AutoresearchCalibrationReconciliationTests(unittest.TestCase):
     def test_incomplete_control_a_is_terminal_and_never_relaunched(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
             campaign_dir = _freeze_campaign_fixture(Path(directory))
+            _downgrade_pre_admission_campaign_fixture(campaign_dir)
             campaign = load_frozen_campaign(campaign_dir)
             cells = campaign.cells_for(candidate_id="control", stage="calibration")
             clock = _Clock()
@@ -321,6 +325,7 @@ class AutoresearchCalibrationReconciliationTests(unittest.TestCase):
     def test_control_a_is_preserved_and_only_b_launches_at_inclusive_gap(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
             campaign_dir = _freeze_campaign_fixture(Path(directory))
+            _downgrade_pre_admission_campaign_fixture(campaign_dir)
             campaign = load_frozen_campaign(campaign_dir)
             cells = campaign.cells_for(candidate_id="control", stage="calibration")
             clock = _Clock()

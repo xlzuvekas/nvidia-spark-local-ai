@@ -429,6 +429,30 @@ class AutoresearchAdmissionJournalTests(unittest.TestCase):
                     controller_events=[],
                 )
 
+    def test_new_record_cannot_move_observation_time_backward(self) -> None:
+        binding = _binding()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "admissions.jsonl"
+            append_admission_record(
+                path,
+                binding=binding,
+                target=_target(),
+                observation=_observation(binding, remaining_s=4930.0),
+                controller_events=[],
+            )
+            before = path.read_bytes()
+
+            with self.assertRaisesRegex(AdmissionJournalError, "time moved backward"):
+                append_admission_record(
+                    path,
+                    binding=binding,
+                    target=replace(_target(), pair_index=1),
+                    observation=_observation(binding, remaining_s=4931.0),
+                    controller_events=[],
+                )
+
+            self.assertEqual(path.read_bytes(), before)
+
 
 if __name__ == "__main__":
     unittest.main()
