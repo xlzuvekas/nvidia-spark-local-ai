@@ -208,9 +208,10 @@ exercised before any GPU ABBA.
   memory/startup fields for target verify, draft decode, and draft extend.
 - Canary: before ABBA, run one exact capability/tool/stream/cancel sequence and
   D256. Require finish/tool/cancel equivalence and no emission after a stop.
-- Design: ABBA with two independent lifetimes per arm; keep cold ready time,
-  per-phase capture time/memory, D256, NEXTN acceptance, agent task wall,
-  MemAvailable, and swap separate.
+- Design: ABBA with two independent lifetimes per arm. In every lifetime use
+  the same unscored warmup, five D256 repetitions, and one fixed agent/tool
+  fixture. Keep cold ready time, per-phase capture time/memory, D256, NEXTN
+  acceptance, agent task wall, MemAvailable, and swap separate.
 - Interpretation: the expected result is a control speed win. A disabled-graph
   simplification may promote only at `>=0.99x` combined speed if it also
   removes the declared graph-serving bundle or proves at least 1 GiB more
@@ -232,7 +233,10 @@ unexercised and add capture, startup, and headroom cost.
 Keep graph results source-pin-local. Safe candidate `3681c4e` adds Qwen
 QSA-specific draft backend and index-sharing wiring, so identical flags need
 not imply identical graph topology or overlap behavior across d91 and 368.
-Never pool those lifetimes.
+Never pool those lifetimes. Public d91 also predates native Qwen3.8
+Flash-Next/QSA support; the historical serving identity is the digest-pinned
+image plus baked patches and tracked overlays. Treat specialized QSA capture as
+a runtime-attested fact, not an inference from pristine d91 source.
 
 ### 6. Conditional next chunk size
 
