@@ -68,30 +68,54 @@ a combined champion requires a new frozen profile and campaign.
 
 ## Ranked next experiments
 
-### 1. Long shared-prefix SGLang Radix-cache pair
+### 1. Long shared-prefix SGLang cache-policy bundle
 
 This has the highest direct coding/cowork value. The current 60K case is a
 one-shot prompt, while the agent cases have small histories; neither measures
 repeated long-prefix work across tool turns.
 
-- Control: the promoted profile with the runtime's default Radix cache.
-- Candidate: add only `--disable-radix-cache`.
-- Suite: one cold 32K–48K coding or document prefix followed by two or three
-  appended, deterministic tool turns with byte-identical shared prefix and
-  unique suffixes. Every turn's maximum tokenized transcript plus output and
-  draft allowance must fit the frozen context and token pool.
-- Design: fresh-lifetime ABBA with two independent lifetimes per arm. Treat the
-  first turn as cold calibration and score later turns separately.
-- Primary outcomes: strict task correctness, later-turn TTFT, and complete task
-  wall time. Decode TPS is secondary.
-- Required controls: identical tokenized prefixes after chat-template and tool
-  serialization, cache residency/eviction bounds, no cross-arm warm state, and
-  scalar native cache-hit accounting if a privacy review admits it. Use a
-  prescribed transcript, or reject a pair when prior model output or reasoning
-  makes the two histories differ.
+- Bundle A: the promoted profile, default Radix behavior, and requested
+  `extra_buffer_lazy`; require startup `impl=UnifiedRadixCache` with hybrid SSM.
+- Bundle B: add `--disable-radix-cache`; retained chunked prefill then selects
+  `ChunkCache`, and the runtime disables the lazy Mamba-state predicates even
+  though their argument remains present. Require both facts at startup.
+- Suite: in each lifetime run T0 as a cold 32K--48K deterministic coding or
+  document prefix, then T1 and T2 after appending prescribed assistant tool
+  calls, tool results, and user suffixes. Do not feed arm-specific generated
+  text back into the next prompt.
+- Design: fresh-lifetime A/B/B/A with two independent lifetimes per bundle.
+  Use no inference warmup before T0. Treat T0 as cold calibration and score
+  T1/T2 separately.
+- Primary outcomes: strict task correctness, later-turn TTFT, T1+T2 resident
+  wall, and full T0--T2 task wall. Decode TPS is secondary.
+- Identity gate: render with the same pinned tokenizer, template, tools,
+  serialization, reasoning policy, sampling and output cap. Retain only scalar
+  token counts, exact common-prefix counts, and domain-separated token-ID
+  digests from volatile `return_prompt_token_ids=true` responses; discard raw
+  token IDs and reject mismatched histories.
+- Hit gate: use non-streaming `return_cached_tokens_details=true` responses and
+  before/after deltas for
+  `sglang:prefill_effective_tokens_total{mode="device_hit"}` and
+  `sglang:cached_tokens_total{cache_source="device"}`. Require B to remain zero
+  and A's T1/T2 to be positive near the page- and Mamba-checkpoint-aligned
+  common prefix. `sglang:cache_hit_rate` alone is insufficient.
+- Residency gate: record KV/Mamba available, used, and evictable token gauges
+  around every turn. Any other request, eviction, retraction, pressure breach,
+  or missing counter invalidates the lifetime.
 
-This experiment asks whether the default cache avoids repeated prefill and
-hybrid-state work. It must not infer a cache hit from latency alone.
+This is deliberately a product-bundle comparison, not an isolated trie
+ablation. In the exact
+[`d91c3682` overrides](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/arg_groups/overrides.py),
+disabling Radix also suppresses `extra_buffer_lazy`; the cache
+[registry](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/mem_cache/registry.py)
+selects `ChunkCache`. Bundle A has a four-slot lazy peak at C1 while B needs one
+live recurrent-state slot, but the explicit four-slot pool likely remains
+allocated in both, so do not claim reclaimed model memory. The public d91 tree
+predates public Qwen4/QSA support; attest the exact retained overlay before
+claiming that a matched Mamba checkpoint also restores its PLE/QSA side state.
+The result estimates whether the retained cache/state bundle avoids repeated
+prefill for iterative work. It must not infer a hit from latency or attribute
+the delta to Radix bookkeeping alone.
 It does not exercise vLLM `enable_prefix_caching` or `mamba_cache_mode`; those
 belong to the separately quarantined systems track.
 

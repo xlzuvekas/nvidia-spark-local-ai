@@ -181,7 +181,8 @@ retained-SGLang product track; items 4--5 are the vLLM systems track:
 5. after that runtime baseline, compare the mixed-FP8 dense-projection
    checkpoint as a quality-first artifact arm with DeepGEMM disabled and the
    resolved CUTLASS path attested;
-6. measure repeated long-prefix Radix reuse for multi-turn agents;
+6. measure the retained long-prefix Radix/lazy-state bundle against its
+   coupled ChunkCache/one-live-state control for multi-turn agents;
 7. test the decode-graph causal control; keep continuous-decode out of the
    queue until an admitted source actually consumes its setting;
 8. admit a separate C2-capable geometry for independent single-user fan-out;
