@@ -153,7 +153,7 @@ bandwidth or proof of saturation.
 | --- | --- | --- |
 | C1 fixed-depth timeline and optional counters | High target GEMV union plus rising L2 sysmem-fill proxy and stable model-implied bytes per step | Material host/launch gaps, low eligible warps, or low achieved occupancy; no direct LPDDR-ceiling claim is available |
 | Matched C1/C2/C8 timelines | Similar target-kernel time or proxy traffic per pass but more useful tokens per pass as concurrency rises | Smaller host gaps or better kernel occupancy as concurrency rises |
-| Continuous decode steps 1 versus 2 | Little change if target kernels/traffic dominate | Wall/TPS gain with unchanged output and no memory change implicates scheduler round trips |
+| `num_continuous_decode_steps` source gate | No physical inference: one and two execute the same reviewed code | The exact sources declare but never read the field; reject a benchmark until a new branch proves changed scheduler cadence |
 | Decode CUDA graph on versus off | Small effect if launches are already amortized | Large resident-C1 regression when disabled implicates launch/capture benefits |
 | Warm versus varied PLE rows | Warm page faults/NVMe reads near zero; varied rows add attributable reads and stalls | Similar I/O but unchanged decode bottleneck points back to target kernels |
 | MTP off versus fixed depth | Target bytes/verification calls per useful token fall with accepted length | Gains instead track fewer launches or larger verification kernels |
@@ -182,7 +182,8 @@ retained-SGLang product track; items 4--5 are the vLLM systems track:
    checkpoint as a quality-first artifact arm with DeepGEMM disabled and the
    resolved CUTLASS path attested;
 6. measure repeated long-prefix Radix reuse for multi-turn agents;
-7. test continuous decode steps and the decode-graph causal control;
+7. test the decode-graph causal control; keep continuous-decode out of the
+   queue until an admitted source actually consumes its setting;
 8. admit a separate C2-capable geometry for independent single-user fan-out;
    and
 9. evaluate MTP off only as a cold short-task specialization, not as the

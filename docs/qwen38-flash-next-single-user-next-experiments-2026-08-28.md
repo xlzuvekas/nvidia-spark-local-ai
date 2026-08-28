@@ -151,20 +151,24 @@ an MTP2 prediction, or an end-to-end measurement.
   if it wins cold managed wall without losing correctness. It should not
   replace the resident default unless it also wins matched resident task wall.
 
-### 4. Continuous decode steps
+### 4. Rejected at source gate: continuous decode steps
 
-- Control: the runtime default, `num_continuous_decode_steps=1`.
-- Candidate: add `--num-continuous-decode-steps 2`.
-- Follow-up: test four only if two wins and remains responsive.
-- Design: ABBA with two independent lifetimes per arm against the current
-  champion; use D256 and the complete agent battery.
-- Primary outcomes: task wall time and output tok/s.
-- Guardrails: first visible emission, cancellation latency, tool-call stop
-  behavior, finish counts, exact validation, memory, and swap.
+Do not run the planned `num_continuous_decode_steps=1` versus `2` ABBA on the
+reviewed sources. On both the measured
+[`d91c3682` source](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/server_args.py#L966-L970)
+and the safe-candidate
+[`3681c4e` source](https://github.com/sgl-project/sglang/blob/3681c4e03f6848dff82972b3f572602d3b8394cc/python/sglang/srt/server_args.py#L972-L976),
+the field is declared with default one but no scheduler or worker reads it. The
+generated scalar CLI accepts any integer without a choices/range gate, while
+the exact
+[scheduler loops](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/managers/scheduler.py#L1721-L1828)
+retain one plan/run/process cycle per iteration.
 
-The expected mechanism is fewer scheduler and CPU round trips at C1. This is a
-low-memory-risk serving flag, but a throughput gain cannot excuse worse
-interactive stop or cancellation behavior.
+Values one and two are therefore equivalent runtime configurations on these
+pins. Any measured difference would be noise, not a scheduler optimization.
+Reconsider this candidate only on a new admitted source identity that actually
+reads the field, with a unit or instrumented cadence test proving the branch is
+exercised before any GPU ABBA.
 
 ### 5. Decode CUDA-graph causal control
 
