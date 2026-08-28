@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from bench.autoresearch_admission import (
     ADMISSION_BLOCKER_ORDER,
@@ -304,6 +306,128 @@ class AutoresearchAdmissionJournalTests(unittest.TestCase):
                 )
             )
         )
+
+    def test_concurrent_writers_serialize_into_one_valid_chain(self) -> None:
+        binding = _binding()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "admissions.jsonl"
+
+            def append_one(index: int) -> int:
+                record = append_admission_record(
+                    path,
+                    binding=binding,
+                    target=replace(_target(), pair_index=index),
+                    observation=_observation(binding),
+                    controller_events=[],
+                )
+                return int(record["sequence"])
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                sequences = tuple(executor.map(append_one, range(8)))
+            records = read_admission_journal(
+                path, binding=binding, controller_events=[]
+            )
+
+        self.assertEqual(sorted(sequences), list(range(1, 9)))
+        self.assertEqual(tuple(record["sequence"] for record in records), tuple(range(1, 9)))
+
+    def test_invalid_first_append_has_no_filesystem_side_effect(self) -> None:
+        binding = _binding()
+        invalid_observation = replace(_observation(binding), remaining_s=float("nan"))
+        invalid_events = [{"event": "started", "at": datetime.now()}]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for label, kwargs in (
+                ("observation", {"observation": invalid_observation}),
+                ("controller", {"controller_events": invalid_events}),
+                ("size", {"max_bytes": 1}),
+            ):
+                with self.subTest(label=label):
+                    path = root / f"{label}.jsonl"
+                    arguments = {
+                        "binding": binding,
+                        "target": _target(),
+                        "observation": _observation(binding),
+                        "controller_events": [],
+                        **kwargs,
+                    }
+                    with self.assertRaises(AdmissionJournalError):
+                        append_admission_record(path, **arguments)
+                    self.assertFalse(path.exists())
+
+    def test_numeric_alias_with_recomputed_digest_is_rejected(self) -> None:
+        binding = _binding()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "admissions.jsonl"
+            record = append_admission_record(
+                path,
+                binding=binding,
+                target=_target(),
+                observation=_observation(binding),
+                controller_events=[],
+            )
+            record["sequence"] = True
+            unsigned = {
+                key: value for key, value in record.items() if key != "record_sha256"
+            }
+            record["record_sha256"] = hashlib.sha256(
+                canonical_json(unsigned).encode("utf-8")
+            ).hexdigest()
+            path.write_text(canonical_json(record) + "\n", encoding="utf-8")
+            os.chmod(path, 0o600)
+
+            with self.assertRaisesRegex(AdmissionJournalError, "sequence"):
+                read_admission_journal(path, binding=binding, controller_events=[])
+
+    def test_parent_symlink_is_rejected_without_redirected_write(self) -> None:
+        binding = _binding()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            redirected_parent = root / "campaign"
+            redirected_parent.symlink_to(target, target_is_directory=True)
+            path = redirected_parent / "admissions.jsonl"
+
+            with self.assertRaisesRegex(AdmissionJournalError, "parent"):
+                append_admission_record(
+                    path,
+                    binding=binding,
+                    target=_target(),
+                    observation=_observation(binding),
+                    controller_events=[],
+                )
+
+            self.assertFalse((target / "admissions.jsonl").exists())
+
+    def test_post_append_foreign_tail_is_detected(self) -> None:
+        binding = _binding()
+        real_write = os.write
+        injected = False
+
+        def corrupting_write(descriptor: int, payload: bytes) -> int:
+            nonlocal injected
+            count = real_write(descriptor, payload)
+            if not injected:
+                injected = True
+                real_write(descriptor, b"{}\n")
+            return count
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "admissions.jsonl"
+            with (
+                patch("bench.autoresearch_admission.os.write", corrupting_write),
+                self.assertRaisesRegex(
+                    AdmissionJournalError, "changed during append"
+                ),
+            ):
+                append_admission_record(
+                    path,
+                    binding=binding,
+                    target=_target(),
+                    observation=_observation(binding),
+                    controller_events=[],
+                )
 
 
 if __name__ == "__main__":
