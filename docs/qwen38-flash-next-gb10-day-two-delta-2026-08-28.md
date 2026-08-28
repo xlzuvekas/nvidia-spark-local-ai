@@ -571,10 +571,10 @@ its historical runtime after cutoff; steps 3--11 are a separate post-cutoff
 systems/reproduction sequence and do not reorder the future SGLang
 serving-flag backlog:
 
-1. Under its bounded historical exception, resume the existing SGLang campaign
-   only if its original preflight passes before cutoff. Otherwise preserve its
-   typed blocked/cutoff state; do not mutate or re-summarize it into a synthetic
-   completion or reuse any result as a deployment-safety claim.
+1. Preserve the existing SGLang campaign's admission-expired, unmeasured state.
+   Its bounded historical exception ended when less than one full pair budget
+   remained; do not rerun or re-summarize it into a synthetic completion, and
+   do not reuse its frozen plan as a deployment-safety claim.
 2. After cutoff, make every historical profile bound to QSA overlay digest
    `e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75`
    non-runnable. The current manifest contains 21 such bindings. Add a
