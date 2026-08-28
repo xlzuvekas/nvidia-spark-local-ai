@@ -4660,6 +4660,13 @@ def run_campaign(
             if existing_events
             else None
         )
+        # Exact-owned cleanup is always permitted, but an unsafe admission
+        # history must be rejected before recovery or reconciliation can append
+        # new controller/calibration truth.
+        _read_campaign_admissions(
+            campaign,
+            events=tuple(existing_events),
+        )
         if recovery_error is not None:
             if existing_state is not None and existing_state.phase == "terminal":
                 raise CampaignPlanningError(

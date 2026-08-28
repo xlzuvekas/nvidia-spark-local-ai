@@ -1149,6 +1149,43 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
             self.assertFalse((campaign_dir / "summary.json").exists())
             self.assertFalse((campaign_dir / "admissions.jsonl").exists())
 
+    def test_malformed_admission_precedes_recovery_terminal_mutation(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            run_campaign(
+                campaign_dir,
+                workspace=ROOT,
+                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
+                meminfo_reader=lambda: _admission_meminfo(swap_used_mib=65),
+                cell_runner=lambda _cell: self.fail("denial launched a cell"),
+            )
+            admission_path = campaign_dir / "admissions.jsonl"
+            admission_path.write_bytes(admission_path.read_bytes() + b"torn")
+            with (
+                patch(
+                    "bench.autoresearch_campaign._recover_interrupted_cells",
+                    side_effect=CellProjectionError(
+                        "synthetic recovery failure",
+                        failure_kind="cleanup_breach",
+                    ),
+                ),
+                self.assertRaisesRegex(
+                    CampaignPlanningError,
+                    "admission journal is unsafe or malformed",
+                ),
+            ):
+                run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=lambda: datetime.fromisoformat(
+                        "2026-08-28T00:01:00-07:00"
+                    ),
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=lambda _cell: self.fail("recovery launched a cell"),
+                )
+
+            self.assertFalse((campaign_dir / "events.jsonl").exists())
+
     def test_admission_samples_clock_after_memory_and_harness(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
             campaign_dir = _freeze_campaign_fixture(Path(directory))

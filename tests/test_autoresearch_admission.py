@@ -379,6 +379,40 @@ class AutoresearchAdmissionJournalTests(unittest.TestCase):
             with self.assertRaisesRegex(AdmissionJournalError, "sequence"):
                 read_admission_journal(path, binding=binding, controller_events=[])
 
+    def test_unhashable_target_and_outcome_are_typed_journal_errors(self) -> None:
+        binding = _binding()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for field, value, message in (
+                ("target_kind", [], "target kind"),
+                ("outcome", {}, "outcome"),
+            ):
+                with self.subTest(field=field):
+                    path = root / f"{field}.jsonl"
+                    record = append_admission_record(
+                        path,
+                        binding=binding,
+                        target=_target(),
+                        observation=_observation(binding),
+                        controller_events=[],
+                    )
+                    record[field] = value
+                    unsigned = {
+                        key: item
+                        for key, item in record.items()
+                        if key != "record_sha256"
+                    }
+                    record["record_sha256"] = hashlib.sha256(
+                        canonical_json(unsigned).encode("utf-8")
+                    ).hexdigest()
+                    path.write_text(canonical_json(record) + "\n", encoding="utf-8")
+                    os.chmod(path, 0o600)
+
+                    with self.assertRaisesRegex(AdmissionJournalError, message):
+                        read_admission_journal(
+                            path, binding=binding, controller_events=[]
+                        )
+
     def test_parent_symlink_is_rejected_without_redirected_write(self) -> None:
         binding = _binding()
         with tempfile.TemporaryDirectory() as directory:

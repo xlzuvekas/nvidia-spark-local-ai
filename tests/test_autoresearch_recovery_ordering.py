@@ -276,6 +276,40 @@ class AutoresearchRecoveryOrderingTests(unittest.TestCase):
                 any(event.get("event") == "autoresearch_pair_scored" for event in events)
             )
 
+    def test_missing_admission_precedes_raw_prefix_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            clock = _Clock()
+            harness = _CompleteCellHarness(clock)
+            with patch.object(campaign_module, "_recover_cell", return_value="absent"):
+                _campaign, cells = self._start_pair_without_raw(
+                    campaign_dir, clock, harness
+                )
+                harness(cells["champion"])
+                (campaign_dir / "admissions.jsonl").unlink()
+                controller_before = (campaign_dir / "events.jsonl").read_bytes()
+
+                with self.assertRaisesRegex(
+                    CampaignPlanningError,
+                    "calibration execution has no admitted provenance",
+                ):
+                    run_campaign(
+                        campaign_dir,
+                        workspace=ROOT,
+                        now=clock,
+                        meminfo_reader=lambda: self.fail(
+                            "missing admission reached live preflight"
+                        ),
+                        cell_runner=lambda _cell: self.fail(
+                            "missing admission launched inference"
+                        ),
+                    )
+
+            self.assertEqual(
+                (campaign_dir / "events.jsonl").read_bytes(),
+                controller_before,
+            )
+
     def test_incomplete_unadmitted_raw_is_audit_before_projection(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
             campaign_dir = _freeze_campaign_fixture(Path(directory))

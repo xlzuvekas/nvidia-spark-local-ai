@@ -114,7 +114,7 @@ class AdmissionTarget:
     pair_index: int
 
     def __post_init__(self) -> None:
-        if self.kind not in ADMISSION_TARGET_KINDS:
+        if not isinstance(self.kind, str) or self.kind not in ADMISSION_TARGET_KINDS:
             raise AdmissionJournalError("admission target kind is invalid")
         _require_stable_id(self.candidate_id, name="candidate_id")
         _require_nonnegative_int(self.pair_index, name="pair_index")
@@ -600,7 +600,7 @@ def _validate_record(
     if record.get("blockers") != blockers:
         raise AdmissionJournalError("admission blocker order or values changed")
     outcome = record.get("outcome")
-    if outcome not in ADMISSION_OUTCOMES:
+    if not isinstance(outcome, str) or outcome not in ADMISSION_OUTCOMES:
         raise AdmissionJournalError("admission outcome is invalid")
     expected_outcome = (
         "admitted"
