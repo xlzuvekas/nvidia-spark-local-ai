@@ -578,9 +578,10 @@ serving-flag backlog:
 2. After cutoff, make every historical profile bound to QSA overlay digest
    `e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75`
    non-runnable. The current manifest contains 21 such bindings. Add a
-   fail-closed test keyed to that exact digest, preserve frozen raw manifests
-   and scalar evidence unchanged, and require distinct IDs for any SM121 Triton
-   successor. Those 21 are also exactly the profiles using recipe revision
+   fail-closed execution-admission tombstone keyed to that exact digest; do not
+   rewrite their historical `support_status`, frozen raw manifests, fingerprints,
+   or scalar evidence. Require distinct IDs for any SM121 Triton successor.
+   Those 21 are also exactly the profiles using recipe revision
    `bf2b7c75870d3703730b6bd8f3bb93dc622c278d` with explicit
    `trtllm_mha` decode; no other overlay targets that QSA source under a
    different digest. Enforce the digest retirement both when selecting a new
