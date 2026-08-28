@@ -55,6 +55,17 @@ boundary is `9d2a91f4459d9407ff6a69effee51b3ce430f1199b0a94446eb4f3f3142435c9`
 across 85 executable harness files, so it intentionally cannot match or resume
 the frozen 84-file campaign.
 
+Commit `c6b978e` separately seals the legacy closeout itself. Its aggregate
+31-file identity is
+`5b121756b6a95644cb99969f309adaf43ea9d9b5d153749d869cd8bac420e988`
+across 156,253 bytes. The public summarizer may return the existing 471-byte
+blocked summary without rewriting it only when the frozen identity, existing
+private lock, complete topology, full tree, individual campaign and summary
+hashes, and before/after metadata snapshots all match. Any difference fails
+closed; run and checkpoint entry points refuse the sealed campaign before
+recovery or controller work. Normal campaign summaries are lock/reload
+serialized. The focused checks and all 845 repository tests passed.
+
 The verified [scalar evidence index](../evidence/index.json) now contains all
 fourteen frozen cells as `nonterminal` with `measurement_terminal=false`.
 Those entries publish the plan topology and artifact bindings only; they are

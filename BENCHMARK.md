@@ -251,6 +251,9 @@ measurement and must not be run or summarized again; see its
 SparkBench now enforces that retirement by the exact QSA overlay digest before
 fresh planning, frozen execution, campaign side effects, or direct SGLang
 startup. Historical loading, evidence, and cleanup remain readable.
+The exact measurement-free closeout is also content-sealed: summarization can
+only read its pinned blocked summary without mutation, while run and checkpoint
+entry points refuse it.
 
 The completed native profile pins `RadixArk/Qwen3.8-Flash-Next-NVFP4` revision
 `7b719225242aacd3dbd3f9407468c2ee9a9d2594`: 206 weight files totaling
