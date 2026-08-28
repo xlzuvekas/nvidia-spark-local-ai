@@ -262,7 +262,7 @@ native Qwen4Exp draft support, so the historical Qwen path still depends on the
 digest-pinned image, baked patches, and overlays; pristine d91 alone cannot
 attest its Qwen-specific consumption. This does not admit a benchmark arm. The
 [default candidate union](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/speculative/adaptive_spec_params.py#L22-L47)
-are `{0, 1, 3, 7}`, so the retained depth-two setting fails the exact
+is `{0, 1, 3, 7}`, so the retained depth-two setting fails the exact
 [membership gate](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/arg_groups/speculative_hook.py#L788-L810)
 rather than becoming the baseline tier. A custom adaptive config is therefore
 a coupled bundle, not a one-flag treatment. On the safe source, adaptive mode
@@ -296,17 +296,46 @@ both retain a three-slot maximum and disable safe-source QSA index sharing,
 while the candidate adds only step-one runtime state. Run an unscored counter
 oracle before any ABBA.
 
-### 8. Stream coalescing
+### 8. Stream endpoint suppression, profile-specific
 
-This is lower priority than compute and cache axes.
+This remains lower priority than compute and cache axes. For OpenAI chat,
+control `stream_interval=1` versus a candidate changing only
+`--stream-interval 2`; reject any raw `/generate` request-level override. The
+field is a real output-side axis on both reviewed pins, but neither server nor
+request parsing validates a positive value, so statically require exactly one
+or two before launch.
 
-- Control: `stream_interval=1`.
-- Candidate: `--stream-interval 2`; test four only after a clean win.
-- Score complete task wall together with user-visible first emission,
-  inter-emission delay, cancellation, and tool-stop latency.
+Do not describe the candidate as a two-token buffer. The exact
+[output streamer](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/managers/scheduler_components/output_streamer.py#L362-L390)
+emits an unfinished request at interval `N>1` only when cumulative output
+length modulo `N` equals one. NEXTN first appends an entire accepted run and
+calls the streamer once, so it can jump over an emission endpoint. At two,
+scalar decode emits at lengths 1, 3, 5, and so on, while odd/even speculative
+acceptance can suppress several verify results or make the setting effectively
+inert. Finished requests always flush. Prefill produces one sampled token, so
+ordinary first semantic emission should remain unchanged.
 
-Reduced client/SSE overhead is not a model decode gain. Do not promote on an
-apparent client TPS change while responsiveness regresses.
+- Design: fresh-lifetime A/B/B/A at C1 with identical request bytes, sampling,
+  reasoning, tools, and limits. In each lifetime run one deterministic streamed
+  256--512-token coding/text case and one forced tool-call case; add one short
+  cancel probe only if cancellation is part of promotion.
+- Wire attestation: timestamp loopback SSE privately and group parser-created
+  frames by cumulative completion-token value. Publish only semantic frame and
+  distinct-usage counts, first semantic delta, median/p95/maximum wire gap,
+  first tool-name time, valid-tool-JSON time, finish time, total wall, final
+  token count, and canonical final text/tool hash. Event arrays stay private.
+- Server controls: bracket requests with TTFT/E2E, generation/request,
+  speculative verify/accept, and abort counters. Server inter-token latency is
+  token-normalized at output batches, not a wire-gap metric.
+- Gates: exact final text/tool hash, token count, tool name/arguments, finish
+  reason, complete terminal flush, no retraction/error, comparable NEXTN
+  evidence, non-inferior first/tool-ready latency, and a frozen p95/maximum gap
+  budget. Any wall/TPS gain must exceed lifetime noise.
+
+Reduced IPC, detokenizer/parser work, or SSE frames is not a model-forward gain.
+Promote only as an empirically retained profile-specific setting; do not make
+it a general default from frame reduction, call it two-token coalescing, or
+extrapolate automatically to interval four.
 
 ## Retained-SGLang product diagnostics
 
