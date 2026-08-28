@@ -25,6 +25,7 @@ from bench.evidence import (
 from bench.journal import content_hash
 from tests.test_autoresearch_campaign import (
     ROOT,
+    _admission_records,
     _admission_meminfo,
     _downgrade_pre_admission_campaign_fixture,
     _freeze_campaign_fixture,
@@ -369,6 +370,123 @@ class AutoresearchCampaignEvidenceTests(unittest.TestCase):
                 campaign_dir.name,
                 b"\n".join(_tree_bytes(first_output).values()).decode("utf-8"),
             )
+
+    def test_fresh_environment_denial_clean_resume_exports_admission_chain(
+        self,
+    ) -> None:
+        blocked_at = datetime.fromisoformat("2026-08-28T00:00:00-07:00")
+        admitted_at = datetime.fromisoformat("2026-08-28T00:01:00-07:00")
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as temporary:
+            root = Path(temporary)
+            fixture = EvidenceFixture(root)
+            _remove_default_run(fixture)
+            autoresearch_root = fixture.results / "autoresearch"
+            autoresearch_root.mkdir()
+            campaign_dir = _freeze_export_campaign(autoresearch_root)
+            campaign = campaign_module.load_frozen_campaign(campaign_dir)
+            expected_cells = campaign.cells_for(
+                candidate_id="control", stage="calibration"
+            )
+            cell_calls: list[str] = []
+
+            def projection(cell: object) -> object:
+                cell_calls.append(str(getattr(cell, "cell_id")))
+                return _progress_projection(cell)
+
+            with (
+                patch.object(
+                    campaign_module, "model_execution_blocker", return_value=None
+                ),
+                patch.object(
+                    campaign_module, "_recover_cell", return_value="already_absent"
+                ),
+                _synthetic_projection_boundary(
+                    _progress_projection,  # type: ignore[arg-type]
+                    stopped_at=admitted_at,
+                    audit_reserve_s=25_200.0,
+                ),
+            ):
+                blocked = campaign_module.run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=lambda: blocked_at,
+                    meminfo_reader=lambda: _admission_meminfo(swap_used_mib=65),
+                    cell_runner=lambda _cell: self.fail(
+                        "blocked admission launched a cell"
+                    ),
+                )
+                resumed = campaign_module.run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=lambda: admitted_at,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=projection,  # type: ignore[arg-type]
+                )
+                output = root / "evidence"
+                exported = _export(fixture, output)
+                verification = verify_evidence(output)
+
+            records = _admission_records(campaign_dir)
+            controller_events = [
+                json.loads(line)
+                for line in (campaign_dir / "events.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            entry, bundle = _campaign_bundle(output)
+            controller = json.loads(
+                (bundle / "controller.json").read_text(encoding="utf-8")
+            )
+            published = json.loads(
+                (bundle / "admissions.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual("blocked_environment", blocked["status"])
+        self.assertEqual("planned", blocked["controller_status"])
+        self.assertEqual(1, blocked["admission_count"])
+        self.assertEqual("active", resumed["status"])
+        self.assertEqual("active", resumed["controller_status"])
+        self.assertTrue(resumed["calibration_recorded"])
+        self.assertEqual(2, resumed["admission_count"])
+        self.assertEqual(
+            ("blocked_environment", "admitted"),
+            tuple(record["outcome"] for record in records),
+        )
+        self.assertEqual((1, 2), tuple(record["sequence"] for record in records))
+        self.assertEqual(
+            ("calibration", "calibration"),
+            tuple(record["target_kind"] for record in records),
+        )
+        self.assertEqual(
+            (0, 0), tuple(record["controller_event_count"] for record in records)
+        )
+        self.assertEqual(
+            records[0]["controller_prefix_sha256"],
+            records[1]["controller_prefix_sha256"],
+        )
+        self.assertEqual(
+            records[0]["record_sha256"], records[1]["previous_record_sha256"]
+        )
+        self.assertEqual(
+            [expected_cells[arm].cell_id for arm in ("control_a", "control_b")],
+            cell_calls,
+        )
+        self.assertEqual(
+            ["autoresearch_campaign_started"],
+            [event["event"] for event in controller_events],
+        )
+        self.assertTrue(exported["changed"])
+        self.assertEqual("active", entry["status"])
+        self.assertEqual("active", controller["controller_status"])
+        self.assertTrue(controller["calibration_recorded"])
+        self.assertEqual(2, published["record_count"])
+        self.assertEqual(
+            ["blocked_environment", "admitted"],
+            [record["outcome"] for record in published["records"]],
+        )
+        self.assertEqual("admitted", published["effective_outcome"])
+        self.assertEqual([], published["effective_blockers"])
+        self.assertEqual("verified", verification["status"])
 
     def test_schema_two_campaign_exports_optional_empty_provenance(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as temporary:
