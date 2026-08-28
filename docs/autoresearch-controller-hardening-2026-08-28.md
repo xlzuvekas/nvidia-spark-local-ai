@@ -2,12 +2,13 @@
 
 ## Status and scope
 
-This is an implementation plan, not a change to the active frozen campaign.
+This is an implementation plan, not a change to the admission-expired frozen
+campaign.
 Do not edit the campaign-bound Python or manifest tree before the 07:00 MST
 cutoff or an explicit decision to abandon that campaign. Its fourteen cell
 plans, policy, queue, and executable harness identity remain immutable.
 
-The first schema-2 run/admission attempt safely stopped before measurement,
+The first campaign-schema-2 run/admission attempt safely stopped before measurement,
 without launching a cell, container, or request, but it exposed four reporting
 gaps:
 
@@ -19,10 +20,13 @@ gaps:
 4. the evidence exporter publishes all cell plans but no typed campaign-level
    admission or cutoff record.
 
-The current blocker is preserved in the existing summary and documentation.
-Do not manufacture a retroactive admission record from it. The design below
-records future launch attempts exactly and gives the current legacy summary a
-non-destructive compatibility path.
+A second pristine invocation after the pair budget expired again launched
+nothing and added time, swap, and memory blocker codes to the same legacy
+summary. Both observations are preserved in documentation, but neither has a
+durable admission journal. Do not manufacture a retroactive admission record
+from either one. The design below records future campaigns' launch attempts
+exactly and gives the current legacy summary a non-destructive compatibility
+path.
 
 ## Authority model
 
@@ -140,10 +144,10 @@ private checkpoint state.
 For the current legacy campaign only, if both journals are absent and the
 existing exact schema-1 summary says `blocked_environment`, public summarize
 must preserve that summary rather than downgrade it or invent observation
-fields. The next genuine launch attempt may create the first schema-2
-admission record. The historical blocker remains only in the legacy raw
-summary and documentation unless a new live observation reproduces it; it
-cannot enter typed evidence retroactively.
+fields. Its admission window is closed, so it must never create a schema-2
+admission record through another launch attempt. The blocker observations
+remain only in the legacy raw summary and documentation; they cannot enter
+typed evidence retroactively.
 
 ## Resume and reconciliation invariants
 
@@ -185,11 +189,11 @@ under the campaign lock; it must not trust or copy `summary.json`. Preserve the
 existing fourteen nonterminal cell bundles and add one campaign bundle, rather
 than converting a blocked admission into a synthetic cell result.
 
-Until the current legacy campaign receives a new live admission observation,
-its typed bundle can project only controller status `planned`, zero admissions,
-and no admission outcome. It must not infer `blocked_environment` from the
-legacy summary. The documentation remains the only tracked account of that
-historical preflight.
+Because the current legacy campaign has no admission journal and cannot launch
+again, its typed bundle can project only controller status `planned`, zero
+admissions, and no admission outcome. It must not infer
+`blocked_environment` or `expired` from the legacy summary. The documentation
+remains the only tracked account of both preflight observations.
 
 The exporter and verifier must reject unknown fields/files, changed ordering,
 bad hashes, broken controller-prefix bindings, missing or extra cell IDs,
