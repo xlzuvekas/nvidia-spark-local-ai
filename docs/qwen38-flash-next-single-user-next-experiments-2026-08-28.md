@@ -12,15 +12,16 @@ The product target remains one person using a coding agent or cowork-style
 assistant. Optimize correct end-to-end task wall time, later-turn latency, and
 safe residency on one DGX Spark. Aggregate multi-user throughput is secondary.
 
-This file owns the retained-SGLang **product track**: serving flags and workload
-geometry are ranked against the mapped-FP8-PLE, lazy-state, MTP2 baseline. The
+This file owns the future SGLang **product track**: serving flags and workload
+geometry are ranked only after a new admitted baseline reproduces the historical
+mapped-FP8-PLE, lazy-state, MTP2 geometry. The
 parallel **systems track** first admits exact vLLM direct mmap, then isolates
 its live-token-width patch and the mixed-FP8 artifact; see the
 [vLLM reproduction plan](qwen38-flash-next-vllm-mmap-reproduction-2026-08-28.md)
 and [bottleneck analysis](qwen38-flash-next-tps-bottleneck-2026-08-28.md).
 The tracks have different runtime and artifact baselines and are not one
-interleaved ranking. A systems candidate does not displace the retained product
-default until it passes its own admission and matched task gates.
+interleaved ranking. A systems candidate does not displace the newly admitted
+product baseline until it passes its own admission and matched task gates.
 
 That baseline is a historical measured prior and the immutable campaign's
 frozen identity, not a runtime for new work: it uses the superseded SM121
@@ -145,7 +146,7 @@ predates public Qwen4/QSA support; these mechanics are a historical source
 prior only. Re-audit them on the newly built and admitted source and attest its exact
 runtime before claiming that a matched hybrid prefix restores full/QSA KV or
 that matched Mamba-slot copy-on-write restores PLE side state.
-The result estimates whether the retained cache/state bundle avoids repeated
+The result estimates whether the admitted cache/state bundle avoids repeated
 prefill for iterative work. It must not infer a hit from latency or attribute
 the delta to Radix bookkeeping alone.
 It does not exercise vLLM `enable_prefix_caching` or `mamba_cache_mode`; those
@@ -171,8 +172,9 @@ behavior and safety before scoring parallel work.
   admitted C1 profile before using it. Before launch, freeze an exact
   fixed-agent workload, an unscored warmup, a lifetime-level resident-wall
   estimator, at least two fresh lifetimes per profile, and a numeric
-  non-inferiority bound. Require every oracle and pressure gate; keep D256 as a
-  separate secondary rather than averaging it into task wall.
+  non-inferiority bound. Require the C2-profile/C1-profile ratio of unweighted
+  mean lifetime wall to be `<=1.0102`, every oracle, and every pressure gate;
+  keep D256 as a separate secondary rather than averaging it into task wall.
 - Scheduling control: inside the same admitted C2 profile, run two fixed,
   independent, strictly validated native cowork/agent subtasks serially and
   then in parallel. Counterbalance serial/parallel order across fresh lifetimes
@@ -308,6 +310,7 @@ completes validly:
 
 - If 2,048 wins, compare the promoted champion with 4,096.
 - If 2,048 loses, compare 1,024 with 512.
+- If the 1,024/2,048 pair is inconclusive, stop; do not propose another value.
 - Clone each new profile from the then-current admitted winner, change only
   `--chunked-prefill-size`, and use ABBA with two fresh lifetimes per arm.
 - Promotion contract: every exact oracle must pass. The sole primary is the
@@ -418,7 +421,7 @@ extrapolate automatically to interval four.
 
 ## Retained-SGLang product diagnostics
 
-Within the retained-SGLang product track, a separate unscored lifetime should
+Within the newly admitted SGLang product track, a separate unscored lifetime should
 bracket three profiled C1 D256 requests with two unprofiled three-request
 blocks. Start with CUDA/NVTX timelines,
 source timers, process `/proc` deltas, PSI, NVMe disk deltas and one-hertz
@@ -468,10 +471,10 @@ bundle. Use fresh server lifetimes, counterbalanced order, baseline
 calibration, hard correctness and lifecycle gates, and at least two independent
 lifetimes per arm. Observed lifetime drift is comparable to a 3% speed
 threshold, so a single forward run cannot promote. Freeze one lifetime-level
-primary and its direction before launch. Unless a section declares a stronger
-contract, require candidate/control primary wall `<=0.95` and every latency
-guardrail `<=1.05`; if no numeric estimator and thresholds are frozen, do not
-launch.
+primary and its direction before launch. Unless a section declares an explicit
+alternative contract, require candidate/control primary wall `<=0.95` and
+every latency guardrail `<=1.05`; if no numeric estimator and thresholds are
+frozen, do not launch.
 
 Publish only the deterministic scalar projection. Raw prompts, completions,
 reasoning, tool payloads, agent trajectories, logs, paths, commands, request
