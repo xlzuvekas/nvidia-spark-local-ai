@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import asdict, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 import fcntl
 import json
 import math
@@ -245,6 +245,34 @@ class AutoresearchCampaignPlanningTests(unittest.TestCase):
         self.assertFalse(frozen["execution_started"])
         integrity = frozen.pop("integrity_hash")
         self.assertEqual(integrity, content_hash(frozen, 64))
+
+    def test_schema_three_requires_admission_journal_and_schema_two_loads(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            root = Path(directory)
+            invalid_root = root / "invalid"
+            invalid_root.mkdir()
+            invalid_dir = _freeze_campaign_fixture(invalid_root)
+            frozen_path = invalid_dir / "campaign.json"
+            frozen = json.loads(frozen_path.read_text())
+            self.assertEqual(frozen["schema_version"], 3)
+            self.assertIs(frozen["admission_journal_required"], True)
+            frozen["admission_journal_required"] = False
+            frozen.pop("integrity_hash")
+            frozen["integrity_hash"] = content_hash(frozen, 64)
+            write_json(frozen_path, frozen)
+            with self.assertRaisesRegex(
+                CampaignPlanningError,
+                "admission-journal requirement changed",
+            ):
+                load_frozen_campaign(invalid_dir)
+
+            legacy_root = root / "legacy"
+            legacy_root.mkdir()
+            legacy_dir = _freeze_campaign_fixture(legacy_root)
+            _downgrade_pre_admission_campaign_fixture(legacy_dir)
+            legacy = load_frozen_campaign(legacy_dir)
+
+        self.assertFalse(legacy.admission_journal_required)
 
 
 def _freeze_campaign_fixture(root: Path) -> Path:
@@ -1057,6 +1085,36 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
 
         self.assertEqual(calls, [])
 
+    def test_rehashed_wrong_admission_target_fails_history_validation(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            campaign = load_frozen_campaign(campaign_dir)
+            run_campaign(
+                campaign_dir,
+                workspace=ROOT,
+                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
+                meminfo_reader=lambda: _admission_meminfo(swap_used_mib=65),
+                cell_runner=lambda _cell: self.fail("denial launched a cell"),
+            )
+            admission_path = campaign_dir / "admissions.jsonl"
+            record = json.loads(admission_path.read_text())
+            record["target_kind"] = "screen"
+            record["candidate_id"] = campaign.proposals[0].candidate_id
+            unsigned = {
+                key: value
+                for key, value in record.items()
+                if key != "record_sha256"
+            }
+            record["record_sha256"] = content_hash(unsigned, 64)
+            admission_path.write_text(json.dumps(record, sort_keys=True) + "\n")
+            os.chmod(admission_path, 0o600)
+
+            with self.assertRaisesRegex(
+                CampaignPlanningError,
+                "target does not match its controller prefix",
+            ):
+                summarize_campaign(campaign_dir)
+
     def test_schema_three_summary_requires_calibration_and_pair_admissions(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
             root = Path(directory)
@@ -1191,6 +1249,7 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
             campaign_dir = _freeze_campaign_fixture(Path(directory))
             campaign = load_frozen_campaign(campaign_dir)
             order: list[str] = []
+            clock = [datetime.fromisoformat("2026-08-28T05:37:50-07:00")]
 
             def meminfo() -> str:
                 order.append("meminfo")
@@ -1198,11 +1257,12 @@ class AutoresearchCampaignControllerTests(unittest.TestCase):
 
             def harness(_workspace: Path) -> tuple[str, int]:
                 order.append("harness")
+                clock[0] += timedelta(milliseconds=1)
                 return campaign.harness_tree_sha256, campaign.harness_file_count
 
             def now() -> datetime:
                 order.append("clock")
-                return datetime.fromisoformat("2026-08-28T05:37:50.001-07:00")
+                return clock[0]
 
             summary = run_campaign(
                 campaign_dir,

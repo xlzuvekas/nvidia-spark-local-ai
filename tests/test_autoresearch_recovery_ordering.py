@@ -24,6 +24,7 @@ from bench.journal import Journal
 from tests.test_autoresearch_campaign import (
     ROOT,
     _admission_meminfo,
+    _admission_records,
     _freeze_campaign_fixture,
     _synthetic_projection,
     _synthetic_projection_boundary,
@@ -274,6 +275,123 @@ class AutoresearchRecoveryOrderingTests(unittest.TestCase):
             self.assertEqual([event["arm"] for event in completions], [order[0]])
             self.assertFalse(
                 any(event.get("event") == "autoresearch_pair_scored" for event in events)
+            )
+
+    def test_partial_calibration_resume_uses_fresh_duplicate_admission(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            campaign = load_frozen_campaign(campaign_dir)
+            cells = campaign.cells_for(
+                candidate_id="control", stage="calibration"
+            )
+            clock = _Clock()
+            harness = _CompleteCellHarness(clock)
+
+            def partial(cell: FrozenCell) -> CellProjection:
+                if cell.cell_id == cells["control_b"].cell_id:
+                    raise KeyboardInterrupt
+                return harness(cell)
+
+            with patch.object(campaign_module, "_recover_cell", return_value="absent"):
+                with self.assertRaises(KeyboardInterrupt):
+                    run_campaign(
+                        campaign_dir,
+                        workspace=ROOT,
+                        now=clock,
+                        meminfo_reader=_admission_meminfo,
+                        cell_runner=partial,
+                    )
+                first_raw = (
+                    cells["control_a"].run_dir / "events.jsonl"
+                ).read_bytes()
+                summary = run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=clock,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=harness,
+                )
+
+            admissions = _admission_records(campaign_dir)
+            self.assertTrue(summary["calibration_recorded"])
+            self.assertEqual(
+                tuple(record["target_kind"] for record in admissions),
+                ("calibration", "calibration"),
+            )
+            self.assertEqual(
+                tuple(record["candidate_id"] for record in admissions),
+                ("control", "control"),
+            )
+            self.assertEqual(
+                (cells["control_a"].run_dir / "events.jsonl").read_bytes(),
+                first_raw,
+            )
+            self.assertEqual(
+                tuple(harness.calls),
+                (cells["control_a"].cell_id, cells["control_b"].cell_id),
+            )
+
+    def test_partial_search_resume_uses_fresh_duplicate_admission(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            clock = _Clock()
+            harness = _CompleteCellHarness(clock)
+            with patch.object(campaign_module, "_recover_cell", return_value="absent"):
+                run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=clock,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=harness,
+                )
+                campaign = load_frozen_campaign(campaign_dir)
+                candidate_id = campaign.proposals[0].candidate_id
+                cells = campaign.cells_for(
+                    candidate_id=candidate_id, stage="screen"
+                )
+
+                def partial(cell: FrozenCell) -> CellProjection:
+                    if cell.cell_id == cells["candidate"].cell_id:
+                        raise KeyboardInterrupt
+                    return harness(cell)
+
+                with self.assertRaises(KeyboardInterrupt):
+                    run_campaign(
+                        campaign_dir,
+                        workspace=ROOT,
+                        now=clock,
+                        meminfo_reader=_admission_meminfo,
+                        cell_runner=partial,
+                    )
+                first_raw = (
+                    cells["champion"].run_dir / "events.jsonl"
+                ).read_bytes()
+                summary = run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=clock,
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=harness,
+                )
+
+            admissions = _admission_records(campaign_dir)
+            search = tuple(
+                record
+                for record in admissions
+                if record["target_kind"] == "screen"
+            )
+            self.assertEqual(summary["status"], "active")
+            self.assertEqual(len(search), 2)
+            self.assertEqual(search[0]["candidate_id"], candidate_id)
+            self.assertEqual(search[1]["candidate_id"], candidate_id)
+            self.assertEqual(search[0]["pair_index"], search[1]["pair_index"])
+            self.assertEqual(
+                (cells["champion"].run_dir / "events.jsonl").read_bytes(),
+                first_raw,
+            )
+            self.assertEqual(
+                tuple(harness.calls[-2:]),
+                (cells["champion"].cell_id, cells["candidate"].cell_id),
             )
 
     def test_missing_admission_precedes_raw_prefix_reconciliation(self) -> None:
