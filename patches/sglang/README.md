@@ -34,11 +34,21 @@ Rustfmt and locked/offline Cargo-metadata checks pass. These facts establish
 source composition only; no extension, image, server or model was built or
 run.
 
-One build-admission blocker remains. The new `_storage` extension is
-auto-discovered and built, but the prebuilt artifact staging, required-module
-check and import-smoke lists omit it. A derived source identity must add
-`storage` to `scripts/ci/utils/stage_rust_ext_modules.sh` and
-`scripts/ci/cuda/ci_install_dependency.sh`, then require:
+The source composition exposed one build-admission gap: the new `_storage`
+extension is auto-discovered and built, but the prebuilt artifact staging,
+required-module check and import-smoke lists omit it. Apply tracked patch
+`ddda8dde-storage-extension-packaging.patch` only after the two storage commits
+above. It adds `storage` to all three lists. The patch ID is
+`afb1c5aad878841df67bd96d57a1075b5167cc00`, its file SHA-256 is
+`f7f7a7f7231c3b893bb868a0919cea5c71dbeb1d2ca5c0dff0ebb982dd56fbc7`, the
+input tree is
+`ddda8dde3b6655c4e0c0ff094d87ef1f5cc71a92`, and the resulting tree is
+`bdb62e9fbc76f6e206cb0136576b88b7e1517a51`. Bash syntax, embedded-Python AST,
+exact module-list assertions, `git apply --check`, and `git diff --check` pass.
+No fourth hard-coded extension list was found.
+
+That resolves the static packaging omission, not build or runtime admission.
+The resulting source must still require:
 
 ```text
 cargo clippy -p sglang-storage --all-targets -- -D warnings
