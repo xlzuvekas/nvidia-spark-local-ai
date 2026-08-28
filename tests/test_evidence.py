@@ -1313,6 +1313,7 @@ class EvidenceExportTests(unittest.TestCase):
         harbor_results: tuple[Path, ...] = (),
         output: Path | None = None,
         replace: bool = False,
+        require_existing_output: bool = False,
     ) -> dict[str, object]:
         # Production campaigns have deliberately exact file-set contracts. Patch
         # that independent adapter so this fixture can remain a small run corpus.
@@ -1325,6 +1326,7 @@ class EvidenceExportTests(unittest.TestCase):
                 output_root=output or self.fixture.output,
                 harbor_results=harbor_results,
                 replace=replace,
+                require_existing_output=require_existing_output,
             )
 
     def add_typed_startup_safety_gates(
@@ -3193,6 +3195,23 @@ class EvidenceExportTests(unittest.TestCase):
         result = self.export(replace=True)
         self.assertTrue(result["changed"])
         self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+
+    def test_existing_only_export_is_nonmutating_and_requires_the_target(self) -> None:
+        with self.assertRaisesRegex(EvidenceError, "output does not exist"):
+            self.export(require_existing_output=True)
+        self.assertFalse(self.fixture.output.exists())
+
+        self.export()
+        original_index = (self.fixture.output / "index.json").read_bytes()
+        unchanged = self.export(require_existing_output=True)
+        self.assertFalse(unchanged["changed"])
+
+        self.fixture.change_aggregate(13.5)
+        with self.assertRaisesRegex(EvidenceError, "rerun with --replace"):
+            self.export(require_existing_output=True)
+        self.assertEqual(
+            (self.fixture.output / "index.json").read_bytes(), original_index
+        )
 
     def test_tampered_file_fails_checksum_verification(self) -> None:
         self.export()

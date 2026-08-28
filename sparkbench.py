@@ -55,6 +55,23 @@ DEFAULT_DIFFUSION_SUITE = (
 DEFAULT_AUDIO_SUITE = WORKSPACE / "manifests" / "suites" / "audio_asr.toml"
 DEFAULT_EVIDENCE = WORKSPACE / "evidence"
 DEFAULT_RESULTS = WORKSPACE / "results"
+AUTORESEARCH_CHECKPOINT_READINESS_CODES = frozenset(
+    {
+        "checkpoint_boundary_unsettled",
+        "checkpoint_race",
+        "evidence_incomplete",
+        "evidence_invalid",
+        "evidence_not_current",
+        "evidence_pair_binding_mismatch",
+        "no_completed_pair",
+        "remote_unverified",
+        "repository_detached",
+        "repository_dirty",
+        "repository_not_pushed",
+        "repository_unverified",
+        "upstream_missing",
+    }
+)
 
 
 def _inventory(*, sizes: bool = False):
@@ -180,7 +197,52 @@ def command_autoresearch_plan(args: argparse.Namespace) -> int:
 def command_autoresearch_run(args: argparse.Namespace) -> int:
     summary = run_campaign(args.campaign_dir, workspace=WORKSPACE)
     print(json.dumps(summary, indent=2, sort_keys=True))
+    if summary["status"] == "checkpoint_required":
+        return 3
     return 0 if summary["status"] in {"active", "complete"} else 1
+
+
+def command_autoresearch_checkpoint(args: argparse.Namespace) -> int:
+    from bench.autoresearch_campaign import acknowledge_campaign_checkpoint
+    from bench.autoresearch_checkpoint import CheckpointError
+
+    try:
+        acknowledgement = acknowledge_campaign_checkpoint(
+            args.campaign_dir,
+            WORKSPACE,
+        )
+    except CheckpointError as error:
+        if error.code not in AUTORESEARCH_CHECKPOINT_READINESS_CODES:
+            raise
+        print(
+            json.dumps(
+                {
+                    "reason": error.code,
+                    "status": "checkpoint_required",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 1
+
+    integrity = acknowledgement.to_mapping()["integrity_hash"]
+    print(
+        json.dumps(
+            {
+                "acknowledgement_integrity_sha256": integrity,
+                "campaign_id": acknowledgement.campaign.campaign_id,
+                "checkpoint_sequence": acknowledgement.completion.sequence,
+                "evidence_index_sha256": acknowledgement.evidence.index_sha256,
+                "pair_kind": acknowledgement.completion.pair_kind,
+                "repository_commit": acknowledgement.repository.head_commit,
+                "status": "checkpoint_acknowledged",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 def command_autoresearch_summarize(args: argparse.Namespace) -> int:
@@ -522,6 +584,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autoresearch_run.add_argument("campaign_dir", type=Path)
     autoresearch_run.set_defaults(function=command_autoresearch_run)
+
+    autoresearch_checkpoint = subparsers.add_parser(
+        "autoresearch-checkpoint",
+        help="acknowledge verified evidence and Git state for a completed pair",
+    )
+    autoresearch_checkpoint.add_argument("campaign_dir", type=Path)
+    autoresearch_checkpoint.set_defaults(function=command_autoresearch_checkpoint)
 
     autoresearch_summarize = subparsers.add_parser(
         "autoresearch-summarize",

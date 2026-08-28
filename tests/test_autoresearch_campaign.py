@@ -11,6 +11,7 @@ from pathlib import Path
 import stat
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from typing import Callable, Iterator
@@ -368,6 +369,10 @@ def _synthetic_projection_boundary(
         patch(
             "bench.autoresearch_campaign._validate_completed_pair_gap",
             return_value=0.0,
+        ),
+        patch(
+            "bench.autoresearch_campaign._checkpoint_gate_for_campaign",
+            return_value=SimpleNamespace(ready=True),
         ),
     ):
         yield

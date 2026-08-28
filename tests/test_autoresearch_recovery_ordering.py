@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -52,6 +53,15 @@ def _interrupt(_cell: FrozenCell) -> CellProjection:
 
 
 class AutoresearchRecoveryOrderingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        gate = patch.object(
+            campaign_module,
+            "_checkpoint_gate_for_campaign",
+            return_value=SimpleNamespace(ready=True),
+        )
+        gate.start()
+        self.addCleanup(gate.stop)
+
     def _start_pair_without_raw(
         self, campaign_dir: Path, clock: _Clock, harness: _CompleteCellHarness
     ) -> tuple[object, dict[str, FrozenCell]]:
@@ -151,6 +161,7 @@ class AutoresearchRecoveryOrderingTests(unittest.TestCase):
                 _freeze_campaign_fixture(Path(directory))
             )
             owner_index = len(campaign.cells) // 2
+            (campaign.cells[owner_index].run_dir / "events.jsonl").write_text("{}\n")
             attempted: list[str] = []
 
             def recover_container(cell: FrozenCell) -> str:

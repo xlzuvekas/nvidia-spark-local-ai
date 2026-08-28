@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import shutil
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -245,6 +246,15 @@ def _set_event_timestamp(
 
 
 class AutoresearchReplayHardeningTests(unittest.TestCase):
+    def setUp(self) -> None:
+        gate = patch.object(
+            campaign_module,
+            "_checkpoint_gate_for_campaign",
+            return_value=SimpleNamespace(ready=True),
+        )
+        gate.start()
+        self.addCleanup(gate.stop)
+
     def _write_raw_complete_screen_pair(
         self,
         campaign_dir: Path,

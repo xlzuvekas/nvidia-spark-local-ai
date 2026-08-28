@@ -23,7 +23,10 @@ import subprocess
 import sys
 import time
 import tomllib
-from typing import Any, Callable, Iterator, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping
+
+if TYPE_CHECKING:
+    from .autoresearch_checkpoint import CheckpointAcknowledgement
 
 from .autoresearch import (
     AUDIT_RESERVE_S,
@@ -281,6 +284,7 @@ class FrozenCell:
 @dataclass(frozen=True, slots=True)
 class FrozenCampaign:
     campaign_dir: Path
+    created_at: str
     integrity_hash: str
     campaign_id: str
     cutoff: datetime
@@ -866,6 +870,21 @@ def load_frozen_campaign(campaign_dir: Path) -> FrozenCampaign:
         raise CampaignPlanningError("frozen campaign has an unknown or missing field")
     if frozen["schema_version"] != FROZEN_CAMPAIGN_SCHEMA_VERSION:
         raise CampaignPlanningError("unsupported frozen campaign schema version")
+    created_at = _require_string(
+        frozen["created_at"], context="frozen campaign creation time"
+    )
+    if len(created_at) > 64:
+        raise CampaignPlanningError("frozen campaign creation time is invalid")
+    try:
+        parsed_created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise CampaignPlanningError(
+            "frozen campaign creation time is invalid"
+        ) from error
+    if parsed_created_at.tzinfo is None or parsed_created_at.utcoffset() is None:
+        raise CampaignPlanningError(
+            "frozen campaign creation time must be timezone-aware"
+        )
     harness_tree_sha256 = frozen["harness_tree_sha256"]
     harness_file_count = frozen["harness_file_count"]
     if (
@@ -1156,6 +1175,7 @@ def load_frozen_campaign(campaign_dir: Path) -> FrozenCampaign:
             raise CampaignPlanningError("frozen candidate semantic delta changed")
     campaign = FrozenCampaign(
         campaign_dir=root,
+        created_at=created_at,
         integrity_hash=integrity_hash,
         campaign_id=_require_string(
             preview["campaign_id"], context="frozen campaign ID"
@@ -2417,6 +2437,7 @@ def _recover_interrupted_cells(campaign: FrozenCampaign) -> None:
     """Recover every owned worker/container before inspecting raw semantics."""
 
     worker_recovered: dict[str, bool] = {}
+    container_recovered: dict[str, bool] = {}
     journal_sizes: dict[str, int | None] = {}
     failures: list[tuple[str, BaseException]] = []
     container_mismatches: list[CellProjectionError] = []
@@ -2448,6 +2469,7 @@ def _recover_interrupted_cells(campaign: FrozenCampaign) -> None:
             failures.append((error.failure_kind, error))
 
     for cell in campaign.cells:
+        container_recovered[cell.cell_id] = False
         try:
             outcome = _recover_cell(cell)
         except CellProjectionError as error:
@@ -2460,6 +2482,7 @@ def _recover_interrupted_cells(campaign: FrozenCampaign) -> None:
                 failures.append((error.failure_kind, error))
         else:
             if outcome == "stopped_owned_container":
+                container_recovered[cell.cell_id] = True
                 exact_container_stopped = True
                 container_mismatches.clear()
 
@@ -2472,7 +2495,9 @@ def _recover_interrupted_cells(campaign: FrozenCampaign) -> None:
     )
 
     for cell in campaign.cells:
-        if worker_recovered[cell.cell_id] and journal_sizes[cell.cell_id] == 0:
+        if (
+            worker_recovered[cell.cell_id] or container_recovered[cell.cell_id]
+        ) and journal_sizes[cell.cell_id] == 0:
             failures.append(
                 (
                     "measurement",
@@ -3335,13 +3360,190 @@ def _search_reconciliation_needs_admission(
     return True
 
 
-def summarize_campaign(campaign_dir: Path) -> dict[str, Any]:
-    campaign = load_frozen_campaign(campaign_dir)
+def _checkpoint_campaign_binding(campaign: FrozenCampaign) -> Any:
+    from .autoresearch_checkpoint import CampaignBinding
+
+    return CampaignBinding(
+        campaign_id=campaign.campaign_id,
+        campaign_integrity_sha256=campaign.integrity_hash,
+        preview_sha256=campaign.preview_digest,
+        policy_sha256=campaign.policy_digest,
+    )
+
+
+def _checkpoint_completion_for_cells(
+    campaign: FrozenCampaign,
+    *,
+    sequence: int,
+    pair_kind: str,
+    candidate_id: str,
+    search_pair_index: int | None,
+    ordered_cells: tuple[FrozenCell, FrozenCell],
+    observation: PairObservation,
+) -> Any:
+    from .autoresearch_checkpoint import (
+        PairCompletion,
+        autoresearch_published_run_id,
+    )
+
+    return PairCompletion(
+        sequence=sequence,
+        pair_kind=pair_kind,
+        candidate_id=candidate_id,
+        search_pair_index=search_pair_index,
+        ordered_cell_ids=tuple(cell.cell_id for cell in ordered_cells),
+        ordered_evidence_run_ids=tuple(
+            autoresearch_published_run_id(
+                campaign_id=campaign.campaign_id,
+                cell_id=cell.cell_id,
+                ordinal=cell.ordinal,
+                created_at=campaign.created_at,
+            )
+            for cell in ordered_cells
+        ),
+        cell_plan_integrity_sha256s=tuple(
+            cell.plan_integrity_hash for cell in ordered_cells
+        ),
+        observation_sha256=content_hash(observation.to_mapping(), 64),
+    )
+
+
+def _latest_checkpoint_completion(campaign: FrozenCampaign) -> Any:
+    """Return the latest strictly raw-attested pair identity, if one exists."""
+
+    verified_calibration = _verify_calibration_record(campaign)
+    calibration_completion = None
+    if verified_calibration is not None:
+        calibration_observation, _passed = verified_calibration
+        calibration_cells = campaign.cells_for(
+            candidate_id="control", stage="calibration"
+        )
+        calibration_completion = _checkpoint_completion_for_cells(
+            campaign,
+            sequence=1,
+            pair_kind="calibration",
+            candidate_id="control",
+            search_pair_index=None,
+            ordered_cells=(
+                calibration_cells["control_a"],
+                calibration_cells["control_b"],
+            ),
+            observation=calibration_observation,
+        )
+
+    journal = Journal(campaign.campaign_dir / "events.jsonl")
+    events = tuple(_controller_events(journal))
+    if not events:
+        return calibration_completion
+    _replay_frozen_campaign(campaign, events)
+    unique = _deduplicated_controller_events(events)
+    pair_occurrences: dict[str, int] = {}
+    pair_metadata: dict[tuple[str, int], tuple[str, tuple[str, str]]] = {}
+    latest_score: dict[str, Any] | None = None
+    for event in unique:
+        name = event.get("event")
+        if name == "autoresearch_pair_started":
+            candidate_id = str(event["candidate_id"])
+            pair_index = int(event["pair_index"])
+            occurrence = pair_occurrences.get(candidate_id, 0)
+            stage = "screen" if occurrence == 0 else "confirmation"
+            pair_occurrences[candidate_id] = occurrence + 1
+            order = tuple(event["order"])
+            if len(order) != 2:
+                raise CampaignPlanningError("checkpoint pair order is incomplete")
+            pair_metadata[(candidate_id, pair_index)] = (stage, order)
+        elif name == "autoresearch_pair_scored":
+            latest_score = event
+
+    if latest_score is None:
+        return calibration_completion
+    if verified_calibration is None or not verified_calibration[1]:
+        raise CampaignPlanningError(
+            "search score exists without a passing verified calibration"
+        )
+    candidate_id = str(latest_score["candidate_id"])
+    pair_index = int(latest_score["pair_index"])
+    try:
+        stage, order = pair_metadata[(candidate_id, pair_index)]
+    except KeyError as error:  # Strict replay should make this unreachable.
+        raise CampaignPlanningError(
+            "checkpoint score has no frozen pair occurrence"
+        ) from error
+    cells = campaign.cells_for(candidate_id=candidate_id, stage=stage)
+    projections = {
+        arm: _project_frozen_cell(cells[arm]) for arm in ("champion", "candidate")
+    }
+    _validate_completed_pair_gap(campaign, cells, pair_index=pair_index)
+    observation = observation_from_cells(
+        campaign.policy,
+        pair_index=pair_index,
+        champion=projections["champion"],
+        candidate=projections["candidate"],
+        audit_reserve_remaining_s=_durable_pair_audit_reserve_s(
+            campaign, projections
+        ),
+    )
+    if canonical_json(latest_score.get("observation")) != canonical_json(
+        observation.to_mapping()
+    ):
+        raise CampaignPlanningError(
+            "checkpoint score does not match the recomputed frozen raw pair"
+        )
+    return _checkpoint_completion_for_cells(
+        campaign,
+        sequence=pair_index + 2,
+        pair_kind=stage,
+        candidate_id=candidate_id,
+        search_pair_index=pair_index,
+        ordered_cells=(cells[order[0]], cells[order[1]]),
+        observation=observation,
+    )
+
+
+def _checkpoint_gate_required(
+    campaign: FrozenCampaign,
+    state: ReplayState | None,
+    events: tuple[dict[str, Any], ...],
+) -> bool:
+    calibration = _verify_calibration_record(campaign)
+    if calibration is None or not calibration[1] or state is None:
+        return False
+    if state.phase == "candidate":
+        return (
+            len(state.candidate_observations) == 1
+            and state.confirmation_mode in {"standard", "simplification"}
+        )
+    if state.phase != "idle":
+        return False
+    decisions = _candidate_decisions(events)
+    if any(
+        decision in {"promote", "promote_simplification"}
+        for decision in decisions.values()
+    ):
+        return False
+    return not all(
+        decisions.get(proposal.candidate_id) == "reject"
+        for proposal in campaign.proposals
+    )
+
+
+def _checkpoint_gate_for_campaign(campaign: FrozenCampaign, workspace: Path) -> Any:
+    from .autoresearch_checkpoint import checkpoint_gate
+
+    return checkpoint_gate(
+        workspace=workspace,
+        campaign=_checkpoint_campaign_binding(campaign),
+        completion=_latest_checkpoint_completion(campaign),
+        journal_path=campaign.campaign_dir / "events.jsonl",
+    )
+
+
+def _campaign_summary_payload(campaign: FrozenCampaign) -> dict[str, Any]:
     journal = Journal(campaign.campaign_dir / "events.jsonl")
     events = tuple(_controller_events(journal))
     state = _replay_frozen_campaign(campaign, events) if events else None
     calibration = _verify_calibration_record(campaign)
-    summary = {
+    return {
         "schema_version": 1,
         "campaign_id": campaign.campaign_id,
         "status": (
@@ -3359,6 +3561,11 @@ def summarize_campaign(campaign_dir: Path) -> dict[str, Any]:
         "candidate_decisions": _candidate_decisions(events),
         "policy_digest": campaign.policy_digest,
     }
+
+
+def summarize_campaign(campaign_dir: Path) -> dict[str, Any]:
+    campaign = load_frozen_campaign(campaign_dir)
+    summary = _campaign_summary_payload(campaign)
     write_json(campaign.campaign_dir / "summary.json", summary)
     return summary
 
@@ -3396,6 +3603,123 @@ def _campaign_lock(path: Path) -> Iterator[None]:
         os.close(descriptor)
 
 
+def _require_checkpoint_boundary(campaign: FrozenCampaign) -> None:
+    """Reject states that may still settle or advance an already-admitted pair."""
+
+    from .autoresearch_checkpoint import CheckpointError
+
+    journal = Journal(campaign.campaign_dir / "events.jsonl")
+    events = tuple(_controller_events(journal))
+    _validate_search_artifact_admission(campaign, events)
+    state = _replay_frozen_campaign(campaign, events) if events else None
+    calibration = _verify_calibration_record(campaign)
+    if calibration is None:
+        cells = campaign.cells_for(candidate_id="control", stage="calibration")
+        raw_started = any(
+            _safe_cell_journal_size(cells[arm].run_dir / "events.jsonl") > 0
+            for arm in ("control_a", "control_b")
+        )
+        if raw_started or (state is not None and state.phase != "terminal"):
+            raise CheckpointError(
+                "checkpoint_boundary_unsettled",
+                "calibration boundary is not settled",
+            )
+        return
+    if state is None:
+        raise CheckpointError(
+            "checkpoint_boundary_unsettled",
+            "calibration has no durable controller boundary",
+        )
+    if not calibration[1] and state.phase != "terminal":
+        raise CheckpointError(
+            "checkpoint_boundary_unsettled",
+            "failed calibration has not reached a terminal boundary",
+        )
+    if state.phase in {"pair", "scored"}:
+        raise CheckpointError(
+            "checkpoint_boundary_unsettled",
+            "search pair boundary is not settled",
+        )
+    if state.phase == "candidate" and not (
+        len(state.candidate_observations) == 1
+        and state.confirmation_mode in {"standard", "simplification"}
+    ):
+        raise CheckpointError(
+            "checkpoint_boundary_unsettled",
+            "candidate admission boundary is not settled",
+        )
+    if state.phase == "idle":
+        decisions = _candidate_decisions(events)
+        terminal_decision = any(
+            decision in {"promote", "promote_simplification"}
+            for decision in decisions.values()
+        ) or all(
+            decisions.get(proposal.candidate_id) == "reject"
+            for proposal in campaign.proposals
+        )
+        if terminal_decision:
+            raise CheckpointError(
+                "checkpoint_boundary_unsettled",
+                "campaign terminal decision has not settled",
+            )
+
+
+def acknowledge_campaign_checkpoint(
+    campaign_dir: Path,
+    workspace: Path,
+    *,
+    evidence_verifier: Callable[..., Any] | None = None,
+    repository_verifier: Callable[..., Any] | None = None,
+    evidence_snapshot_reader: Callable[..., Any] | None = None,
+    repository_snapshot_reader: Callable[..., Any] | None = None,
+    state_root: Path | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> "CheckpointAcknowledgement":
+    """Acknowledge one stable, strictly re-audited campaign pair under lock."""
+
+    from .autoresearch_checkpoint import (
+        CheckpointError,
+        acknowledge_checkpoint,
+    )
+
+    initial = load_frozen_campaign(campaign_dir)
+    lock_path = initial.campaign_dir / ".autoresearch.lock"
+    with _campaign_lock(lock_path):
+        campaign = load_frozen_campaign(initial.campaign_dir)
+        try:
+            _recover_interrupted_cells(campaign)
+        except CellProjectionError as error:
+            raise CheckpointError(
+                "checkpoint_boundary_unsettled",
+                "campaign cleanup has not reached a stable checkpoint boundary",
+            ) from error
+        _require_checkpoint_boundary(campaign)
+        binding = _checkpoint_campaign_binding(campaign)
+
+        def completion_reader() -> Any:
+            refreshed = load_frozen_campaign(campaign.campaign_dir)
+            if _checkpoint_campaign_binding(refreshed) != binding:
+                raise CheckpointError(
+                    "checkpoint_race",
+                    "frozen campaign binding changed during verification",
+                )
+            _require_checkpoint_boundary(refreshed)
+            return _latest_checkpoint_completion(refreshed)
+
+        return acknowledge_checkpoint(
+            workspace=workspace,
+            campaign=binding,
+            journal_path=campaign.campaign_dir / "events.jsonl",
+            completion_reader=completion_reader,
+            evidence_verifier=evidence_verifier,
+            repository_verifier=repository_verifier,
+            evidence_snapshot_reader=evidence_snapshot_reader,
+            repository_snapshot_reader=repository_snapshot_reader,
+            state_root=state_root,
+            now=now,
+        )
+
+
 def run_campaign(
     campaign_dir: Path,
     *,
@@ -3404,6 +3728,7 @@ def run_campaign(
     meminfo_reader: Callable[[], str] = read_host_meminfo,
     harness_identity_reader: Callable[[Path], tuple[str, int]] = harness_tree_identity,
     cell_runner: Callable[[FrozenCell], CellProjection] | None = None,
+    checkpoint_gate_reader: Callable[[FrozenCampaign, Path], Any] | None = None,
 ) -> dict[str, Any]:
     """Run or replay the finite queue, never resuming an interrupted cell."""
 
@@ -3483,7 +3808,11 @@ def run_campaign(
             )
             return summarize_campaign(campaign.campaign_dir)
 
+        if existing_state is not None and existing_state.phase == "terminal":
+            return summarize_campaign(campaign.campaign_dir)
+
         calibration_reconciled = False
+        calibration_boundary_recovered = False
         try:
             existing_state = _reconcile_raw_search_prefix(
                 campaign,
@@ -3493,6 +3822,16 @@ def run_campaign(
             )
             existing_events = _controller_events(existing_journal)
             calibration_reconciled = _reconcile_raw_calibration(campaign)
+            if (
+                existing_state is None
+                and _verify_calibration_record(campaign) is not None
+            ):
+                _append_campaign_started(existing_journal, campaign)
+                existing_events = _controller_events(existing_journal)
+                existing_state = _replay_frozen_campaign(
+                    campaign, existing_events
+                )
+                calibration_boundary_recovered = True
         except CellProjectionError as error:
             if existing_state is not None and existing_state.phase == "terminal":
                 raise CampaignPlanningError(
@@ -3507,15 +3846,30 @@ def run_campaign(
                 not in {"cleanup_breach", "ownership_ambiguity"},
             )
             return summarize_campaign(campaign.campaign_dir)
-        if existing_state is not None and existing_state.phase == "terminal":
-            return summarize_campaign(campaign.campaign_dir)
-        if calibration_reconciled:
+        if calibration_reconciled or calibration_boundary_recovered:
             return summarize_campaign(campaign.campaign_dir)
         calibration_ready = _calibration_path(campaign).exists()
+        current_events = tuple(_controller_events(existing_journal))
+        if _checkpoint_gate_required(
+            campaign,
+            existing_state,
+            current_events,
+        ):
+            gate_reader = checkpoint_gate_reader or _checkpoint_gate_for_campaign
+            gate = gate_reader(campaign, Path(workspace))
+            if not gate.ready:
+                gate_payload = gate.to_mapping()
+                if gate_payload.get("status") != "checkpoint_required":
+                    raise CampaignPlanningError(
+                        "checkpoint gate returned an invalid non-ready status"
+                    )
+                summary = _campaign_summary_payload(campaign)
+                summary.update(gate_payload)
+                return summary
         if _search_reconciliation_needs_admission(
             campaign,
             existing_state,
-            tuple(existing_events),
+            current_events,
             calibration_ready=calibration_ready,
         ):
             blockers = list(

@@ -529,6 +529,31 @@ class AutoresearchCheckpointTests(unittest.TestCase):
                 )
             self.assertEqual(stale.exception.code, "evidence_not_current")
 
+    def test_evidence_proof_never_creates_a_missing_evidence_tree(self) -> None:
+        completion = _completion()
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            evidence = workspace / "evidence"
+            calls: list[str] = []
+
+            with self.assertRaises(CheckpointError) as missing:
+                prove_evidence(
+                    completion,
+                    workspace=workspace,
+                    results_root=workspace / "results",
+                    evidence_root=evidence,
+                    exporter=lambda **_kwargs: calls.append("export")
+                    or {"changed": False},
+                    verifier=lambda _path: calls.append("verify")
+                    or {"status": "verified"},
+                    staged_verifier=lambda **_kwargs: calls.append("staged")
+                    or {"status": "staged_verified"},
+                )
+
+            self.assertEqual(missing.exception.code, "evidence_not_current")
+            self.assertEqual(calls, [])
+            self.assertFalse(evidence.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1159,11 +1159,21 @@ def prove_evidence(
     workspace = Path(workspace).resolve(strict=True)
     results = Path(results_root) if results_root is not None else workspace / "results"
     evidence = Path(evidence_root) if evidence_root is not None else workspace / "evidence"
+    # ``export_evidence(..., replace=False)`` intentionally creates a missing
+    # output tree.  A checkpoint proof is a read-only readiness check, so first
+    # require the tracked evidence directory to exist through a no-follow open.
+    # Existing trees are compared via the exporter's disposable temporary tree;
+    # an absent tree must never be materialized as a side effect of admission.
+    evidence_directory = _open_directory_nofollow(
+        evidence, code="evidence_not_current"
+    )
+    os.close(evidence_directory)
     try:
         export_report = exporter(
             results_root=results,
             output_root=evidence,
             replace=False,
+            require_existing_output=True,
         )
     except CheckpointError:
         raise

@@ -14073,6 +14073,7 @@ def _export_evidence_locked(
     output_root: Path,
     harbor_results: Sequence[Path] = (),
     replace: bool = False,
+    require_existing_output: bool = False,
 ) -> dict[str, Any]:
     if len(harbor_results) not in {0, HARBOR_REPLICATE_COUNT}:
         raise EvidenceError("Harbor evidence requires zero or exactly two result files")
@@ -14086,6 +14087,22 @@ def _export_evidence_locked(
     output_candidate = output_parent / output_root.name
     if output_candidate.is_symlink():
         raise EvidenceError("evidence output must not be a symlink")
+    required_output_identity: tuple[int, int] | None = None
+    if require_existing_output:
+        if replace:
+            raise EvidenceError(
+                "existing-only evidence comparison cannot replace output"
+            )
+        try:
+            output_metadata = output_candidate.lstat()
+        except FileNotFoundError as error:
+            raise EvidenceError("evidence output does not exist") from error
+        if not stat.S_ISDIR(output_metadata.st_mode):
+            raise EvidenceError("evidence output must be an existing directory")
+        required_output_identity = (
+            output_metadata.st_dev,
+            output_metadata.st_ino,
+        )
     output_target = output_candidate.resolve(strict=False)
     if (
         output_target == results_root
@@ -14254,6 +14271,20 @@ def _export_evidence_locked(
         )
         verification = verify_evidence(temporary)
 
+        if required_output_identity is not None:
+            try:
+                current_output_metadata = output_candidate.lstat()
+            except FileNotFoundError as error:
+                raise EvidenceError("evidence output changed during comparison") from error
+            if (
+                not stat.S_ISDIR(current_output_metadata.st_mode)
+                or (
+                    current_output_metadata.st_dev,
+                    current_output_metadata.st_ino,
+                )
+                != required_output_identity
+            ):
+                raise EvidenceError("evidence output changed during comparison")
         if output_target.exists():
             if not output_target.is_dir():
                 raise EvidenceError("existing evidence target is not a directory")
@@ -14270,6 +14301,24 @@ def _export_evidence_locked(
                 for path in temporary.rglob("*")
                 if path.is_file()
             }
+            if required_output_identity is not None:
+                try:
+                    current_output_metadata = output_candidate.lstat()
+                except FileNotFoundError as error:
+                    raise EvidenceError(
+                        "evidence output changed during comparison"
+                    ) from error
+                if (
+                    not stat.S_ISDIR(current_output_metadata.st_mode)
+                    or (
+                        current_output_metadata.st_dev,
+                        current_output_metadata.st_ino,
+                    )
+                    != required_output_identity
+                ):
+                    raise EvidenceError(
+                        "evidence output changed during comparison"
+                    )
             if existing_files == new_files:
                 shutil.rmtree(temporary)
                 return {**verification, "changed": False, "runs": len(runs)}
@@ -14286,6 +14335,8 @@ def _export_evidence_locked(
                 raise
             shutil.rmtree(backup)
         else:
+            if required_output_identity is not None:
+                raise EvidenceError("evidence output changed during comparison")
             os.replace(temporary, output_target)
         return {**verification, "changed": True, "runs": len(runs)}
     except BaseException:
@@ -14300,6 +14351,7 @@ def export_evidence(
     output_root: Path,
     harbor_results: Sequence[Path] = (),
     replace: bool = False,
+    require_existing_output: bool = False,
 ) -> dict[str, Any]:
     if len(harbor_results) not in {0, HARBOR_REPLICATE_COUNT}:
         raise EvidenceError("Harbor evidence requires zero or exactly two result files")
@@ -14321,6 +14373,7 @@ def export_evidence(
             output_root=output_root,
             harbor_results=tuple(Path(path) for path in harbor_results),
             replace=replace,
+            require_existing_output=require_existing_output,
         )
     finally:
         try:

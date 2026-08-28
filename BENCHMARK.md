@@ -524,9 +524,8 @@ stop, export only allowlisted scalar evidence, verify the staged projection,
 commit, and push before explicitly resuming. Raw prompts, completions,
 reasoning, tool payloads, logs, identifiers, and commands remain ignored.
 
-The checkpoint proof core is landed, but this revision does not yet wire the
-`autoresearch-checkpoint` CLI parser/dispatch or the `run_campaign` gate. The
-following is the target workflow, not a currently callable command sequence:
+The controller enforces the remote checkpoint boundary before it admits a new
+pair. Use this explicit workflow after each completed pair:
 
 ```bash
 python3 sparkbench.py export-evidence \
@@ -542,15 +541,19 @@ python3 sparkbench.py autoresearch-run \
   results/autoresearch/FROZEN_CAMPAIGN_DIR
 ```
 
-The target command writes a private mode-0600 acknowledgement under ignored
+The checkpoint command writes a private mode-0600 acknowledgement under ignored
 `logs/autoresearch-checkpoints/`, outside both raw `results/` and tracked
 `evidence/`, so it cannot become an input to the evidence checksum it binds.
 It proves the completed pair, journal prefix, evidence tree, clean commit, and
 identical live upstream. No Git, evidence export, remote proof, or other
-network operation is permitted between pair cells. Once the gate is wired,
-`checkpoint_required` will be a resumable nonterminal pause that starts no
-cell and appends no failure transition. Until then, returning after a pair is
-only a manual stop point, not proof that the remote checkpoint exists.
+network operation is permitted between pair cells. `checkpoint_required` is a
+resumable nonterminal pause that starts no cell, does not write or rewrite
+`summary.json`, and appends no failure transition; `autoresearch-run` still
+prints the in-memory status and uses exit status 3 so automation can distinguish
+that pause from a completed run or an environmental blocker. Exact-owned
+cleanup and any deterministic raw reconciliation happen before the gate, so a
+cleanup, ownership, or one-use failure takes precedence over a checkpoint
+pause.
 
 No campaign-admitted Pi harness is available. The nine cases are deterministic
 coding/cowork proxies; they do not measure Pi, repository editing, document

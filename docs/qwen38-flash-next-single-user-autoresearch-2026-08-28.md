@@ -161,13 +161,24 @@ python3 sparkbench.py autoresearch-run results/autoresearch/FROZEN_CAMPAIGN_DIR
 python3 sparkbench.py autoresearch-summarize results/autoresearch/FROZEN_CAMPAIGN_DIR
 ```
 
-The checkpoint proof implementation is present, but the
-`autoresearch-checkpoint` parser/dispatch and the `run_campaign` admission gate
-are not wired in this revision. The command and `checkpoint_required` status
-documented below are the target integration, not currently callable behavior.
-Until that wiring lands and a campaign is frozen against the resulting harness
-hash, stop manually after each pair; do not interpret the controller's return
-alone as proof that evidence was committed and reached the live upstream.
+The controller and `autoresearch-checkpoint` command enforce a remote evidence
+boundary between settled pairs. A run returns after each calibration, screen,
+or confirmation pair. The next pair is not admitted until the latest completed
+pair has matching tracked evidence in a clean commit that is identical to the
+live upstream and the private acknowledgement has been written.
+
+Every run invocation first exhaustively recovers the exact frozen worker and
+container identities, validates controller structure, and replays or reconciles
+any ordered raw-complete prefix. The checkpoint command performs the same
+exhaustive recovery before its strict raw replay and evidence/Git proof. Those
+local safety steps precede checkpoint evaluation, so a cleanup, ownership,
+topology, or incomplete-one-use failure takes precedence over
+`checkpoint_required`. The remote gate runs only at a stable boundary before
+new work: after calibration, after a nonfinal rejection, or after a passing
+screen before its confirmation. It never runs between pair arms, for an already
+admitted `candidate_started` or `pair` state, while a scored pair still needs
+its deterministic decision, or while a terminal tail still needs its
+deterministic completion transition.
 
 One `autoresearch-run` invocation crosses at most one complete pair boundary:
 first calibration, then one screen or confirmation pair. This deliberate stop
@@ -302,7 +313,7 @@ Push the frozen clean protocol before any campaign preflight. Within a pair,
 fsync each cell's private lifecycle markers and verify exact owned cleanup, but
 do not run any Git operation, evidence export, live-remote check, or other
 network operation between the two cells. In particular, never run the
-forthcoming `autoresearch-checkpoint` command after only one arm: its evidence
+`autoresearch-checkpoint` command after only one arm: its evidence
 and live-upstream proofs belong strictly after a complete pair, outside the
 120-second inter-cell bound.
 
@@ -315,7 +326,7 @@ safety event or the final cutoff. A failed push stops further pairs until it is
 resolved; local raw state alone is not a substitute for the requested remote
 checkpoint.
 
-The target explicit workflow, pending the CLI integration noted above, is:
+The explicit workflow is:
 
 ```bash
 python3 sparkbench.py export-evidence \
@@ -338,20 +349,29 @@ the verified working and Git-index evidence, clean `HEAD`, and the identical
 live upstream. Keeping it out of both `results/` and `evidence/` prevents the
 acknowledgement from becoming an input to the corpus whose checksum it proves.
 It is never a substitute for the tracked scalar evidence or the pushed commit.
+An explicit checkpoint may bind the latest completed pair after the campaign
+has become terminal. That includes a fully measured but failed calibration, or
+the last completed pair when a later pair terminated partway through. The
+partial pair itself is never acknowledged. A terminal campaign with no
+completed pair has nothing to acknowledge and returns `no_completed_pair`;
+`autoresearch-run` never gates or resumes a terminal campaign.
 
 Never stage `results/`, raw journals, server logs, telemetry streams, prompts,
 completions, reasoning, tool payloads, request identifiers, local paths, or
 commands. Frequent pushes do not relax the scalar-only publication contract,
 and Git work never enters a causal measurement or an admitted pair lifecycle.
 
-The current controller enforces only the first half of that boundary by
-returning after at most one pair. Once the pending admission gate is wired, a
-missing, newer, or changed acknowledgement will return
-`checkpoint_required` before another pair starts. That status is a resumable,
-nonterminal pause: it starts no cell and must not append a failure transition;
-after the exact checkpoint is acknowledged, the same frozen campaign may
-resume. Until then, `active` means only that the just-finished pair is locally
-replayable, not that its remote checkpoint has been proven.
+The controller returns after at most one pair. A missing, newer, or changed
+acknowledgement returns `checkpoint_required` before local host admission or
+another pair start. That status is a resumable, nonterminal pause: it starts no
+cell, does not write or rewrite `summary.json`, and appends no failure
+transition; `autoresearch-run` prints that in-memory status and uses exit status
+3. It otherwise exits 0 for `active`/`complete` and 1 for blocked or terminated
+state. `autoresearch-checkpoint` exits 0 after a verified acknowledgement, 1
+when proof is not ready, and 2 for structural corruption. After the exact
+checkpoint is acknowledged, the same frozen campaign may resume. `active`
+means the just-finished pair is locally replayable; it does not by itself prove
+that the remote checkpoint exists.
 `blocked_environment` starts no cell and writes no campaign transition;
 `terminated` and `complete` must not be resumed.
 
