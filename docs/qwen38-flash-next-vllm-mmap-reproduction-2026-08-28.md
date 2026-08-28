@@ -139,6 +139,8 @@ The branch's default-off path is activated with the following exact settings:
 | Speculation | MTP, two speculative tokens | Published smoke geometry |
 | Modality | Text only | Published smoke geometry |
 | CUDA graph mode | `PIECEWISE` | Author-recommended reconstruction setting |
+| Maximum batched tokens | `8192`, subject to resolved-config confirmation | Source-derived OpenAI-server default on a non-A100 device reporting at least 70 GiB; not published by the author |
+| Maximum sequences | `1024`, subject to resolved-config confirmation | Same source-derived default; a feasibility control, not the eventual single-user setting |
 
 The source refuses full and full-and-piecewise graph modes and requires
 `CompilationMode.VLLM_COMPILE` when mmap is on. It also refuses an
@@ -219,6 +221,98 @@ capture; its model-load hook tests stub the loader and table builder. The first
 GPU gate must therefore prove compile, capture and replay at two request shapes
 and across a second request, then run the mmap-versus-`safe_open` oracle. The
 claim remains text-only; multimodal execution is not established by this PR.
+
+## Static performance model and tuning order
+
+The mmap path is a capacity-enabling design, not a zero-copy path. Each PLE
+invocation sits on the token critical path as:
+
+```text
+eager GPU n-gram hash
+  -> blocking GPU-to-CPU ids
+  -> CPU sort/dedupe and task plan
+  -> blocking thread-pool mmap gather/page faults
+  -> CPU inverse-order copy
+  -> effectively synchronous pageable CPU-to-GPU rows
+  -> device output copy
+  -> FP8 dequantization
+```
+
+The source makes the whole hash-plus-gather operation opaque to compilation
+and graph capture, then performs an explicit blocking
+[`ids.to("cpu", non_blocking=False)`](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/models/qwen4_exp/nvidia/ple_mmap.py#L545-L573).
+The CPU gather uses `np.unique`, advanced-index copies, a blocking pool map and
+a final `out[inverse]` copy before the pageable H2D transfer
+([implementation](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/models/qwen4_exp/nvidia/ple_mmap.py#L343-L409)).
+The custom op then copies the device result into its traced output buffer
+([implementation](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/models/qwen4_exp/nvidia/ple_mmap.py#L941-L968)).
+
+For this checkpoint's one PLE layer, each logical token produces 16 int64 ids:
+128 bytes copied D2H, at most 2,560 bytes of useful FP8 rows gathered and copied
+H2D, another 2,560-byte device output copy, and a 5,120-byte BF16 dequantized
+result. These payloads are tiny. Warm cost is more likely to come from the
+eager boundary, synchronization, allocations and small-task dispatch than raw
+row bandwidth. On a cold random lookup, sixteen distinct 160-byte rows require
+at least sixteen 4 KiB pages, a 25.6x page-granularity amplification before
+boundary crossings or readahead.
+
+The highest-value static finding is separate from mmap I/O: PLE hashing fills
+the full second dimension of a `[num_reqs, max_num_batched_tokens]` workspace,
+builds shifted contexts and hashes that workspace, then selects the currently
+scheduled token positions only at the end
+([workspace](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/models/qwen4_exp/nvidia/ple_layer.py#L303-L315),
+[hash](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/models/qwen4_exp/nvidia/ple_layer.py#L352-L420)).
+Decode hash work therefore scales with actual request count times the configured
+batched-token ceiling, not merely the current decode-token count. At this head,
+an OpenAI server on a non-A100 device reporting at least 70 GiB defaults to
+`8192` batched tokens and `1024` sequences
+([defaults](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/engine/arg_utils.py#L2627-L2645)).
+The runtime must print and verify the resolved values; relying on automatic
+hardware classification is inadmissible after the author-shape control.
+
+This review cannot establish that PLE is the overall warm-TPS limiter. The
+backbone and active-expert LPDDR path may still dominate, consistent with the
+independent evidence summarized in the
+[TPS bottleneck audit](qwen38-flash-next-tps-bottleneck-2026-08-28.md).
+Instrument PLE phases and the whole token concurrently; do not infer total-TPS
+causality from a faster microphase.
+
+After two unchanged baseline lifetimes agree, change one axis at a time:
+
+1. freeze `max-num-seqs=2`, the actual C2 product ceiling, while retaining the
+   `8192` batched-token control;
+2. with sequences fixed at two, compare `max-num-batched-tokens=2048` against
+   `8192`; bracket with `4096`, then `1024`, only when the first contrast is
+   material, scoring both resident agent-task wall and 8K/32K prefill wall;
+3. at the winning scheduler geometry, compare mmap workers 16 versus 32;
+   changing the 2,048-row chunk cannot alter ordinary C1/C2 decode topology,
+   while MTP2 can make scheduled tokens per forward exceed request count;
+4. add a measured small-call serial/thread-pool-bypass arm only if pool
+   enqueue/wait is at least 10% of PLE wall;
+5. make the hash symbolic-shape-safe and compare whole-forward split against a
+   gather-only split, stopping on any recompile, constraint violation or output
+   mismatch;
+6. test persistent pinned staging only if H2D is at least 5% of PLE wall, and
+   test chunk size only on prefill calls whose unique rows per shard exceed the
+   current chunk; and
+7. keep prewarm as a cold-start experiment, never a resident-TPS arm. Its
+   built-in 8 GiB headroom is below this repository's 14 GiB safety floor, so
+   it requires a safer bound before admission.
+
+Per-call instrumentation must include actual requests and scheduled/MTP
+tokens, raw and unique ids, shards/tasks/active workers, hash CUDA time,
+blocking D2H wall, CPU plan/pool/page-copy/inverse-copy wall, H2D and output-copy
+wall, dequant time, total custom-op wall, minor/major faults and process NVMe
+bytes. Pair that with graph launches, device idle gaps, LPDDR traffic, CPU run
+queue, requested-page hit rate, MTP acceptance and end-to-end TTFT/ITL/task
+wall. The existing `pending` log field is task count, not observed worker
+concurrency.
+
+Stop a worker search when adjacent settings differ by less than 3%. Promote a
+candidate only when two fresh lifetimes move in the same direction, improve
+correct task wall or PLE wall by at least 5% (or decode TPS by at least 3%
+outside measured drift), retain exact oracle/greedy correctness, and preserve
+the memory, swap, pressure and latency gates.
 
 ## Acquisition and build phase
 
