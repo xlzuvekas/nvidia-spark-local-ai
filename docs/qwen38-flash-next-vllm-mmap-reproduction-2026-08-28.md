@@ -160,6 +160,66 @@ The author also reported a 2,100 MHz GPU clock cap. Do not change the host's
 clock merely to imitate that observation. Record the actual clock policy and
 keep any external 25.1 tok/s comparison descriptive.
 
+## Pre-build compatibility and integration audit
+
+A read-only audit of the complete local Radix snapshot against the exact
+`8e4e036` mmap implementation found no static blocker for a fresh-process,
+immutable-local-directory, TP1, text-only launch. The header and geometry gate
+passes:
+
+| Check | Pinned Radix result |
+| --- | --- |
+| Safetensors set | 206 files; every header parses, every tensor offset is in bounds, and tensor names are unique |
+| Header cap | Largest header is 203,584 bytes, below the branch's 100 MiB limit |
+| PLE topology | Exactly one PLE layer: zero-based layer 1, matching `ple_layer_ids=[2]` |
+| PLE shards | All 128 indices `0..127`; each is `[2,500,012, 160]` E4M3 FP8 |
+| PLE total | 320,001,536 rows and 51,200,245,760 bytes, or 47.683945 GiB |
+| Scale | One exact-name `[1]` BF16 scale tensor, a dtype accepted by the branch |
+
+The 160-byte row width follows independently from `ple_embed_dim=2560` divided
+by `(ngram_size - 1) * heads_per_ngram = 16`; the model's 256-wide attention
+heads are unrelated. This establishes compatibility with
+[`discover_shards`](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/models/qwen4_exp/nvidia/ple_mmap.py#L183-L268)
+and the branch's header/shape predicates. It does **not** prove that the real
+loader intercepts every Radix shard and scale correctly, that the
+streamed-versus-direct scale values match, that the ModelOpt NVFP4 backbone
+loads, or that the compiled custom op executes on GB10. No large tensor payload
+or scale value was read during this audit.
+
+The same review found two concrete integration defects outside the frozen
+fresh-process protocol:
+
+- **Same-path hot reload is unsafe.** The layer discards streamed PLE shard
+  tensors and may replace its scale, but
+  [`build_tables`](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/models/qwen4_exp/nvidia/ple_mmap.py#L790-L815)
+  skips an already attached table when the path string is unchanged, while
+  header discovery is cached only by path. An iterator-based reload or an
+  in-place snapshot replacement can therefore mix a new backbone/scale with
+  old mapped rows. Disable weight reload for this arm, keep the mounted
+  snapshot immutable, and require a full process restart for any checkpoint
+  change.
+- **Repository-ID resolution can disagree with the real loader.** The mmap
+  [`resolver`](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/models/qwen4_exp/nvidia/ple_mmap.py#L641-L659)
+  does not carry the loader's custom download directory or non-default weight
+  source through its offline lookup. Pass the exact completed snapshot
+  directory as the model. Repository IDs, `model_weights` indirection,
+  RunAI/object sources, and custom download-directory resolution are outside
+  this reproduction.
+
+There is also a fail-closed validation gap: the mmap discovery glob silently
+uses the last copy of a duplicate `(layer, shard)` or scale tensor, independent
+of the default loader's index-based duplicate filtering. The pinned Radix
+manifest has no duplicate tensor names, but unique PLE tensor ownership is now
+an explicit admission check.
+
+Finally, the branch's large synthetic test module is not an end-to-end model
+test. Its custom-op tests cover CPU dispatch, schema/fake behavior and graph
+guards, but do not execute the op under real CUDA compilation and piecewise
+capture; its model-load hook tests stub the loader and table builder. The first
+GPU gate must therefore prove compile, capture and replay at two request shapes
+and across a second request, then run the mmap-versus-`safe_open` oracle. The
+claim remains text-only; multimodal execution is not established by this PR.
+
 ## Acquisition and build phase
 
 This phase may use the network, but it must be separate from measurement:
@@ -169,8 +229,10 @@ This phase may use the network, but it must be separate from measurement:
 3. build without overlaying files into an older vLLM image;
 4. record the resulting OCI digest, source tree digest, compiler/toolchain,
    CUDA, PyTorch, FlashInfer, vLLM and complete installed-package freeze;
-5. run the branch's checkpoint- and GPU-free synthetic mmap tests before
-   introducing the model; and
+5. run the branch's checkpoint- and GPU-free synthetic mmap tests, the
+   header-only validator against the pinned snapshot, and a CPU loader-seam
+   test that proves shard/scale interception without recording their values;
+   and
 6. disable network access for admission and all measured lifetimes.
 
 The author reported:
