@@ -17,6 +17,15 @@ checks, and no GPU-resident PLE allocation. It is still an unmerged community
 branch stacked on another open model-support pull request, so it is an
 experiment candidate rather than supported deployment guidance.
 
+A second open SGLang branch now supplies a concrete `io_uring` PLE reader and
+an exact Radix checkpoint pin. It reports 24.23 output tok/s across forty
+512-token requests on one Spark. The storage design is a serious reproduction
+candidate, but its current stack still contains the SM121 TRT-LLM enablement
+that upstream subsequently restricted after corruption reports. Its new
+correctness-first Triton fallback runs only when the preferred TRT-LLM kernel
+is unavailable. The reader can be evaluated only after separating that storage
+change from the stale QSA dispatch boundary.
+
 One external vLLM profile also sharpens the performance hypothesis. It
 attributes most per-token wall time to BF16 dense GEMV and only a small share
 to the NVFP4 MoE experts. That is consistent with this repository's inference
@@ -33,6 +42,8 @@ The operational decision is:
   measured anchors;
 - treat SGLang's general SM121 TRT-LLM route as unsafe until upstream has a
   validated replacement with natural long-context coverage; and
+- treat SGLang's new `io_uring` reader as a component candidate, not permission
+  to run its exact stale SM121 QSA stack; and
 - after the frozen campaign closes, reproduce the vLLM mmap branch under the
   same immutable, offline, loopback-authenticated, scalar-evidence protocol.
 
@@ -40,7 +51,7 @@ The operational decision is:
 
 This is a strict delta from the day-one review's repository cutoff. The prior
 report was committed at `2026-08-27T21:58:59Z`; this review covers public
-changes visible through `2026-08-28T09:30:00Z`. Materially relevant changes
+changes visible through `2026-08-28T10:15:46Z`. Materially relevant changes
 that began before the cutoff but were absent from the prior report are labeled
 **supplemental** or explicitly described as a sequence that straddles the
 cutoff; they are not silently counted as day-two publications.
@@ -120,6 +131,72 @@ The frozen campaign's 60K repeated-word exact-key case remains a mandatory
 synthetic capacity gate. It must not be weakened or replaced to accommodate
 the new literature, but it cannot address varied-token corruption. Natural
 varied-token validation belongs in a separate post-campaign protocol.
+
+## SGLang: the new `io_uring` reader is useful, but its QSA stack is stale
+
+Open [SGLang PR #36567](https://github.com/sgl-project/sglang/pull/36567), at
+reviewed head
+[`d866243006f5dcb073223cfa4fe90a7a3f740c45`](https://github.com/sgl-project/sglang/commit/d866243006f5dcb073223cfa4fe90a7a3f740c45),
+adds a substantially different NVMe PLE route. It keeps the table in the
+original indexed safetensors, parses exact row offsets, and uses a bundled Rust
+reader with persistent `io_uring`, `O_DIRECT`, page-aligned bounded reads and
+an optional application LRU. A background thread begins the read before the
+preceding decoder layer, then a persistent pinned stage supports asynchronous
+H2D and FP8-to-BF16 conversion. The implementation also retains an mmap reader
+as a correctness fallback
+([source](https://github.com/sgl-project/sglang/blob/d866243006f5dcb073223cfa4fe90a7a3f740c45/python/sglang/srt/models/qwen4_ple_nvme.py#L266-L418),
+[staging path](https://github.com/sgl-project/sglang/blob/d866243006f5dcb073223cfa4fe90a7a3f740c45/python/sglang/srt/models/qwen4_ple_nvme.py#L452-L606)).
+
+The PR publishes unusually specific one-Spark data for the exact local Radix
+revision `7b71922`:
+
+| Author-reported measure | Result |
+| --- | ---: |
+| Sixteen-row Rust-reader microbenchmark, 1,000 iterations | 0.208 ms p50 / 0.627 ms p95 / 0.944 ms p99 |
+| Sparse GQA SM121 kernel, batch one, 100 iterations | 0.0978 ms mean |
+| Forty requests: chat/STEM/math/code, 512 output tokens each | 20,480/20,480 output tokens; zero API errors, restarts or OOMs |
+| Aggregate output | 24.23 tok/s over 845.30 s |
+| Per-domain output | 23.52 / 23.78 / 26.97 / 23.01 tok/s |
+| Mean acceptance length | 2.60 |
+| Overall median TTFT / reported TPOT aggregate | 469.02 ms / 39.06 ms |
+| Mixed gather log after 7,000 calls | 703,568 selected rows; 4.475 ms mean read time |
+| Target / NEXTN loading | 466.10 s / 90.20 s |
+| Post-pool available memory | 18.31 GiB; 447,040 KV-cache tokens allocated |
+
+The run used TP1, concurrency one, BF16 KV, 32K context, eager execution and
+MTP3 with top-k one/four draft tokens. Its prompt set, 512-token outputs,
+reasoning policy, eager graphs and MTP depth do not match either the local
+SGLang anchors or vLLM's MTP2 report. The rates are therefore not a backend
+ranking. The row checks—first, boundary, final and sixteen random rows against
+`safe_open`—are useful admission evidence but much smaller than this
+repository's planned 1,000-row oracle.
+
+The decisive caveat is branch ancestry. Head `d866243` contains the earlier
+SM121 enablement `7c66045` and does not contain the later safety restriction
+`99c9362`. Its resolver still selects TRT-LLM on SM121 whenever FlashInfer's
+decode function imports
+([resolver](https://github.com/sgl-project/sglang/blob/d866243006f5dcb073223cfa4fe90a7a3f740c45/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py#L52-L67)).
+Only when that preferred path is unavailable does the new SM121 Triton sparse
+GQA fallback run
+([dispatch](https://github.com/sgl-project/sglang/blob/d866243006f5dcb073223cfa4fe90a7a3f740c45/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py#L1645-L1665)).
+The fallback's model-shape unit comparison and microbenchmark do not establish
+that the published end-to-end run selected it or that either route is correct
+at varied 120K context. At this audit, the PR remained open and its public
+base, extra and AMD check summaries were red.
+
+Reproduce the storage component only as a clearly named integration arm:
+
+- rebase the reader onto a source boundary that contains the SM121 restriction,
+  or explicitly force and attest the Triton fallback; never silently carry the
+  stale TRT-LLM resolver;
+- pin the Rust/Cargo tree, wheel and image digest, then run the full row oracle,
+  compile/dispatch attestation and ascending natural long-context gate;
+- use a narrow seccomp profile that admits only `io_uring_setup`,
+  `io_uring_enter` and `io_uring_register`; never use `seccomp=unconfined` or a
+  privileged container merely to benchmark it; and
+- keep `io_uring` and any application page-cache size as explicit axes. The
+  local host reports `kernel.io_uring_disabled=0`, but container syscall
+  admission and the internal NVMe's `O_DIRECT` behavior remain untested.
 
 ## vLLM: direct PLE mmap is the leading reproduction target
 
@@ -311,6 +388,7 @@ The support matrix at this review is therefore:
 | Route | One-Spark GB10 status | Local action |
 | --- | --- | --- |
 | SGLang TRT-LLM sparse decode | SM121 excluded by the reviewed `qwen4-main-squashed` gate after corruption reports; no release support | Keep the existing pinned overlay experimental; strengthen varied-token validation |
+| SGLang `io_uring` PLE streaming | Open stacked PR with exact-checkpoint data, but its head predates the SM121 safety restriction and its public checks are red | Rebase/force the safe QSA fallback before testing the reader; use narrow syscall admission |
 | vLLM direct PLE mmap | Open PR stacked on open model support; promising row and spot checks | Highest-priority post-cutoff reproduction target |
 | vLLM CPU PLE offload | Open PR; default container isolation blocks `pidfd_getfd` | Do not add `SYS_PTRACE` merely to benchmark it; prefer mmap |
 | Compressed NVFP4 PLE | Pinned community checkpoint, minimal quality evidence | Quality-first research arm, not champion candidate |
@@ -332,21 +410,26 @@ campaign:
    inferred until the author confirms it.
 3. Use direct read-only mmap without `SYS_PTRACE`, implicit downloads, mutable
    branches, wildcard cache selection, or public API exposure.
-4. Reuse the clean local D256 prompts and client geometry while freezing a new
+4. Preserve SGLang PR #36567's reader and Rust commits as a second exact source
+   input, but do not execute its stale SM121 resolver. Build a separate
+   integration on the restricted/fallback-attested QSA path; add only the three
+   `io_uring` syscalls to a pinned seccomp profile and test direct reads before
+   any server launch.
+5. Reuse the clean local D256 prompts and client geometry while freezing a new
    matched vLLM off/MTP2 pair; retain the local MTP3/off pair as the separate
    SGLang anchor. Then run C1/C2/C4/C8 and the deterministic coding/cowork
    battery under the same scalar telemetry, fixed `max-num-seqs`, and explicit
    queue counters.
-5. Add natural varied-token long-context trials around 60K, 120K, 160K, 190K,
+6. Add natural varied-token long-context trials around 60K, 120K, 160K, 190K,
    and 210K only as fresh-lifetime ascending admissions. Precompute token, KV,
    and workspace budgets; retain the existing MemAvailable, swap, and PSI
    gates; and admit the next tier only after the prior tier is correct and
    pressure-clean. On corruption, preserve a typed failure and restart rather
    than retrying inside a poisoned process.
-6. Profile a fixed C1 decode span with kernel timing and hardware counters to
+7. Profile a fixed C1 decode span with kernel timing and hardware counters to
    distinguish BF16 weight traffic from occupancy, launch, scheduler, and PLE
    page-fault costs.
-7. Publish external claims and local measurements in separate tables; promote
+8. Publish external claims and local measurements in separate tables; promote
    no configuration without semantic, lifecycle, memory, swap, and cleanup
    gates.
 
