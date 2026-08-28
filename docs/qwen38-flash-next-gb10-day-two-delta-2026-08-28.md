@@ -566,48 +566,56 @@ The support matrix at this review is therefore:
 ## What this changes in the local optimization plan
 
 The day-two evidence narrows the next work rather than changing the frozen
-campaign. Step 1 preserves the frozen SGLang product campaign; steps 2--10 are
-a separate post-cutoff systems/reproduction sequence and do not reorder the
-retained-SGLang serving-flag backlog:
+campaign. Step 1 preserves the frozen SGLang product campaign; step 2 retires
+its historical runtime after cutoff; steps 3--11 are a separate post-cutoff
+systems/reproduction sequence and do not reorder the future SGLang
+serving-flag backlog:
 
 1. Under its bounded historical exception, resume the existing SGLang campaign
    only if its original preflight passes before cutoff. Otherwise preserve its
    typed blocked/cutoff state; do not mutate or re-summarize it into a synthetic
    completion or reuse any result as a deployment-safety claim.
-2. Freeze the exact stacked PR #54129 tree rather than combining it with the
+2. After cutoff, make every historical profile bound to QSA overlay digest
+   `e30566492e1502f94a4c7fed42d90b523bbb662580c628459e6e63c7b5263c75`
+   non-runnable. The current manifest contains 21 such bindings. Add a
+   fail-closed test keyed to that exact digest, preserve frozen raw manifests
+   and scalar evidence unchanged, and require distinct IDs for any SM121 Triton
+   successor.
+3. Freeze the exact stacked PR #54129 tree rather than combining it with the
    newer #53896 head, then build an immutable Linux/aarch64 image. Use the
    pinned local Radix NVFP4-backbone/FP8-PLE checkpoint as the best-supported
    reconstruction target while clearly labeling the checkpoint identity as
    inferred until the author confirms it.
-3. After the untouched author-shape control, apply only the `4df2ce2`
+4. After the untouched author-shape control, apply only the `4df2ce2`
    live-width slice as a new source identity and require hash-ID/output parity
    across decode, MTP, prefill and same-token-count/different-layout replay.
-4. Use direct read-only mmap without `SYS_PTRACE`, implicit downloads, mutable
+5. Use direct read-only mmap without `SYS_PTRACE`, implicit downloads, mutable
    branches, wildcard cache selection, public API exposure, or prefix caching
    in the initial admission.
-5. Build the SGLang storage candidate only from `04648a7` and `9f101e3` atop
+6. Build the SGLang storage candidate only from `04648a7` and `9f101e3` atop
    `3681c4e`; exclude `8ef3b3`. Add only the three `io_uring` syscalls to a
    pinned seccomp profile and test direct reads before any server launch.
-6. Reuse the clean local D256 prompts and client geometry while freezing a new
-   matched vLLM off/MTP2 pair; retain the local MTP3/off pair as the separate
-   SGLang anchor. Then run C1/C2/C4/C8 and the deterministic coding/cowork
+7. Reuse the clean local D256 prompts and client geometry while freezing a new
+   matched vLLM off/MTP2 pair. Retain the local MTP3/off pair as a historical
+   numeric anchor only; any SGLang comparator must be newly built and admitted
+   on SM121 Triton. Then run C1/C2/C4/C8 and the deterministic coding/cowork
    battery under the same scalar telemetry, fixed `max-num-seqs`, and explicit
    queue counters.
-7. Add natural varied-token long-context trials around 60K, 120K, 160K, 190K,
+8. Add natural varied-token long-context trials around 60K, 120K, 160K, 190K,
    and 210K only as fresh-lifetime ascending admissions. Precompute token, KV,
    and workspace budgets; retain the existing MemAvailable, swap, and PSI
    gates; and admit the next tier only after the prior tier is correct and
    pressure-clean. On corruption, preserve a typed failure and restart rather
    than retrying inside a poisoned process.
-8. Only after cache-off admission, run the resolved-`align` growing-prefix
+9. Only after cache-off admission, run the resolved-`align` growing-prefix
    canary defined in the reproduction plan in a separate fresh lifetime. Do
    not add an `all` arm. Repeating a fixed prompt is not evidence that
    cache-resume state is safe.
-9. Profile a fixed C1 decode span with CUDA/NVTX timing and process counters to
+10. Profile a fixed C1 decode span with CUDA/NVTX timing and process counters to
    partition target, launch, scheduler, and PLE page-fault costs. GB10 hardware
    counters require separate authorization and expose only LPDDR-facing
    proxies, not direct DRAM bytes.
-10. Publish external claims and local measurements in separate tables; promote
+11. Publish external claims and local measurements in separate tables; promote
    no configuration without semantic, lifecycle, memory, swap, and cleanup
    gates.
 
