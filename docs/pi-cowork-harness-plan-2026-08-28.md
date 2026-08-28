@@ -194,17 +194,19 @@ prefix.
 
 Prevent accidental reuse between episodes with an admitted non-prompt cache
 namespace: generate a private per-episode `cache_salt`, keep it stable across
-that episode's turns, and assert it after every provider transform. If the
-pinned runtime cannot prove that namespace is consumed, use an admitted cache
-reset between episodes. If neither mechanism passes, the shared-server block is
-not runnable; refreeze a fresh-server-per-episode design and its replicate unit
-before scoring. Never inject a sentinel into the measured prompt. Require
-unique salts across episodes and zero device/host/storage native hits on every
-episode's first request. Keep salts private. Publish request-scoped cached-token
-counts only after a zero-hit semantics canary reconciles them with native
-counters. Normalize an absent/null detail object to zero only for that admitted
-behavior; malformed or unsupported telemetry remains invalid. Otherwise omit
-the counts, and never infer a cache hit from TTFT.
+that episode's turns, and assert it after every provider transform. For C1
+blocks only, an admitted reset between episodes may replace the namespace. C2
+requires two simultaneously valid independent namespaces; a parallel pair
+cannot reset between tasks, and a serial in-window reset would contaminate its
+makespan. If the pinned runtime cannot prove namespace consumption, C2 is
+non-runnable and must be refrozen rather than measured. Never inject a sentinel
+into the measured prompt. Require unique salts across episodes and zero
+device/host/storage native hits on every episode's first request. Keep salts
+private. Publish request-scoped cached-token counts only after a zero-hit
+semantics canary reconciles them with native counters. Normalize an absent/null
+detail object to zero only for that admitted behavior; malformed or unsupported
+telemetry remains invalid. Otherwise omit the counts, and never infer a cache
+hit from TTFT.
 
 ## C1 and C2 scheduling admission
 
@@ -230,10 +232,12 @@ releases the second only after the first terminal result. C2 means two
 independent subtasks for one user; it is not a multi-user result or permission
 to parallelize a sequential tool chain.
 
-For serial C2, the common orchestrator timestamps task one's terminal result and
-releases task two in the same transition. Task one's terminal state must already
-prohibit further model or tool work, but do not run its verifier, remove its
-container, delete its workspace, or perform other heavy cleanup before that
+For serial C2, when task one reaches an ordinary model terminal state eligible
+for continuation, the common orchestrator timestamps it and releases task two
+in the same transition. A campaign-stopping safety, provenance, or cleanup fault
+instead skips task two and enters pair cleanup. Task one's terminal state must
+already prohibit further model or tool work, but do not run its verifier, remove
+its container, delete its workspace, or perform other heavy cleanup before that
 release. After task two terminates, verify and clean both tasks before ending
 the server lifetime. Parallel C2 uses the same pair-level teardown after both
 terminal results. This keeps cleanup out of both makespans without allowing an
@@ -347,7 +351,9 @@ their model requests. For
 the selected profile, precompute every request's maximum tokenizer-rendered
 input plus its reserved output and speculative allowance across every legal
 path. Require that total to remain at or below 61,440 tokens, leaving 4,096
-tokens unallocated in the 65,536-token server pool.
+tokens unallocated in the 65,536-token server pool for C1. For C2, evaluate
+every legal simultaneous pair of paths and require the sum across both requests
+to remain at or below 61,440; individual-request compliance is insufficient.
 
 The twelve episodes should target roughly 6,500–8,000 assistant-emitted tokens,
 including reasoning and serialized tool calls. The historical superseded
