@@ -2956,7 +2956,14 @@ def execute_plan(
                 )
                 return summarize_run(run_dir)
             return existing_summary
-        journal.append({"event": "run_start", "completed_cases_at_resume": sorted(completed)})
+        journal.append(
+            {
+                "event": "run_start",
+                "completed_cases_at_resume": sorted(completed),
+                "plan_fingerprint": str(plan["fingerprint"]),
+                "run_nonce": run_nonce,
+            }
+        )
         if keep_server and str(model.backend) == "llamacpp":
             error = PreflightError(
                 "--keep-server is not supported for managed llama.cpp processes"
@@ -3026,7 +3033,15 @@ def execute_plan(
             return summarize_run(run_dir)
 
         failure_stage = "host_safety_policy"
-        measurement_started = time.perf_counter()
+        measurement_started_ns = time.monotonic_ns()
+        journal.append(
+            {
+                "event": "measurement_started",
+                "monotonic_ns": measurement_started_ns,
+                "plan_fingerprint": str(plan["fingerprint"]),
+                "run_nonce": run_nonce,
+            }
+        )
         try:
             host_safety = _host_safety_watchdog(model)
             if host_safety is not None and keep_server:
@@ -3223,10 +3238,15 @@ def execute_plan(
                     if host_safety is not None:
                         host_safety.raise_if_tripped()
                 failure_stage = "measurement_complete"
+                measurement_complete_ns = time.monotonic_ns()
                 journal.append(
                     {
                         "event": "measurement_complete",
-                        "elapsed_s": time.perf_counter() - measurement_started,
+                        "elapsed_s": (
+                            measurement_complete_ns - measurement_started_ns
+                        )
+                        / 1_000_000_000,
+                        "monotonic_ns": measurement_complete_ns,
                     }
                 )
             except BaseException as error:
@@ -3240,7 +3260,7 @@ def execute_plan(
                 failure_stage = "server_cleanup"
                 telemetry.set_phase("server_shutdown")
                 effective_keep_server = keep_server
-                cleanup_started = time.perf_counter()
+                cleanup_started_ns = time.monotonic_ns()
                 try:
                     if server:
                         try:
@@ -3319,6 +3339,7 @@ def execute_plan(
                                 if host_safety.tripped and effective_keep_server:
                                     effective_keep_server = False
                                     server.stop(keep_server=False)
+                        server_stopped_ns = time.monotonic_ns()
                         journal.append(
                             {
                                 "event": (
@@ -3328,8 +3349,10 @@ def execute_plan(
                                 ),
                                 "backend": server.backend,
                                 "cleanup_elapsed_s": (
-                                    time.perf_counter() - cleanup_started
-                                ),
+                                    server_stopped_ns - cleanup_started_ns
+                                )
+                                / 1_000_000_000,
+                                "monotonic_ns": server_stopped_ns,
                             }
                         )
                 except Exception as cleanup_error:

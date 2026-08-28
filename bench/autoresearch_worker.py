@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -37,6 +38,18 @@ ProcessSignaler: TypeAlias = Callable[[int, int], None]
 MonotonicClock: TypeAlias = Callable[[], float]
 Sleeper: TypeAlias = Callable[[float], None]
 PopenFactory: TypeAlias = Callable[..., subprocess.Popen[Any]]
+WorkerTimeoutPhase: TypeAlias = Literal["measurement", "cleanup", "finalization"]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerProgress:
+    """One durable child-journal phase and its same-boot deadline."""
+
+    phase: WorkerTimeoutPhase
+    deadline_monotonic_s: float
+
+
+ProgressProbe: TypeAlias = Callable[[], WorkerProgress | None]
 
 
 class WorkerLifecycleError(RuntimeError):
@@ -113,6 +126,7 @@ class WorkerRunResult:
     return_code: int
     timed_out: bool
     cleanup: WorkerCleanupResult
+    timeout_phase: WorkerTimeoutPhase | None = None
 
 
 def worker_state_path(cell_run_dir: Path) -> Path:
@@ -700,6 +714,98 @@ def _cleanup_uncaptured_process(
         ) from signal_failure
 
 
+_PROGRESS_PHASE_ORDER = {
+    "measurement": 0,
+    "cleanup": 1,
+    "finalization": 2,
+}
+
+
+def _validated_worker_progress(
+    value: WorkerProgress | None,
+    previous: WorkerProgress | None,
+) -> WorkerProgress | None:
+    if value is None:
+        if previous is not None:
+            raise WorkerLifecycleError(
+                "worker_progress_regressed",
+                "worker progress disappeared after a durable phase marker",
+            )
+        return None
+    if not isinstance(value, WorkerProgress):
+        raise WorkerLifecycleError(
+            "worker_progress_malformed",
+            "worker progress probe returned an invalid value",
+        )
+    if value.phase not in _PROGRESS_PHASE_ORDER:
+        raise WorkerLifecycleError(
+            "worker_progress_malformed",
+            "worker progress phase is unknown",
+        )
+    deadline = value.deadline_monotonic_s
+    if not isinstance(deadline, (int, float)) or isinstance(deadline, bool):
+        raise WorkerLifecycleError(
+            "worker_progress_malformed",
+            "worker progress deadline must be numeric",
+        )
+    if not math.isfinite(float(deadline)) or float(deadline) <= 0:
+        raise WorkerLifecycleError(
+            "worker_progress_malformed",
+            "worker progress deadline must be finite and positive",
+        )
+    if previous is not None:
+        prior_rank = _PROGRESS_PHASE_ORDER[previous.phase]
+        current_rank = _PROGRESS_PHASE_ORDER[value.phase]
+        if current_rank < prior_rank:
+            raise WorkerLifecycleError(
+                "worker_progress_regressed",
+                "worker progress moved backwards",
+            )
+        if current_rank == prior_rank and value != previous:
+            raise WorkerLifecycleError(
+                "worker_progress_changed",
+                "a durable worker phase deadline changed",
+            )
+    return value
+
+
+def _wait_with_progress_deadlines(
+    process: subprocess.Popen[Any],
+    *,
+    progress_probe: ProgressProbe,
+    start_marker_timeout_s: float,
+    poll_interval_s: float,
+    monotonic: MonotonicClock,
+) -> tuple[int | None, WorkerTimeoutPhase | None]:
+    """Wait until exit or the active durable lifecycle phase expires."""
+
+    start_deadline = monotonic() + start_marker_timeout_s
+    progress: WorkerProgress | None = None
+    while True:
+        progress = _validated_worker_progress(progress_probe(), progress)
+        deadline = (
+            start_deadline
+            if progress is None
+            else float(progress.deadline_monotonic_s)
+        )
+        now = monotonic()
+        if now >= deadline:
+            # Re-probe immediately at the boundary so a just-fsynced marker
+            # wins the race against a terminating signal.
+            refreshed = _validated_worker_progress(progress_probe(), progress)
+            if refreshed != progress:
+                progress = refreshed
+                continue
+            try:
+                return process.wait(timeout=0), None
+            except subprocess.TimeoutExpired:
+                return None, "measurement" if progress is None else progress.phase
+        try:
+            return process.wait(timeout=min(poll_interval_s, deadline - now)), None
+        except subprocess.TimeoutExpired:
+            continue
+
+
 def run_owned_worker(
     argv: Sequence[str],
     *,
@@ -713,6 +819,10 @@ def run_owned_worker(
     proc_reader: ProcStatReader = read_proc_stat,
     signal_group: ProcessGroupSignaler = os.killpg,
     signal_process: ProcessSignaler = os.kill,
+    progress_probe: ProgressProbe | None = None,
+    start_marker_timeout_s: float = 30.0,
+    progress_poll_interval_s: float = 0.25,
+    monotonic: MonotonicClock = time.monotonic,
 ) -> WorkerRunResult:
     """Run one worker in a new session with durable, bounded ownership.
 
@@ -727,7 +837,13 @@ def run_owned_worker(
             "worker_argv_invalid", "worker argv must contain nonempty strings"
         )
     _validate_run_nonce(run_nonce)
-    if timeout_s <= 0 or interrupt_grace_s < 0 or kill_grace_s <= 0:
+    if (
+        timeout_s <= 0
+        or interrupt_grace_s < 0
+        or kill_grace_s <= 0
+        or start_marker_timeout_s <= 0
+        or progress_poll_interval_s <= 0
+    ):
         raise WorkerLifecycleError(
             "worker_timeout_invalid", "worker and cleanup bounds must be positive"
         )
@@ -789,14 +905,45 @@ def run_owned_worker(
         )
         raise error from persistence_error
 
+    timeout_phase: WorkerTimeoutPhase | None = None
     try:
-        return_code = process.wait(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
+        if progress_probe is None:
+            try:
+                return_code = process.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                return_code = None
+                timeout_phase = "measurement"
+        else:
+            return_code, timeout_phase = _wait_with_progress_deadlines(
+                process,
+                progress_probe=progress_probe,
+                start_marker_timeout_s=min(start_marker_timeout_s, timeout_s),
+                poll_interval_s=progress_poll_interval_s,
+                monotonic=monotonic,
+            )
+    except BaseException as original_error:
+        try:
+            _terminate_current_process(
+                process,
+                cell_run_dir,
+                identity,
+                interrupt_grace_s=interrupt_grace_s,
+                kill_grace_s=kill_grace_s,
+                proc_reader=proc_reader,
+                signal_group=signal_group,
+            )
+        except WorkerLifecycleError as cleanup_error:
+            raise cleanup_error from original_error
+        raise
+
+    if timeout_phase is not None:
         cleanup = _terminate_current_process(
             process,
             cell_run_dir,
             identity,
-            interrupt_grace_s=interrupt_grace_s,
+            interrupt_grace_s=(
+                interrupt_grace_s if timeout_phase == "measurement" else 0.0
+            ),
             kill_grace_s=kill_grace_s,
             proc_reader=proc_reader,
             signal_group=signal_group,
@@ -812,21 +959,10 @@ def run_owned_worker(
             return_code=cleanup.return_code,
             timed_out=True,
             cleanup=cleanup,
+            timeout_phase=timeout_phase,
         )
-    except BaseException as original_error:
-        try:
-            _terminate_current_process(
-                process,
-                cell_run_dir,
-                identity,
-                interrupt_grace_s=interrupt_grace_s,
-                kill_grace_s=kill_grace_s,
-                proc_reader=proc_reader,
-                signal_group=signal_group,
-            )
-        except WorkerLifecycleError as cleanup_error:
-            raise cleanup_error from original_error
-        raise
+    if return_code is None:  # pragma: no cover - defensive type guard.
+        raise WorkerLifecycleError("reap_failed", "completed worker has no return code")
 
     cleanup = _certify_absent_and_remove(
         cell_run_dir,

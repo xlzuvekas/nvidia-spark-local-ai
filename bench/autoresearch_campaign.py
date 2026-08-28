@@ -26,6 +26,8 @@ import tomllib
 from typing import Any, Callable, Iterator, Mapping
 
 from .autoresearch import (
+    CELL_TIMEOUT_S,
+    CLEANUP_TIMEOUT_S,
     CampaignPolicy,
     CandidateDelta,
     EligibilityInputs,
@@ -44,6 +46,7 @@ from .autoresearch import (
 )
 from .autoresearch_worker import (
     WorkerLifecycleError,
+    WorkerProgress,
     WorkerRunResult,
     recover_owned_worker,
     run_owned_worker,
@@ -119,6 +122,9 @@ HOST_SAFETY_MAX_SWAP_GROWTH_KIB = 512 * 1024
 HOST_SAFETY_MAX_STARTING_SWAP_KIB = 64 * 1024
 PAIR_ADMISSION_REMAINING_S = 4_620
 EXPECTED_HOST_SAFETY_THRESHOLDS = (14, 512, 64)
+START_MARKER_TIMEOUT_S = 30
+FINALIZATION_TIMEOUT_S = 10
+MAX_PROGRESS_LINE_BYTES = 16 * 1024 * 1024
 
 _TOP_LEVEL_KEYS = frozenset({"schema_version", "campaign", "candidates"})
 _CAMPAIGN_KEYS = frozenset(
@@ -1222,6 +1228,336 @@ def _finite_nonnegative(value: Any, *, context: str) -> float:
     return parsed
 
 
+def _progress_timestamp(value: Any, *, context: str) -> None:
+    if not isinstance(value, str):
+        raise WorkerLifecycleError(
+            "worker_progress_malformed", f"{context} timestamp is missing"
+        )
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise WorkerLifecycleError(
+            "worker_progress_malformed", f"{context} timestamp is invalid"
+        ) from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise WorkerLifecycleError(
+            "worker_progress_malformed", f"{context} timestamp has no timezone"
+        )
+
+
+def _progress_monotonic_ns(value: Any, *, context: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise WorkerLifecycleError(
+            "worker_progress_malformed",
+            f"{context} monotonic clock must be a positive integer",
+        )
+    return value
+
+
+class _CellLifecycleProgress:
+    """Incrementally validate durable lifecycle markers for one frozen cell."""
+
+    def __init__(
+        self,
+        *,
+        events_path: Path,
+        plan_fingerprint: str,
+        run_nonce: str,
+        measurement_timeout_s: int,
+        cleanup_timeout_s: int,
+        finalization_timeout_s: int = FINALIZATION_TIMEOUT_S,
+    ) -> None:
+        self.events_path = events_path
+        self.plan_fingerprint = plan_fingerprint
+        self.run_nonce = run_nonce
+        self.measurement_timeout_s = measurement_timeout_s
+        self.cleanup_timeout_s = cleanup_timeout_s
+        self.finalization_timeout_s = finalization_timeout_s
+        self._identity: tuple[int, int] | None = None
+        self._offset = 0
+        self._tail = b""
+        self._run_started = False
+        self._measurement_started_ns: int | None = None
+        self._measurement_complete_ns: int | None = None
+        self._server_stopped_ns: int | None = None
+        self._run_completed = False
+        self.measurement_elapsed_s: float | None = None
+        self.cleanup_elapsed_s: float | None = None
+
+    def _require_keys(
+        self, event: Mapping[str, Any], expected: frozenset[str], *, context: str
+    ) -> None:
+        if set(event) != expected:
+            raise WorkerLifecycleError(
+                "worker_progress_malformed", f"{context} marker schema changed"
+            )
+        _progress_timestamp(event.get("timestamp"), context=context)
+
+    def _consume(self, event: Mapping[str, Any]) -> None:
+        name = event.get("event")
+        if name == "run_start":
+            self._require_keys(
+                event,
+                frozenset(
+                    {
+                        "event",
+                        "timestamp",
+                        "completed_cases_at_resume",
+                        "plan_fingerprint",
+                        "run_nonce",
+                    }
+                ),
+                context="run_start",
+            )
+            if self._run_started or self._measurement_started_ns is not None:
+                raise WorkerLifecycleError(
+                    "worker_progress_malformed", "run_start marker is duplicated"
+                )
+            if event.get("completed_cases_at_resume") != []:
+                raise WorkerLifecycleError(
+                    "worker_progress_malformed", "campaign worker attempted a resume"
+                )
+            if (
+                event.get("plan_fingerprint") != self.plan_fingerprint
+                or event.get("run_nonce") != self.run_nonce
+            ):
+                raise WorkerLifecycleError(
+                    "worker_progress_binding_mismatch",
+                    "run_start marker does not match the frozen cell",
+                )
+            self._run_started = True
+            return
+        if name == "measurement_started":
+            self._require_keys(
+                event,
+                frozenset(
+                    {
+                        "event",
+                        "timestamp",
+                        "monotonic_ns",
+                        "plan_fingerprint",
+                        "run_nonce",
+                    }
+                ),
+                context="measurement_started",
+            )
+            if not self._run_started or self._measurement_started_ns is not None:
+                raise WorkerLifecycleError(
+                    "worker_progress_malformed",
+                    "measurement_started marker is out of order or duplicated",
+                )
+            if (
+                event.get("plan_fingerprint") != self.plan_fingerprint
+                or event.get("run_nonce") != self.run_nonce
+            ):
+                raise WorkerLifecycleError(
+                    "worker_progress_binding_mismatch",
+                    "measurement marker does not match the frozen cell",
+                )
+            self._measurement_started_ns = _progress_monotonic_ns(
+                event.get("monotonic_ns"), context="measurement_started"
+            )
+            return
+        if name == "measurement_complete":
+            self._require_keys(
+                event,
+                frozenset({"event", "timestamp", "elapsed_s", "monotonic_ns"}),
+                context="measurement_complete",
+            )
+            if (
+                self._measurement_started_ns is None
+                or self._measurement_complete_ns is not None
+                or self._server_stopped_ns is not None
+            ):
+                raise WorkerLifecycleError(
+                    "worker_progress_malformed",
+                    "measurement_complete marker is out of order or duplicated",
+                )
+            completed_ns = _progress_monotonic_ns(
+                event.get("monotonic_ns"), context="measurement_complete"
+            )
+            try:
+                elapsed_s = _finite_nonnegative(
+                    event.get("elapsed_s"), context="measurement_complete.elapsed_s"
+                )
+            except CellProjectionError as error:
+                raise WorkerLifecycleError(
+                    "worker_progress_malformed",
+                    "measurement_complete elapsed time is invalid",
+                ) from error
+            elapsed_ns = completed_ns - self._measurement_started_ns
+            if (
+                elapsed_ns < 0
+                or elapsed_ns > self.measurement_timeout_s * 1_000_000_000
+                or elapsed_s > self.measurement_timeout_s
+                or abs(elapsed_s - elapsed_ns / 1_000_000_000) > 0.000001
+            ):
+                raise WorkerLifecycleError(
+                    "worker_progress_measurement_budget",
+                    "measurement marker exceeds or disagrees with its causal budget",
+                )
+            self._measurement_complete_ns = completed_ns
+            self.measurement_elapsed_s = elapsed_s
+            return
+        if name == "server_stopped":
+            self._require_keys(
+                event,
+                frozenset(
+                    {
+                        "event",
+                        "timestamp",
+                        "backend",
+                        "cleanup_elapsed_s",
+                        "monotonic_ns",
+                    }
+                ),
+                context="server_stopped",
+            )
+            if (
+                self._measurement_complete_ns is None
+                or self._server_stopped_ns is not None
+            ):
+                raise WorkerLifecycleError(
+                    "worker_progress_malformed",
+                    "server_stopped marker is out of order or duplicated",
+                )
+            stopped_ns = _progress_monotonic_ns(
+                event.get("monotonic_ns"), context="server_stopped"
+            )
+            try:
+                cleanup_s = _finite_nonnegative(
+                    event.get("cleanup_elapsed_s"),
+                    context="server_stopped.cleanup_elapsed_s",
+                )
+            except CellProjectionError as error:
+                raise WorkerLifecycleError(
+                    "worker_progress_malformed", "server cleanup elapsed time is invalid"
+                ) from error
+            if (
+                stopped_ns < self._measurement_complete_ns
+                or stopped_ns - self._measurement_complete_ns
+                > self.cleanup_timeout_s * 1_000_000_000
+                or cleanup_s > self.cleanup_timeout_s
+            ):
+                raise WorkerLifecycleError(
+                    "worker_progress_cleanup_budget",
+                    "server cleanup marker exceeds its causal budget",
+                )
+            self._server_stopped_ns = stopped_ns
+            self.cleanup_elapsed_s = cleanup_s
+            return
+        if name == "run_complete":
+            self._require_keys(
+                event,
+                frozenset({"event", "timestamp", "status"}),
+                context="run_complete",
+            )
+            if self._server_stopped_ns is None or self._run_completed:
+                raise WorkerLifecycleError(
+                    "worker_progress_malformed",
+                    "run_complete marker is out of order or duplicated",
+                )
+            self._run_completed = True
+
+    def _read_new_events(self) -> None:
+        flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(self.events_path, flags)
+        except FileNotFoundError:
+            if self._identity is not None:
+                raise WorkerLifecycleError(
+                    "worker_progress_regressed", "cell journal disappeared"
+                )
+            return
+        except OSError as error:
+            raise WorkerLifecycleError(
+                "worker_progress_unreadable", "cell journal could not be opened"
+            ) from error
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_uid != os.geteuid()
+            ):
+                raise WorkerLifecycleError(
+                    "worker_progress_unsafe", "cell journal topology is unsafe"
+                )
+            identity = (metadata.st_dev, metadata.st_ino)
+            if self._identity is None:
+                self._identity = identity
+            elif identity != self._identity or metadata.st_size < self._offset:
+                raise WorkerLifecycleError(
+                    "worker_progress_regressed", "cell journal was replaced or truncated"
+                )
+            os.lseek(descriptor, self._offset, os.SEEK_SET)
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(descriptor, 65_536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                self._offset += len(chunk)
+            payload = self._tail + b"".join(chunks)
+            lines = payload.split(b"\n")
+            self._tail = lines.pop()
+            if len(self._tail) > MAX_PROGRESS_LINE_BYTES:
+                raise WorkerLifecycleError(
+                    "worker_progress_malformed", "cell journal line is too large"
+                )
+            for line in lines:
+                if not line or len(line) > MAX_PROGRESS_LINE_BYTES:
+                    raise WorkerLifecycleError(
+                        "worker_progress_malformed", "cell journal line is invalid"
+                    )
+                try:
+                    event = json.loads(
+                        line.decode("utf-8"), object_pairs_hook=_reject_duplicate_pairs
+                    )
+                except (
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                    CellProjectionError,
+                ) as error:
+                    raise WorkerLifecycleError(
+                        "worker_progress_malformed",
+                        "cell journal has a malformed complete line",
+                    ) from error
+                if not isinstance(event, dict):
+                    raise WorkerLifecycleError(
+                        "worker_progress_malformed", "cell journal event is not an object"
+                    )
+                self._consume(event)
+        finally:
+            os.close(descriptor)
+
+    def __call__(self) -> WorkerProgress | None:
+        self._read_new_events()
+        if self._server_stopped_ns is not None:
+            return WorkerProgress(
+                "finalization",
+                self._server_stopped_ns / 1_000_000_000
+                + self.finalization_timeout_s,
+            )
+        if self._measurement_complete_ns is not None:
+            return WorkerProgress(
+                "cleanup",
+                self._measurement_complete_ns / 1_000_000_000
+                + self.cleanup_timeout_s,
+            )
+        if self._measurement_started_ns is not None:
+            return WorkerProgress(
+                "measurement",
+                self._measurement_started_ns / 1_000_000_000
+                + self.measurement_timeout_s,
+            )
+        return None
+
+    @property
+    def run_completed(self) -> bool:
+        return self._run_completed
+
+
 def _one_event(
     events: tuple[dict[str, Any], ...], name: str
 ) -> dict[str, Any]:
@@ -1526,13 +1862,45 @@ def project_completed_cell(run_dir: Path) -> CellProjection:
     profile_id = model.get("id")
     if not isinstance(profile_id, str):
         raise CellProjectionError("cell profile ID is missing")
-
     terminal_failure = _terminal_failure_kind(events, summary)
     if terminal_failure is not None:
         raise CellProjectionError(
             "cell contains a terminal failure artifact",
             failure_kind=terminal_failure,
         )
+    plan_fingerprint = plan.get("fingerprint")
+    run_nonce = plan.get("run_nonce")
+    if not isinstance(plan_fingerprint, str) or not isinstance(run_nonce, str):
+        raise CellProjectionError("cell plan lifecycle binding is missing")
+    lifecycle = _CellLifecycleProgress(
+        events_path=run_dir / "events.jsonl",
+        plan_fingerprint=plan_fingerprint,
+        run_nonce=run_nonce,
+        measurement_timeout_s=CELL_TIMEOUT_S,
+        cleanup_timeout_s=CLEANUP_TIMEOUT_S,
+    )
+    try:
+        lifecycle_progress = lifecycle()
+    except WorkerLifecycleError as error:
+        raise CellProjectionError(
+            "cell lifecycle markers are invalid",
+            failure_kind=(
+                "cleanup_breach"
+                if error.code == "worker_progress_cleanup_budget"
+                else "measurement"
+                if error.code == "worker_progress_measurement_budget"
+                else "audit"
+            ),
+        ) from error
+    if (
+        lifecycle_progress is None
+        or lifecycle_progress.phase != "finalization"
+        or not lifecycle.run_completed
+        or lifecycle.measurement_elapsed_s is None
+        or lifecycle.cleanup_elapsed_s is None
+    ):
+        raise CellProjectionError("cell lifecycle journal is not terminal")
+
     if summary.get("status") != "complete" or summary.get("completed_cases") != 9:
         raise CellProjectionError("cell summary is not a complete nine-case run")
     for field in (
@@ -1553,6 +1921,7 @@ def project_completed_cell(run_dir: Path) -> CellProjection:
     run_start = _one_event(events, "run_start")
     if run_start.get("completed_cases_at_resume") != []:
         raise CellProjectionError("campaign cells must be fresh, not resumed")
+    _one_event(events, "measurement_started")
     _one_event(events, "server_ready")
     measurement_complete = _one_event(events, "measurement_complete")
     server_stopped = _one_event(events, "server_stopped")
@@ -1610,16 +1979,10 @@ def project_completed_cell(run_dir: Path) -> CellProjection:
     minimum_memory, swap_growth = _telemetry_extrema(run_dir / "telemetry.jsonl")
     return CellProjection(
         profile_id=profile_id,
-        plan_fingerprint=str(plan["fingerprint"]),
+        plan_fingerprint=plan_fingerprint,
         measurements=measurements,
-        measurement_elapsed_s=_finite_nonnegative(
-            measurement_complete.get("elapsed_s"),
-            context="measurement_complete.elapsed_s",
-        ),
-        cleanup_elapsed_s=_finite_nonnegative(
-            server_stopped.get("cleanup_elapsed_s"),
-            context="server_stopped.cleanup_elapsed_s",
-        ),
+        measurement_elapsed_s=lifecycle.measurement_elapsed_s,
+        cleanup_elapsed_s=lifecycle.cleanup_elapsed_s,
         minimum_memavailable_gib=minimum_memory,
         maximum_swap_growth_mib=swap_growth,
         normalized_flags=_normalized_flags(model),
@@ -1819,6 +2182,12 @@ _WORKER_OWNERSHIP_FAILURES = frozenset(
 def _worker_failure_kind(error: WorkerLifecycleError) -> str:
     if error.code in _WORKER_OWNERSHIP_FAILURES:
         return "ownership_ambiguity"
+    if error.code == "worker_progress_measurement_budget":
+        return "measurement"
+    if error.code == "worker_progress_cleanup_budget":
+        return "cleanup_breach"
+    if error.code.startswith("worker_progress_"):
+        return "audit"
     return "cleanup_breach"
 
 
@@ -1856,6 +2225,13 @@ def run_frozen_cell(
         "--fail-fast",
     ]
     log_path = cell.run_dir / "controller.log"
+    progress_probe = _CellLifecycleProgress(
+        events_path=events_path,
+        plan_fingerprint=cell.plan_fingerprint,
+        run_nonce=cell.run_nonce,
+        measurement_timeout_s=cell_timeout_s,
+        cleanup_timeout_s=cleanup_timeout_s,
+    )
     started = monotonic()
     with _private_append_log(log_path) as log:
         try:
@@ -1873,18 +2249,32 @@ def run_frozen_cell(
                     "text": True,
                 },
                 popen_factory=popen_factory,
+                progress_probe=progress_probe,
+                start_marker_timeout_s=START_MARKER_TIMEOUT_S,
             )
-        except WorkerLifecycleError as error:
-            raise CellProjectionError(
-                "cell worker ownership or cleanup failed",
-                failure_kind=_worker_failure_kind(error),
-            ) from error
+        except BaseException as error:
+            try:
+                _recover_cell(cell)
+            except BaseException as recovery_error:
+                raise CellProjectionError(
+                    "cell worker and exact server recovery could not be certified",
+                    failure_kind="cleanup_breach",
+                ) from recovery_error
+            if isinstance(error, WorkerLifecycleError):
+                raise CellProjectionError(
+                    "cell worker ownership, progress, or cleanup failed",
+                    failure_kind=_worker_failure_kind(error),
+                ) from error
+            raise
     wall_s = monotonic() - started
     if wall_s < 0:
         raise CellProjectionError("cell monotonic clock moved backwards")
     if worker.timed_out:
         _recover_cell(cell)
-        if worker.cleanup.outcome == "killed":
+        if (
+            worker.timeout_phase in {"cleanup", "finalization"}
+            or worker.cleanup.outcome == "killed"
+        ):
             raise CellProjectionError(
                 "cell exceeded timeout and owned cleanup grace",
                 failure_kind="cleanup_breach",
@@ -1900,7 +2290,11 @@ def run_frozen_cell(
         except CellProjectionError as error:
             raise error
         raise CellProjectionError("cell process returned a nonzero status")
-    projection = project_completed_cell(cell.run_dir)
+    try:
+        projection = project_completed_cell(cell.run_dir)
+    except CellProjectionError:
+        _recover_cell(cell)
+        raise
     if projection.profile_id != cell.profile_id:
         raise CellProjectionError("completed cell profile binding changed")
     return projection
@@ -2225,7 +2619,15 @@ def _run_search_pair(
             },
         )
         state = replay_transitions(campaign.policy, journal.events())
-        last_completion = now()
+        stopped_events = cells[arm].run_dir / "events.jsonl"
+        # Production runners can return a projection only after the durable
+        # stop marker exists.  The fallback keeps the explicitly injected,
+        # artifact-free unit runner deterministic without weakening CLI runs.
+        last_completion = (
+            _server_stopped_at(cells[arm])
+            if stopped_events.exists() and stopped_events.stat().st_size
+            else now()
+        )
     observation = observation_from_cells(
         campaign.policy,
         pair_index=state.active_pair_index,

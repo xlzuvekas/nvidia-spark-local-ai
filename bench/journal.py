@@ -41,6 +41,7 @@ class Journal:
 
     def append(self, event: dict[str, Any]) -> None:
         record = {"timestamp": utc_now(), **event}
+        created = not self.path.exists()
         needs_separator = False
         if self.path.exists() and self.path.stat().st_size:
             with self.path.open("rb") as existing:
@@ -52,6 +53,13 @@ class Journal:
             stream.write(canonical_json(record) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
+        if created:
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            descriptor = os.open(self.path.parent, flags)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
 
     def events(self) -> list[dict[str, Any]]:
         """Return every intact journal record, ignoring a torn crash tail."""

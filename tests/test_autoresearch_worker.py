@@ -12,6 +12,7 @@ import unittest
 from bench.autoresearch_worker import (
     WORKER_STATE_SCHEMA_VERSION,
     WorkerLifecycleError,
+    WorkerProgress,
     parse_proc_stat,
     recover_owned_worker,
     run_owned_worker,
@@ -61,6 +62,28 @@ class _Clock:
 
     def sleep(self, duration: float) -> None:
         self.value += duration
+
+
+class _TimedProcess:
+    def __init__(self, clock: _Clock, *, exit_at: float = float("inf")) -> None:
+        self.pid = PID
+        self.clock = clock
+        self.exit_at = exit_at
+        self.return_code = 0
+        self.exited = False
+        self.timeouts: list[float] = []
+
+    def wait(self, timeout: float) -> int:
+        self.timeouts.append(timeout)
+        if self.exited:
+            return self.return_code
+        deadline = self.clock.value + timeout
+        if self.exit_at <= deadline:
+            self.clock.value = self.exit_at
+            self.exited = True
+            return self.return_code
+        self.clock.value = deadline
+        raise subprocess.TimeoutExpired("synthetic", timeout)
 
 
 def _missing_group(_pgid: int, action: int) -> None:
@@ -294,6 +317,160 @@ class AutoresearchWorkerTests(unittest.TestCase):
         self.assertTrue(result.cleanup.process_lookup_race)
         self.assertFalse(result.cleanup.sigint_sent)
         self.assertTrue(result.cleanup.state_removed)
+
+    def test_late_measurement_switches_to_separate_cleanup_deadline(self) -> None:
+        clock = _Clock()
+        process = _TimedProcess(clock, exit_at=1.821)
+        actions: list[int] = []
+
+        def progress() -> WorkerProgress:
+            if clock.value < 1.79:
+                return WorkerProgress("measurement", 1.8)
+            if clock.value < 1.82:
+                return WorkerProgress("cleanup", 1.91)
+            return WorkerProgress("finalization", 1.83)
+
+        def signal_group(_pgid: int, action: int) -> None:
+            actions.append(action)
+            if action == 0 and process.exited:
+                raise ProcessLookupError
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_owned_worker(
+                ["synthetic"],
+                cell_run_dir=Path(directory),
+                run_nonce=RUN_NONCE,
+                timeout_s=1.8,
+                interrupt_grace_s=0.12,
+                progress_probe=progress,
+                progress_poll_interval_s=0.05,
+                popen_factory=lambda *_args, **_kwargs: process,
+                proc_reader=lambda _pid: _proc_stat(),
+                signal_group=signal_group,
+                monotonic=clock.monotonic,
+            )
+
+        self.assertFalse(result.timed_out)
+        self.assertIsNone(result.timeout_phase)
+        self.assertEqual(actions, [0])
+        self.assertGreater(clock.value, 1.8)
+
+    def test_deadline_reprobe_observes_marker_before_signaling(self) -> None:
+        clock = _Clock()
+        process = _TimedProcess(clock, exit_at=1.81)
+        boundary_probes = 0
+        actions: list[int] = []
+
+        def progress() -> WorkerProgress:
+            nonlocal boundary_probes
+            if clock.value < 1.8:
+                return WorkerProgress("measurement", 1.8)
+            boundary_probes += 1
+            if boundary_probes == 1:
+                return WorkerProgress("measurement", 1.8)
+            return WorkerProgress("cleanup", 1.92)
+
+        def signal_group(_pgid: int, action: int) -> None:
+            actions.append(action)
+            if action == 0 and process.exited:
+                raise ProcessLookupError
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_owned_worker(
+                ["synthetic"],
+                cell_run_dir=Path(directory),
+                run_nonce=RUN_NONCE,
+                timeout_s=1.8,
+                interrupt_grace_s=0.12,
+                progress_probe=progress,
+                progress_poll_interval_s=0.05,
+                popen_factory=lambda *_args, **_kwargs: process,
+                proc_reader=lambda _pid: _proc_stat(),
+                signal_group=signal_group,
+                monotonic=clock.monotonic,
+            )
+
+        self.assertFalse(result.timed_out)
+        self.assertGreaterEqual(boundary_probes, 2)
+        self.assertEqual(actions, [0])
+
+    def test_cleanup_timeout_gets_no_second_cleanup_grace(self) -> None:
+        clock = _Clock()
+        process = _TimedProcess(clock)
+        actions: list[int] = []
+
+        def progress() -> WorkerProgress:
+            if clock.value < 1.0:
+                return WorkerProgress("measurement", 1.8)
+            return WorkerProgress("cleanup", 1.12)
+
+        def signal_group(_pgid: int, action: int) -> None:
+            actions.append(action)
+            if action == signal.SIGKILL:
+                process.return_code = -signal.SIGKILL
+                process.exit_at = clock.value
+            elif action == 0 and process.exited:
+                raise ProcessLookupError
+
+        def proc_reader(_pid: int) -> str:
+            if process.exited:
+                raise FileNotFoundError
+            return _proc_stat()
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_owned_worker(
+                ["synthetic"],
+                cell_run_dir=Path(directory),
+                run_nonce=RUN_NONCE,
+                timeout_s=1.8,
+                interrupt_grace_s=0.12,
+                progress_probe=progress,
+                progress_poll_interval_s=0.05,
+                popen_factory=lambda *_args, **_kwargs: process,
+                proc_reader=proc_reader,
+                signal_group=signal_group,
+                monotonic=clock.monotonic,
+            )
+
+        self.assertTrue(result.timed_out)
+        self.assertEqual(result.timeout_phase, "cleanup")
+        self.assertEqual(result.cleanup.outcome, "killed")
+        self.assertEqual(actions, [signal.SIGINT, signal.SIGKILL, 0])
+        self.assertIn(0.0, process.timeouts)
+
+    def test_measurement_timeout_retains_owned_interrupt_grace(self) -> None:
+        clock = _Clock()
+        process = _TimedProcess(clock)
+        actions: list[int] = []
+
+        def signal_group(_pgid: int, action: int) -> None:
+            actions.append(action)
+            if action == signal.SIGINT:
+                process.return_code = -signal.SIGINT
+                process.exit_at = clock.value + 0.05
+            elif action == 0 and process.exited:
+                raise ProcessLookupError
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_owned_worker(
+                ["synthetic"],
+                cell_run_dir=Path(directory),
+                run_nonce=RUN_NONCE,
+                timeout_s=1.8,
+                interrupt_grace_s=0.12,
+                progress_probe=lambda: WorkerProgress("measurement", 1.8),
+                progress_poll_interval_s=0.05,
+                popen_factory=lambda *_args, **_kwargs: process,
+                proc_reader=lambda _pid: _proc_stat(),
+                signal_group=signal_group,
+                monotonic=clock.monotonic,
+            )
+
+        self.assertTrue(result.timed_out)
+        self.assertEqual(result.timeout_phase, "measurement")
+        self.assertEqual(result.cleanup.outcome, "interrupted")
+        self.assertEqual(actions, [signal.SIGINT, 0])
+        self.assertIn(0.12, process.timeouts)
 
     def test_keyboard_interrupt_cleans_then_reraises_original_exception(self) -> None:
         process = _FakeProcess([KeyboardInterrupt(), -signal.SIGINT])

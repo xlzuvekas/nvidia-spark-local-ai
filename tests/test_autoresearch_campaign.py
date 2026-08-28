@@ -310,7 +310,9 @@ def _synthetic_projection(cell: object, *, improvement: float) -> CellProjection
     )
 
 
-def _worker_result(*, outcome: str, timed_out: bool) -> WorkerRunResult:
+def _worker_result(
+    *, outcome: str, timed_out: bool, timeout_phase: str | None = None
+) -> WorkerRunResult:
     cleanup = WorkerCleanupResult(
         outcome=outcome,  # type: ignore[arg-type]
         identity=None,
@@ -324,6 +326,7 @@ def _worker_result(*, outcome: str, timed_out: bool) -> WorkerRunResult:
         return_code=cleanup.return_code or 0,
         timed_out=timed_out,
         cleanup=cleanup,
+        timeout_phase=timeout_phase,  # type: ignore[arg-type]
     )
 
 
@@ -364,6 +367,8 @@ class AutoresearchFrozenCellWorkerTests(unittest.TestCase):
         self.assertEqual(captured["run_nonce"], cell.run_nonce)
         self.assertEqual(captured["timeout_s"], 1_800)
         self.assertEqual(captured["interrupt_grace_s"], 120)
+        self.assertTrue(callable(captured["progress_probe"]))
+        self.assertEqual(captured["start_marker_timeout_s"], 30)
         self.assertEqual(
             captured["command"],
             [
@@ -399,6 +404,54 @@ class AutoresearchFrozenCellWorkerTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.failure_kind, "cleanup_breach")
 
+    def test_cleanup_phase_timeout_is_a_breach_without_forced_kill(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign = load_frozen_campaign(
+                _freeze_campaign_fixture(Path(directory))
+            )
+            cell = campaign.cells[0]
+            with patch(
+                "bench.autoresearch_campaign._recover_cell",
+                return_value="already_absent",
+            ):
+                with self.assertRaises(CellProjectionError) as raised:
+                    run_frozen_cell(
+                        cell,
+                        workspace=ROOT,
+                        cell_timeout_s=1_800,
+                        cleanup_timeout_s=120,
+                        worker_runner=lambda *_args, **_kwargs: _worker_result(
+                            outcome="interrupted",
+                            timed_out=True,
+                            timeout_phase="cleanup",
+                        ),
+                    )
+
+        self.assertEqual(raised.exception.failure_kind, "cleanup_breach")
+
+    def test_zero_exit_without_terminal_markers_recovers_exact_server(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign = load_frozen_campaign(
+                _freeze_campaign_fixture(Path(directory))
+            )
+            cell = campaign.cells[0]
+            with patch(
+                "bench.autoresearch_campaign._recover_cell",
+                return_value="already_absent",
+            ) as recover:
+                with self.assertRaises(CellProjectionError):
+                    run_frozen_cell(
+                        cell,
+                        workspace=ROOT,
+                        cell_timeout_s=1_800,
+                        cleanup_timeout_s=120,
+                        worker_runner=lambda *_args, **_kwargs: _worker_result(
+                            outcome="completed", timed_out=False
+                        ),
+                    )
+
+        recover.assert_called_once_with(cell)
+
     def test_worker_identity_failure_is_ownership_ambiguity(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
             campaign = load_frozen_campaign(
@@ -422,7 +475,7 @@ class AutoresearchFrozenCellWorkerTests(unittest.TestCase):
                     )
 
         self.assertEqual(raised.exception.failure_kind, "ownership_ambiguity")
-        recover.assert_not_called()
+        recover.assert_called_once_with(cell)
 
 
 class AutoresearchCampaignControllerTests(unittest.TestCase):
@@ -845,10 +898,12 @@ class AutoresearchCellProjectionTests(unittest.TestCase):
         fingerprint = content_hash(
             {"model": model_data, "suite": suite_data, "resolved": resolved}
         )
+        run_nonce = "1234567890abcdef1234567890abcdef"
         plan = {
             "schema_version": 2,
             "created_at": "2026-08-28T00:00:00+00:00",
             "fingerprint": fingerprint,
+            "run_nonce": run_nonce,
             "models_manifest": "ignored",
             "suite_manifest": "ignored",
             "model": model_data,
@@ -899,8 +954,25 @@ class AutoresearchCellProjectionTests(unittest.TestCase):
         write_json(root / "summary.json", summary)
 
         depth = 2
+        timestamp = "2026-08-28T00:00:00+00:00"
+        measurement_started_ns = 1_000_000_000
+        measurement_complete_ns = 101_000_000_000
+        server_stopped_ns = 111_000_000_000
         events = [
-            {"event": "run_start", "completed_cases_at_resume": []},
+            {
+                "event": "run_start",
+                "timestamp": timestamp,
+                "completed_cases_at_resume": [],
+                "plan_fingerprint": fingerprint,
+                "run_nonce": run_nonce,
+            },
+            {
+                "event": "measurement_started",
+                "timestamp": timestamp,
+                "monotonic_ns": measurement_started_ns,
+                "plan_fingerprint": fingerprint,
+                "run_nonce": run_nonce,
+            },
             {"event": "server_ready"},
             *(
                 {
@@ -921,12 +993,24 @@ class AutoresearchCellProjectionTests(unittest.TestCase):
                     "num_accepted_tokens": 15,
                 },
             },
-            {"event": "measurement_complete", "elapsed_s": 100.0},
+            {
+                "event": "measurement_complete",
+                "timestamp": timestamp,
+                "elapsed_s": 100.0,
+                "monotonic_ns": measurement_complete_ns,
+            },
             {
                 "event": "server_stopped",
+                "timestamp": timestamp,
+                "backend": "sglang",
                 "cleanup_elapsed_s": 10.0,
+                "monotonic_ns": server_stopped_ns,
             },
-            {"event": "run_complete"},
+            {
+                "event": "run_complete",
+                "timestamp": timestamp,
+                "status": "completed",
+            },
         ]
         (root / "events.jsonl").write_text(
             "".join(json.dumps(event, sort_keys=True) + "\n" for event in events)
@@ -985,6 +1069,72 @@ class AutoresearchCellProjectionTests(unittest.TestCase):
                 with self.assertRaises(CellProjectionError) as raised:
                     project_completed_cell(run_dir)
                 self.assertEqual(raised.exception.failure_kind, failure_kind)
+
+    def test_projection_enforces_inclusive_causal_and_cleanup_deadlines(self) -> None:
+        fixtures = (
+            (1_800_000_000_000, 10_000_000_000, True, None),
+            (1_800_000_000_001, 10_000_000_000, False, "measurement"),
+            (100_000_000_000, 120_000_000_000, True, None),
+            (100_000_000_000, 120_000_000_001, False, "cleanup_breach"),
+        )
+        for elapsed_ns, cleanup_ns, passes, failure_kind in fixtures:
+            with self.subTest(
+                elapsed_ns=elapsed_ns, cleanup_ns=cleanup_ns
+            ), tempfile.TemporaryDirectory() as directory:
+                run_dir = self._write_cell(Path(directory))
+                events_path = run_dir / "events.jsonl"
+                events = [json.loads(line) for line in events_path.read_text().splitlines()]
+                started = next(
+                    event for event in events if event["event"] == "measurement_started"
+                )
+                completed = next(
+                    event for event in events if event["event"] == "measurement_complete"
+                )
+                stopped = next(
+                    event for event in events if event["event"] == "server_stopped"
+                )
+                completed["monotonic_ns"] = started["monotonic_ns"] + elapsed_ns
+                completed["elapsed_s"] = elapsed_ns / 1_000_000_000
+                stopped["monotonic_ns"] = completed["monotonic_ns"] + cleanup_ns
+                stopped["cleanup_elapsed_s"] = cleanup_ns / 1_000_000_000
+                events_path.write_text(
+                    "".join(json.dumps(event, sort_keys=True) + "\n" for event in events)
+                )
+
+                if passes:
+                    project_completed_cell(run_dir)
+                else:
+                    with self.assertRaises(CellProjectionError) as raised:
+                        project_completed_cell(run_dir)
+                    self.assertEqual(raised.exception.failure_kind, failure_kind)
+
+    def test_projection_rejects_duplicate_and_wrong_bound_markers(self) -> None:
+        for mutation in ("duplicate", "wrong_nonce"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                run_dir = self._write_cell(Path(directory))
+                events_path = run_dir / "events.jsonl"
+                events = [json.loads(line) for line in events_path.read_text().splitlines()]
+                if mutation == "duplicate":
+                    index = next(
+                        index
+                        for index, event in enumerate(events)
+                        if event["event"] == "measurement_complete"
+                    )
+                    events.insert(index + 1, dict(events[index]))
+                else:
+                    marker = next(
+                        event
+                        for event in events
+                        if event["event"] == "measurement_started"
+                    )
+                    marker["run_nonce"] = "f" * 32
+                events_path.write_text(
+                    "".join(json.dumps(event, sort_keys=True) + "\n" for event in events)
+                )
+
+                with self.assertRaises(CellProjectionError) as raised:
+                    project_completed_cell(run_dir)
+                self.assertEqual(raised.exception.failure_kind, "audit")
 
     def test_projection_classifies_durable_terminal_artifacts(self) -> None:
         fixtures = (
