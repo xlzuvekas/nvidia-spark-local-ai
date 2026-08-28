@@ -16,8 +16,9 @@ post-campaign systems track and is outside this frozen SGLang search.
 
 ## Current status: safety-stopped, no campaign measurements
 
-The schema-2 campaign froze all fourteen pristine cell plans from clean, pushed
-revision `aa9cca8` at 01:09 MST on 2026-08-28. Its first admission returned
+The campaign-schema-2 freeze created all fourteen pristine cell plans from
+clean, pushed revision `aa9cca8` at 01:09 MST on 2026-08-28. Its current
+derived summary remains schema 1. The first admission returned
 `blocked_environment` with `starting_swap_above_clean_limit`. At that preflight,
 used host swap was 889,256 kB (868.414 MiB), above the frozen 64 MiB start cap;
 `MemAvailable` was 118,269,252 kB and no container was running. The controller
