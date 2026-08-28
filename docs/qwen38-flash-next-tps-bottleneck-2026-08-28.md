@@ -97,6 +97,21 @@ utilization only says some GPU work was active during most sample windows.
 Likewise, the close community and local no-spec rates do not prove a common
 hardware bottleneck.
 
+One new external result raises the priority of dense weight traffic without
+settling it. A
+[mixed-FP8 checkpoint](https://huggingface.co/lovedheart/Qwen3.8-Flash-Next-NVFP4-FP8)
+quantizes QSA and GDN input/output projections that remain BF16 in the Radix
+artifact. Its author reports a 39% single-stream improvement over an
+unquantized-dense build after forcing vLLM away from a broken SM121 DeepGEMM
+route to CUTLASS
+([issue #54125](https://github.com/vllm-project/vllm/issues/54125)). That is
+directionally consistent with the BF16 GEMV/weight-traffic hypothesis.
+
+It is not local causal evidence: the artifact changed, the published request
+and MTP geometry is incomplete, and the model card labels the checkpoint a
+private candidate. Test it only after the exact mmap runtime baseline, with a
+pinned revision, matched perplexity and strict task/long-context gates.
+
 ## Why PLE and NVMe are not the current headline
 
 The exact 47.684 GiB FP8 PLE payload is read-only and demand-mapped from NVMe,
@@ -159,11 +174,14 @@ Until that attribution exists:
    comparisons only after a clean host preflight;
 4. on the direct-mmap vLLM branch, test the isolated live-token hash slice
    before scheduler ceilings or mmap worker tuning;
-5. measure repeated long-prefix Radix reuse for multi-turn agents;
-6. test continuous decode steps and the decode-graph causal control;
-7. admit a separate C2-capable geometry for independent single-user fan-out;
+5. after that runtime baseline, compare the mixed-FP8 dense-projection
+   checkpoint as a quality-first artifact arm with DeepGEMM disabled and the
+   resolved CUTLASS path attested;
+6. measure repeated long-prefix Radix reuse for multi-turn agents;
+7. test continuous decode steps and the decode-graph causal control;
+8. admit a separate C2-capable geometry for independent single-user fan-out;
    and
-8. evaluate MTP off only as a cold short-task specialization, not as the
+9. evaluate MTP off only as a cold short-task specialization, not as the
    resident decode default.
 
 The ranked protocols are in the
