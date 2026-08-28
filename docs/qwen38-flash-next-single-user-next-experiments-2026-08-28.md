@@ -68,16 +68,17 @@ Spark's memory and device availability and must remain an explicit operator
 choice.
 
 The current [frozen campaign](qwen38-flash-next-single-user-autoresearch-2026-08-28.md)
-already tests three one-axis questions in order:
+planned three one-axis questions in order:
 
 1. low reasoning versus explicit no-thinking;
 2. 1,024- versus 2,048-token chunked prefill; and
 3. NEXTN depth two (`steps=2`, `draft_tokens=3`) versus depth three
    (`steps=3`, `draft_tokens=4`).
 
-Do not duplicate those cells or combine a winning axis with another change in
-place. Promotion ends the current fixed queue; continuing with another axis or
-a combined champion requires a new frozen profile and campaign.
+None of those cells started, so all three questions remain unanswered. Do not
+duplicate or alter the cells before terminal disposition. Afterward, re-freeze
+any still-valued axis against the newly built and admitted runtime; there is no
+winner to combine or promote from this campaign.
 
 ## Ranked next experiments
 
@@ -87,9 +88,9 @@ This has the highest direct coding/cowork value. The current 60K case is a
 one-shot prompt, while the agent cases have small histories; neither measures
 repeated long-prefix work across tool turns.
 
-- Bundle A: the promoted profile, default Radix behavior, and requested
+- Bundle A: the newly admitted C1 baseline, default Radix behavior, and requested
   `extra_buffer_lazy`; require startup `impl=UnifiedRadixCache` with hybrid SSM.
-- Bundle B: add `--disable-radix-cache`; retained chunked prefill then selects
+- Bundle B: add `--disable-radix-cache`; the baseline chunked prefill then selects
   `ChunkCache`, and the runtime disables the lazy Mamba-state predicates even
   though their argument remains present. Require `impl=ChunkCache` at startup,
   pin the source assertion that both lazy predicates are false, and corroborate
@@ -101,8 +102,13 @@ repeated long-prefix work across tool turns.
 - Design: fresh-lifetime A/B/B/A with two independent lifetimes per bundle.
   Use no inference warmup before T0. Treat T0 as cold calibration and score
   T1/T2 separately.
-- Primary outcomes: strict task correctness, later-turn TTFT, T1+T2 resident
-  wall, and full T0--T2 task wall. Decode TPS is secondary.
+- Promotion contract: strict correctness is mandatory. The sole speed primary
+  is the ratio of unweighted arm means for lifetime-level T1+T2 resident wall.
+  Promote B only if `B/A <=0.95`; retain A if `A/B <=0.95`; otherwise call the
+  speed result inconclusive. Require the selected bundle's unweighted-mean
+  later-turn TTFT and full T0--T2 wall each to remain `<=1.05x` the other
+  bundle. Decode TPS and T0 cold wall are separate diagnostics, never averaged
+  into the primary.
 - Identity gate: render with the same pinned tokenizer, template, tools,
   serialization, reasoning policy, sampling and output cap. Compute
   domain-separated token-ID digests from volatile
@@ -149,17 +155,18 @@ belong to the separately quarantined systems track.
 
 This is an application-scheduling experiment for one person decomposing one
 task into two independent subtasks. It is not a multi-user throughput claim.
-The retained 64K profile admits only one running request, so first freeze a
-separate C2-capable profile and prove its C1 behavior and safety before scoring
-parallel work.
+The historical 64K prior admitted only one running request. First establish a
+new C1 baseline, then freeze a separate C2-capable profile and prove its C1
+behavior and safety before scoring parallel work.
 
 - Admission bundle: keep the 65,536-token pool, raise running requests from one
   to two, provide eight lazy recurrent-state slots for two four-slot sequences,
   and capture decode graph batches one and two. Treat this as one inseparable
   concurrency-geometry bundle.
-- Capacity gate: precompute the sum of both requests' fully rendered inputs,
-  reserved outputs, and draft allowances. It must fit the shared pool with an
-  explicit safety margin; full-60K requests are therefore outside this arm.
+- Capacity gate: precompute the maximum combined fully rendered histories,
+  reserved outputs, and draft allowances over every legal simultaneous
+  multi-turn path. It must fit the shared pool with an explicit safety margin;
+  full-60K requests are therefore outside this arm.
 - Geometry control: compare the C2-capable profile at C1 against the newly
   admitted C1 profile before using it. Before launch, freeze an exact
   fixed-agent workload, an unscored warmup, a lifetime-level resident-wall
@@ -196,7 +203,7 @@ projects a coarse crossover near 3,127 total emitted tokens for that batch
 shape. It is not a break-even for one request or an arbitrary short-turn mix,
 an MTP2 prediction, or an end-to-end measurement.
 
-- Control: the promoted fixed-depth MTP profile.
+- Control: the newly admitted fixed-depth MTP2 C1 baseline.
 - Candidate: an otherwise identical MTP-off profile that removes only the
   complete speculative-decoding bundle.
 - Suite: strict short JSON/tool cases, the complete multi-turn agent battery,
@@ -205,9 +212,13 @@ an MTP2 prediction, or an end-to-end measurement.
 - Design: fresh-lifetime ABBA with two independent lifetimes per arm. Report
   cold start-to-first-correct-task wall and resident task wall separately;
   never subtract startup after the fact to create a synthetic winner.
-- Interpretation: an MTP-off arm may justify a specialized ephemeral profile
-  if it wins cold managed wall without losing correctness. It should not
-  replace the resident default unless it also wins matched resident task wall.
+- Promotion contract: every exact oracle must pass. For the ephemeral decision,
+  the sole primary is the ratio of unweighted arm means for cold
+  start-to-first-correct short-battery wall; MTP off must be `<=0.95x` MTP2.
+  For the separate resident decision, the sole primary is unweighted-mean
+  multi-turn agent resident wall and the same `<=0.95x` rule applies. Neither
+  decision may use the other's outcome, D256, or startup subtraction. Preserve
+  TTFT and D256 as diagnostics.
 
 ### 4. Rejected at source gate: continuous decode steps
 
@@ -291,15 +302,19 @@ never publish a whole-lifetime rate that mixes those blocks.
 
 ### 6. Conditional next chunk size
 
-Propose another value only if the current queue reaches and completes a valid
-1,024/2,048 pair. An earlier promotion ends that queue without a chunk result.
+The stopped campaign produced no 1,024/2,048 result. First refreeze that pair on
+the newly admitted runtime. Propose another value only after the new pair
+completes validly:
 
 - If 2,048 wins, compare the promoted champion with 4,096.
 - If 2,048 loses, compare 1,024 with 512.
-- Clone each new profile from the then-current champion, change only
-  `--chunked-prefill-size`, and retain ABBA replication.
-- Score 60K TTFT/E2E, later-turn agent wall time, D256 throughput, memory, and
-  swap separately.
+- Clone each new profile from the then-current admitted winner, change only
+  `--chunked-prefill-size`, and use ABBA with two fresh lifetimes per arm.
+- Promotion contract: every exact oracle must pass. The sole primary is the
+  candidate/control ratio of unweighted arm means for lifetime-level correct
+  60K E2E; promote only at `<=0.95`. Require candidate/control
+  unweighted-mean later-turn agent wall and 60K TTFT each to remain `<=1.05`.
+  Keep D256 throughput, memory, and swap separate.
 
 At concurrency one, larger chunks have no scheduling-fairness justification.
 They must win on actual prefill or task wall time without harming interactive
@@ -418,7 +433,8 @@ disposable privileged lifetime is explicitly approved, treat L2 sysmem-fill
 sectors only as an LPDDR-facing proxy, never measured LPDDR GB/s. The present
 coarse utilization and power samples cannot distinguish target-weight traffic,
 PLE page traffic, kernel overhead or another resource. This diagnostic must
-use the retained champion, remain outside a causal candidate pair, and must not
+use the then-current newly admitted or promoted product profile, remain outside
+a causal candidate pair, and must not
 silently change its serving flags. The separately specified vLLM direct-mmap
 profile is a systems-attribution diagnostic chosen for instrumentability; it is
 not this product-track lifetime and the two diagnostics are not an A/B pair.
@@ -435,7 +451,8 @@ prefix-cache pair proves that hybrid-state reuse is material.
   reserve, and runtime/draft allowance prove that every case still fits;
   increasing it primarily buys capacity rather than C1 decode speed.
 - Medium or xhigh reasoning is a correctness-rescue treatment, not a speed
-  axis. Low versus no-thinking is already frozen.
+  axis. Low versus no-thinking was frozen but remains unmeasured; re-freeze it
+  only after the stopped campaign is terminal.
 - PLE omission changes semantics and previously produced incomplete C4/C8
   requests; it is not a deployment speed candidate.
 - Ordinary-buffer depth three has an unsafe pressure history.
@@ -450,7 +467,11 @@ Every causal comparison changes one declared axis or one inseparable flag
 bundle. Use fresh server lifetimes, counterbalanced order, baseline
 calibration, hard correctness and lifecycle gates, and at least two independent
 lifetimes per arm. Observed lifetime drift is comparable to a 3% speed
-threshold, so a single forward run cannot promote.
+threshold, so a single forward run cannot promote. Freeze one lifetime-level
+primary and its direction before launch. Unless a section declares a stronger
+contract, require candidate/control primary wall `<=0.95` and every latency
+guardrail `<=1.05`; if no numeric estimator and thresholds are frozen, do not
+launch.
 
 Publish only the deterministic scalar projection. Raw prompts, completions,
 reasoning, tool payloads, agent trajectories, logs, paths, commands, request
