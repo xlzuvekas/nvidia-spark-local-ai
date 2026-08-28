@@ -1,0 +1,108 @@
+schema_version = 1
+kind = "sparkbench-sglang-build-candidate"
+candidate_id = "sglang-sm121-triton-storage-v1"
+status = "source_and_build_invocation_only"
+
+[source]
+upstream_repository = "https://github.com/sgl-project/sglang.git"
+storage_repository = "https://github.com/jzinno/sglang.git"
+base_commit = "3681c4e03f6848dff82972b3f572602d3b8394cc"
+base_tree = "557805e1f7170622391cec7a7e49d756dbb17624"
+final_tree = "274ee330db7ea9653807b868c0fb8693d50ed7b2"
+excluded_commits = ["8ef3b3fee34a3b5543b65393dd217ed0362a9273"]
+
+[[source.protected_files]]
+path = "python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py"
+sha256 = "5236bcfb628bfb864a18a8278119a5f7b694ea30df08778724476f354cdc5e33"
+
+[[source.protected_files]]
+path = "python/sglang/srt/layers/attention/qsa/sm121_varlen.py"
+sha256 = "7afad798bf6aa6074413fca151a719973a800c5fe905c9319d21216546bc4621"
+
+[[source.protected_files]]
+path = "python/sglang/srt/utils/common.py"
+sha256 = "d656850e662374ff8405b2b71db1617bd8721803d9ff07e50c4bab708357eb24"
+
+[[source.protected_files]]
+path = "test/registered/kernels/test_qsa.py"
+sha256 = "33b29fa3106f8695379b3604afe3c958fb844f5aad2fb91264ed4e4516e11ebb"
+
+[[source.steps]]
+kind = "commit"
+repository = "storage"
+commit = "04648a701501e473081ebabd2c110474f915e924"
+input_tree = "557805e1f7170622391cec7a7e49d756dbb17624"
+output_tree = "cb9b2dffb10ae70bc91915c3eade4957fa649eaa"
+
+[[source.steps]]
+kind = "commit"
+repository = "storage"
+commit = "9f101e39ff09b356355e6a11183eaa3f7bb15f8c"
+input_tree = "cb9b2dffb10ae70bc91915c3eade4957fa649eaa"
+output_tree = "ddda8dde3b6655c4e0c0ff094d87ef1f5cc71a92"
+
+[[source.steps]]
+kind = "patch"
+path = "patches/sglang/ddda8dde-storage-extension-packaging.patch"
+sha256 = "f7f7a7f7231c3b893bb868a0919cea5c71dbeb1d2ca5c0dff0ebb982dd56fbc7"
+patch_id = "afb1c5aad878841df67bd96d57a1075b5167cc00"
+input_tree = "ddda8dde3b6655c4e0c0ff094d87ef1f5cc71a92"
+output_tree = "bdb62e9fbc76f6e206cb0136576b88b7e1517a51"
+
+[[source.steps]]
+kind = "patch"
+path = "patches/sglang/bdb62e9f-cuda130-arm64-base-pin.patch"
+sha256 = "7de1f4f3ed468c1a4b7ac9e98abbe73b6908095321289d0b5328334608f6df11"
+patch_id = "9d143b6c2fd01a26e906a077dd4e917c675faefb"
+input_tree = "bdb62e9fbc76f6e206cb0136576b88b7e1517a51"
+output_tree = "274ee330db7ea9653807b868c0fb8693d50ed7b2"
+
+[build]
+dockerfile = "docker/Dockerfile"
+dockerfile_sha256 = "98f5dbc2daf64620f27eee5fb1556315bffe03cb906cbb55655af234ef3e797d"
+dockerignore = ".dockerignore"
+dockerignore_sha256 = "71b793acddb338c8bf78f1625df70cafb74cacfb846d61eb2f01cfda517445a3"
+target = "runtime"
+platform = "linux/arm64"
+automatic_targetarch = "arm64"
+context_mode = "tracked-tree-export"
+external_base_argument = "CUDA_BASE_IMAGE"
+external_base_reference = "nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04@sha256:689c34b3fdc12303418e90828359fcdb3c7053bc8aa8d7681823186dde1fe572"
+external_base_index_digest = "sha256:0230b7f243483cb15969fa3cc724a9459599604427052fc2a0d4291c7c0647dd"
+external_base_manifest_digest = "sha256:689c34b3fdc12303418e90828359fcdb3c7053bc8aa8d7681823186dde1fe572"
+external_base_config_digest = "sha256:d91d871d1f1ad40b22b1886a8cfec8748a9e4a61e8996f8a88be85c06ddd25ff"
+external_base_stages = ["base", "runtime"]
+stage_names = [
+  "base",
+  "torch_deps",
+  "hpc_ops_builder",
+  "flashinfer_cache",
+  "devtools_builder",
+  "gateway_builder",
+  "framework",
+  "local_src",
+  "framework_final",
+  "runtime",
+]
+
+[build.args]
+CUDA_BASE_IMAGE = "nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04@sha256:689c34b3fdc12303418e90828359fcdb3c7053bc8aa8d7681823186dde1fe572"
+CUDA_VERSION = "13.0.3"
+BUILD_TYPE = "all"
+BRANCH_TYPE = "local"
+SGL_KERNEL_VERSION = "0.4.6.post1"
+SGL_VERSION = ""
+SGL_DEEP_GEMM_VERSION = "0.1.5.post2"
+USE_LATEST_SGLANG = "0"
+GDRCOPY_VERSION = "2.5.1"
+PIP_DEFAULT_INDEX = ""
+UBUNTU_MIRROR = ""
+GITHUB_ARTIFACTORY = "github.com"
+INSTALL_FLASHINFER_JIT_CACHE = "1"
+FLASHINFER_VERSION = "0.6.17"
+MOONCAKE_VERSION = "0.3.12.post1"
+MSCCLPP_VERSION = "sglang-v0.9.1"
+HPC_OPS_COMMIT = "ab1a402724635507037426068f6cddc3d30dc0a8"
+SGLANG_BUILD_COMMIT = "274ee330db7ea9653807b868c0fb8693d50ed7b2"
+SGLANG_BUILD_URL = ""
+SGLANG_IMAGE_TAG = "local/sglang:sm121-storage-274ee330-runtime"

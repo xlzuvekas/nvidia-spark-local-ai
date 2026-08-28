@@ -64,6 +64,88 @@ verify artifact contents, and compare synthetic resident versus NVMe gathers.
 On the target, an `EPERM` or `ENOSYS` skip is an admission failure so the narrow
 three-syscall `io_uring` policy is tested rather than assumed.
 
+### Pinned ARM64 build candidate
+
+`sm121-storage-build-candidate-v1.toml` is the strict composition and build
+invocation contract for candidate `sglang-sm121-triton-storage-v1`. Starting
+from tree `bdb62e9fbc76f6e206cb0136576b88b7e1517a51`, apply
+`bdb62e9f-cuda130-arm64-base-pin.patch`. Its SHA-256 is
+`7de1f4f3ed468c1a4b7ac9e98abbe73b6908095321289d0b5328334608f6df11`,
+its stable patch ID is `9d143b6c2fd01a26e906a077dd4e917c675faefb`,
+and the resulting tree is
+`274ee330db7ea9653807b868c0fb8693d50ed7b2`. The patch materializes
+`.dockerignore` as a regular file and makes both external `FROM` stages use the
+Linux/ARM64 child manifest
+`sha256:689c34b3fdc12303418e90828359fcdb3c7053bc8aa8d7681823186dde1fe572`
+for CUDA 13.0.3. The competing QSA commit
+`8ef3b3fee34a3b5543b65393dd217ed0362a9273` is explicitly excluded from the
+source chain and ancestry.
+
+Verify a clean, non-shallow reconstructed source checkout and the intended
+invocation before building. The checkout must contain the pinned base and step
+commit objects plus the explicitly excluded QSA commit object:
+
+```text
+python3 -m bench.sglang_build_contract \
+  --repository-root . \
+  --contract patches/sglang/sm121-storage-build-candidate-v1.toml \
+  --source-root /path/to/reconstructed/sglang \
+  --target runtime \
+  --platform linux/arm64 \
+  --build-arg KEY=VALUE  # repeat for every exact entry in [build.args]
+```
+
+Every build argument must be supplied as `KEY=VALUE`; missing, extra,
+duplicate, value-mismatched, or environment-inherited `KEY` arguments fail.
+The empty `SGL_VERSION`, `PIP_DEFAULT_INDEX`, `UBUNTU_MIRROR`, and
+`SGLANG_BUILD_URL` values are intentional. `TARGETARCH` is automatic BuildKit
+metadata rather than a passed build argument; architecture selection is bound
+by `--platform linux/arm64`. `MOONCAKE_COMPILE_ARG` is declared but unused by
+this Dockerfile and is deliberately not passed; the verifier fails if it is
+lexically referenced outside its `ARG` declaration without a schema change.
+
+The argument-reference check is restricted to stages reachable from the
+`runtime` target through `FROM`, `COPY --from`, and `RUN --mount ... from=`
+edges. It proves that each passed argument has a recognized reference in that
+build graph; it does not prove that every conditional shell branch executes.
+For this ARM64, CUDA 13.0.3, local-source invocation, `HPC_OPS_COMMIT` is in an
+x86-only branch, `SGL_DEEP_GEMM_VERSION` is in a CUDA-12 branch, and
+`USE_LATEST_SGLANG` plus `SGL_VERSION` are in inactive non-local source
+branches. Their frozen values are invocation provenance, not evidence that
+they affect the resulting image.
+
+The verifier uses only local Git and file operations and never modifies either
+inspected repository. Before trusting tree IDs or cleanliness, it runs strict
+full object-integrity checks, rejects alternate object databases and effective
+clean-filter or archive-control attributes, and rejects integrity-bypass Git
+configuration. It replays the source transitions in a disposable, isolated Git
+index and object directory, then removes that scratch state. Run the verifier
+against the clean Git checkout first; it intentionally requires a Git
+repository. After it succeeds, create the build context directly from the
+literal `source_tree` returned by the verifier. For this schema-1 contract,
+the config- and attribute-isolated handoff is:
+
+```text
+env -i PATH="$PATH" LANG=C LC_ALL=C \
+  GIT_ATTR_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  GIT_NO_LAZY_FETCH=1 GIT_NO_REPLACE_OBJECTS=1 GIT_OPTIONAL_LOCKS=0 \
+  GIT_PAGER= GIT_TERMINAL_PROMPT=0 \
+  git -C /path/to/reconstructed/sglang \
+    -c core.fsmonitor=false -c core.hooksPath=/dev/null -c tar.umask=0000 \
+    archive --format=tar 274ee330db7ea9653807b868c0fb8693d50ed7b2 \
+    > sglang-sm121-storage-274ee330.tar
+```
+
+Build from exactly that tar stream. Do not substitute a later `HEAD`, export
+the mutable worktree, or run the verifier against the export. A tracked-tree
+export is required because
+this Dockerfile's `.dockerignore` does not exclude `.git`. This contract's
+status is `source_and_build_invocation_only`: it describes a build candidate,
+not an admitted runtime, and it is not a reproducible dependency closure.
+Mutable apt, pip, rustup, and other remote dependency resolution still require
+recording the newly built OCI digest and completing the ARM64 `_storage`, SM121
+Triton, long-context, and quality admission checks separately.
+
 ## Historical measured route identity
 
 The `gd91c3682b` package version is a reported base, not a reconstructible
