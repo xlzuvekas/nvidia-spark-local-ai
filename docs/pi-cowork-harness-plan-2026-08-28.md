@@ -16,6 +16,12 @@ coding-agent and cowork-style results separate:
 This plan is prospective. Do not edit the frozen campaign's harness, profiles,
 suite, cutoff, or plans.
 
+Freeze three records rather than one overloaded campaign: C1 Pi coding on the
+six Harbor tasks, C1 `cowork-core-v1` on its twelve episodes, and a separate
+C1/C2 cowork fan-out campaign and profile. They may share admitted code and
+pins, but require distinct campaign IDs and evidence bundles. Never pool coding
+capability, cowork capability, and scheduling results.
+
 At the audited repository boundary
 `2274111b0e5e921911124d71e49bbd706e93cdd4`, Pi is design-only. There is no
 checked-in Pi package lock or normalized prefix, core wrapper, Pi/cowork
@@ -81,10 +87,11 @@ manifest or evidence schema.
 The new Pi image and adapter should run Pi as a verified non-root task user
 inside each ephemeral Harbor task container. The current Harbor main container
 runs the agent as root, so non-root UID, ownership, and capability checks are a
-new admission requirement rather than an existing property. If the canary
-retains the root agent, preserve the shared-verifier trust limitation in every
-result. Pi's coding tools accept absolute paths and include an unrestricted
-shell, so a host process is not an acceptable boundary.
+new admission requirement rather than an existing property. A root-agent
+`fix-git` run may be an unscored plumbing canary only; no coding correctness or
+latency result is publishable until non-root admission passes. Pi's coding
+tools accept absolute paths and include an unrestricted shell, so a host
+process is not an acceptable boundary.
 
 Adapt the existing isolation and authenticated-relay design through a new
 Pi-specific campaign; do not reuse the old campaign manifest or record:
@@ -182,7 +189,10 @@ The smallest admission-only sequence is one C1 `fix-git` trial, one C1
 byte-distinct `cowork-table-reconcile` and conflict-recovery variants. This
 checks isolation, low-effort payload attestation, growing history, mutation and
 conflict recovery, dual-client cleanup, and C2 capacity. It makes no speed
-claim.
+claim. The pair remains conditional on exact tokenizer/path admission: if both
+worst-case legal rendered histories, output reservations, and MTP allowance do
+not fit the 61,440-token budget, freeze shorter C2-specific variants. Never
+truncate dynamically or pair the 40K--48K retrieval case.
 
 For a first descriptive scheduling panel, define workload set A as table and
 conflict variant zero and set B as the corresponding variant one. Fresh
