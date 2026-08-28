@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections import Counter
 import csv
-from datetime import datetime
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
@@ -70,6 +70,18 @@ HARBOR_EXPECTED_DERIVATION_DIGEST = (
 HARBOR_REPLICATE_COUNT = 2
 LOOP_EVIDENCE_KIND = "rlm_halo_loop_campaign"
 LOOP_RESULT_ROOTS = ("loop-campaigns", "loop-smoke-plans", "loop-smokes")
+AUTORESEARCH_RESULT_ROOT = "autoresearch"
+AUTORESEARCH_CAMPAIGN_SCHEMA_VERSION = 2
+AUTORESEARCH_CELL_COUNT = 14
+AUTORESEARCH_SUITE_ID = "qwen38-flash-next-sglang-agent64k-autoresearch"
+AUTORESEARCH_SUITE_DESCRIPTION = (
+    "Immutable single-user coding/cowork proxy for the exact "
+    "Qwen3.8-Flash-Next 64K autoresearch baseline and its three one-axis "
+    "candidates."
+)
+AUTORESEARCH_SUITE_SPEC_DIGEST = (
+    "260506c71f890e714b50829e69289fdc1e2490b1c7d5a8a08218c5369128a063"
+)
 MAX_SOURCE_JSON_BYTES = 16 * 1024 * 1024
 MAX_SOURCE_LINE_BYTES = 1024 * 1024
 MAX_OUTPUT_FILE_BYTES = 2 * 1024 * 1024
@@ -243,6 +255,51 @@ _HEX_RE = re.compile(r"[0-9a-f]{64}\Z")
 _REVISION_RE = re.compile(r"[0-9a-f]{7,64}\Z")
 _VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}\Z")
 _RUN_ID_RE = re.compile(r"20[0-9]{6}T[0-9]{6,12}Z-[A-Za-z0-9_.-]+\Z")
+_AUTORESEARCH_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
+_AUTORESEARCH_PATH_COMPONENT_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,255}\Z"
+)
+_AUTORESEARCH_CAMPAIGN_FIELDS = frozenset(
+    {
+        "schema_version",
+        "created_at",
+        "harness_tree_sha256",
+        "harness_file_count",
+        "preview",
+        "preview_digest",
+        "cells",
+        "execution_started",
+        "integrity_hash",
+    }
+)
+_AUTORESEARCH_PREVIEW_FIELDS = frozenset(
+    {
+        "schema_version",
+        "campaign_id",
+        "cutoff",
+        "baseline_id",
+        "suite_id",
+        "policy",
+        "policy_digest",
+        "proposals",
+        "planned_cell_count",
+        "execution_started",
+    }
+)
+_AUTORESEARCH_CELL_FIELDS = frozenset(
+    {
+        "cell_id",
+        "stage",
+        "candidate_id",
+        "arm",
+        "profile_id",
+        "ordinal",
+        "run_dir",
+        "plan_fingerprint",
+        "plan_integrity_hash",
+        "run_nonce",
+    }
+)
 _GROUPED_RUN_ROOT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"qwen36-core-(20[0-9]{6}T[0-9]{6})\Z"), "%Y%m%dT%H%M%S"),
     (re.compile(r"reasoning-(20[0-9]{6})\Z"), "%Y%m%d"),
@@ -3067,6 +3124,67 @@ def _project_memory_suite(
     }
 
 
+def _project_autoresearch_suite(
+    suite: Any, *, source_model: Any = None
+) -> dict[str, Any]:
+    """Validate and project the exact mixed nine-case autoresearch suite."""
+
+    if not isinstance(suite, dict) or frozenset(suite) not in {
+        frozenset({"cases", "id", "schema_version"}),
+        frozenset({"cases", "description", "id", "schema_version"}),
+    }:
+        raise EvidenceError("autoresearch suite does not match its exact schema")
+    if suite.get("id") != AUTORESEARCH_SUITE_ID:
+        raise EvidenceError("autoresearch suite identifier changed")
+    if suite.get("schema_version") != 1:
+        raise EvidenceError("autoresearch suite schema version changed")
+    description = suite.get("description", AUTORESEARCH_SUITE_DESCRIPTION)
+    if description != AUTORESEARCH_SUITE_DESCRIPTION:
+        raise EvidenceError("autoresearch suite description changed")
+    cases = suite.get("cases")
+    if not isinstance(cases, list) or len(cases) != 9 or any(
+        not isinstance(case, dict) for case in cases
+    ):
+        raise EvidenceError("autoresearch suite must contain exactly nine cases")
+    unbound_cases = [
+        {key: value for key, value in case.items() if key != "case_id"}
+        for case in cases
+    ]
+    suite_basis = {
+        "id": AUTORESEARCH_SUITE_ID,
+        "cases": unbound_cases,
+        "description": AUTORESEARCH_SUITE_DESCRIPTION,
+        "schema_version": 1,
+    }
+    if _autoresearch_content_hash(suite_basis) != AUTORESEARCH_SUITE_SPEC_DIGEST:
+        raise EvidenceError("autoresearch suite content changed")
+    if source_model is not None and not isinstance(source_model, dict):
+        raise EvidenceError("autoresearch source model must be an object")
+    projected_cases: list[dict[str, Any]] = []
+    for case, unbound in zip(cases, unbound_cases, strict=True):
+        case_id = _safe_id(case.get("case_id"), name="autoresearch case ID")
+        scenario_id = _safe_id(case.get("id"), name="autoresearch scenario ID")
+        if not re.fullmatch(rf"{re.escape(scenario_id)}--[0-9a-f]{{12}}", case_id):
+            raise EvidenceError("autoresearch case identifier changed")
+        if isinstance(source_model, dict):
+            expected = (
+                f"{scenario_id}--"
+                f"{_autoresearch_content_hash({'model': source_model, 'case': unbound}, length=12)}"
+            )
+            if case_id != expected:
+                raise EvidenceError(
+                    "autoresearch case identifier is not model-bound"
+                )
+        projected_cases.append(dict(case))
+    if len({case["case_id"] for case in projected_cases}) != len(projected_cases):
+        raise EvidenceError("autoresearch case identifiers are duplicated")
+    return {
+        "cases": projected_cases,
+        "id": AUTORESEARCH_SUITE_ID,
+        "schema_version": 1,
+    }
+
+
 def _project_suite(plan: dict[str, Any]) -> dict[str, Any] | None:
     suite = plan.get("suite")
     if not isinstance(suite, dict):
@@ -3082,6 +3200,8 @@ def _project_suite(plan: dict[str, Any]) -> dict[str, Any] | None:
             }
         return None
     raw_cases = suite.get("cases")
+    if suite.get("id") == AUTORESEARCH_SUITE_ID:
+        return _project_autoresearch_suite(suite, source_model=plan.get("model"))
     if suite.get("id") == "agentic-tools" or (
         isinstance(raw_cases, list)
         and any(
@@ -4713,27 +4833,45 @@ def _validate_agentic_aggregates(
     terminal: bool = False,
 ) -> None:
     planned_cases: dict[str, dict[str, Any]] = {}
-    if isinstance(suite, dict) and suite.get("id") == "agentic-tools":
-        validated_suite = _project_agentic_suite(suite)
-        planned_cases = {
+    all_planned_cases: dict[str, dict[str, Any]] = {}
+    mixed_suite = False
+    if isinstance(suite, dict) and suite.get("id") in {
+        "agentic-tools",
+        AUTORESEARCH_SUITE_ID,
+    }:
+        mixed_suite = suite.get("id") == AUTORESEARCH_SUITE_ID
+        validated_suite = (
+            _project_autoresearch_suite(suite)
+            if mixed_suite
+            else _project_agentic_suite(suite)
+        )
+        all_planned_cases = {
             str(case["case_id"]): case for case in validated_suite["cases"]
+        }
+        planned_cases = {
+            case_id: case
+            for case_id, case in all_planned_cases.items()
+            if case.get("kind") == "agentic"
         }
     cases = summary.get("cases")
     agentic_samples = [
         sample for sample in requests if sample.get("kind") == "agentic"
     ]
     if not isinstance(cases, list):
-        if agentic_samples or planned_cases:
+        if agentic_samples or (terminal and planned_cases):
             raise EvidenceError("agentic evidence requires summary cases")
         return
     agentic_cases = [
         case for case in cases if isinstance(case, dict) and case.get("kind") == "agentic"
     ]
     if (agentic_samples or agentic_cases) and not planned_cases:
-        raise EvidenceError("agentic evidence requires the exact agentic-tools suite")
+        raise EvidenceError(
+            "agentic evidence requires the exact agentic-tools suite or exact "
+            "autoresearch suite"
+        )
     if not agentic_samples and not agentic_cases and not planned_cases:
         return
-    if len(agentic_cases) != len(cases):
+    if not mixed_suite and len(agentic_cases) != len(cases):
         raise EvidenceError("agentic summary must contain only agentic cases")
     for sample in agentic_samples:
         _validate_projected_agentic_sample(sample)
@@ -4778,7 +4916,9 @@ def _validate_agentic_aggregates(
                 continue
             if not isinstance(values, list):
                 raise EvidenceError(f"agentic summary {key} must be a list")
-            accounted.extend(values)
+            if any(value not in all_planned_cases for value in values):
+                raise EvidenceError("summary accounts for an unplanned case")
+            accounted.extend(value for value in values if value in planned_cases)
         if any(value not in planned_cases for value in accounted):
             raise EvidenceError("agentic summary accounts for an unplanned case")
         if len(accounted) != len(set(accounted)):
@@ -9002,8 +9142,12 @@ def _export_run(
     results_root: Path,
     output_root: Path,
     matrix_id: str | None,
+    *,
+    published_run_id: str | None = None,
 ) -> dict[str, Any]:
-    run_id = run_dir.name
+    source_run_id = run_dir.name
+    _date_from_run_id(source_run_id)
+    run_id = published_run_id if published_run_id is not None else source_run_id
     run_date = _date_from_run_id(run_id)
     plan = _load_json(run_dir / "plan.json", results_root)
     if not isinstance(plan, dict):
@@ -11808,7 +11952,11 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     agentic_suite: dict[str, Any] | None = None
     memory_suite: dict[str, Any] | None = None
     manifest_cases = suite.get("cases") if isinstance(suite, dict) else None
-    if isinstance(suite, dict) and (
+    if isinstance(suite, dict) and suite.get("id") == AUTORESEARCH_SUITE_ID:
+        agentic_suite = _project_autoresearch_suite(suite)
+        if agentic_suite != suite:
+            raise EvidenceError(f"autoresearch suite projection mismatch: {run_id}")
+    elif isinstance(suite, dict) and (
         suite.get("id") == "agentic-tools"
         or (
             isinstance(manifest_cases, list)
@@ -13281,10 +13429,10 @@ public artifact/runtime identities.  It contains no raw request or response text
 media, token sequences, credentials, API keys, commands, environment variables, or
 absolute paths.
 
-`index.json` accounts for every discovered run, matrix, custom campaign, and
-standalone battery.  Aborted and nonterminal attempts remain explicitly classified;
-they are not promoted to completed measurements.  `checksums.json` covers only the
-sanitized files in this directory.
+`index.json` accounts for every discovered run, declared nested autoresearch cell,
+matrix, custom campaign, and standalone battery.  Aborted and nonterminal attempts
+remain explicitly classified; they are not promoted to completed measurements.
+`checksums.json` covers only the sanitized files in this directory.
 """
 
 
@@ -13483,6 +13631,425 @@ def _loop_campaign_dirs(results_root: Path) -> list[tuple[str, Path]]:
     return campaigns
 
 
+def _autoresearch_content_hash(value: Any, *, length: int = 64) -> str:
+    return hashlib.sha256(_canonical(value).rstrip(b"\n")).hexdigest()[:length]
+
+
+def _autoresearch_id(value: Any, *, name: str) -> str:
+    if not isinstance(value, str) or _AUTORESEARCH_ID_RE.fullmatch(value) is None:
+        raise EvidenceError(f"unsafe autoresearch {name}")
+    return value
+
+
+def _autoresearch_sha256(value: Any, *, name: str) -> str:
+    if not isinstance(value, str) or _HEX_RE.fullmatch(value) is None:
+        raise EvidenceError(f"invalid autoresearch {name}")
+    return value
+
+
+def _autoresearch_real_directory(path: Path, *, name: str) -> Path:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise EvidenceError(f"autoresearch {name} is missing") from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise EvidenceError(f"autoresearch {name} must be a real directory")
+    return path.resolve(strict=True)
+
+
+def _autoresearch_created_stamp(value: Any) -> str:
+    if not isinstance(value, str) or len(value) > 64:
+        raise EvidenceError("autoresearch campaign creation time is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise EvidenceError("autoresearch campaign creation time is invalid") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise EvidenceError("autoresearch campaign creation time must be timezone-aware")
+    return parsed.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def _autoresearch_published_run_id(
+    *,
+    campaign_id: str,
+    cell_id: str,
+    ordinal: int,
+    created_at: str,
+) -> str:
+    stamp = _autoresearch_created_stamp(created_at)
+    identity = {
+        "campaign_id": campaign_id,
+        "cell_id": cell_id,
+        "created_at": created_at,
+        "ordinal": ordinal,
+    }
+    identity_digest = _autoresearch_content_hash(identity, length=16)
+    run_id = (
+        f"{stamp}-autoresearch-{campaign_id[:64]}-{ordinal:02d}-"
+        f"{cell_id[:64]}-{identity_digest}"
+    )
+    _date_from_run_id(run_id)
+    checked = _safe_id(run_id, name="autoresearch published run ID")
+    assert isinstance(checked, str)
+    return checked
+
+
+def _autoresearch_run_dirs(results_root: Path) -> list[tuple[Path, str]]:
+    """Validate frozen campaigns and enumerate only their declared cell plans."""
+
+    autoresearch_root = results_root / AUTORESEARCH_RESULT_ROOT
+    if not autoresearch_root.exists():
+        return []
+    autoresearch_root = _autoresearch_real_directory(
+        autoresearch_root, name="results root"
+    )
+    campaign_dirs = sorted(autoresearch_root.iterdir())
+    if not campaign_dirs:
+        raise EvidenceError("autoresearch results root must contain a campaign")
+
+    published: list[tuple[Path, str]] = []
+    for campaign_dir in campaign_dirs:
+        if (
+            _AUTORESEARCH_PATH_COMPONENT_RE.fullmatch(campaign_dir.name) is None
+        ):
+            raise EvidenceError("unsafe autoresearch campaign directory name")
+        campaign_dir = _autoresearch_real_directory(
+            campaign_dir, name="campaign directory"
+        )
+        campaign_entries = {entry.name: entry for entry in campaign_dir.iterdir()}
+        allowed_campaign_files = {
+            ".autoresearch.lock",
+            "calibration.json",
+            "campaign.json",
+            "events.jsonl",
+            "summary.json",
+        }
+        if "campaign.json" not in campaign_entries or "cells" not in campaign_entries:
+            raise EvidenceError("autoresearch campaign topology is incomplete")
+        unknown_campaign_entries = set(campaign_entries) - (
+            allowed_campaign_files | {"cells"}
+        )
+        if unknown_campaign_entries:
+            raise EvidenceError("autoresearch campaign topology contains unknown entries")
+        for name, entry in campaign_entries.items():
+            metadata = entry.lstat()
+            if name == "cells":
+                if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(
+                    metadata.st_mode
+                ):
+                    raise EvidenceError("autoresearch cells must be a real directory")
+            elif stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(
+                metadata.st_mode
+            ):
+                raise EvidenceError("autoresearch campaign control must be a real file")
+
+        campaign = _load_json(campaign_dir / "campaign.json", results_root)
+        if not isinstance(campaign, dict) or set(campaign) != set(
+            _AUTORESEARCH_CAMPAIGN_FIELDS
+        ):
+            raise EvidenceError("autoresearch campaign schema changed")
+        if campaign.get("schema_version") != AUTORESEARCH_CAMPAIGN_SCHEMA_VERSION:
+            raise EvidenceError("unsupported autoresearch campaign schema")
+        campaign_integrity = _autoresearch_sha256(
+            campaign.get("integrity_hash"), name="campaign integrity hash"
+        )
+        campaign_payload = {
+            key: value for key, value in campaign.items() if key != "integrity_hash"
+        }
+        if _autoresearch_content_hash(campaign_payload) != campaign_integrity:
+            raise EvidenceError("autoresearch campaign integrity hash does not match")
+        if campaign.get("execution_started") is not False:
+            raise EvidenceError("autoresearch frozen campaign execution state changed")
+        _autoresearch_sha256(
+            campaign.get("harness_tree_sha256"), name="harness tree hash"
+        )
+        harness_file_count = campaign.get("harness_file_count")
+        if (
+            isinstance(harness_file_count, bool)
+            or not isinstance(harness_file_count, int)
+            or harness_file_count <= 0
+        ):
+            raise EvidenceError("autoresearch harness file count is invalid")
+        created_at = campaign.get("created_at")
+        _autoresearch_created_stamp(created_at)
+        assert isinstance(created_at, str)
+
+        preview = campaign.get("preview")
+        if not isinstance(preview, dict) or set(preview) != set(
+            _AUTORESEARCH_PREVIEW_FIELDS
+        ):
+            raise EvidenceError("autoresearch campaign preview schema changed")
+        preview_digest = _autoresearch_sha256(
+            campaign.get("preview_digest"), name="preview digest"
+        )
+        if _autoresearch_content_hash(preview) != preview_digest:
+            raise EvidenceError("autoresearch campaign preview digest does not match")
+        if (
+            preview.get("schema_version") != 1
+            or preview.get("execution_started") is not False
+            or preview.get("planned_cell_count") != AUTORESEARCH_CELL_COUNT
+        ):
+            raise EvidenceError("autoresearch campaign preview topology changed")
+        campaign_id = _autoresearch_id(
+            preview.get("campaign_id"), name="campaign ID"
+        )
+        baseline_id = _autoresearch_id(
+            preview.get("baseline_id"), name="baseline ID"
+        )
+        suite_id = _autoresearch_id(preview.get("suite_id"), name="suite ID")
+        policy = preview.get("policy")
+        policy_digest = _autoresearch_sha256(
+            preview.get("policy_digest"), name="policy digest"
+        )
+        if (
+            not isinstance(policy, dict)
+            or _autoresearch_content_hash(policy) != policy_digest
+        ):
+            raise EvidenceError("autoresearch campaign policy digest does not match")
+        proposals = preview.get("proposals")
+        if not isinstance(proposals, list):
+            raise EvidenceError("autoresearch campaign proposals must be an array")
+        proposal_ids: list[str] = []
+        for proposal in proposals:
+            if not isinstance(proposal, dict) or set(proposal) != {
+                "candidate_id",
+                "axis",
+                "delta",
+                "delta_digest",
+            }:
+                raise EvidenceError("autoresearch campaign proposal schema changed")
+            proposal_ids.append(
+                _autoresearch_id(proposal.get("candidate_id"), name="candidate ID")
+            )
+            _autoresearch_id(proposal.get("axis"), name="candidate axis")
+            delta = proposal.get("delta")
+            delta_digest = _autoresearch_sha256(
+                proposal.get("delta_digest"), name="candidate delta digest"
+            )
+            if (
+                not isinstance(delta, dict)
+                or _autoresearch_content_hash(delta) != delta_digest
+            ):
+                raise EvidenceError("autoresearch candidate delta digest does not match")
+        if len(proposal_ids) != len(set(proposal_ids)):
+            raise EvidenceError("autoresearch candidate identifiers are duplicated")
+
+        expected_cells: list[dict[str, str]] = [
+            {
+                "arm": "control_a",
+                "candidate_id": "control",
+                "cell_id": "calibration-control-a",
+                "profile_id": baseline_id,
+                "stage": "calibration",
+            },
+            {
+                "arm": "control_b",
+                "candidate_id": "control",
+                "cell_id": "calibration-control-b",
+                "profile_id": baseline_id,
+                "stage": "calibration",
+            },
+        ]
+        for candidate_id in proposal_ids:
+            expected_cells.extend(
+                (
+                    {
+                        "arm": "champion",
+                        "candidate_id": candidate_id,
+                        "cell_id": f"{candidate_id}-screen-champion",
+                        "profile_id": baseline_id,
+                        "stage": "screen",
+                    },
+                    {
+                        "arm": "candidate",
+                        "candidate_id": candidate_id,
+                        "cell_id": f"{candidate_id}-screen-candidate",
+                        "profile_id": candidate_id,
+                        "stage": "screen",
+                    },
+                    {
+                        "arm": "candidate",
+                        "candidate_id": candidate_id,
+                        "cell_id": f"{candidate_id}-confirmation-candidate",
+                        "profile_id": candidate_id,
+                        "stage": "confirmation",
+                    },
+                    {
+                        "arm": "champion",
+                        "candidate_id": candidate_id,
+                        "cell_id": f"{candidate_id}-confirmation-champion",
+                        "profile_id": baseline_id,
+                        "stage": "confirmation",
+                    },
+                )
+            )
+        if len(expected_cells) != AUTORESEARCH_CELL_COUNT:
+            raise EvidenceError("autoresearch campaign proposal topology changed")
+
+        cells = campaign.get("cells")
+        if not isinstance(cells, list) or len(cells) != AUTORESEARCH_CELL_COUNT:
+            raise EvidenceError("autoresearch campaign must declare fourteen cells")
+        cells_root = _autoresearch_real_directory(
+            campaign_dir / "cells", name="cells directory"
+        )
+        expected_cell_directories: set[str] = set()
+        declared_plan_paths: set[Path] = set()
+        run_dirs: set[Path] = set()
+        cell_ids: list[str] = []
+        run_nonces: list[str] = []
+        for ordinal, cell in enumerate(cells, start=1):
+            if not isinstance(cell, dict) or set(cell) != set(
+                _AUTORESEARCH_CELL_FIELDS
+            ):
+                raise EvidenceError("autoresearch campaign cell schema changed")
+            if cell.get("ordinal") != ordinal:
+                raise EvidenceError("autoresearch cell ordinals are not contiguous")
+            cell_id = _autoresearch_id(cell.get("cell_id"), name="cell ID")
+            cell_ids.append(cell_id)
+            for field in ("stage", "candidate_id", "arm", "profile_id"):
+                _autoresearch_id(cell.get(field), name=f"cell {field}")
+            expected_cell = expected_cells[ordinal - 1]
+            if any(cell.get(key) != value for key, value in expected_cell.items()):
+                raise EvidenceError(
+                    "autoresearch cell schedule or profile binding changed"
+                )
+            run_nonce = cell.get("run_nonce")
+            if (
+                not isinstance(run_nonce, str)
+                or re.fullmatch(r"[0-9a-f]{32}", run_nonce) is None
+            ):
+                raise EvidenceError("autoresearch cell ownership nonce is invalid")
+            run_nonces.append(run_nonce)
+            plan_fingerprint = cell.get("plan_fingerprint")
+            if (
+                not isinstance(plan_fingerprint, str)
+                or re.fullmatch(r"[0-9a-f]{16}", plan_fingerprint) is None
+            ):
+                raise EvidenceError("autoresearch cell plan fingerprint is invalid")
+            plan_integrity = _autoresearch_sha256(
+                cell.get("plan_integrity_hash"), name="cell plan integrity hash"
+            )
+
+            raw_run_dir = cell.get("run_dir")
+            if not isinstance(raw_run_dir, str) or len(raw_run_dir) > 768:
+                raise EvidenceError("autoresearch cell run directory is unsafe")
+            relative_run_dir = PurePosixPath(raw_run_dir)
+            expected_cell_directory = f"{ordinal:02d}-{cell_id}"
+            if (
+                relative_run_dir.is_absolute()
+                or relative_run_dir.as_posix() != raw_run_dir
+                or len(relative_run_dir.parts) != 3
+                or relative_run_dir.parts[:2]
+                != ("cells", expected_cell_directory)
+                or any(part in {"", ".", ".."} for part in relative_run_dir.parts)
+            ):
+                raise EvidenceError("autoresearch cell run directory topology changed")
+            raw_run_id = relative_run_dir.parts[2]
+            _date_from_run_id(raw_run_id)
+            expected_cell_directories.add(expected_cell_directory)
+            run_dir = campaign_dir.joinpath(*relative_run_dir.parts)
+            resolved_run_dir = _autoresearch_real_directory(
+                run_dir, name="cell run directory"
+            )
+            if resolved_run_dir != run_dir or resolved_run_dir in run_dirs:
+                raise EvidenceError("autoresearch cell run directories are duplicated")
+            try:
+                resolved_run_dir.relative_to(campaign_dir)
+            except ValueError as error:
+                raise EvidenceError(
+                    "autoresearch cell run directory escapes its campaign"
+                ) from error
+            run_dirs.add(resolved_run_dir)
+            plan_path = resolved_run_dir / "plan.json"
+            declared_plan_paths.add(plan_path)
+            plan = _load_json(plan_path, results_root)
+            if not isinstance(plan, dict) or plan.get("schema_version") != 2:
+                raise EvidenceError("autoresearch cell plan schema changed")
+            if (
+                plan.get("fingerprint") != plan_fingerprint
+                or plan.get("integrity_hash") != plan_integrity
+            ):
+                raise EvidenceError("autoresearch cell plan binding changed")
+            if plan.get("run_nonce") != run_nonce:
+                raise EvidenceError("autoresearch cell ownership nonce changed")
+            plan_payload = {
+                key: value for key, value in plan.items() if key != "integrity_hash"
+            }
+            if _autoresearch_content_hash(plan_payload) != plan_integrity:
+                raise EvidenceError("autoresearch cell plan integrity hash does not match")
+            model = plan.get("model")
+            suite = plan.get("suite")
+            resolved = plan.get("resolved")
+            if (
+                not isinstance(model, dict)
+                or not isinstance(suite, dict)
+                or not isinstance(resolved, dict)
+                or model.get("id") != cell.get("profile_id")
+                or suite.get("id") != suite_id
+            ):
+                raise EvidenceError("autoresearch cell profile or suite binding changed")
+            if suite_id == AUTORESEARCH_SUITE_ID:
+                _project_autoresearch_suite(suite, source_model=model)
+            cases = suite.get("cases")
+            if not isinstance(cases, list) or any(
+                not isinstance(case, dict) for case in cases
+            ):
+                raise EvidenceError("autoresearch cell plan cases are invalid")
+            suite_without_case_ids = {
+                **suite,
+                "cases": [
+                    {key: value for key, value in case.items() if key != "case_id"}
+                    for case in cases
+                ],
+            }
+            expected_fingerprint = _autoresearch_content_hash(
+                {
+                    "model": model,
+                    "suite": suite_without_case_ids,
+                    "resolved": resolved,
+                },
+                length=16,
+            )
+            if expected_fingerprint != plan_fingerprint:
+                raise EvidenceError("autoresearch cell plan fingerprint does not match")
+
+            published_run_id = _autoresearch_published_run_id(
+                campaign_id=campaign_id,
+                cell_id=cell_id,
+                ordinal=ordinal,
+                created_at=created_at,
+            )
+            published.append((resolved_run_dir, published_run_id))
+
+        if len(cell_ids) != len(set(cell_ids)):
+            raise EvidenceError("autoresearch cell identifiers are duplicated")
+        if len(run_nonces) != len(set(run_nonces)):
+            raise EvidenceError("autoresearch cell ownership nonces are duplicated")
+        actual_cell_entries = {entry.name: entry for entry in cells_root.iterdir()}
+        if set(actual_cell_entries) != expected_cell_directories:
+            raise EvidenceError("autoresearch cell directory topology changed")
+        for cell_directory, entry in actual_cell_entries.items():
+            resolved_cell = _autoresearch_real_directory(
+                entry, name="cell directory"
+            )
+            expected_runs = {
+                run_dir.name for run_dir in run_dirs if run_dir.parent == resolved_cell
+            }
+            actual_runs = {child.name: child for child in resolved_cell.iterdir()}
+            if set(actual_runs) != expected_runs or len(expected_runs) != 1:
+                raise EvidenceError("autoresearch cell run topology changed")
+            for child in actual_runs.values():
+                _autoresearch_real_directory(child, name="cell run directory")
+        actual_plan_paths = set(campaign_dir.rglob("plan.json"))
+        if actual_plan_paths != declared_plan_paths:
+            raise EvidenceError("autoresearch campaign contains an undeclared plan")
+
+    published_ids = [run_id for _, run_id in published]
+    if len(published_ids) != len(set(published_ids)):
+        raise EvidenceError("autoresearch published run identifiers are duplicated")
+    return published
+
+
 def _export_evidence_locked(
     *,
     results_root: Path,
@@ -13518,6 +14085,8 @@ def _export_evidence_locked(
         runs: list[dict[str, Any]] = []
         loop_campaign_dirs = _loop_campaign_dirs(results_root)
         loop_campaign_paths = {path for _, path in loop_campaign_dirs}
+        autoresearch_runs = _autoresearch_run_dirs(results_root)
+        autoresearch_root = results_root / AUTORESEARCH_RESULT_ROOT
         run_dirs = sorted(
             {
                 path.parent
@@ -13525,11 +14094,13 @@ def _export_evidence_locked(
                 if not any(
                     ancestor in loop_campaign_paths for ancestor in path.parents
                 )
+                and autoresearch_root not in path.parents
             }
         )
+        all_run_dirs = [*run_dirs, *(path for path, _ in autoresearch_runs)]
         has_runtime_overlays = _validate_runtime_overlay_tree(
             results_root,
-            run_dirs,
+            all_run_dirs,
             [path for _, path in loop_campaign_dirs],
         )
         grouped_runs = _grouped_run_dirs(results_root)
@@ -13545,6 +14116,13 @@ def _export_evidence_locked(
         }
         if has_runtime_overlays:
             recognized_top.add("runtime-overlays")
+        if autoresearch_runs:
+            recognized_top.add(AUTORESEARCH_RESULT_ROOT)
+        published_run_ids = [run_dir.name for run_dir in run_dirs] + [
+            run_id for _, run_id in autoresearch_runs
+        ]
+        if len(published_run_ids) != len(set(published_run_ids)):
+            raise EvidenceError("published run identifiers are duplicated")
         for run_dir in run_dirs:
             relative_run = run_dir.relative_to(results_root)
             if len(relative_run.parts) == 1:
@@ -13566,6 +14144,16 @@ def _export_evidence_locked(
                 else None
             )
             runs.append(_export_run(run_dir, results_root, temporary, matrix_id))
+        for run_dir, published_run_id in autoresearch_runs:
+            runs.append(
+                _export_run(
+                    run_dir,
+                    results_root,
+                    temporary,
+                    None,
+                    published_run_id=published_run_id,
+                )
+            )
         recognized_top.update(root_name for root_name, _ in loop_campaign_dirs)
         actual_top = {path.name for path in results_root.iterdir()}
         if actual_top != recognized_top:

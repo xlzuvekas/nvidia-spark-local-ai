@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import hashlib
 import json
 import os
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 import subprocess
@@ -47,6 +49,7 @@ from bench.memory_ops import (
     MEMORY_OPERATION_SERVER_TIMING_TOLERANCE_S,
     memory_operation_llamacpp_args,
 )
+from bench.manifest import load_suite
 from bench.report import summarize_run
 from bench.harbor_campaign_lifecycle import (
     CleanupStatus,
@@ -78,6 +81,39 @@ REPOSITORY = Path(__file__).resolve().parents[1]
 HARBOR_CAMPAIGN_PATH = (
     REPOSITORY / "manifests" / "campaigns" / "harbor_terminal_coder_next.toml"
 )
+
+
+def _synthetic_content_hash(value: object, *, length: int = 64) -> str:
+    serialized = json.dumps(
+        value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(serialized).hexdigest()[:length]
+
+
+def _autoresearch_suite(model: dict[str, object]) -> dict[str, object]:
+    suite = asdict(
+        load_suite(
+            REPOSITORY
+            / "manifests"
+            / "suites"
+            / "qwen38_flash_next_sglang_agent64k_autoresearch.toml"
+        )
+    )
+    suite.pop("protocol_digest", None)
+    suite["cases"] = [
+        {
+            **case,
+            "case_id": (
+                f"{case['id']}--"
+                f"{_synthetic_content_hash({'model': model, 'case': case}, length=12)}"
+            ),
+        }
+        for case in suite["cases"]
+    ]
+    return suite
 
 
 def _harbor_npm_admission(
@@ -815,6 +851,190 @@ class EvidenceFixture:
                 },
             ],
         )
+
+    def write_autoresearch_campaign(
+        self, *, mixed_suite: bool = False
+    ) -> tuple[Path, list[Path]]:
+        """Nest fourteen bound cells whose private run basenames all collide."""
+
+        source_files = (
+            {}
+            if mixed_suite
+            else {
+                path.name: path.read_bytes()
+                for path in self.run_dir.iterdir()
+                if path.is_file() and path.name != "plan.json"
+            }
+        )
+        source_plan = json.loads(
+            (self.run_dir / "plan.json").read_text(encoding="utf-8")
+        )
+        source_plan.update(
+            {
+                "schema_version": 2,
+                "created_at": "2026-08-17T00:00:00.000+00:00",
+                "resolved": {},
+            }
+        )
+        if mixed_suite:
+            source_plan["suite"] = _autoresearch_suite(source_plan["model"])
+        source_suite = source_plan["suite"]
+        suite_without_case_ids = {
+            **source_suite,
+            "cases": [
+                {key: value for key, value in case.items() if key != "case_id"}
+                for case in source_suite["cases"]
+            ],
+        }
+        fingerprint = _synthetic_content_hash(
+            {
+                "model": source_plan["model"],
+                "suite": suite_without_case_ids,
+                "resolved": source_plan["resolved"],
+            },
+            length=16,
+        )
+        source_plan["fingerprint"] = fingerprint
+
+        campaign_root = self.results / "autoresearch"
+        campaign_root.mkdir()
+        campaign_dir = (
+            campaign_root
+            / "20260816T170000-0700-synthetic-autoresearch-campaign"
+        )
+        cells_root = campaign_dir / "cells"
+        cells_root.mkdir(parents=True)
+        shutil.rmtree(self.run_dir)
+
+        candidate_specs = (
+            ("reasoning-candidate", "reasoning_policy"),
+            ("prefill-candidate", "chunked_prefill_size"),
+            ("nextn-candidate", "nextn_bundle"),
+        )
+        cell_specs: list[tuple[str, str, str, str]] = [
+            ("calibration-control-a", "calibration", "control", "control_a"),
+            ("calibration-control-b", "calibration", "control", "control_b"),
+        ]
+        for candidate_id, _axis in candidate_specs:
+            cell_specs.extend(
+                (
+                    (
+                        f"{candidate_id}-screen-champion",
+                        "screen",
+                        candidate_id,
+                        "champion",
+                    ),
+                    (
+                        f"{candidate_id}-screen-candidate",
+                        "screen",
+                        candidate_id,
+                        "candidate",
+                    ),
+                    (
+                        f"{candidate_id}-confirmation-candidate",
+                        "confirmation",
+                        candidate_id,
+                        "candidate",
+                    ),
+                    (
+                        f"{candidate_id}-confirmation-champion",
+                        "confirmation",
+                        candidate_id,
+                        "champion",
+                    ),
+                )
+            )
+        cells: list[dict[str, object]] = []
+        run_dirs: list[Path] = []
+        for ordinal, (cell_id, stage, candidate_id, arm) in enumerate(
+            cell_specs, start=1
+        ):
+            cell_root = cells_root / f"{ordinal:02d}-{cell_id}"
+            run_dir = cell_root / self.run_id
+            run_dir.mkdir(parents=True)
+            for name, payload in source_files.items():
+                (run_dir / name).write_bytes(payload)
+            profile_id = (
+                candidate_id if arm == "candidate" else "synthetic-model"
+            )
+            plan = {
+                **source_plan,
+                "model": {**source_plan["model"], "id": profile_id},
+            }
+            if mixed_suite:
+                plan["suite"] = _autoresearch_suite(plan["model"])
+            plan["fingerprint"] = _synthetic_content_hash(
+                {
+                    "model": plan["model"],
+                    "suite": suite_without_case_ids,
+                    "resolved": plan["resolved"],
+                },
+                length=16,
+            )
+            plan["run_nonce"] = f"{ordinal:032x}"
+            plan["integrity_hash"] = _synthetic_content_hash(plan)
+            self.write_json(run_dir / "plan.json", plan)
+            relative_run = run_dir.relative_to(campaign_dir).as_posix()
+            cells.append(
+                {
+                    "arm": arm,
+                    "candidate_id": candidate_id,
+                    "cell_id": cell_id,
+                    "ordinal": ordinal,
+                    "plan_fingerprint": plan["fingerprint"],
+                    "plan_integrity_hash": plan["integrity_hash"],
+                    "profile_id": profile_id,
+                    "run_dir": relative_run,
+                    "run_nonce": plan["run_nonce"],
+                    "stage": stage,
+                }
+            )
+            run_dirs.append(run_dir)
+        self.run_dir = run_dirs[0]
+
+        proposals: list[dict[str, object]] = []
+        for candidate_id, axis in candidate_specs:
+            delta = {
+                "axis": axis,
+                "candidate_config_digest": "b" * 64,
+                "candidate_value_json": "1",
+                "champion_config_digest": "a" * 64,
+                "champion_value_json": "0",
+            }
+            proposals.append(
+                {
+                    "axis": axis,
+                    "candidate_id": candidate_id,
+                    "delta": delta,
+                    "delta_digest": _synthetic_content_hash(delta),
+                }
+            )
+        policy: dict[str, object] = {}
+        preview = {
+            "baseline_id": "synthetic-model",
+            "campaign_id": "synthetic-autoresearch",
+            "cutoff": "2026-08-18T00:00:00+00:00",
+            "execution_started": False,
+            "planned_cell_count": len(cells),
+            "policy": policy,
+            "policy_digest": _synthetic_content_hash(policy),
+            "proposals": proposals,
+            "schema_version": 1,
+            "suite_id": source_suite["id"],
+        }
+        campaign: dict[str, object] = {
+            "cells": cells,
+            "created_at": "2026-08-17T00:00:00.123+00:00",
+            "execution_started": False,
+            "harness_file_count": 1,
+            "harness_tree_sha256": "d" * 64,
+            "preview": preview,
+            "preview_digest": _synthetic_content_hash(preview),
+            "schema_version": 2,
+        }
+        campaign["integrity_hash"] = _synthetic_content_hash(campaign)
+        self.write_json(campaign_dir / "campaign.json", campaign)
+        return campaign_dir, run_dirs
 
     def write_memory_run(self, *, imperfect: bool = False) -> tuple[str, Path]:
         run_id = "20260824T010000Z-memory-evidence"
@@ -2512,6 +2732,145 @@ class EvidenceExportTests(unittest.TestCase):
         with self.assertRaisesRegex(
             EvidenceError, "only direct run directories"
         ):
+            self.export()
+
+    def test_autoresearch_cells_export_unique_deterministic_scalar_runs(self) -> None:
+        campaign_dir, _run_dirs = self.fixture.write_autoresearch_campaign()
+
+        first = self.export()
+        original = self.exported_bytes()
+        second = self.export()
+
+        self.assertTrue(first["changed"])
+        self.assertEqual(14, first["runs"])
+        self.assertFalse(second["changed"])
+        self.assertEqual(original, self.exported_bytes())
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+
+        index = json.loads(
+            (self.fixture.output / "index.json").read_text(encoding="utf-8")
+        )
+        published_ids = [entry["run_id"] for entry in index["runs"]]
+        self.assertEqual(14, len(published_ids))
+        self.assertEqual(14, len(set(published_ids)))
+        self.assertTrue(
+            all("-autoresearch-synthetic-autoresearch-" in run_id for run_id in published_ids)
+        )
+        self.assertNotIn(self.fixture.run_id, published_ids)
+        for run_id in published_ids:
+            manifest = json.loads(
+                (
+                    self.fixture.output / "runs" / run_id / "manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(run_id, manifest["source_run_id"])
+            self.assertFalse(manifest["sanitization"]["raw_identifiers_included"])
+
+        serialized = b"\n".join(original.values()).decode("utf-8")
+        for private_value in (
+            self.fixture.run_id,
+            str(campaign_dir),
+            str(self.fixture.results),
+            RAW_HOST_PATH,
+            RAW_SECRET,
+            RAW_REQUEST_ID,
+            f"{1:032x}",
+        ):
+            with self.subTest(private_value=private_value):
+                self.assertNotIn(private_value, serialized)
+
+    def test_autoresearch_mixed_nine_case_suite_exports_and_verifies(self) -> None:
+        self.fixture.write_autoresearch_campaign(mixed_suite=True)
+
+        result = self.export()
+
+        self.assertEqual(14, result["runs"])
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+        index = json.loads(
+            (self.fixture.output / "index.json").read_text(encoding="utf-8")
+        )
+        first_run_id = index["runs"][0]["run_id"]
+        manifest = json.loads(
+            (
+                self.fixture.output / "runs" / first_run_id / "manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            "qwen38-flash-next-sglang-agent64k-autoresearch",
+            manifest["suite"]["id"],
+        )
+        self.assertEqual(9, len(manifest["suite"]["cases"]))
+        self.assertEqual(
+            4,
+            sum(
+                case["kind"] == "agentic"
+                for case in manifest["suite"]["cases"]
+            ),
+        )
+
+    def test_autoresearch_campaign_rejects_rebound_plan_hashes(self) -> None:
+        campaign_dir, _run_dirs = self.fixture.write_autoresearch_campaign()
+        campaign_path = campaign_dir / "campaign.json"
+        original = json.loads(campaign_path.read_text(encoding="utf-8"))
+
+        for field, replacement in (
+            ("plan_fingerprint", "f" * 16),
+            ("plan_integrity_hash", "e" * 64),
+        ):
+            with self.subTest(field=field):
+                campaign = json.loads(json.dumps(original))
+                campaign["cells"][0][field] = replacement
+                campaign.pop("integrity_hash")
+                campaign["integrity_hash"] = _synthetic_content_hash(campaign)
+                self.fixture.write_json(campaign_path, campaign)
+
+                with self.assertRaisesRegex(
+                    EvidenceError, "autoresearch cell plan binding changed"
+                ):
+                    self.export()
+
+    def test_autoresearch_campaign_rejects_duplicate_bound_nonces(self) -> None:
+        campaign_dir, run_dirs = self.fixture.write_autoresearch_campaign()
+        campaign_path = campaign_dir / "campaign.json"
+        campaign = json.loads(campaign_path.read_text(encoding="utf-8"))
+        duplicate_nonce = campaign["cells"][0]["run_nonce"]
+        second_plan_path = run_dirs[1] / "plan.json"
+        second_plan = json.loads(second_plan_path.read_text(encoding="utf-8"))
+        second_plan["run_nonce"] = duplicate_nonce
+        second_plan.pop("integrity_hash")
+        second_plan["integrity_hash"] = _synthetic_content_hash(second_plan)
+        self.fixture.write_json(second_plan_path, second_plan)
+        campaign["cells"][1]["run_nonce"] = duplicate_nonce
+        campaign["cells"][1]["plan_integrity_hash"] = second_plan["integrity_hash"]
+        campaign.pop("integrity_hash")
+        campaign["integrity_hash"] = _synthetic_content_hash(campaign)
+        self.fixture.write_json(campaign_path, campaign)
+
+        with self.assertRaisesRegex(
+            EvidenceError, "autoresearch cell ownership nonces are duplicated"
+        ):
+            self.export()
+
+    def test_autoresearch_campaign_rejects_undeclared_nested_plan(self) -> None:
+        _campaign_dir, run_dirs = self.fixture.write_autoresearch_campaign()
+        undeclared = run_dirs[0] / "private-controller-state"
+        undeclared.mkdir()
+        shutil.copyfile(run_dirs[0] / "plan.json", undeclared / "plan.json")
+
+        with self.assertRaisesRegex(
+            EvidenceError, "autoresearch campaign contains an undeclared plan"
+        ):
+            self.export()
+
+    def test_autoresearch_campaign_rejects_cell_directory_symlink(self) -> None:
+        campaign_dir, _run_dirs = self.fixture.write_autoresearch_campaign()
+        cells_root = campaign_dir / "cells"
+        first_cell = sorted(cells_root.iterdir())[0]
+        (cells_root / "99-linked-cell").symlink_to(
+            first_cell, target_is_directory=True
+        )
+
+        with self.assertRaisesRegex(EvidenceError, "directory symlink"):
             self.export()
 
     def test_source_ordinals_and_columnar_telemetry_are_preserved(self) -> None:
