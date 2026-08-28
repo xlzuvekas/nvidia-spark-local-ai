@@ -289,7 +289,7 @@ for chain-buffer allocation. List removal is a later configuration-cleanup
 bundle. Do not capture graph batches above one for a C1 objective; they are
 unexercised and add capture, startup, and headroom cost.
 
-Keep graph results source-pin-local. Safe candidate `3681c4e` adds Qwen
+Keep graph results source-pin-local. Corrective-source candidate `3681c4e` adds Qwen
 QSA-specific draft backend and index-sharing wiring, so identical flags need
 not imply identical graph topology or overlap behavior across d91 and 368.
 Never pool those lifetimes. Public d91 also predates native Qwen3.8

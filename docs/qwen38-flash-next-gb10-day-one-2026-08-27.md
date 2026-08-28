@@ -157,11 +157,13 @@ compared directly with this repository's 114.5755 aggregate C8 rate.
 The close off/MTP rates do not show PLE disk bandwidth dominating these short
 decode prompts and are consistent with target verification/weight traffic
 being important. That is a weak inference, not a profiler result: both routes
-use page-backed PLE and could share a common bottleneck. The next direct study
-should measure a pinned vLLM arm and the existing SGLang arm under the same
-prompt, token, cache, MTP and telemetry protocol.
+use page-backed PLE and could share a common bottleneck. The superseding direct
+study should measure a pinned vLLM arm against a newly built and admitted SM121
+Triton SGLang comparator under the same prompt, token, cache, MTP, and telemetry
+protocol. The existing SM121 TRT-LLM arm is historical only and must not be
+rerun.
 
-## Safe next experiment
+## Historical reproduction requirements
 
 A local vLLM reproduction should be a new derived profile, not the community
 script executed directly:
