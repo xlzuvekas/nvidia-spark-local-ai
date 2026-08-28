@@ -14,13 +14,27 @@ One declared serving axis or coupled NEXTN bundle may change per candidate.
 
 ## Current status: safety-stopped, no campaign measurements
 
-This campaign has not started and none of its four profiles has produced a
-measurement under this protocol. The host is currently safety-stopped because
-the preceding buffer-strategy interaction block crossed the frozen 512 MiB
-swap-growth limit twice: the ordinary depth-two C6 tail reached
-2,473.8359375 MiB of growth, and the following ordinary depth-three startup
-reached 3,173.1484375 MiB before any case began. Those observations belong to
-the earlier interaction study, not to this campaign.
+The schema-2 campaign froze all fourteen pristine cell plans from clean, pushed
+revision `aa9cca8` at 01:09 MST on 2026-08-28. Its first admission returned
+`blocked_environment` with `starting_swap_above_clean_limit`. At that preflight,
+used host swap was 889,256 kB (868.414 MiB), above the frozen 64 MiB start cap;
+`MemAvailable` was 118,269,252 kB and no container was running. The controller
+created no event journal, calibration record, cell summary, worker state,
+container, or model request. None of the four profiles has produced a
+measurement under this protocol.
+
+The verified [scalar evidence index](../evidence/index.json) now contains all
+fourteen frozen cells as `nonterminal` with `measurement_terminal=false`.
+Those entries publish the plan topology and artifact bindings only; they are
+not throughput, wall-time, quality, or memory observations. The prior schema-1
+freeze was measurement-free and was moved intact into the ignored private
+archive before this schema-2 export.
+
+The host stop originated when the preceding buffer-strategy interaction block
+crossed the frozen 512 MiB swap-growth limit twice: the ordinary depth-two C6
+tail reached 2,473.8359375 MiB of growth, and the following ordinary
+depth-three startup reached 3,173.1484375 MiB before any case began. Those
+observations belong to the earlier interaction study, not to this campaign.
 
 Do not run any inference command in this document until an operator resets the
 Spark and a fresh preflight establishes unambiguous ownership, no unrelated

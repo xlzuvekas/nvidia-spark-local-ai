@@ -457,10 +457,17 @@ rejections remain incompatible and must not be retried. The full frozen design
 and commands are in the
 [follow-up protocol](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md#lazy-buffer--depth-follow-up--frozen-2026-08-28).
 
-#### Single-user 64K autoresearch campaign (planned)
+#### Single-user 64K autoresearch campaign (frozen; safety-blocked)
 
-The next campaign is a prospective C1 serving search, not a reported result.
-It freezes the following profile queue in this order:
+This is a prospective C1 serving search, not a reported measurement result.
+The schema-2 campaign froze fourteen pristine cells from clean, pushed revision
+`aa9cca8` at 01:09 MST on 2026-08-28. Its first admission returned
+`blocked_environment` with `starting_swap_above_clean_limit`: used host swap was
+868.414 MiB against the frozen 64 MiB start cap. No controller event,
+calibration record, cell summary, worker state, container, or model request was
+created. The scalar archive therefore publishes all fourteen plans as
+`nonterminal` with `measurement_terminal=false`; they are not benchmark
+observations. The frozen profile queue is, in order:
 
 1. `qwen38-flash-next-nvfp4-mtp2-agent64k-low-ple-mapped-sglang`
    (baseline: mapped PLE, lazy recurrent state, NEXTN depth two, 1,024-token
@@ -492,8 +499,9 @@ allowance + `120` inter-cell gap + `10` final-cell finalization + `900` audit
 reserve. The first finalization fits inside the inter-cell allowance.
 Search-pair scores derive the durable audit reserve from the later cell's
 `run_complete` wall timestamp, not a later replay clock. After the current host
-safety stop is cleared by an operator reset and clean preflight, validate and
-freeze the exact campaign:
+safety stop is cleared by an operator reset and clean preflight, resume the
+existing frozen campaign; do not refreeze it or change its cutoff. The planning
+commands below reproduce and inspect the protocol for a future revision:
 
 ```bash
 python3 sparkbench.py autoresearch-plan \
