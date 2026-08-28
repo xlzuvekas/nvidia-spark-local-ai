@@ -47,6 +47,16 @@ preflight leave less than 4,930 seconds before the frozen cutoff, record the
 campaign as stopped without starting a pair; do not move the cutoff or silently
 shorten a cell.
 
+**Bounded historical exception.** This already-frozen campaign is the sole
+exception to the post-day-two rule excluding the digest-pinned SM121 TRT-LLM
+runtime from new inference. It may run only to disposition its immutable
+fourteen-cell protocol before the unchanged cutoff, after every original
+preflight, lifecycle, correctness, and safety gate passes. Do not rebuild or
+alter the runtime, add or copy cells, move the cutoff, or reuse its result as a
+safe deployment baseline; any measurement is a historical within-runtime
+comparison only. All later or newly frozen work must use a newly built, pinned,
+and admitted SM121 Triton runtime.
+
 ## Autoresearch adaptation
 
 The controller design is adapted from Karpathy's
@@ -180,10 +190,11 @@ python3 sparkbench.py autoresearch-summarize results/autoresearch/FROZEN_CAMPAIG
 Do not invoke `autoresearch-summarize` after a fresh pre-journal
 `blocked_environment` return. The current summarizer derives controller state
 only; with no journal it would rewrite the preserved blocker summary as
-`planned` and drop its blocker codes. The frozen campaign remains safely
-resumable without that command. Use the controller's run output and existing
-summary for the preflight outcome; use the summarizer only after a controller
-journal exists.
+`planned` and drop its blocker codes. The frozen campaign remains
+controller-resumable only under the bounded historical exception above and
+without that command. Use the controller's run output and existing summary for
+the preflight outcome; use the summarizer only after a controller journal
+exists.
 
 The prospective
 [post-cutoff controller hardening plan](autoresearch-controller-hardening-2026-08-28.md)
@@ -399,9 +410,10 @@ transition; `autoresearch-run` prints that in-memory status and uses exit status
 3. It otherwise exits 0 for `active`/`complete` and 1 for blocked or terminated
 state. `autoresearch-checkpoint` exits 0 after a verified acknowledgement, 1
 when proof is not ready, and 2 for structural corruption. After the exact
-checkpoint is acknowledged, the same frozen campaign may resume. `active`
-means the just-finished pair is locally replayable; it does not by itself prove
-that the remote checkpoint exists.
+checkpoint is acknowledged, the same frozen campaign may resume subject to the
+bounded historical exception and unchanged cutoff. `active` means the
+just-finished pair is locally replayable; it does not by itself prove that the
+remote checkpoint exists.
 `blocked_environment` starts no cell and writes no campaign transition;
 `terminated` and `complete` must not be resumed.
 

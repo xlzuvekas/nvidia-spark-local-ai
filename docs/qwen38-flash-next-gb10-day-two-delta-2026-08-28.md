@@ -54,8 +54,9 @@ The operational decision is:
   before its cutoff;
 - keep the local clean MTP3/off and replicated mapped-PLE MTP2 results as the
   measured anchors;
-- keep TRT-LLM excluded on SM121 and treat the new explicit Triton fallback as
-  an unmerged corrective candidate, not release support;
+- outside the sole bounded exception for the already-frozen fourteen-cell
+  campaign, keep TRT-LLM excluded on SM121 and treat the new explicit Triton
+  fallback as an unmerged corrective candidate, not release support;
 - treat SGLang's new `io_uring` reader as a component candidate, not permission
   to run its exact stale SM121 QSA stack; and
 - after the frozen campaign closes, reproduce the vLLM mmap branch under the
@@ -552,7 +553,7 @@ The support matrix at this review is therefore:
 
 | Route | One-Spark GB10 status | Local action |
 | --- | --- | --- |
-| SGLang TRT-LLM sparse decode | SM121 excluded by the reviewed `qwen4-main-squashed` gate after corruption reports; no release support | Keep the existing pinned overlay experimental; strengthen varied-token validation |
+| SGLang TRT-LLM sparse decode | SM121 excluded by the reviewed `qwen4-main-squashed` gate after corruption reports; no release support | Preserve only for historical provenance and the sole already-frozen campaign exception; do not use for new integration |
 | SGLang SM121 Triton QSA | Open corrective PR directly atop the restriction; useful one-Spark correctness evidence, but unmerged and publicly red/gated | Leading safe-kernel component candidate; reproduce before combining with storage |
 | SGLang `io_uring` PLE streaming | Open stacked PR with exact-checkpoint data, but its head predates the SM121 safety restriction and its public checks are red | Rebase/force the safe QSA fallback before testing the reader; use narrow syscall admission |
 | vLLM direct PLE mmap | Open PR stacked on open model support; promising row and spot checks; a different mmap stack has a growing-prefix cache-on crash | Highest-priority post-cutoff reproduction target, cache-off first |
@@ -569,9 +570,10 @@ campaign. Step 1 preserves the frozen SGLang product campaign; steps 2--10 are
 a separate post-cutoff systems/reproduction sequence and do not reorder the
 retained-SGLang serving-flag backlog:
 
-1. Resume the existing SGLang campaign only if its original preflight passes
-   before cutoff. Otherwise preserve its typed blocked/cutoff state; do not
-   mutate or re-summarize it into a synthetic completion.
+1. Under its bounded historical exception, resume the existing SGLang campaign
+   only if its original preflight passes before cutoff. Otherwise preserve its
+   typed blocked/cutoff state; do not mutate or re-summarize it into a synthetic
+   completion or reuse any result as a deployment-safety claim.
 2. Freeze the exact stacked PR #54129 tree rather than combining it with the
    newer #53896 head, then build an immutable Linux/aarch64 image. Use the
    pinned local Radix NVFP4-backbone/FP8-PLE checkpoint as the best-supported
