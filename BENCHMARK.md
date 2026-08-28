@@ -240,6 +240,14 @@ embedding symbols imported successfully.
 
 #### Full Radix NVFP4 + read-only PLE result
 
+**Safety supersession, 2026-08-28:** the SGLang measurements and commands in
+this section bind the historical SM121 TRT-LLM overlay later restricted after
+varied-token corruption. Preserve them as provenance only; do not run the
+commands or use these profiles for new inference. New work requires a newly
+built, pinned, and admitted SM121 Triton runtime. The sole bounded exception is
+the already-frozen fourteen-cell campaign under its unchanged cutoff and
+[full protocol](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md#current-status-safety-stopped-no-campaign-measurements).
+
 The completed native profile pins `RadixArk/Qwen3.8-Flash-Next-NVFP4` revision
 `7b719225242aacd3dbd3f9407468c2ee9a9d2594`: 206 weight files totaling
 135,195,303,851 bytes. It uses ModelOpt NVFP4 for the main MoE weights, keeps
@@ -349,7 +357,8 @@ simultaneous-eight result. The 40-state MTP2 allocation was safety-stopped at
 602.48 MiB swap growth against a 512 MiB gate. An MTP3/40-state attempt
 separately crossed below the 14 GiB host-availability floor during graph
 capture. These are
-capacity rejections, not crashes; the lazy MTP2/32-state profile is retained.
+capacity rejections, not crashes; the lazy MTP2/32-state profile was retained
+only within the historical measured runtime.
 
 The repeated-word 131K exact-key case passed twice: once in
 [`a06b138a`](evidence/runs/20260827T015017Z-qwen38-flash-next-nvfp4-mtp-sglang-qwen38-flash-next-sglang-native-a06b138a/summary.json)
@@ -367,8 +376,8 @@ served. All 8K-131K prompts repeat one synthetic word, so they test serving
 mechanics and exact-key retention rather than natural-document understanding or
 cold/varied-token NVMe-PLE cost.
 
-Prepare and verify the exact offline overlays and PLE payload before freezing a
-run, then use the native suite:
+The following commands record how the historical offline overlays, PLE payload,
+and native suite were prepared; do not execute them:
 
 ```bash
 python3 prepare_sglang_overlays.py
@@ -460,6 +469,9 @@ and commands are in the
 #### Single-user 64K autoresearch campaign (frozen; safety-blocked)
 
 This is a prospective C1 serving search, not a reported measurement result.
+It is the sole bounded historical exception named above and may run only under
+the linked protocol's original gates and unchanged cutoff; any result would be
+a within-runtime comparison, not a deployment-safety claim.
 The schema-2 campaign froze fourteen pristine cells from clean, pushed revision
 `aa9cca8` at 01:09 MST on 2026-08-28. Its first admission returned
 `blocked_environment` with `starting_swap_above_clean_limit`: used host swap was
