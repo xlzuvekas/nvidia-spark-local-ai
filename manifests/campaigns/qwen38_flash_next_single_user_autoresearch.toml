@@ -1,0 +1,33 @@
+schema_version = 1
+
+[campaign]
+id = "qwen38-flash-next-single-user-autoresearch-2026-08-28"
+cutoff = "2026-08-28T07:00:00-07:00"
+models = "../models.toml"
+suite = "../suites/qwen38_flash_next_sglang_agent64k_autoresearch.toml"
+baseline = "qwen38-flash-next-nvfp4-mtp2-agent64k-low-ple-mapped-sglang"
+primary_case_ids = [
+  "agentic-select-and-call",
+  "agentic-no-tool",
+  "agentic-two-hop",
+  "agentic-tool-error-recovery",
+  "long-context-needle-60000-agent-c1",
+  "agent64k-decode-256-c1-v1",
+]
+allowed_axes = [
+  "reasoning_policy",
+  "chunked_prefill_size",
+  "nextn_bundle",
+]
+
+[[candidates]]
+id = "qwen38-flash-next-nvfp4-mtp2-agent64k-none-ple-mapped-sglang"
+axis = "reasoning_policy"
+
+[[candidates]]
+id = "qwen38-flash-next-nvfp4-mtp2-agent64k-low-chunk2k-ple-mapped-sglang"
+axis = "chunked_prefill_size"
+
+[[candidates]]
+id = "qwen38-flash-next-nvfp4-mtp3-agent64k-low-ple-mapped-sglang"
+axis = "nextn_bundle"

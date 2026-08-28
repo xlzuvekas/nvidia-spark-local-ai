@@ -18,6 +18,7 @@ from bench.annotations import (
 )
 from bench.acquire import fetch_model_snapshot
 from bench.audit import audit_matrix
+from bench.autoresearch_campaign import freeze_campaign, preview_campaign
 from bench.diffusion_direct import run_direct_diffusion
 from bench.evidence import export_evidence, verify_evidence, verify_staged_evidence
 from bench.inventory import (
@@ -154,6 +155,20 @@ def command_plan(args: argparse.Namespace) -> int:
         suite_path=args.suite,
     )
     print(run_dir)
+    return 0
+
+
+def command_autoresearch_plan(args: argparse.Namespace) -> int:
+    preview = preview_campaign(args.campaign, workspace=WORKSPACE)
+    if args.dry_run:
+        print(json.dumps(preview.to_mapping(), indent=2, sort_keys=True))
+        return 0
+    campaign_dir = freeze_campaign(
+        args.campaign,
+        workspace=WORKSPACE,
+        results_root=args.results,
+    )
+    print(campaign_dir)
     return 0
 
 
@@ -467,6 +482,21 @@ def build_parser() -> argparse.ArgumentParser:
     plan = subparsers.add_parser("plan", help="freeze an immutable single-model plan")
     add_selection(plan)
     plan.set_defaults(function=command_plan)
+
+    autoresearch_plan = subparsers.add_parser(
+        "autoresearch-plan",
+        help="validate or freeze the bounded single-user autoresearch campaign",
+    )
+    autoresearch_plan.add_argument("--campaign", type=Path, required=True)
+    autoresearch_plan.add_argument(
+        "--results", type=Path, default=WORKSPACE / "results" / "autoresearch"
+    )
+    autoresearch_plan.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate and print the scalar proposal without writing plans",
+    )
+    autoresearch_plan.set_defaults(function=command_autoresearch_plan)
 
     benchmark = subparsers.add_parser("benchmark", help="create and immediately execute a plan")
     add_selection(benchmark)
