@@ -17,6 +17,13 @@ checks, and no GPU-resident PLE allocation. It is still an unmerged community
 branch stacked on another open model-support pull request, so it is an
 experiment candidate rather than supported deployment guidance.
 
+A new GB10 vLLM issue adds a workload-specific safety gate: a growing
+multi-turn prefix can crash the GDN path when prefix caching is enabled even
+though repeated identical prompts appear healthy and fast. That report used a
+different third-party mmap patch, so it does not establish a defect in the
+reviewed direct-mmap branch. It does establish that identical-prompt cache
+replay is an inadequate admission test for this model family.
+
 A second open SGLang branch now supplies a concrete `io_uring` PLE reader and
 an exact Radix checkpoint pin. It reports 24.23 output tok/s across forty
 512-token requests on one Spark. The storage design is a serious reproduction
@@ -45,13 +52,15 @@ The operational decision is:
 - treat SGLang's new `io_uring` reader as a component candidate, not permission
   to run its exact stale SM121 QSA stack; and
 - after the frozen campaign closes, reproduce the vLLM mmap branch under the
-  same immutable, offline, loopback-authenticated, scalar-evidence protocol.
+  same immutable, offline, loopback-authenticated, scalar-evidence protocol,
+  starting cache-off and requiring a growing-prefix canary before any cache-on
+  result.
 
 ## Review window and evidence classes
 
 This is a strict delta from the day-one review's repository cutoff. The prior
 report was committed at `2026-08-27T21:58:59Z`; this review covers public
-changes visible through `2026-08-28T10:15:46Z`. Materially relevant changes
+changes visible through `2026-08-28T10:28:40Z`. Materially relevant changes
 that began before the cutoff but were absent from the prior report are labeled
 **supplemental** or explicitly described as a sequence that straddles the
 cutoff; they are not silently counted as day-two publications.
@@ -271,6 +280,32 @@ dense BF16 parameters moving 9.68 GB of 10.98 GB per token, while the NVFP4 MoE
 experts consumed 0.47 ms per token. Treat that as external diagnostic evidence,
 not as a local hardware counter or proof of a single root cause.
 
+### Growing-prefix cache crash is a new admission gate
+
+[vLLM issue #54173](https://github.com/vllm-project/vllm/issues/54173), opened
+on 2026-08-28, reports an illegal memory access on one GB10 when a cached long
+prefix is resumed at successively greater lengths. The report pins vLLM
+`8e685d198`, image digest
+`sha256:fc120ece0a388cc0aa1caad4a9f1cd92113484ab7ec2fd0efadd62585be05bf8`,
+and the same Radix checkpoint revision used in this repository's reconstruction.
+Both `mamba-cache-mode=align` and `all` failed, and disabling async scheduling
+did not prevent the crash. Disabling prefix caching was the only reported
+stable configuration.
+
+The trigger is easy for a benchmark to miss. Nine byte-identical roughly 50K
+prompts completed while cached TTFT fell from 24.38 to 1.40 seconds, but a
+shared prefix extended across turns failed within roughly five to ten
+requests. The reporter's cache-on and cache-off deep-context checks remained
+correct before the crash, so a short semantic smoke also would not screen it.
+
+This is discovery evidence, not attribution to vLLM, GDN, or PLE alone. The
+image carries the separate `blazux/qwen3.8-Flash-DGX` mmap patch, and the
+unpatched checkpoint cannot fit on that one-Spark host. The first PR #54129
+admission must therefore remain cache-off. Prefix caching is a separate
+quarantined candidate requiring a fresh-process, varied-length growing-prefix
+sequence, exact cleanup, and immediate typed failure on the first device fault;
+an identical-prompt replay cannot promote it.
+
 ## CPU offload has a security and operability cost
 
 [vLLM PR #53899](https://github.com/vllm-project/vllm/pull/53899) remains open.
@@ -389,7 +424,7 @@ The support matrix at this review is therefore:
 | --- | --- | --- |
 | SGLang TRT-LLM sparse decode | SM121 excluded by the reviewed `qwen4-main-squashed` gate after corruption reports; no release support | Keep the existing pinned overlay experimental; strengthen varied-token validation |
 | SGLang `io_uring` PLE streaming | Open stacked PR with exact-checkpoint data, but its head predates the SM121 safety restriction and its public checks are red | Rebase/force the safe QSA fallback before testing the reader; use narrow syscall admission |
-| vLLM direct PLE mmap | Open PR stacked on open model support; promising row and spot checks | Highest-priority post-cutoff reproduction target |
+| vLLM direct PLE mmap | Open PR stacked on open model support; promising row and spot checks; a different mmap stack has a growing-prefix cache-on crash | Highest-priority post-cutoff reproduction target, cache-off first |
 | vLLM CPU PLE offload | Open PR; default container isolation blocks `pidfd_getfd` | Do not add `SYS_PTRACE` merely to benchmark it; prefer mmap |
 | Compressed NVFP4 PLE | Pinned community checkpoint, minimal quality evidence | Quality-first research arm, not champion candidate |
 | HashK PLE | Source unavailable and reconstruction/output warnings | Reject |
@@ -409,7 +444,8 @@ campaign:
    reconstruction target while clearly labeling the checkpoint identity as
    inferred until the author confirms it.
 3. Use direct read-only mmap without `SYS_PTRACE`, implicit downloads, mutable
-   branches, wildcard cache selection, or public API exposure.
+   branches, wildcard cache selection, public API exposure, or prefix caching
+   in the initial admission.
 4. Preserve SGLang PR #36567's reader and Rust commits as a second exact source
    input, but do not execute its stale SM121 resolver. Build a separate
    integration on the restricted/fallback-attested QSA path; add only the three
@@ -426,10 +462,14 @@ campaign:
    gates; and admit the next tier only after the prior tier is correct and
    pressure-clean. On corruption, preserve a typed failure and restart rather
    than retrying inside a poisoned process.
-7. Profile a fixed C1 decode span with kernel timing and hardware counters to
-   distinguish BF16 weight traffic from occupancy, launch, scheduler, and PLE
-   page-fault costs.
-8. Publish external claims and local measurements in separate tables; promote
+7. Only after cache-off admission, run the growing-prefix cache canary in a
+   separate fresh lifetime. Repeating a fixed prompt is a negative control, not
+   evidence that cache-resume state is safe.
+8. Profile a fixed C1 decode span with CUDA/NVTX timing and process counters to
+   partition target, launch, scheduler, and PLE page-fault costs. GB10 hardware
+   counters require separate authorization and expose only LPDDR-facing
+   proxies, not direct DRAM bytes.
+9. Publish external claims and local measurements in separate tables; promote
    no configuration without semantic, lifecycle, memory, swap, and cleanup
    gates.
 
