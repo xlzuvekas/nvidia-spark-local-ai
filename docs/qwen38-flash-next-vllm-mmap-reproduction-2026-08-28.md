@@ -436,7 +436,10 @@ Admission requires:
 - read-only direct mapping of the checkpoint shards, no offload worker and no
   added container capability;
 - piecewise compiled graphs with the mmap op present in the split set;
-- prefix caching explicitly disabled and attested in resolved configuration;
+- prefix caching explicitly disabled with `--no-enable-prefix-caching`, with
+  resolved `enable_prefix_caching=false`, `mamba_cache_mode=none`, and the
+  `vllm:cache_config_info` labels attested, plus zero local prefix-query and
+  hit-counter deltas over admission requests; argv alone is insufficient;
 - a 1,000-row mmap-versus-`safe_open` oracle whose deterministic seed,
   sampling protocol and digest are frozen before launch, with 1,000/1,000
   exact matches; and
@@ -478,6 +481,17 @@ engine health. Validate task facts rather than requiring byte-identical greedy
 text. Stop at the first CUDA, engine, correctness or pressure fault, preserve
 the failure, clean up the process, and reject cache-on; never retry inside that
 lifetime.
+
+Do not add an `all`-versus-`align` arm on the exact reviewed heads. The
+[Qwen4Exp model class](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/models/qwen4_exp/nvidia/model.py#L587-L603)
+does not declare the interface required for all-mode Mamba prefix caching;
+shared
+[configuration](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/model_executor/models/config.py#L622-L657)
+therefore normalizes `all` to `align`, while model initialization
+[rejects](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/models/qwen4_exp/nvidia/model.py#L612-L624)
+an `all` value that survives normalization. A launch flag is not evidence of a
+distinct treatment. Any later cache-mode experiment needs an admitted source
+change plus persisted resolved configuration before it can be scored.
 
 ## Phase 2: matched single-user comparison
 

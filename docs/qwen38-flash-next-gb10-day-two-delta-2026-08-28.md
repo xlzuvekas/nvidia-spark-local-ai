@@ -372,9 +372,18 @@ prefix is resumed at successively greater lengths. The report pins vLLM
 `8e685d198`, image digest
 `sha256:fc120ece0a388cc0aa1caad4a9f1cd92113484ab7ec2fd0efadd62585be05bf8`,
 and the same Radix checkpoint revision used in this repository's reconstruction.
-Both `mamba-cache-mode=align` and `all` failed, and disabling async scheduling
-did not prevent the crash. Disabling prefix caching was the only reported
-stable configuration.
+The reporter labeled failed cache-on attempts `mamba-cache-mode=align` and
+`all`, and disabling async scheduling did not prevent the crash. Those labels
+must not be interpreted as two resolved cache modes on the reviewed Qwen4Exp
+heads: the
+[model class](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/models/qwen4_exp/nvidia/model.py#L587-L603)
+does not declare the interface needed for all-mode prefix caching, so shared
+[configuration](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/model_executor/models/config.py#L622-L657)
+normalizes `all` to `align`, while model initialization
+[rejects](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/models/qwen4_exp/nvidia/model.py#L612-L624)
+a surviving `all` value. Disabling prefix caching was the only reported stable
+configuration. A future comparison must persist the resolved cache
+configuration rather than infer it from the launch argument.
 
 The trigger is easy for a benchmark to miss. Nine byte-identical roughly 50K
 prompts completed while cached TTFT fell from 24.38 to 1.40 seconds, but a
@@ -385,7 +394,11 @@ correct before the crash, so a short semantic smoke also would not screen it.
 This is discovery evidence, not attribution to vLLM, GDN, or PLE alone. The
 image carries the separate `blazux/qwen3.8-Flash-DGX` mmap patch, and the
 unpatched checkpoint cannot fit on that one-Spark host. The first PR #54129
-admission must therefore remain cache-off. Prefix caching is a separate
+admission must therefore remain explicitly cache-off: use
+`--no-enable-prefix-caching`, require resolved `enable_prefix_caching=false`
+and `mamba_cache_mode=none`, attest the
+[exported cache-configuration labels](https://github.com/Trosfy/vllm/blob/8e4e036a311604800334989485b4ee23925956da/vllm/config/cache.py#L294-L297),
+and require zero local prefix-query and hit-counter deltas. Prefix caching is a separate
 quarantined candidate requiring a fresh-process, varied-length growing-prefix
 sequence, exact cleanup, and immediate typed failure on the first device fault;
 an identical-prompt replay cannot promote it.
