@@ -10,11 +10,11 @@ coding-agent and cowork-style results separate:
 - Pi + the six existing Harbor tasks measure an end-to-end coding client stack;
 - a new deterministic `cowork-core-v1` suite measures structured multi-file,
   retrieval, table, and revision-conflict work through bounded virtual tools;
-- the current Qwen3.8-Flash-Next 64K autoresearch suite remains unchanged and
-  cannot be relabeled as either benchmark.
+- the Qwen3.8-Flash-Next 64K autoresearch suite is admission-expired and cannot
+  be relabeled as either benchmark.
 
 This plan is prospective. Do not edit the frozen campaign's harness, profiles,
-suite, cutoff, or plans.
+suite, cutoff, or plans before its fixed 07:00 cutoff.
 
 Freeze three records rather than one overloaded campaign: C1 Pi coding on the
 six Harbor tasks, C1 `cowork-core-v1` on its twelve episodes, and a separate
@@ -54,7 +54,7 @@ the dependency surface ambiguous.
 
 ## Immutable Pi prefix
 
-After the current frozen campaign is terminal:
+After the fixed cutoff and retirement of the superseded runtime:
 
 1. Create an owner-private, normalized, read-only Pi 0.57.1 prefix from a
    separately admitted, hash-locked artifact set. The top-level tarball and a
