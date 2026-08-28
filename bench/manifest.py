@@ -120,6 +120,15 @@ _TPS_SUITE_BY_PROFILE_ID = {
 }
 _FLASH_NEXT_LONG_PROFILE_ID = "qwen38-flash-next-nvfp4-long-sglang"
 _FLASH_NEXT_LONG_SUITE_ID = "qwen38-flash-next-sglang-long-context"
+_FLASH_NEXT_AGENT64K_SUITE_ID = "qwen38-flash-next-sglang-agent64k-autoresearch"
+_FLASH_NEXT_AGENT64K_PROFILE_IDS = frozenset(
+    {
+        "qwen38-flash-next-nvfp4-mtp2-agent64k-low-ple-mapped-sglang",
+        "qwen38-flash-next-nvfp4-mtp3-agent64k-low-ple-mapped-sglang",
+        "qwen38-flash-next-nvfp4-mtp2-agent64k-low-chunk2k-ple-mapped-sglang",
+        "qwen38-flash-next-nvfp4-mtp2-agent64k-none-ple-mapped-sglang",
+    }
+)
 _PLE_STUDY_PROFILE_IDS_BY_SUITE = {
     "qwen38-flash-next-sglang-ple-depth-c8": frozenset(
         {
@@ -1704,6 +1713,18 @@ def validate_benchmark_selection(
         raise ManifestError(
             f"{context}: the {_FLASH_NEXT_LONG_SUITE_ID!r} suite requires "
             f"the {_FLASH_NEXT_LONG_PROFILE_ID!r} profile"
+        )
+    flash_next_agent64k_profile = model_id in _FLASH_NEXT_AGENT64K_PROFILE_IDS
+    flash_next_agent64k_suite = suite.id == _FLASH_NEXT_AGENT64K_SUITE_ID
+    if flash_next_agent64k_profile and not flash_next_agent64k_suite:
+        raise ManifestError(
+            f"{context}: the {model.id!r} profile requires the "
+            f"{_FLASH_NEXT_AGENT64K_SUITE_ID!r} suite"
+        )
+    if flash_next_agent64k_suite and not flash_next_agent64k_profile:
+        raise ManifestError(
+            f"{context}: the {_FLASH_NEXT_AGENT64K_SUITE_ID!r} suite requires "
+            "one of its exact dedicated agent64k profiles"
         )
     ple_study_suite_profiles = _PLE_STUDY_PROFILE_IDS_BY_SUITE.get(suite.id)
     ple_study_profile_suites = _PLE_STUDY_SUITE_IDS_BY_PROFILE_ID.get(model_id)

@@ -1,0 +1,108 @@
+schema_version = 1
+
+[suite]
+id = "qwen38-flash-next-sglang-agent64k-autoresearch"
+description = "Immutable single-user coding/cowork proxy for the exact Qwen3.8-Flash-Next 64K autoresearch baseline and its three one-axis candidates."
+
+[[cases]]
+id = "json-smoke"
+kind = "capability"
+requires = ["chat", "json"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "tools-smoke"
+kind = "capability"
+requires = ["chat", "tools"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "synthetic-exact-answer-v2"
+kind = "quality"
+requires = ["chat"]
+warmups = 0
+repetitions = 2
+max_output_tokens = 512
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "agentic-select-and-call"
+kind = "agentic"
+requires = ["chat", "tools"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 4096
+max_turns = 6
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "agentic-no-tool"
+kind = "agentic"
+requires = ["chat", "tools"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 4096
+max_turns = 6
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "agentic-two-hop"
+kind = "agentic"
+requires = ["chat", "tools"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 4096
+max_turns = 6
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "agentic-tool-error-recovery"
+kind = "agentic"
+requires = ["chat", "tools"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 4096
+max_turns = 6
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "long-context-needle-60000-agent-c1"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 128
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 60000
+
+[[cases]]
+id = "agent64k-decode-256-c1-v1"
+kind = "decode"
+requires = ["chat"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
