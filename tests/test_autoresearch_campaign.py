@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+from datetime import datetime
 import json
 import math
 from pathlib import Path
@@ -17,9 +18,12 @@ from bench.autoresearch_campaign import (
     EXPECTED_PRIMARY_CASE_IDS,
     _cell_specs,
     freeze_campaign,
+    campaign_admission,
+    load_frozen_campaign,
     load_campaign_definition,
     observation_from_cells,
     project_completed_cell,
+    run_campaign,
     semantic_config,
     validate_campaign,
 )
@@ -164,6 +168,291 @@ class AutoresearchCampaignPlanningTests(unittest.TestCase):
         self.assertFalse(frozen["execution_started"])
         integrity = frozen.pop("integrity_hash")
         self.assertEqual(integrity, content_hash(frozen, 64))
+
+
+def _freeze_campaign_fixture(root: Path) -> Path:
+    def fake_create_plan(**kwargs: object) -> Path:
+        results_root = kwargs["results_root"]
+        model = kwargs["model"]
+        suite = kwargs["suite"]
+        assert isinstance(results_root, Path)
+        run_dir = results_root / "frozen-run"
+        run_dir.mkdir()
+        model_data = asdict(model)
+        suite_data = asdict(suite)
+        suite_data.pop("protocol_digest", None)
+        cases = [_canonical_case(model_data, case) for case in suite_data["cases"]]
+        frozen_suite = {**suite_data, "cases": cases}
+        resolved = {"image_digest": "image@sha256:" + "a" * 64}
+        fingerprint = content_hash(
+            {"model": model_data, "suite": suite_data, "resolved": resolved}
+        )
+        plan = {
+            "schema_version": 2,
+            "created_at": "2026-08-28T00:00:00+00:00",
+            "fingerprint": fingerprint,
+            "models_manifest": "ignored",
+            "suite_manifest": "ignored",
+            "model": model_data,
+            "suite": frozen_suite,
+            "resolved": resolved,
+            "host_at_plan": {},
+        }
+        plan["integrity_hash"] = content_hash(plan, 64)
+        write_json(run_dir / "plan.json", plan)
+        return run_dir
+
+    return freeze_campaign(
+        CAMPAIGN_PATH,
+        workspace=ROOT,
+        results_root=root,
+        create_plan_fn=fake_create_plan,
+    )
+
+
+def _admission_meminfo(*, available_gib: int = 120, swap_used_mib: int = 0) -> str:
+    total_kib = 128 * 1024**2
+    swap_total_kib = 16 * 1024**2
+    return "\n".join(
+        (
+            f"MemTotal: {total_kib} kB",
+            f"MemAvailable: {available_gib * 1024**2} kB",
+            f"SwapTotal: {swap_total_kib} kB",
+            f"SwapFree: {swap_total_kib - swap_used_mib * 1024} kB",
+        )
+    )
+
+
+def _synthetic_projection(cell: object, *, improvement: float) -> CellProjection:
+    profile_id = str(getattr(cell, "profile_id"))
+    fingerprint = str(getattr(cell, "plan_fingerprint"))
+    baseline = profile_id.endswith("agent64k-low-ple-mapped-sglang")
+    factor = 1.0 if baseline else improvement
+    measurements = tuple(
+        CaseMeasurement(
+            case_id,
+            (
+                20.0 * factor
+                if case_id == "agent64k-decode-256-c1-v1"
+                else 10.0 / factor
+            ),
+            "higher" if case_id == "agent64k-decode-256-c1-v1" else "lower",
+            2.0,
+        )
+        for case_id in EXPECTED_PRIMARY_CASE_IDS
+    )
+    return CellProjection(
+        profile_id,
+        fingerprint,
+        measurements,
+        100.0,
+        10.0,
+        20.0,
+        0.0,
+        ("--same",),
+    )
+
+
+class AutoresearchCampaignControllerTests(unittest.TestCase):
+    def test_loader_rejects_rehashed_schedule_and_safety_tampering(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            schedule_root = Path(directory) / "schedule"
+            schedule_root.mkdir()
+            campaign_dir = _freeze_campaign_fixture(schedule_root)
+            campaign_path = campaign_dir / "campaign.json"
+            frozen = json.loads(campaign_path.read_text())
+            frozen["cells"][2]["stage"] = "confirmation"
+            frozen.pop("integrity_hash")
+            frozen["integrity_hash"] = content_hash(frozen, 64)
+            write_json(campaign_path, frozen)
+            with self.assertRaisesRegex(
+                CampaignPlanningError, "schedule or profile binding"
+            ):
+                load_frozen_campaign(campaign_dir)
+
+            safety_root = Path(directory) / "safety"
+            safety_root.mkdir()
+            campaign_dir = _freeze_campaign_fixture(safety_root)
+            frozen = json.loads((campaign_dir / "campaign.json").read_text())
+            cell = frozen["cells"][0]
+            plan_path = campaign_dir / cell["run_dir"] / "plan.json"
+            plan = json.loads(plan_path.read_text())
+            plan["model"]["host_safety_min_memavailable_gib"] = 1
+            suite_without_case_ids = {
+                **plan["suite"],
+                "cases": [
+                    {key: value for key, value in case.items() if key != "case_id"}
+                    for case in plan["suite"]["cases"]
+                ],
+            }
+            plan["fingerprint"] = content_hash(
+                {
+                    "model": plan["model"],
+                    "suite": suite_without_case_ids,
+                    "resolved": plan["resolved"],
+                }
+            )
+            plan.pop("integrity_hash")
+            plan["integrity_hash"] = content_hash(plan, 64)
+            write_json(plan_path, plan)
+            cell["plan_fingerprint"] = plan["fingerprint"]
+            cell["plan_integrity_hash"] = plan["integrity_hash"]
+            frozen.pop("integrity_hash")
+            frozen["integrity_hash"] = content_hash(frozen, 64)
+            write_json(campaign_dir / "campaign.json", frozen)
+            with self.assertRaisesRegex(CampaignPlanningError, "host-safety gates"):
+                load_frozen_campaign(campaign_dir)
+
+    def test_admission_reports_time_swap_and_memory_without_execution(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign = load_frozen_campaign(
+                _freeze_campaign_fixture(Path(directory))
+            )
+            blockers = campaign_admission(
+                campaign,
+                now=datetime.fromisoformat("2026-08-28T06:00:00-07:00"),
+                meminfo_reader=lambda: _admission_meminfo(
+                    available_gib=100, swap_used_mib=65
+                ),
+            )
+
+        self.assertEqual(
+            blockers,
+            (
+                "insufficient_time_for_pair",
+                "starting_swap_above_clean_limit",
+                "insufficient_preflight_memavailable",
+            ),
+        )
+
+    def test_run_blocks_before_journal_or_cell_when_starting_swap_is_dirty(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            cell_calls: list[str] = []
+            summary = run_campaign(
+                campaign_dir,
+                workspace=ROOT,
+                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
+                meminfo_reader=lambda: _admission_meminfo(swap_used_mib=65),
+                cell_runner=lambda cell: cell_calls.append(cell.cell_id),  # type: ignore[arg-type,return-value]
+            )
+            events_exists = (campaign_dir / "events.jsonl").exists()
+
+        self.assertEqual(summary["status"], "blocked_environment")
+        self.assertEqual(summary["blockers"], ["starting_swap_above_clean_limit"])
+        self.assertEqual(cell_calls, [])
+        self.assertFalse(events_exists)
+
+    def test_controller_calibrates_confirms_promotes_and_stops_fixed_queue(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            calls: list[str] = []
+
+            def runner(cell: object) -> CellProjection:
+                calls.append(str(getattr(cell, "cell_id")))
+                return _synthetic_projection(cell, improvement=1.05)
+
+            summary = run_campaign(
+                campaign_dir,
+                workspace=ROOT,
+                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
+                meminfo_reader=_admission_meminfo,
+                cell_runner=runner,  # type: ignore[arg-type]
+            )
+            screened = run_campaign(
+                campaign_dir,
+                workspace=ROOT,
+                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
+                meminfo_reader=_admission_meminfo,
+                cell_runner=runner,  # type: ignore[arg-type]
+            )
+            promoted = run_campaign(
+                campaign_dir,
+                workspace=ROOT,
+                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
+                meminfo_reader=_admission_meminfo,
+                cell_runner=runner,  # type: ignore[arg-type]
+            )
+            replayed = run_campaign(
+                campaign_dir,
+                workspace=ROOT,
+                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
+                meminfo_reader=_admission_meminfo,
+                cell_runner=runner,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(summary["status"], "active")
+        self.assertTrue(summary["calibration_recorded"])
+        self.assertEqual(screened["status"], "active")
+        self.assertEqual(promoted["status"], "complete")
+        self.assertEqual(replayed, promoted)
+        self.assertEqual(len(calls), 6)
+        first_candidate = (
+            "qwen38-flash-next-nvfp4-mtp2-agent64k-none-ple-mapped-sglang"
+        )
+        self.assertEqual(promoted["candidate_decisions"][first_candidate], "promote")
+        self.assertEqual(promoted["next_pair_index"], 2)
+
+    def test_equal_candidates_are_rejected_and_queue_is_exhausted(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+            calls: list[str] = []
+
+            def runner(cell: object) -> CellProjection:
+                calls.append(str(getattr(cell, "cell_id")))
+                return _synthetic_projection(cell, improvement=1.0)
+
+            summaries = [
+                run_campaign(
+                    campaign_dir,
+                    workspace=ROOT,
+                    now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
+                    meminfo_reader=_admission_meminfo,
+                    cell_runner=runner,  # type: ignore[arg-type]
+                )
+                for _ in range(4)
+            ]
+            summary = summaries[-1]
+
+        self.assertEqual(summary["status"], "complete")
+        self.assertEqual(
+            [item["status"] for item in summaries],
+            ["active", "active", "active", "complete"],
+        )
+        self.assertEqual(set(summary["candidate_decisions"].values()), {"reject"})
+        self.assertEqual(summary["next_pair_index"], 3)
+        self.assertEqual(len(calls), 8)
+
+    def test_hard_ineligible_score_terminates_instead_of_deciding(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / "results") as directory:
+            campaign_dir = _freeze_campaign_fixture(Path(directory))
+
+            def runner(cell: object) -> CellProjection:
+                projection = _synthetic_projection(cell, improvement=1.05)
+                if getattr(cell, "stage") == "screen" and getattr(cell, "arm") == "candidate":
+                    return replace(projection, measurement_elapsed_s=1800.001)
+                return projection
+
+            calibrated = run_campaign(
+                campaign_dir,
+                workspace=ROOT,
+                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
+                meminfo_reader=_admission_meminfo,
+                cell_runner=runner,  # type: ignore[arg-type]
+            )
+            summary = run_campaign(
+                campaign_dir,
+                workspace=ROOT,
+                now=lambda: datetime.fromisoformat("2026-08-28T00:00:00-07:00"),
+                meminfo_reader=_admission_meminfo,
+                cell_runner=runner,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(calibrated["status"], "active")
+        self.assertEqual(summary["status"], "terminated")
+        self.assertEqual(summary["terminal_reason"], "measurement")
+        self.assertEqual(summary["candidate_decisions"], {})
+        self.assertEqual(summary["next_pair_index"], 1)
 
 
 class AutoresearchCellProjectionTests(unittest.TestCase):
@@ -329,6 +618,43 @@ class AutoresearchCellProjectionTests(unittest.TestCase):
                 with self.assertRaises(CellProjectionError) as raised:
                     project_completed_cell(run_dir)
                 self.assertEqual(raised.exception.failure_kind, failure_kind)
+
+    def test_projection_classifies_durable_terminal_artifacts(self) -> None:
+        fixtures = (
+            (
+                {
+                    "event": "host_safety_breach",
+                    "code": "memavailable_below_minimum",
+                },
+                "memory_pressure",
+            ),
+            (
+                {
+                    "event": "host_safety_breach",
+                    "code": "swap_growth_above_maximum",
+                },
+                "swap_pressure",
+            ),
+            ({"event": "cleanup_failed"}, "cleanup_breach"),
+        )
+        for artifact, expected in fixtures:
+            with self.subTest(artifact=artifact), tempfile.TemporaryDirectory() as directory:
+                run_dir = self._write_cell(Path(directory))
+                events_path = run_dir / "events.jsonl"
+                events = [
+                    json.loads(line) for line in events_path.read_text().splitlines()
+                ]
+                events.insert(-1, artifact)
+                events_path.write_text(
+                    "".join(json.dumps(event, sort_keys=True) + "\n" for event in events)
+                )
+                summary = json.loads((run_dir / "summary.json").read_text())
+                summary["status"] = "aborted"
+                write_json(run_dir / "summary.json", summary)
+
+                with self.assertRaises(CellProjectionError) as raised:
+                    project_completed_cell(run_dir)
+                self.assertEqual(raised.exception.failure_kind, expected)
 
     def test_projection_rejects_resume_bad_audit_and_tamper(self) -> None:
         mutations = ("resume", "audit", "plan")

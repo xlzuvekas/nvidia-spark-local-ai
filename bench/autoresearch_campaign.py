@@ -9,11 +9,17 @@ screening, and reverse-order confirmation.  Planning never executes a plan.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+import fcntl
 import json
 import math
+import os
 from pathlib import Path
+import signal
 import statistics
+import subprocess
+import sys
+import time
 import tomllib
 from typing import Any, Callable, Mapping
 
@@ -24,9 +30,16 @@ from .autoresearch import (
     PairObservation,
     SimplificationEvidence,
     TimingInputs,
+    append_transition,
+    evaluate_calibration,
+    evaluate_promotion,
+    evaluate_screen,
+    pair_order,
+    replay_transitions,
     validate_one_axis_delta,
 )
-from .journal import canonical_json, content_hash, utc_now, write_json
+from .host_safety import parse_meminfo, read_host_meminfo
+from .journal import Journal, canonical_json, content_hash, utc_now, write_json
 from .manifest import (
     ManifestError,
     ModelSpec,
@@ -36,6 +49,7 @@ from .manifest import (
     validate_benchmark_selection,
 )
 from .runner import create_plan
+from .runtime import recover_owned_sglang
 
 
 CAMPAIGN_SCHEMA_VERSION = 1
@@ -68,6 +82,8 @@ EXPECTED_AXES = (
 HOST_SAFETY_MIN_MEMAVAILABLE_KIB = 14 * 1024 * 1024
 HOST_SAFETY_MAX_SWAP_GROWTH_KIB = 512 * 1024
 HOST_SAFETY_MAX_STARTING_SWAP_KIB = 64 * 1024
+PAIR_ADMISSION_REMAINING_S = 4_620
+EXPECTED_HOST_SAFETY_THRESHOLDS = (14, 512, 64)
 
 _TOP_LEVEL_KEYS = frozenset({"schema_version", "campaign", "candidates"})
 _CAMPAIGN_KEYS = frozenset(
@@ -192,6 +208,48 @@ class CellProjection:
                 f"cell projection has {len(matches)} measurements for {case_id!r}"
             )
         return matches[0]
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenCell:
+    cell_id: str
+    stage: str
+    candidate_id: str
+    arm: str
+    profile_id: str
+    ordinal: int
+    run_dir: Path
+    plan_fingerprint: str
+    plan_integrity_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenCampaign:
+    campaign_dir: Path
+    campaign_id: str
+    cutoff: datetime
+    baseline_id: str
+    policy: CampaignPolicy
+    policy_digest: str
+    proposals: tuple[ValidatedProposal, ...]
+    cells: tuple[FrozenCell, ...]
+
+    def cells_for(self, *, candidate_id: str, stage: str) -> dict[str, FrozenCell]:
+        matches = {
+            cell.arm: cell
+            for cell in self.cells
+            if cell.candidate_id == candidate_id and cell.stage == stage
+        }
+        expected = (
+            {"control_a", "control_b"}
+            if stage == "calibration"
+            else {"champion", "candidate"}
+        )
+        if set(matches) != expected:
+            raise CampaignPlanningError(
+                f"frozen {stage} cells for {candidate_id!r} are incomplete"
+            )
+        return matches
 
 
 def _require_exact_keys(
@@ -422,6 +480,16 @@ def validate_campaign(
         validate_benchmark_selection(baseline, suite, context="autoresearch")
     except ManifestError as error:
         raise CampaignPlanningError(str(error)) from error
+    baseline_safety = (
+        baseline.host_safety_min_memavailable_gib,
+        baseline.host_safety_max_swap_growth_mib,
+        baseline.host_safety_max_starting_swap_mib,
+    )
+    if baseline_safety != EXPECTED_HOST_SAFETY_THRESHOLDS:
+        raise CampaignPlanningError(
+            "campaign profiles must freeze the 14 GiB, 512 MiB growth, and "
+            "64 MiB starting-swap host-safety gates"
+        )
 
     baseline_config = semantic_config(baseline)
     invariant = canonical_json(_invariant_model_projection(baseline))
@@ -563,6 +631,250 @@ def freeze_campaign(
     frozen["integrity_hash"] = content_hash(frozen, 64)
     write_json(campaign_dir / "campaign.json", frozen)
     return campaign_dir
+
+
+def _require_safe_relative_path(
+    base: Path, raw: Any, *, context: str
+) -> Path:
+    text = _require_string(raw, context=context)
+    relative = Path(text)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise CampaignPlanningError(f"{context} must be a safe relative path")
+    try:
+        resolved = (base / relative).resolve(strict=True)
+        resolved.relative_to(base.resolve(strict=True))
+    except (OSError, ValueError) as error:
+        raise CampaignPlanningError(f"{context} escapes the campaign directory") from error
+    if not resolved.is_dir():
+        raise CampaignPlanningError(f"{context} must resolve to a directory")
+    return resolved
+
+
+def load_frozen_campaign(campaign_dir: Path) -> FrozenCampaign:
+    root = campaign_dir.resolve(strict=True)
+    frozen = _read_json_object(root / "campaign.json", context="frozen campaign")
+    expected_top = {
+        "schema_version",
+        "created_at",
+        "preview",
+        "preview_digest",
+        "cells",
+        "execution_started",
+        "integrity_hash",
+    }
+    if set(frozen) != expected_top:
+        raise CampaignPlanningError("frozen campaign has an unknown or missing field")
+    if frozen["schema_version"] != FROZEN_CAMPAIGN_SCHEMA_VERSION:
+        raise CampaignPlanningError("unsupported frozen campaign schema version")
+    integrity_hash = frozen["integrity_hash"]
+    if not isinstance(integrity_hash, str) or len(integrity_hash) != 64:
+        raise CampaignPlanningError("frozen campaign integrity hash is invalid")
+    payload = {key: value for key, value in frozen.items() if key != "integrity_hash"}
+    if content_hash(payload, 64) != integrity_hash:
+        raise CampaignPlanningError("frozen campaign integrity hash does not match")
+    preview = frozen["preview"]
+    if not isinstance(preview, dict):
+        raise CampaignPlanningError("frozen campaign preview must be an object")
+    if content_hash(preview, 64) != frozen["preview_digest"]:
+        raise CampaignPlanningError("frozen campaign preview digest does not match")
+    required_preview = {
+        "schema_version",
+        "campaign_id",
+        "cutoff",
+        "baseline_id",
+        "suite_id",
+        "policy",
+        "policy_digest",
+        "proposals",
+        "planned_cell_count",
+        "execution_started",
+    }
+    if set(preview) != required_preview:
+        raise CampaignPlanningError("frozen campaign preview topology changed")
+    if preview["schema_version"] != CAMPAIGN_SCHEMA_VERSION:
+        raise CampaignPlanningError("frozen campaign preview schema is unsupported")
+    if (
+        preview["planned_cell_count"] != 14
+        or preview["execution_started"] is not False
+        or frozen["execution_started"] is not False
+    ):
+        raise CampaignPlanningError("frozen campaign execution topology changed")
+    if preview["suite_id"] != EXPECTED_SUITE_ID:
+        raise CampaignPlanningError("frozen campaign suite identity changed")
+    policy = CampaignPolicy.from_mapping(preview["policy"])
+    if policy.digest != preview["policy_digest"]:
+        raise CampaignPlanningError("frozen campaign policy digest does not match")
+    cutoff = datetime.fromisoformat(
+        _require_string(preview["cutoff"], context="frozen cutoff")
+    )
+    if cutoff.tzinfo is None or cutoff.utcoffset() is None:
+        raise CampaignPlanningError("frozen campaign cutoff must be timezone-aware")
+    proposals_value = preview["proposals"]
+    if not isinstance(proposals_value, list) or not proposals_value:
+        raise CampaignPlanningError("frozen campaign proposals must be an array")
+    proposals: list[ValidatedProposal] = []
+    for index, raw in enumerate(proposals_value):
+        if not isinstance(raw, dict) or set(raw) != {
+            "candidate_id",
+            "axis",
+            "delta",
+            "delta_digest",
+        }:
+            raise CampaignPlanningError(
+                f"frozen campaign proposal {index} topology changed"
+            )
+        delta_value = raw["delta"]
+        if not isinstance(delta_value, dict):
+            raise CampaignPlanningError("frozen candidate delta must be an object")
+        try:
+            delta = CandidateDelta(**delta_value)
+        except TypeError as error:
+            raise CampaignPlanningError("frozen candidate delta is malformed") from error
+        if delta.digest != raw["delta_digest"] or delta.axis != raw["axis"]:
+            raise CampaignPlanningError("frozen candidate delta digest does not match")
+        proposals.append(
+            ValidatedProposal(
+                candidate_id=_require_string(
+                    raw["candidate_id"], context="frozen candidate ID"
+                ),
+                axis=_require_string(raw["axis"], context="frozen candidate axis"),
+                delta=delta,
+            )
+        )
+    if tuple(proposal.axis for proposal in proposals) != EXPECTED_AXES:
+        raise CampaignPlanningError("frozen candidate order changed")
+
+    cells_value = frozen["cells"]
+    if not isinstance(cells_value, list) or len(cells_value) != 14:
+        raise CampaignPlanningError("frozen campaign must contain fourteen cells")
+    cell_keys = {
+        "cell_id",
+        "stage",
+        "candidate_id",
+        "arm",
+        "profile_id",
+        "ordinal",
+        "run_dir",
+        "plan_fingerprint",
+        "plan_integrity_hash",
+    }
+    cells: list[FrozenCell] = []
+    expected_cells: list[dict[str, str]] = [
+        {
+            "cell_id": "calibration-control-a",
+            "stage": "calibration",
+            "candidate_id": "control",
+            "arm": "control_a",
+            "profile_id": str(preview["baseline_id"]),
+        },
+        {
+            "cell_id": "calibration-control-b",
+            "stage": "calibration",
+            "candidate_id": "control",
+            "arm": "control_b",
+            "profile_id": str(preview["baseline_id"]),
+        },
+    ]
+    for proposal in proposals:
+        expected_cells.extend(
+            (
+                {
+                    "cell_id": f"{proposal.candidate_id}-screen-champion",
+                    "stage": "screen",
+                    "candidate_id": proposal.candidate_id,
+                    "arm": "champion",
+                    "profile_id": str(preview["baseline_id"]),
+                },
+                {
+                    "cell_id": f"{proposal.candidate_id}-screen-candidate",
+                    "stage": "screen",
+                    "candidate_id": proposal.candidate_id,
+                    "arm": "candidate",
+                    "profile_id": proposal.candidate_id,
+                },
+                {
+                    "cell_id": f"{proposal.candidate_id}-confirmation-candidate",
+                    "stage": "confirmation",
+                    "candidate_id": proposal.candidate_id,
+                    "arm": "candidate",
+                    "profile_id": proposal.candidate_id,
+                },
+                {
+                    "cell_id": f"{proposal.candidate_id}-confirmation-champion",
+                    "stage": "confirmation",
+                    "candidate_id": proposal.candidate_id,
+                    "arm": "champion",
+                    "profile_id": str(preview["baseline_id"]),
+                },
+            )
+        )
+    for index, raw in enumerate(cells_value, start=1):
+        if not isinstance(raw, dict) or set(raw) != cell_keys:
+            raise CampaignPlanningError(f"frozen cell {index} topology changed")
+        if raw["ordinal"] != index:
+            raise CampaignPlanningError("frozen cell ordinals are not contiguous")
+        expected_identity = expected_cells[index - 1]
+        if any(raw.get(key) != value for key, value in expected_identity.items()):
+            raise CampaignPlanningError("frozen cell schedule or profile binding changed")
+        run_dir = _require_safe_relative_path(
+            root, raw["run_dir"], context=f"frozen cell {index} run_dir"
+        )
+        plan = _read_json_object(run_dir / "plan.json", context="frozen cell plan")
+        _validate_plan_integrity(plan)
+        if (
+            plan.get("fingerprint") != raw["plan_fingerprint"]
+            or plan.get("integrity_hash") != raw["plan_integrity_hash"]
+        ):
+            raise CampaignPlanningError("frozen cell plan binding changed")
+        model = plan.get("model")
+        if not isinstance(model, dict) or model.get("id") != raw["profile_id"]:
+            raise CampaignPlanningError("frozen cell profile binding changed")
+        if (
+            model.get("host_safety_min_memavailable_gib"),
+            model.get("host_safety_max_swap_growth_mib"),
+            model.get("host_safety_max_starting_swap_mib"),
+        ) != EXPECTED_HOST_SAFETY_THRESHOLDS:
+            raise CampaignPlanningError("frozen cell host-safety gates changed")
+        cells.append(
+            FrozenCell(
+                cell_id=_require_string(raw["cell_id"], context="frozen cell ID"),
+                stage=_require_string(raw["stage"], context="frozen cell stage"),
+                candidate_id=_require_string(
+                    raw["candidate_id"], context="frozen cell candidate"
+                ),
+                arm=_require_string(raw["arm"], context="frozen cell arm"),
+                profile_id=_require_string(
+                    raw["profile_id"], context="frozen cell profile"
+                ),
+                ordinal=index,
+                run_dir=run_dir,
+                plan_fingerprint=str(raw["plan_fingerprint"]),
+                plan_integrity_hash=str(raw["plan_integrity_hash"]),
+            )
+        )
+    if len({cell.cell_id for cell in cells}) != 14:
+        raise CampaignPlanningError("frozen cell IDs must be unique")
+    campaign = FrozenCampaign(
+        campaign_dir=root,
+        campaign_id=_require_string(
+            preview["campaign_id"], context="frozen campaign ID"
+        ),
+        cutoff=cutoff,
+        baseline_id=_require_string(
+            preview["baseline_id"], context="frozen baseline ID"
+        ),
+        policy=policy,
+        policy_digest=policy.digest,
+        proposals=tuple(proposals),
+        cells=tuple(cells),
+    )
+    campaign.cells_for(candidate_id="control", stage="calibration")
+    for proposal in campaign.proposals:
+        campaign.cells_for(candidate_id=proposal.candidate_id, stage="screen")
+        campaign.cells_for(
+            candidate_id=proposal.candidate_id, stage="confirmation"
+        )
+    return campaign
 
 
 def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -833,6 +1145,45 @@ def _case_measurement(stable_id: str, case: Mapping[str, Any]) -> CaseMeasuremen
     return CaseMeasurement(stable_id, speed_value, direction, ttft)
 
 
+def _terminal_failure_kind(
+    events: tuple[dict[str, Any], ...], summary: Mapping[str, Any]
+) -> str | None:
+    """Classify durable terminal artifacts before rejecting an incomplete cell."""
+
+    if any(event.get("event") == "cleanup_failed" for event in events):
+        return "cleanup_breach"
+    breaches = tuple(
+        event for event in events if event.get("event") == "host_safety_breach"
+    )
+    if breaches:
+        code = breaches[-1].get("code")
+        if code == "memavailable_below_minimum":
+            return "memory_pressure"
+        if code in {
+            "starting_swap_above_maximum",
+            "swap_growth_above_maximum",
+            "swap_total_changed",
+        }:
+            return "swap_pressure"
+        return "measurement"
+    if any(
+        event.get("event") == "run_aborted"
+        and event.get("stage") == "sglang_speculative_acceptance_audit"
+        for event in events
+    ):
+        return "audit"
+    validation_failures = summary.get("validation_failed_cases")
+    if isinstance(validation_failures, list) and validation_failures:
+        return "validation"
+    if any(
+        event.get("event") == "case_complete"
+        and event.get("validation_passed") is False
+        for event in events
+    ):
+        return "validation"
+    return None
+
+
 def project_completed_cell(run_dir: Path) -> CellProjection:
     """Project one complete raw run to the strict scalar campaign contract."""
 
@@ -850,6 +1201,12 @@ def project_completed_cell(run_dir: Path) -> CellProjection:
     if not isinstance(profile_id, str):
         raise CellProjectionError("cell profile ID is missing")
 
+    terminal_failure = _terminal_failure_kind(events, summary)
+    if terminal_failure is not None:
+        raise CellProjectionError(
+            "cell contains a terminal failure artifact",
+            failure_kind=terminal_failure,
+        )
     if summary.get("status") != "complete" or summary.get("completed_cases") != 9:
         raise CellProjectionError("cell summary is not a complete nine-case run")
     for field in (
@@ -1017,3 +1374,682 @@ def observation_from_cells(
             candidate_flags=candidate.normalized_flags,
         ),
     )
+
+
+def _aware_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def campaign_admission(
+    campaign: FrozenCampaign,
+    *,
+    now: datetime | None = None,
+    meminfo_reader: Callable[[], str] = read_host_meminfo,
+) -> tuple[str, ...]:
+    """Return scalar pre-start blockers without starting an inference process."""
+
+    current = now or _aware_now()
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise CampaignPlanningError("campaign admission time must be timezone-aware")
+    blockers: list[str] = []
+    remaining_s = (campaign.cutoff - current).total_seconds()
+    if remaining_s < PAIR_ADMISSION_REMAINING_S:
+        blockers.append("insufficient_time_for_pair")
+    try:
+        sample = parse_meminfo(meminfo_reader())
+    except (OSError, ValueError) as error:
+        raise CampaignPlanningError("campaign host-memory admission failed closed") from error
+    if sample.swap_used_kib > HOST_SAFETY_MAX_STARTING_SWAP_KIB:
+        blockers.append("starting_swap_above_clean_limit")
+    calibration = campaign.cells_for(
+        candidate_id="control", stage="calibration"
+    )
+    plan = _read_json_object(
+        calibration["control_a"].run_dir / "plan.json",
+        context="calibration control plan",
+    )
+    model = plan.get("model")
+    if not isinstance(model, dict):
+        raise CampaignPlanningError("calibration control model is malformed")
+    estimated = model.get("estimated_ram_gib")
+    if isinstance(estimated, bool) or not isinstance(estimated, (int, float)):
+        raise CampaignPlanningError("calibration control RAM estimate is missing")
+    required_kib = int((float(estimated) + 8.0) * 1024**2)
+    if sample.memavailable_kib < required_kib:
+        blockers.append("insufficient_preflight_memavailable")
+    return tuple(blockers)
+
+
+def _cell_run_identity(cell: FrozenCell) -> str:
+    return f"{cell.plan_fingerprint}-{cell.run_dir.name}"
+
+
+def _recover_cell(cell: FrozenCell) -> str:
+    try:
+        outcome = recover_owned_sglang(
+            _cell_run_identity(cell),
+            api_key_path=cell.run_dir / "server" / "api-key",
+        )
+    except Exception as error:
+        raise CellProjectionError(
+            "exact owned SGLang recovery failed", failure_kind="cleanup_breach"
+        ) from error
+    if outcome == "different_container_present":
+        raise CellProjectionError(
+            "a differently owned SGLang container blocks recovery",
+            failure_kind="ownership_ambiguity",
+        )
+    return outcome
+
+
+def run_frozen_cell(
+    cell: FrozenCell,
+    *,
+    workspace: Path,
+    cell_timeout_s: int,
+    cleanup_timeout_s: int,
+    popen_factory: Callable[..., subprocess.Popen[Any]] = subprocess.Popen,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> CellProjection:
+    """Execute one pristine plan with SIGINT unwind and exact owned recovery."""
+
+    events_path = cell.run_dir / "events.jsonl"
+    if events_path.exists() and events_path.stat().st_size:
+        try:
+            projection = project_completed_cell(cell.run_dir)
+        except CellProjectionError as error:
+            _recover_cell(cell)
+            raise CellProjectionError(
+                "a previously started cell is not scoreable and will not be resumed",
+                failure_kind=error.failure_kind,
+            ) from error
+        if projection.profile_id != cell.profile_id:
+            raise CellProjectionError("completed cell profile binding changed")
+        return projection
+
+    command = [
+        sys.executable,
+        str((workspace / "sparkbench.py").resolve(strict=True)),
+        "run",
+        str(cell.run_dir),
+        "--fail-fast",
+    ]
+    log_path = cell.run_dir / "controller.log"
+    started = monotonic()
+    timed_out = False
+    forced_kill = False
+    with log_path.open("a", encoding="utf-8") as log:
+        process = popen_factory(
+            command,
+            cwd=str(workspace),
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            return_code = process.wait(timeout=cell_timeout_s)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            os.killpg(process.pid, signal.SIGINT)
+            try:
+                return_code = process.wait(timeout=cleanup_timeout_s)
+            except subprocess.TimeoutExpired:
+                forced_kill = True
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=10)
+                return_code = -signal.SIGKILL
+    wall_s = monotonic() - started
+    if wall_s < 0:
+        raise CellProjectionError("cell monotonic clock moved backwards")
+    if forced_kill:
+        _recover_cell(cell)
+        raise CellProjectionError(
+            "cell exceeded timeout and owned cleanup grace",
+            failure_kind="cleanup_breach",
+        )
+    if timed_out:
+        _recover_cell(cell)
+        raise CellProjectionError(
+            "cell exceeded its causal timeout and is invalid",
+            failure_kind="measurement",
+        )
+    if return_code != 0:
+        _recover_cell(cell)
+        try:
+            project_completed_cell(cell.run_dir)
+        except CellProjectionError as error:
+            raise error
+        raise CellProjectionError("cell process returned a nonzero status")
+    projection = project_completed_cell(cell.run_dir)
+    if projection.profile_id != cell.profile_id:
+        raise CellProjectionError("completed cell profile binding changed")
+    return projection
+
+
+def _transition_id(*parts: object) -> str:
+    value = "-".join(str(part).lower().replace("_", "-") for part in parts)
+    if len(value) <= 128:
+        return value
+    return value[:111] + "-" + content_hash(value, 16)
+
+
+def _append_campaign_started(
+    journal: Journal, campaign: FrozenCampaign
+) -> None:
+    if journal.events():
+        replay_transitions(campaign.policy, journal.events())
+        return
+    append_transition(
+        journal,
+        campaign.policy,
+        {
+            "event": "autoresearch_campaign_started",
+            "transition_id": "campaign-started",
+            "campaign_id": campaign.campaign_id,
+            "policy_digest": campaign.policy_digest,
+        },
+    )
+
+
+def _append_terminal(
+    journal: Journal,
+    campaign: FrozenCampaign,
+    *,
+    failure_kind: str,
+    cleanup_verified: bool,
+) -> None:
+    state = replay_transitions(campaign.policy, journal.events())
+    if state.phase == "terminal":
+        return
+    append_transition(
+        journal,
+        campaign.policy,
+        {
+            "event": "autoresearch_campaign_terminated",
+            "transition_id": _transition_id("campaign", "terminated", failure_kind),
+            "failure_kind": failure_kind,
+            "cleanup_verified": cleanup_verified,
+            "restored_preflight": False,
+        },
+    )
+
+
+def _calibration_path(campaign: FrozenCampaign) -> Path:
+    return campaign.campaign_dir / "calibration.json"
+
+
+def _write_calibration(
+    campaign: FrozenCampaign,
+    observation: PairObservation,
+    *,
+    passed: bool,
+    reasons: tuple[str, ...],
+) -> None:
+    record = {
+        "schema_version": 1,
+        "observation": observation.to_mapping(),
+        "passed": passed,
+        "reasons": list(reasons),
+    }
+    record["integrity_hash"] = content_hash(record, 64)
+    write_json(_calibration_path(campaign), record)
+
+
+def _load_calibration(campaign: FrozenCampaign) -> PairObservation | None:
+    path = _calibration_path(campaign)
+    if not path.exists():
+        return None
+    record = _read_json_object(path, context="calibration record")
+    expected = {"schema_version", "observation", "passed", "reasons", "integrity_hash"}
+    if set(record) != expected or record.get("schema_version") != 1:
+        raise CampaignPlanningError("calibration record topology changed")
+    integrity = record.pop("integrity_hash")
+    if not isinstance(integrity, str) or content_hash(record, 64) != integrity:
+        raise CampaignPlanningError("calibration record integrity hash does not match")
+    observation = PairObservation.from_mapping(record["observation"])
+    decision = evaluate_calibration(campaign.policy, observation)
+    if record["passed"] is not decision.passed or record["reasons"] != list(
+        decision.reasons
+    ):
+        raise CampaignPlanningError("calibration record decision does not replay")
+    if not decision.passed:
+        raise CellProjectionError("control-to-control calibration did not pass")
+    return observation
+
+
+def _remaining_s(campaign: FrozenCampaign, now: Callable[[], datetime]) -> float:
+    value = now()
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise CampaignPlanningError("campaign clock must be timezone-aware")
+    return max(0.0, (campaign.cutoff - value).total_seconds())
+
+
+def _run_calibration(
+    campaign: FrozenCampaign,
+    *,
+    workspace: Path,
+    cell_runner: Callable[[FrozenCell], CellProjection],
+    now: Callable[[], datetime],
+) -> PairObservation:
+    existing = _load_calibration(campaign)
+    if existing is not None:
+        return existing
+    if _remaining_s(campaign, now) < PAIR_ADMISSION_REMAINING_S:
+        raise CellProjectionError("insufficient time remains for calibration")
+    cells = campaign.cells_for(candidate_id="control", stage="calibration")
+    control_a = cell_runner(cells["control_a"])
+    if (
+        control_a.measurement_elapsed_s > campaign.policy.cell_timeout_s
+        or control_a.cleanup_elapsed_s > campaign.policy.cleanup_timeout_s
+    ):
+        raise CellProjectionError(
+            "first calibration cell exceeded its measurement or cleanup budget"
+        )
+    stopped_path = cells["control_a"].run_dir / "events.jsonl"
+    control_a_stopped = (
+        _server_stopped_at(cells["control_a"])
+        if stopped_path.exists() and stopped_path.stat().st_size
+        else now()
+    )
+    calibration_gap_s = (now() - control_a_stopped).total_seconds()
+    if calibration_gap_s < 0 or calibration_gap_s > campaign.policy.cleanup_timeout_s:
+        raise CellProjectionError(
+            "calibration inter-cell gap exceeded the frozen cleanup bound"
+        )
+    control_b = cell_runner(cells["control_b"])
+    observation = observation_from_cells(
+        campaign.policy,
+        pair_index=0,
+        champion=control_a,
+        candidate=control_b,
+        audit_reserve_remaining_s=_remaining_s(campaign, now),
+    )
+    decision = evaluate_calibration(campaign.policy, observation)
+    _write_calibration(
+        campaign,
+        observation,
+        passed=decision.passed,
+        reasons=decision.reasons,
+    )
+    if not decision.passed:
+        raise CellProjectionError("control-to-control calibration did not pass")
+    return observation
+
+
+def _candidate_decisions(events: tuple[dict[str, Any], ...]) -> dict[str, str]:
+    decisions: dict[str, str] = {}
+    for event in events:
+        if event.get("event") != "autoresearch_candidate_decided":
+            continue
+        candidate_id = event.get("candidate_id")
+        decision = event.get("decision")
+        if not isinstance(candidate_id, str) or not isinstance(decision, str):
+            raise CampaignPlanningError("candidate decision journal is malformed")
+        decisions[candidate_id] = decision
+    return decisions
+
+
+def _require_score_eligible(
+    policy: CampaignPolicy, observation: PairObservation
+) -> None:
+    failed_gates = observation.eligibility.failed_gates
+    failed_budgets = observation.timing.failed_budgets(policy)
+    if not failed_gates and not failed_budgets:
+        return
+    failure_kind = "measurement"
+    for gate, kind in (
+        ("cleanup_breach", "cleanup_breach"),
+        ("ownership_ambiguous", "ownership_ambiguity"),
+        ("oom", "oom"),
+        ("swap_pressure", "swap_pressure"),
+        ("memory_pressure", "memory_pressure"),
+        ("audit_requirement_passed", "audit"),
+        ("validation_passed", "validation"),
+    ):
+        if gate in failed_gates:
+            failure_kind = kind
+            break
+    raise CellProjectionError(
+        "score-bearing pair failed a frozen eligibility or timing gate",
+        failure_kind=failure_kind,
+    )
+
+
+def _server_stopped_at(cell: FrozenCell) -> datetime:
+    event = _one_event(
+        _read_jsonl(cell.run_dir / "events.jsonl", context="cell event journal"),
+        "server_stopped",
+    )
+    raw = event.get("timestamp")
+    if not isinstance(raw, str):
+        raise CellProjectionError("server_stopped event has no timestamp")
+    try:
+        value = datetime.fromisoformat(raw)
+    except ValueError as error:
+        raise CellProjectionError("server_stopped timestamp is invalid") from error
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise CellProjectionError("server_stopped timestamp is not timezone-aware")
+    return value
+
+
+def _run_search_pair(
+    campaign: FrozenCampaign,
+    journal: Journal,
+    *,
+    candidate_id: str,
+    stage: str,
+    cell_runner: Callable[[FrozenCell], CellProjection],
+    now: Callable[[], datetime],
+) -> PairObservation:
+    state = replay_transitions(campaign.policy, journal.events())
+    if state.phase == "candidate":
+        if _remaining_s(campaign, now) < PAIR_ADMISSION_REMAINING_S:
+            raise CellProjectionError("insufficient time remains for a search pair")
+        append_transition(
+            journal,
+            campaign.policy,
+            {
+                "event": "autoresearch_pair_started",
+                "transition_id": _transition_id(
+                    candidate_id, "pair", state.next_pair_index, "started"
+                ),
+                "candidate_id": candidate_id,
+                "pair_index": state.next_pair_index,
+                "order": list(pair_order(state.next_pair_index)),
+            },
+        )
+        state = replay_transitions(campaign.policy, journal.events())
+    if state.phase != "pair" or state.active_pair_index is None:
+        raise CampaignPlanningError("candidate is not in an executable pair phase")
+    cells = campaign.cells_for(candidate_id=candidate_id, stage=stage)
+    projections: dict[str, CellProjection] = {}
+    last_completion: datetime | None = None
+    for completed_arm in state.completed_arms:
+        projections[completed_arm] = project_completed_cell(
+            cells[completed_arm].run_dir
+        )
+        last_completion = _server_stopped_at(cells[completed_arm])
+    for arm in state.active_order[len(state.completed_arms) :]:
+        if last_completion is not None:
+            current = now()
+            if current.tzinfo is None or current.utcoffset() is None:
+                raise CampaignPlanningError("campaign clock must be timezone-aware")
+            gap_s = (current - last_completion).total_seconds()
+            if gap_s < 0 or gap_s > campaign.policy.cleanup_timeout_s:
+                raise CellProjectionError(
+                    "inter-cell gap exceeded the frozen cleanup bound"
+                )
+            prior = projections[state.active_order[len(projections) - 1]]
+            if (
+                prior.measurement_elapsed_s > campaign.policy.cell_timeout_s
+                or prior.cleanup_elapsed_s > campaign.policy.cleanup_timeout_s
+            ):
+                raise CellProjectionError(
+                    "first cell exceeded its measurement or cleanup budget"
+                )
+        projection = cell_runner(cells[arm])
+        if projection.profile_id != cells[arm].profile_id:
+            raise CellProjectionError("cell projection profile does not match schedule")
+        projections[arm] = projection
+        append_transition(
+            journal,
+            campaign.policy,
+            {
+                "event": "autoresearch_cell_completed",
+                "transition_id": _transition_id(
+                    candidate_id, "pair", state.active_pair_index, arm, "completed"
+                ),
+                "candidate_id": candidate_id,
+                "pair_index": state.active_pair_index,
+                "arm": arm,
+            },
+        )
+        state = replay_transitions(campaign.policy, journal.events())
+        last_completion = now()
+    observation = observation_from_cells(
+        campaign.policy,
+        pair_index=state.active_pair_index,
+        champion=projections["champion"],
+        candidate=projections["candidate"],
+        audit_reserve_remaining_s=_remaining_s(campaign, now),
+    )
+    append_transition(
+        journal,
+        campaign.policy,
+        {
+            "event": "autoresearch_pair_scored",
+            "transition_id": _transition_id(
+                candidate_id, "pair", state.active_pair_index, "scored"
+            ),
+            "candidate_id": candidate_id,
+            "pair_index": state.active_pair_index,
+            "observation": observation.to_mapping(),
+        },
+    )
+    return observation
+
+
+def summarize_campaign(campaign_dir: Path) -> dict[str, Any]:
+    campaign = load_frozen_campaign(campaign_dir)
+    journal = Journal(campaign.campaign_dir / "events.jsonl")
+    events = tuple(journal.events())
+    state = replay_transitions(campaign.policy, events) if events else None
+    calibration_path = _calibration_path(campaign)
+    summary = {
+        "schema_version": 1,
+        "campaign_id": campaign.campaign_id,
+        "status": (
+            "planned"
+            if state is None
+            else "complete"
+            if state.phase == "terminal" and state.terminal_reason == "completed"
+            else "terminated"
+            if state.phase == "terminal"
+            else "active"
+        ),
+        "terminal_reason": state.terminal_reason if state else None,
+        "calibration_recorded": calibration_path.exists(),
+        "next_pair_index": state.next_pair_index if state else 0,
+        "candidate_decisions": _candidate_decisions(events),
+        "policy_digest": campaign.policy_digest,
+    }
+    write_json(campaign.campaign_dir / "summary.json", summary)
+    return summary
+
+
+def run_campaign(
+    campaign_dir: Path,
+    *,
+    workspace: Path,
+    now: Callable[[], datetime] = _aware_now,
+    meminfo_reader: Callable[[], str] = read_host_meminfo,
+    cell_runner: Callable[[FrozenCell], CellProjection] | None = None,
+) -> dict[str, Any]:
+    """Run or replay the finite queue, never resuming an interrupted cell."""
+
+    campaign = load_frozen_campaign(campaign_dir)
+    lock_path = campaign.campaign_dir / ".autoresearch.lock"
+    with lock_path.open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise CampaignPlanningError(
+                "another autoresearch controller holds the campaign lock"
+            ) from error
+        existing_journal = Journal(campaign.campaign_dir / "events.jsonl")
+        existing_events = existing_journal.events()
+        if existing_events:
+            existing_state = replay_transitions(campaign.policy, existing_events)
+            if existing_state.phase == "terminal":
+                return summarize_campaign(campaign.campaign_dir)
+        blockers = campaign_admission(
+            campaign, now=now(), meminfo_reader=meminfo_reader
+        )
+        if blockers:
+            summary = summarize_campaign(campaign.campaign_dir)
+            summary.update(
+                {
+                    "status": "blocked_environment",
+                    "blockers": list(blockers),
+                }
+            )
+            write_json(campaign.campaign_dir / "summary.json", summary)
+            return summary
+
+        runner = cell_runner or (
+            lambda cell: run_frozen_cell(
+                cell,
+                workspace=workspace,
+                cell_timeout_s=campaign.policy.cell_timeout_s,
+                cleanup_timeout_s=campaign.policy.cleanup_timeout_s,
+            )
+        )
+        journal = existing_journal
+        _append_campaign_started(journal, campaign)
+        try:
+            calibration_already_recorded = _calibration_path(campaign).exists()
+            _run_calibration(
+                campaign,
+                workspace=workspace,
+                cell_runner=runner,
+                now=now,
+            )
+            if not calibration_already_recorded:
+                return summarize_campaign(campaign.campaign_dir)
+            while True:
+                state = replay_transitions(campaign.policy, journal.events())
+                if state.phase == "terminal":
+                    break
+                decisions = _candidate_decisions(tuple(journal.events()))
+                if any(
+                    decision in {"promote", "promote_simplification"}
+                    for decision in decisions.values()
+                ):
+                    append_transition(
+                        journal,
+                        campaign.policy,
+                        {
+                            "event": "autoresearch_campaign_completed",
+                            "transition_id": "campaign-completed-after-promotion",
+                        },
+                    )
+                    break
+                if state.phase == "idle":
+                    proposal = next(
+                        (
+                            item
+                            for item in campaign.proposals
+                            if item.candidate_id not in decisions
+                        ),
+                        None,
+                    )
+                    if proposal is None:
+                        append_transition(
+                            journal,
+                            campaign.policy,
+                            {
+                                "event": "autoresearch_campaign_completed",
+                                "transition_id": "campaign-completed-queue-exhausted",
+                            },
+                        )
+                        break
+                    append_transition(
+                        journal,
+                        campaign.policy,
+                        {
+                            "event": "autoresearch_candidate_started",
+                            "transition_id": _transition_id(
+                                proposal.candidate_id, "started"
+                            ),
+                            "candidate_id": proposal.candidate_id,
+                            "axis": proposal.axis,
+                            "delta_digest": proposal.delta.digest,
+                        },
+                    )
+                    state = replay_transitions(campaign.policy, journal.events())
+                if state.candidate_id is None:
+                    raise CampaignPlanningError("active search state has no candidate")
+                if state.phase in {"candidate", "pair"}:
+                    stage = (
+                        "screen"
+                        if len(state.candidate_observations) == 0
+                        else "confirmation"
+                    )
+                    _run_search_pair(
+                        campaign,
+                        journal,
+                        candidate_id=state.candidate_id,
+                        stage=stage,
+                        cell_runner=runner,
+                        now=now,
+                    )
+                    state = replay_transitions(campaign.policy, journal.events())
+                if state.phase != "scored" or state.candidate_id is None:
+                    raise CampaignPlanningError("search pair did not reach scored state")
+                observations = state.candidate_observations
+                _require_score_eligible(campaign.policy, observations[-1])
+                if len(observations) == 1:
+                    decision = (
+                        "confirm"
+                        if evaluate_screen(campaign.policy, observations[0]).passed
+                        else "reject"
+                    )
+                elif len(observations) == 2:
+                    decision = (
+                        "promote"
+                        if evaluate_promotion(
+                            campaign.policy, observations[0], observations[1]
+                        ).passed
+                        else "reject"
+                    )
+                else:
+                    raise CampaignPlanningError("candidate has an invalid score count")
+                append_transition(
+                    journal,
+                    campaign.policy,
+                    {
+                        "event": "autoresearch_candidate_decided",
+                        "transition_id": _transition_id(
+                            state.candidate_id, "decision", decision
+                        ),
+                        "candidate_id": state.candidate_id,
+                        "decision": decision,
+                    },
+                )
+                if decision in {"promote", "promote_simplification"}:
+                    append_transition(
+                        journal,
+                        campaign.policy,
+                        {
+                            "event": "autoresearch_campaign_completed",
+                            "transition_id": "campaign-completed-after-promotion",
+                        },
+                    )
+                elif decision == "reject":
+                    final_decisions = _candidate_decisions(tuple(journal.events()))
+                    if all(
+                        final_decisions.get(proposal.candidate_id) == "reject"
+                        for proposal in campaign.proposals
+                    ):
+                        append_transition(
+                            journal,
+                            campaign.policy,
+                            {
+                                "event": "autoresearch_campaign_completed",
+                                "transition_id": "campaign-completed-queue-exhausted",
+                            },
+                        )
+                # One invocation crosses at most one calibration/search pair.
+                # The caller can publish and push its scalar checkpoint before
+                # explicitly resuming the next pair.
+                break
+        except CellProjectionError as error:
+            _append_terminal(
+                journal,
+                campaign,
+                failure_kind=error.failure_kind,
+                cleanup_verified=error.failure_kind != "cleanup_breach",
+            )
+        return summarize_campaign(campaign.campaign_dir)

@@ -18,7 +18,12 @@ from bench.annotations import (
 )
 from bench.acquire import fetch_model_snapshot
 from bench.audit import audit_matrix
-from bench.autoresearch_campaign import freeze_campaign, preview_campaign
+from bench.autoresearch_campaign import (
+    freeze_campaign,
+    preview_campaign,
+    run_campaign,
+    summarize_campaign,
+)
 from bench.diffusion_direct import run_direct_diffusion
 from bench.evidence import export_evidence, verify_evidence, verify_staged_evidence
 from bench.inventory import (
@@ -169,6 +174,18 @@ def command_autoresearch_plan(args: argparse.Namespace) -> int:
         results_root=args.results,
     )
     print(campaign_dir)
+    return 0
+
+
+def command_autoresearch_run(args: argparse.Namespace) -> int:
+    summary = run_campaign(args.campaign_dir, workspace=WORKSPACE)
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0 if summary["status"] in {"active", "complete"} else 1
+
+
+def command_autoresearch_summarize(args: argparse.Namespace) -> int:
+    summary = summarize_campaign(args.campaign_dir)
+    print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 
 
@@ -497,6 +514,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate and print the scalar proposal without writing plans",
     )
     autoresearch_plan.set_defaults(function=command_autoresearch_plan)
+
+    autoresearch_run = subparsers.add_parser(
+        "autoresearch-run",
+        aliases=["autoresearch-resume"],
+        help="execute or replay a frozen autoresearch campaign",
+    )
+    autoresearch_run.add_argument("campaign_dir", type=Path)
+    autoresearch_run.set_defaults(function=command_autoresearch_run)
+
+    autoresearch_summarize = subparsers.add_parser(
+        "autoresearch-summarize",
+        help="replay and summarize a frozen autoresearch campaign",
+    )
+    autoresearch_summarize.add_argument("campaign_dir", type=Path)
+    autoresearch_summarize.set_defaults(function=command_autoresearch_summarize)
 
     benchmark = subparsers.add_parser("benchmark", help="create and immediately execute a plan")
     add_selection(benchmark)
