@@ -580,7 +580,10 @@ serving-flag backlog:
    non-runnable. The current manifest contains 21 such bindings. Add a
    fail-closed test keyed to that exact digest, preserve frozen raw manifests
    and scalar evidence unchanged, and require distinct IDs for any SM121 Triton
-   successor.
+   successor. Those 21 are also exactly the profiles using recipe revision
+   `bf2b7c75870d3703730b6bd8f3bb93dc622c278d` with explicit
+   `trtllm_mha` decode; no other overlay targets that QSA source under a
+   different digest.
 3. Freeze the exact stacked PR #54129 tree rather than combining it with the
    newer #53896 head, then build an immutable Linux/aarch64 image. Use the
    pinned local Radix NVFP4-backbone/FP8-PLE checkpoint as the best-supported
