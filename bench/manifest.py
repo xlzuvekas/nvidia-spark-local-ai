@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -29,6 +29,11 @@ from .prefix_cache_protocol import (
 
 
 SCHEMA_VERSION = 1
+HOST_SAFETY_MODEL_FIELDS = (
+    "host_safety_min_memavailable_gib",
+    "host_safety_max_swap_growth_mib",
+    "host_safety_max_starting_swap_mib",
+)
 _QWEN38_PLE_ABLATION_IDENTITY = (
     "RadixArk/Qwen3.8-Flash-Next-NVFP4",
     "7b719225242aacd3dbd3f9407468c2ee9a9d2594",
@@ -311,6 +316,9 @@ _MODEL_KEYS = frozenset(
         "native_context",
         "startup_timeout_s",
         "estimated_ram_gib",
+        "host_safety_min_memavailable_gib",
+        "host_safety_max_swap_growth_mib",
+        "host_safety_max_starting_swap_mib",
         "endpoint",
         "args",
         "cache_dir",
@@ -409,6 +417,9 @@ class ModelSpec:
     args: tuple[str, ...] = ()
     endpoint: str = "http://127.0.0.1:8000/v1"
     estimated_ram_gib: float | None = None
+    host_safety_min_memavailable_gib: int | None = None
+    host_safety_max_swap_growth_mib: int | None = None
+    host_safety_max_starting_swap_mib: int | None = None
     revision: str | None = None
     image_digest: str | None = None
     architecture: str = "unknown"
@@ -451,6 +462,31 @@ class ModelSpec:
     mmproj_size_bytes: int | None = None
     prefix_cache_mode: str | None = None
     support_status: str = "exploratory"
+
+
+def model_spec_to_dict(model: ModelSpec) -> dict[str, Any]:
+    """Serialize a model without changing legacy unconfigured records.
+
+    Host-safety gates are an opt-in profile contract. Omitting their three
+    nullable defaults preserves frozen fingerprints and strict projections for
+    profiles that predate that contract, while configured profiles retain the
+    complete all-or-none threshold tuple.
+    """
+
+    record = asdict(model)
+    configured = {
+        name: record[name]
+        for name in HOST_SAFETY_MODEL_FIELDS
+        if record[name] is not None
+    }
+    if not configured:
+        for name in HOST_SAFETY_MODEL_FIELDS:
+            record.pop(name)
+    elif len(configured) != len(HOST_SAFETY_MODEL_FIELDS):
+        raise ManifestError(
+            "model host-safety thresholds must be configured together"
+        )
+    return record
 
 
 @dataclass(frozen=True, slots=True)
@@ -517,6 +553,24 @@ def load_models(path: str | Path) -> dict[str, ModelSpec]:
             or _default_endpoint(backend),
             estimated_ram_gib=_optional_number(
                 row, "estimated_ram_gib", context
+            ),
+            host_safety_min_memavailable_gib=_optional_int(
+                row,
+                "host_safety_min_memavailable_gib",
+                context,
+                default=None,
+            ),
+            host_safety_max_swap_growth_mib=_optional_int(
+                row,
+                "host_safety_max_swap_growth_mib",
+                context,
+                default=None,
+            ),
+            host_safety_max_starting_swap_mib=_optional_int(
+                row,
+                "host_safety_max_starting_swap_mib",
+                context,
+                default=None,
             ),
             revision=_optional_string(row, "revision", context),
             image_digest=_optional_string(row, "image_digest", context),
@@ -700,6 +754,35 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
         raise ManifestError(f"{context}.startup_timeout_s must be positive")
     if model.estimated_ram_gib is not None and model.estimated_ram_gib <= 0:
         raise ManifestError(f"{context}.estimated_ram_gib must be positive")
+    host_safety_fields = {
+        "host_safety_min_memavailable_gib": (
+            model.host_safety_min_memavailable_gib
+        ),
+        "host_safety_max_swap_growth_mib": (
+            model.host_safety_max_swap_growth_mib
+        ),
+        "host_safety_max_starting_swap_mib": (
+            model.host_safety_max_starting_swap_mib
+        ),
+    }
+    configured_host_safety = {
+        name: value
+        for name, value in host_safety_fields.items()
+        if value is not None
+    }
+    if configured_host_safety and len(configured_host_safety) != len(
+        host_safety_fields
+    ):
+        raise ManifestError(
+            f"{context} host-safety thresholds must be configured together"
+        )
+    if configured_host_safety and model.backend != "sglang":
+        raise ManifestError(
+            f"{context} host-safety thresholds are supported only for sglang"
+        )
+    for name, value in configured_host_safety.items():
+        if value is None or value <= 0:
+            raise ManifestError(f"{context}.{name} must be positive")
     if model.lifecycle not in {"docker", "existing", "subprocess"}:
         raise ManifestError(
             f"{context}.lifecycle must be 'docker', 'existing', or 'subprocess'"

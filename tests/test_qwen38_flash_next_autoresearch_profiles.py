@@ -10,7 +10,9 @@ from bench.manifest import (
     ModelSpec,
     load_models,
     load_suite,
+    model_spec_to_dict,
     validate_benchmark_selection,
+    validate_model,
 )
 from bench.runner import _estimated_context_tokens
 
@@ -147,6 +149,9 @@ class Qwen38FlashNextAutoresearchProfileTests(unittest.TestCase):
                 tasks=("chat", "json", "thinking", "tools"),
                 request_body_json=LOW_BODY,
                 max_context=65536,
+                host_safety_min_memavailable_gib=14,
+                host_safety_max_swap_growth_mib=512,
+                host_safety_max_starting_swap_mib=64,
                 args=_baseline_args_from_source(
                     source,
                     served_name=baseline.served_name,
@@ -167,6 +172,12 @@ class Qwen38FlashNextAutoresearchProfileTests(unittest.TestCase):
         )
         self.assertEqual(baseline.max_context, 65536)
         self.assertEqual(baseline.native_context, 262144)
+        self.assertEqual(baseline.host_safety_min_memavailable_gib, 14)
+        self.assertEqual(baseline.host_safety_max_swap_growth_mib, 512)
+        self.assertEqual(baseline.host_safety_max_starting_swap_mib, 64)
+        self.assertIsNone(source.host_safety_min_memavailable_gib)
+        self.assertIsNone(source.host_safety_max_swap_growth_mib)
+        self.assertIsNone(source.host_safety_max_starting_swap_mib)
         expected_args = {
             "--reasoning-parser": "qwen3",
             "--tool-call-parser": "qwen3_coder",
@@ -237,6 +248,59 @@ class Qwen38FlashNextAutoresearchProfileTests(unittest.TestCase):
             json.loads(no_thinking.request_body_json or ""),
             {"chat_template_kwargs": {"enable_thinking": False}},
         )
+
+    def test_all_campaign_profiles_opt_into_the_exact_host_safety_gates(
+        self,
+    ) -> None:
+        for profile_id in PROFILE_IDS:
+            profile = self.models[profile_id]
+            with self.subTest(profile=profile_id):
+                self.assertEqual(profile.host_safety_min_memavailable_gib, 14)
+                self.assertEqual(profile.host_safety_max_swap_growth_mib, 512)
+                self.assertEqual(profile.host_safety_max_starting_swap_mib, 64)
+                serialized = model_spec_to_dict(profile)
+                self.assertEqual(
+                    {
+                        key: serialized[key]
+                        for key in (
+                            "host_safety_min_memavailable_gib",
+                            "host_safety_max_swap_growth_mib",
+                            "host_safety_max_starting_swap_mib",
+                        )
+                    },
+                    {
+                        "host_safety_min_memavailable_gib": 14,
+                        "host_safety_max_swap_growth_mib": 512,
+                        "host_safety_max_starting_swap_mib": 64,
+                    },
+                )
+
+        source = self.models[SOURCE_ID]
+        serialized_source = model_spec_to_dict(source)
+        self.assertNotIn("host_safety_min_memavailable_gib", serialized_source)
+        self.assertNotIn("host_safety_max_swap_growth_mib", serialized_source)
+        self.assertNotIn("host_safety_max_starting_swap_mib", serialized_source)
+
+    def test_host_safety_fields_are_all_or_none_positive_and_sglang_only(
+        self,
+    ) -> None:
+        baseline = self.models[BASELINE_ID]
+        invalid = (
+            (
+                replace(baseline, host_safety_max_swap_growth_mib=None),
+                "configured together",
+            ),
+            (
+                replace(baseline, host_safety_max_starting_swap_mib=0),
+                "must be positive",
+            ),
+            (replace(baseline, backend="vllm"), "only for sglang"),
+        )
+        for profile, message in invalid:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                ManifestError, message
+            ):
+                validate_model(profile)
 
     def test_profile_and_suite_binding_rejects_unknown_or_wrong_selection(
         self,

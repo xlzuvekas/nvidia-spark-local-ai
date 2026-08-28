@@ -63,7 +63,7 @@ from .harbor_terminal import (
     verify_staged_agent_source,
 )
 from .journal import utc_now
-from .manifest import load_models
+from .manifest import load_models, model_spec_to_dict
 from .runner import _preflight, results_lock_path
 from .runtime import start_llamacpp, validate_llamacpp_artifacts
 from .telemetry import TelemetrySampler
@@ -760,7 +760,7 @@ def _git_provenance(workspace: Path) -> tuple[str, bool]:
 
 
 def _cross_validate_model(campaign: CampaignSpec, model: Any) -> None:
-    actual = asdict(model)
+    actual = model_spec_to_dict(model)
     runtime_binary = actual.pop("runtime_binary")
     runtime_source_dir = actual.pop("runtime_source_dir")
     expected = {
@@ -857,7 +857,7 @@ def _cross_validate_model(campaign: CampaignSpec, model: Any) -> None:
 
 
 def _runtime_model(model: Any, campaign_id: str) -> SimpleNamespace:
-    values = asdict(model)
+    values = model_spec_to_dict(model)
     for name in ("runtime_binary", "runtime_source_dir"):
         value = values.get(name)
         if isinstance(value, str):

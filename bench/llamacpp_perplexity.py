@@ -16,6 +16,7 @@ import time
 from typing import Any
 
 from .journal import Journal, content_hash, utc_now, write_json
+from .manifest import ModelSpec, model_spec_to_dict
 from .report import _telemetry_summaries
 from .runner import _preflight, results_lock_path
 from .telemetry import TelemetrySampler
@@ -85,6 +86,8 @@ def _sha256_file(path: Path) -> str:
 
 
 def _model_payload(model: Any) -> dict[str, Any]:
+    if isinstance(model, ModelSpec):
+        return model_spec_to_dict(model)
     if is_dataclass(model):
         return asdict(model)
     try:

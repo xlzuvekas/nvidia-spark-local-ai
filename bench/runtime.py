@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 import os
@@ -12,8 +12,9 @@ import secrets
 import signal
 import socket
 import subprocess
+import threading
 import time
-from typing import Any, TextIO
+from typing import Any, Callable, TextIO
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
@@ -177,10 +178,13 @@ def wait_for_endpoint(
     *,
     authorization: str | None = None,
     sensitive_values: tuple[str, ...] = (),
+    abort_check: Callable[[], None] | None = None,
 ) -> float:
     started = time.monotonic()
     auth = authorization
     while time.monotonic() - started < timeout_s:
+        if abort_check is not None:
+            abort_check()
         if endpoint_ready(base_url, authorization=auth):
             return time.monotonic() - started
         if container_id:
@@ -202,7 +206,11 @@ def wait_for_endpoint(
                         sensitive_values,
                     )
                 )
+        if abort_check is not None:
+            abort_check()
         time.sleep(2)
+    if abort_check is not None:
+        abort_check()
     raise RuntimeErrorWithContext(f"Server did not become ready within {timeout_s:.0f}s")
 
 
@@ -886,8 +894,63 @@ class ManagedServer:
     authorization: str | None = None
     api_key: str | None = None
     api_key_path: Path | None = None
+    _lifecycle_lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def _require_owned_container(self) -> None:
+        if not self.container_id or not self.run_identity:
+            raise RuntimeErrorWithContext(
+                "Managed container has no lifecycle ownership state"
+            )
+        inspect = _run(
+            [
+                "docker", "inspect", "--format",
+                "{{index .Config.Labels \"ai.sparkbench.managed\"}} "
+                "{{index .Config.Labels \"ai.sparkbench.run\"}}",
+                self.container_id,
+            ],
+            check=False,
+            timeout=20,
+        )
+        labels = inspect.stdout.strip().split(maxsplit=1)
+        owned = (
+            inspect.returncode == 0
+            and labels
+            and labels[0] == "true"
+            and len(labels) == 2
+            and labels[1] == self.run_identity
+        )
+        if not owned:
+            raise RuntimeErrorWithContext(
+                "Refusing to stop a container not owned by SparkBench"
+            )
+
+    def interrupt_owned(self) -> None:
+        """Immediately stop an exact owned SGLang container without removing it."""
+
+        if self.backend != "sglang":
+            raise RuntimeErrorWithContext(
+                "Immediate host-safety interruption is supported only for SGLang"
+            )
+        with self._lifecycle_lock:
+            if not self.container_id:
+                return
+            self._require_owned_container()
+            _run(
+                ["docker", "stop", "--time", "0", self.container_id],
+                check=True,
+                timeout=15,
+            )
 
     def stop(self, *, keep_server: bool = False) -> None:
+        with self._lifecycle_lock:
+            self._stop_locked(keep_server=keep_server)
+
+    def _stop_locked(self, *, keep_server: bool = False) -> None:
         if self.backend == LLAMACPP_BACKEND:
             if keep_server:
                 raise RuntimeErrorWithContext(
@@ -916,25 +979,7 @@ class ManagedServer:
             and self.container_id
             and not keep_server
         ):
-            inspect = _run(
-                [
-                    "docker", "inspect", "--format",
-                    "{{index .Config.Labels \"ai.sparkbench.managed\"}} {{index .Config.Labels \"ai.sparkbench.run\"}}",
-                    self.container_id,
-                ],
-                check=False,
-                timeout=20,
-            )
-            labels = inspect.stdout.strip().split(maxsplit=1)
-            owned = (
-                inspect.returncode == 0
-                and labels
-                and labels[0] == "true"
-                and len(labels) == 2
-                and labels[1] == self.run_identity
-            )
-            if not owned:
-                raise RuntimeErrorWithContext("Refusing to stop a container not owned by SparkBench")
+            self._require_owned_container()
             _run(["docker", "stop", "--time", "30", self.container_id], check=True, timeout=45)
             _run(["docker", "rm", self.container_id], check=True, timeout=15)
             self.container_id = None
@@ -1397,12 +1442,16 @@ def start_sglang(
     port: int = 30000,
     allow_download: bool = False,
     server_log_path: Path | None = None,
+    abort_check: Callable[[], None] | None = None,
+    on_server_created: Callable[[ManagedServer], None] | None = None,
 ) -> ManagedServer:
     """Start a digest-pinned SGLang server from exact cached snapshots."""
 
     # Runtime acquisition is always forbidden. A typed profile may permit only
     # the pinned image's documented metadata probe after both snapshots exist.
     del allow_download
+    if abort_check is not None:
+        abort_check()
     existing = _existing_container(SGLANG_CONTAINER_NAME)
     if existing:
         container_id, managed, existing_run = existing
@@ -1708,6 +1757,12 @@ def start_sglang(
     # new option by SGLang's argparse CLI.
     command.append("--api-key=" + key)
     command.extend(str(argument) for argument in model.args)
+    if abort_check is not None:
+        try:
+            abort_check()
+        except BaseException:
+            _unlink_private_secret(api_key_path)
+            raise
     try:
         result = _run(command, check=False, timeout=60)
     except BaseException as launch_error:
@@ -1785,12 +1840,21 @@ def start_sglang(
         "api_key_file_mode": "0600" if api_key_path is not None else None,
     }
     try:
+        if on_server_created is not None:
+            on_server_created(server)
+        if abort_check is not None:
+            abort_check()
+        wait_arguments: dict[str, Any] = {
+            "authorization": auth,
+            "sensitive_values": sensitive_values,
+        }
+        if abort_check is not None:
+            wait_arguments["abort_check"] = abort_check
         server.startup_s = wait_for_endpoint(
             server.base_url,
             float(model.startup_timeout_s),
             container_id,
-            authorization=auth,
-            sensitive_values=sensitive_values,
+            **wait_arguments,
         )
     except BaseException as startup_error:
         if server_log_path is not None:
@@ -2222,7 +2286,15 @@ def start_server(
     process_state_path: Path | None = None,
     validated_llamacpp_artifacts: dict[str, Any] | None = None,
     artifact_validation_s: float | None = None,
+    abort_check: Callable[[], None] | None = None,
+    on_server_created: Callable[[ManagedServer], None] | None = None,
 ) -> ManagedServer:
+    if model.backend != "sglang" and (
+        abort_check is not None or on_server_created is not None
+    ):
+        raise RuntimeErrorWithContext(
+            "Host-safety lifecycle callbacks are supported only for SGLang"
+        )
     if model.backend == LLAMACPP_BACKEND:
         return start_llamacpp(
             model,
@@ -2241,11 +2313,17 @@ def start_server(
             server_log_path=server_log_path,
         )
     if model.backend == "sglang":
+        safety_callbacks: dict[str, Any] = {}
+        if abort_check is not None:
+            safety_callbacks["abort_check"] = abort_check
+        if on_server_created is not None:
+            safety_callbacks["on_server_created"] = on_server_created
         return start_sglang(
             model,
             workspace=workspace,
             allow_download=allow_download,
             server_log_path=server_log_path,
+            **safety_callbacks,
         )
     if model.backend == "ollama":
         return connect_ollama(model)

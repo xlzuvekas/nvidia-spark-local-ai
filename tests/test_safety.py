@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from bench.client import BenchmarkRequestError
+from bench.host_safety import HostMemorySample, HostSafetyError
 from bench.journal import Journal, content_hash
 from bench.report import summarize_run
 from bench.runner import (
@@ -17,6 +18,7 @@ from bench.runner import (
     _estimated_context_tokens,
     _preflight,
     _prompt,
+    _record_host_safety_breach,
     execute_plan,
     results_lock_path,
 )
@@ -41,6 +43,52 @@ class _JSONResponse(io.BytesIO):
 
     def __exit__(self, *args: object) -> None:
         self.close()
+
+
+class _FakeHostSafetyWatchdog:
+    def __init__(self) -> None:
+        self.failure: HostSafetyError | None = None
+        self.abort_callback_error: BaseException | None = None
+        self.abort_callback = None
+        self.start_calls = 0
+        self.stop_calls = 0
+
+    @property
+    def tripped(self) -> bool:
+        return self.failure is not None
+
+    def start(self) -> _FakeHostSafetyWatchdog:
+        self.start_calls += 1
+        if self.failure is not None:
+            raise self.failure
+        return self
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+
+    def register_abort_callback(self, callback: object) -> None:
+        if not callable(callback):
+            raise TypeError("abort callback must be callable")
+        self.abort_callback = callback
+        if self.failure is not None:
+            try:
+                callback()
+            except BaseException as error:
+                self.abort_callback_error = error
+
+    def raise_if_tripped(self) -> None:
+        if self.failure is not None:
+            raise self.failure
+
+    def trip(self, error: HostSafetyError) -> None:
+        if self.failure is not None:
+            return
+        self.failure = error
+        if self.abort_callback is not None:
+            try:
+                self.abort_callback()
+            except BaseException as callback_error:
+                self.abort_callback_error = callback_error
 
 
 class RuntimeSafetyTests(unittest.TestCase):
@@ -75,6 +123,91 @@ class RuntimeSafetyTests(unittest.TestCase):
             [item.args[0][:2] for item in run.call_args_list],
             [["docker", "inspect"], ["docker", "stop"], ["docker", "rm"]],
         )
+        self.assertIsNone(server.container_id)
+
+    def test_sglang_host_safety_interrupt_checks_ownership_and_preserves_cleanup_state(
+        self,
+    ) -> None:
+        server = ManagedServer(
+            backend="sglang",
+            base_url="http://127.0.0.1:30000/v1",
+            container_id="container-id",
+            run_identity="run-1",
+            authorization="Bearer fixture-key",
+            api_key="fixture-key",
+            api_key_path=Path("/mock/api-key"),
+        )
+        with patch(
+            "bench.runtime._run",
+            side_effect=[_completed(stdout="true run-1\n"), _completed()],
+        ) as run:
+            server.interrupt_owned()
+
+        self.assertEqual(
+            [item.args[0][:2] for item in run.call_args_list],
+            [["docker", "inspect"], ["docker", "stop"]],
+        )
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            ["docker", "stop", "--time", "0", "container-id"],
+        )
+        self.assertEqual(server.container_id, "container-id")
+        self.assertEqual(server.authorization, "Bearer fixture-key")
+        self.assertEqual(server.api_key, "fixture-key")
+        self.assertEqual(server.api_key_path, Path("/mock/api-key"))
+
+    def test_sglang_host_safety_interrupt_refuses_an_unowned_container(
+        self,
+    ) -> None:
+        server = ManagedServer(
+            backend="sglang",
+            base_url="http://127.0.0.1:30000/v1",
+            container_id="container-id",
+            run_identity="run-1",
+        )
+        with patch(
+            "bench.runtime._run", return_value=_completed(stdout="true other-run\n")
+        ) as run:
+            with self.assertRaisesRegex(RuntimeErrorWithContext, "Refusing to stop"):
+                server.interrupt_owned()
+
+        run.assert_called_once()
+        self.assertEqual(server.container_id, "container-id")
+
+    def test_sglang_interrupt_leaves_the_container_for_normal_owned_cleanup(
+        self,
+    ) -> None:
+        server = ManagedServer(
+            backend="sglang",
+            base_url="http://127.0.0.1:30000/v1",
+            container_id="container-id",
+            run_identity="run-1",
+        )
+        with patch(
+            "bench.runtime._run",
+            side_effect=[
+                _completed(stdout="true run-1\n"),
+                _completed(),
+                _completed(stdout="true run-1\n"),
+                _completed(),
+                _completed(),
+            ],
+        ) as run:
+            server.interrupt_owned()
+            server.stop()
+
+        self.assertEqual(
+            [item.args[0][:2] for item in run.call_args_list],
+            [
+                ["docker", "inspect"],
+                ["docker", "stop"],
+                ["docker", "inspect"],
+                ["docker", "stop"],
+                ["docker", "rm"],
+            ],
+        )
+        self.assertEqual(run.call_args_list[1].args[0][3], "0")
+        self.assertEqual(run.call_args_list[3].args[0][3], "30")
         self.assertIsNone(server.container_id)
 
     def test_keep_server_performs_no_lifecycle_command(self) -> None:
@@ -298,6 +431,7 @@ class PlanSafetyTests(unittest.TestCase):
         kind: str = "decode",
         requires: tuple[str, ...] = ("chat",),
         prompt_repetitions: int = 0,
+        host_safety: bool = False,
     ) -> Path:
         model = {
             "id": f"{backend}-target",
@@ -319,6 +453,23 @@ class PlanSafetyTests(unittest.TestCase):
                     "args": [],
                     "startup_timeout_s": 1,
                     "cache_dir": "project",
+                }
+            )
+        if backend == "sglang":
+            model.update(
+                {
+                    "image": "example/image@sha256:" + "a" * 64,
+                    "args": [],
+                    "startup_timeout_s": 1,
+                    "cache_dir": "project",
+                }
+            )
+        if host_safety:
+            model.update(
+                {
+                    "host_safety_min_memavailable_gib": 14,
+                    "host_safety_max_swap_growth_mib": 512,
+                    "host_safety_max_starting_swap_mib": 64,
                 }
             )
         case_template = {
@@ -373,6 +524,47 @@ class PlanSafetyTests(unittest.TestCase):
             results_lock_path(workspace),
             workspace / "results" / ".sparkbench.lock",
         )
+
+    def test_host_safety_breach_evidence_is_deduplicated_per_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Journal(Path(directory) / "events.jsonl")
+            errors = (
+                HostSafetyError(
+                    "memavailable_below_minimum",
+                    "first synthetic breach",
+                    observed_kib=1,
+                    limit_kib=2,
+                ),
+                HostSafetyError(
+                    "swap_growth_above_maximum",
+                    "second synthetic breach",
+                    observed_kib=3,
+                    limit_kib=2,
+                ),
+            )
+            for attempt, error in enumerate(errors, start=1):
+                journal.append(
+                    {"event": "run_start", "attempt": attempt}
+                )
+                _record_host_safety_breach(
+                    journal, error, stage="case_execution"
+                )
+                _record_host_safety_breach(
+                    journal, error, stage="case_execution"
+                )
+
+            breaches = [
+                event
+                for event in journal.events()
+                if event.get("event") == "host_safety_breach"
+            ]
+            self.assertEqual(
+                [event["code"] for event in breaches],
+                [
+                    "memavailable_below_minimum",
+                    "swap_growth_above_maximum",
+                ],
+            )
 
     def test_ollama_rerank_remains_explicitly_adapter_unimplemented(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -637,6 +829,321 @@ class PlanSafetyTests(unittest.TestCase):
         start_server.assert_not_called()
         telemetry.stop.assert_not_called()
 
+    def test_sglang_host_safety_start_failure_aborts_before_server_launch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = self._write_runnable_plan(
+                root, backend="sglang", host_safety=True
+            )
+            telemetry = Mock()
+            watchdog = _FakeHostSafetyWatchdog()
+            sample = HostMemorySample(
+                mem_total_kib=128 * 1024**2,
+                memavailable_kib=14 * 1024**2 - 1,
+                swap_total_kib=8 * 1024**2,
+                swap_free_kib=8 * 1024**2,
+            )
+            watchdog.failure = HostSafetyError(
+                "memavailable_below_minimum",
+                "synthetic MemAvailable breach",
+                sample=sample,
+                observed_kib=sample.memavailable_kib,
+                limit_kib=14 * 1024**2,
+                starting_swap_used_kib=0,
+            )
+            with (
+                patch("bench.runner._preflight"),
+                patch("bench.runner.TelemetrySampler", return_value=telemetry),
+                patch(
+                    "bench.runner.HostSafetyWatchdog", return_value=watchdog
+                ) as constructor,
+                patch("bench.runner.start_server") as start_server,
+            ):
+                with self.assertRaises(HostSafetyError) as raised:
+                    execute_plan(run_dir, workspace=root)
+
+            self.assertIs(raised.exception, watchdog.failure)
+            constructor.assert_called_once_with(
+                min_memavailable_gib=14,
+                max_swap_growth_mib=512,
+                max_starting_swap_mib=64,
+            )
+            start_server.assert_not_called()
+            self.assertEqual(watchdog.start_calls, 1)
+            self.assertGreaterEqual(watchdog.stop_calls, 1)
+            telemetry.stop.assert_called_once()
+            events = [
+                json.loads(line)
+                for line in (run_dir / "events.jsonl").read_text().splitlines()
+            ]
+            breach = [
+                event
+                for event in events
+                if event.get("event") == "host_safety_breach"
+            ]
+            aborted = [
+                event for event in events if event.get("event") == "run_aborted"
+            ]
+            self.assertEqual(len(breach), 1)
+            self.assertEqual(breach[0]["stage"], "host_safety_start")
+            self.assertEqual(breach[0]["observed_kib"], sample.memavailable_kib)
+            self.assertEqual(len(aborted), 1)
+            self.assertEqual(aborted[0]["error_type"], "HostSafetyError")
+
+    def test_sglang_host_safety_rejects_keep_server_before_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = self._write_runnable_plan(
+                root, backend="sglang", host_safety=True
+            )
+            telemetry = Mock()
+            watchdog = _FakeHostSafetyWatchdog()
+            with (
+                patch("bench.runner._preflight") as preflight,
+                patch("bench.runner.TelemetrySampler", return_value=telemetry),
+                patch("bench.runner.HostSafetyWatchdog", return_value=watchdog),
+                patch("bench.runner.start_server") as start_server,
+            ):
+                with self.assertRaisesRegex(
+                    PreflightError, "keep-server.*host-safety"
+                ):
+                    execute_plan(
+                        run_dir,
+                        workspace=root,
+                        keep_server=True,
+                    )
+
+            preflight.assert_not_called()
+            telemetry.start.assert_not_called()
+            start_server.assert_not_called()
+            self.assertEqual(watchdog.start_calls, 0)
+            events = [
+                json.loads(line)
+                for line in (run_dir / "events.jsonl").read_text().splitlines()
+            ]
+            aborted = [
+                event for event in events if event.get("event") == "run_aborted"
+            ]
+            self.assertEqual(len(aborted), 1)
+            self.assertEqual(aborted[0]["stage"], "host_safety_policy")
+
+    def test_live_safety_breach_wins_over_socket_error_and_forces_cleanup(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = self._write_runnable_plan(
+                root,
+                backend="sglang",
+                case_ids=("first", "must-not-run"),
+                host_safety=True,
+            )
+            telemetry = Mock()
+            watchdog = _FakeHostSafetyWatchdog()
+            server = SimpleNamespace(
+                backend="sglang",
+                base_url="http://127.0.0.1:30000/v1",
+                startup_s=0.1,
+                container_id="container-id",
+                run_identity=None,
+                ollama_model=None,
+                unload_ollama=False,
+                authorization="Bearer fixture",
+                interrupt_owned=Mock(
+                    side_effect=[
+                        RuntimeError("synthetic immediate stop failure"),
+                        None,
+                    ]
+                ),
+                stop=Mock(),
+            )
+            first_request = Mock()
+            first_request.to_dict.return_value = {}
+            safety_error = HostSafetyError(
+                "swap_growth_above_maximum",
+                "synthetic swap growth breach",
+                sample=HostMemorySample(
+                    mem_total_kib=128 * 1024**2,
+                    memavailable_kib=20 * 1024**2,
+                    swap_total_kib=8 * 1024**2,
+                    swap_free_kib=8 * 1024**2 - (512 * 1024 + 1),
+                ),
+                observed_kib=512 * 1024 + 1,
+                limit_kib=512 * 1024,
+                starting_swap_used_kib=0,
+            )
+
+            def start(*args: object, **kwargs: object) -> object:
+                model = args[0]
+                server.run_identity = model.run_identity
+                kwargs["on_server_created"](server)
+                kwargs["abort_check"]()
+                return server
+
+            def fail_first_case(**kwargs: object) -> None:
+                watchdog.trip(safety_error)
+                raise BenchmarkRequestError("synthetic socket reset")
+
+            with (
+                patch("bench.runner._preflight"),
+                patch("bench.runner.TelemetrySampler", return_value=telemetry),
+                patch("bench.runner.HostSafetyWatchdog", return_value=watchdog),
+                patch("bench.runner.start_server", side_effect=start),
+                patch("bench.runner.capture_server_provenance", return_value={}),
+                patch("bench.runner._prime_model", return_value=first_request),
+                patch(
+                    "bench.runner._execute_case", side_effect=fail_first_case
+                ) as execute_case,
+                patch(
+                    "bench.runner.save_server_logs",
+                    side_effect=lambda *args, **kwargs: self.assertEqual(
+                        server.interrupt_owned.call_count, 2
+                    ),
+                ),
+            ):
+                with self.assertRaises(HostSafetyError) as raised:
+                    execute_plan(
+                        run_dir,
+                        workspace=root,
+                        continue_on_error=True,
+                    )
+
+            self.assertIs(raised.exception, safety_error)
+            self.assertEqual(execute_case.call_count, 1)
+            self.assertEqual(server.interrupt_owned.call_count, 2)
+            server.stop.assert_called_once_with(keep_server=False)
+            events = [
+                json.loads(line)
+                for line in (run_dir / "events.jsonl").read_text().splitlines()
+            ]
+            names = [event["event"] for event in events]
+            self.assertIn("server_stopped", names)
+            self.assertNotIn("server_kept", names)
+            self.assertNotIn("run_complete", names)
+            aborted = next(
+                event for event in events if event["event"] == "run_aborted"
+            )
+            self.assertEqual(aborted["error_type"], "HostSafetyError")
+            self.assertEqual(aborted["stage"], "case_execution")
+            interrupt_failure = next(
+                event
+                for event in events
+                if event["event"] == "host_safety_interrupt_failed"
+            )
+            self.assertEqual(interrupt_failure["error_type"], "RuntimeError")
+            self.assertNotIn("error", interrupt_failure)
+
+    def test_cleanup_time_safety_trip_supersedes_request_error_durably(
+        self,
+    ) -> None:
+        for continue_on_error in (False, True):
+            with self.subTest(continue_on_error=continue_on_error):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    run_dir = self._write_runnable_plan(
+                        root, backend="sglang", host_safety=True
+                    )
+                    telemetry = Mock()
+                    watchdog = _FakeHostSafetyWatchdog()
+                    server = SimpleNamespace(
+                        backend="sglang",
+                        base_url="http://127.0.0.1:30000/v1",
+                        startup_s=0.1,
+                        container_id="container-id",
+                        run_identity=None,
+                        ollama_model=None,
+                        unload_ollama=False,
+                        authorization="Bearer fixture",
+                        interrupt_owned=Mock(),
+                        stop=Mock(),
+                    )
+                    first_request = Mock()
+                    first_request.to_dict.return_value = {}
+                    safety_error = HostSafetyError(
+                        "memavailable_below_minimum",
+                        "synthetic cleanup-time memory breach",
+                        sample=HostMemorySample(
+                            mem_total_kib=128 * 1024**2,
+                            memavailable_kib=14 * 1024**2 - 1,
+                            swap_total_kib=8 * 1024**2,
+                            swap_free_kib=8 * 1024**2,
+                        ),
+                        observed_kib=14 * 1024**2 - 1,
+                        limit_kib=14 * 1024**2,
+                        starting_swap_used_kib=0,
+                    )
+
+                    def start(*args: object, **kwargs: object) -> object:
+                        model = args[0]
+                        server.run_identity = model.run_identity
+                        kwargs["on_server_created"](server)
+                        kwargs["abort_check"]()
+                        return server
+
+                    def trip_during_cleanup(*args: object, **kwargs: object) -> None:
+                        watchdog.trip(safety_error)
+
+                    with (
+                        patch("bench.runner._preflight"),
+                        patch(
+                            "bench.runner.TelemetrySampler",
+                            return_value=telemetry,
+                        ),
+                        patch(
+                            "bench.runner.HostSafetyWatchdog",
+                            return_value=watchdog,
+                        ),
+                        patch("bench.runner.start_server", side_effect=start),
+                        patch(
+                            "bench.runner.capture_server_provenance",
+                            return_value={},
+                        ),
+                        patch(
+                            "bench.runner._prime_model",
+                            return_value=first_request,
+                        ),
+                        patch(
+                            "bench.runner._execute_case",
+                            side_effect=BenchmarkRequestError(
+                                "synthetic request socket failure"
+                            ),
+                        ),
+                        patch(
+                            "bench.runner.save_server_logs",
+                            side_effect=trip_during_cleanup,
+                        ),
+                    ):
+                        with self.assertRaises(HostSafetyError) as raised:
+                            execute_plan(
+                                run_dir,
+                                workspace=root,
+                                continue_on_error=continue_on_error,
+                            )
+
+                    self.assertIs(raised.exception, safety_error)
+                    server.interrupt_owned.assert_called_once_with()
+                    server.stop.assert_called_once_with(keep_server=False)
+                    events = [
+                        json.loads(line)
+                        for line in (
+                            run_dir / "events.jsonl"
+                        ).read_text().splitlines()
+                    ]
+                    aborted = [
+                        event
+                        for event in events
+                        if event.get("event") == "run_aborted"
+                    ]
+                    self.assertEqual(len(aborted), 1)
+                    self.assertEqual(aborted[0]["error_type"], "HostSafetyError")
+                    self.assertEqual(aborted[0]["stage"], "server_cleanup")
+                    summary = json.loads((run_dir / "summary.json").read_text())
+                    self.assertEqual(
+                        summary["run_error"]["error_type"], "HostSafetyError"
+                    )
+
     def test_completed_plan_resume_is_idempotent_and_starts_no_server(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -781,6 +1288,28 @@ class PlanSafetyTests(unittest.TestCase):
             self.assertEqual(summary["status"], "complete")
             fresh_server.stop.assert_called_once_with(keep_server=False)
             scrape.assert_not_called()
+            events = [
+                json.loads(line)
+                for line in (run_dir / "events.jsonl").read_text().splitlines()
+            ]
+            names = [event["event"] for event in events]
+            measurement_index = names.index("measurement_complete")
+            stopped_index = max(
+                index
+                for index, name in enumerate(names)
+                if name == "server_stopped"
+            )
+            self.assertLess(
+                measurement_index,
+                stopped_index,
+            )
+            self.assertLess(
+                stopped_index, names.index("run_complete")
+            )
+            measurement = events[measurement_index]
+            stopped = events[stopped_index]
+            self.assertGreaterEqual(measurement["elapsed_s"], 0.0)
+            self.assertGreaterEqual(stopped["cleanup_elapsed_s"], 0.0)
 
     def test_resume_stops_exact_owned_vllm_before_marking_run_complete(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

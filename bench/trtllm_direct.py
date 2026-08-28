@@ -25,11 +25,13 @@ import unicodedata
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from bench.journal import Journal, content_hash, utc_now, write_json
+    from bench.manifest import model_spec_to_dict
     from bench.report import _telemetry_summaries
     from bench.runner import _preflight, results_lock_path
     from bench.telemetry import TelemetrySampler
 else:
     from .journal import Journal, content_hash, utc_now, write_json
+    from .manifest import model_spec_to_dict
     from .report import _telemetry_summaries
     from .runner import _preflight, results_lock_path
     from .telemetry import TelemetrySampler
@@ -758,13 +760,14 @@ def run_direct_trtllm(
             ) from error
 
         verification = verify_direct_profile(model)
+        model_record = model_spec_to_dict(model)
         case = asdict(suite.cases[0])
         case["case_id"] = (
             f"{case['id']}--"
-            f"{content_hash({'model': asdict(model), 'case': case}, 12)}"
+            f"{content_hash({'model': model_record, 'case': case}, 12)}"
         )
         basis = {
-            "model": asdict(model),
+            "model": model_record,
             "suite": {**asdict(suite), "cases": [case]},
             "verification": verification,
             "worker_timeout_s": deadline_s,

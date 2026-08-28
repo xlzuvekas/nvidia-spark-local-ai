@@ -37,7 +37,7 @@ import urllib.parse
 import urllib.request
 
 from .journal import Journal, utc_now
-from .manifest import load_models
+from .manifest import load_models, model_spec_to_dict
 from .runner import _preflight, results_lock_path
 from .runtime import (
     ManagedServer,
@@ -574,7 +574,7 @@ def build_cases(config: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _profile_plan_record(profile: Any) -> dict[str, Any]:
-    record = asdict(profile)
+    record = model_spec_to_dict(profile)
     record["tasks"] = list(profile.tasks)
     record["args"] = list(profile.args)
     record["model_shards"] = [asdict(shard) for shard in profile.model_shards]

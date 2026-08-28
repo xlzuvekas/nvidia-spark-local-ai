@@ -2691,6 +2691,9 @@ startup_timeout_s = 1800
 # One lazy-buffer request consumes four recurrent-state slots. The explicit
 # token pool and graph batch admit only the single 64K campaign sequence.
 estimated_ram_gib = 104.5
+host_safety_min_memavailable_gib = 14
+host_safety_max_swap_growth_mib = 512
+host_safety_max_starting_swap_mib = 64
 endpoint = "http://127.0.0.1:30000/v1"
 sglang_source_overlays = [
   { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:bcdc2c86aa59784ffe27d53c8d214e56b6aa45c02b1d5841fd956d1f006d6030" },
@@ -2755,6 +2758,9 @@ max_context = 65536
 native_context = 262144
 startup_timeout_s = 1800
 estimated_ram_gib = 104.5
+host_safety_min_memavailable_gib = 14
+host_safety_max_swap_growth_mib = 512
+host_safety_max_starting_swap_mib = 64
 endpoint = "http://127.0.0.1:30000/v1"
 sglang_source_overlays = [
   { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:bcdc2c86aa59784ffe27d53c8d214e56b6aa45c02b1d5841fd956d1f006d6030" },
@@ -2819,6 +2825,9 @@ max_context = 65536
 native_context = 262144
 startup_timeout_s = 1800
 estimated_ram_gib = 104.5
+host_safety_min_memavailable_gib = 14
+host_safety_max_swap_growth_mib = 512
+host_safety_max_starting_swap_mib = 64
 endpoint = "http://127.0.0.1:30000/v1"
 sglang_source_overlays = [
   { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:bcdc2c86aa59784ffe27d53c8d214e56b6aa45c02b1d5841fd956d1f006d6030" },
@@ -2883,6 +2892,9 @@ max_context = 65536
 native_context = 262144
 startup_timeout_s = 1800
 estimated_ram_gib = 104.5
+host_safety_min_memavailable_gib = 14
+host_safety_max_swap_growth_mib = 512
+host_safety_max_starting_swap_mib = 64
 endpoint = "http://127.0.0.1:30000/v1"
 sglang_source_overlays = [
   { host_path = "results/runtime-overlays/qwen38-flash-next-bf2b7c75-persistent-ple-ablation-v1/qwen4_exp.py", container_path = "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py", digest = "sha256:bcdc2c86aa59784ffe27d53c8d214e56b6aa45c02b1d5841fd956d1f006d6030" },

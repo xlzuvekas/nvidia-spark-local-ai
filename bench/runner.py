@@ -34,6 +34,7 @@ from .client import (
     stream_chat_request,
     stream_ollama_chat_request,
 )
+from .host_safety import HostSafetyError, HostSafetyWatchdog
 from .journal import Journal, content_hash, utc_now, write_json
 from .llamacpp_cache_metrics import (
     LlamaCppCacheMetricsError,
@@ -50,7 +51,7 @@ from .llamacpp_metrics import (
     require_speculative_activity,
     snapshot_llamacpp_spec_decode_metrics,
 )
-from .manifest import validate_benchmark_selection
+from .manifest import model_spec_to_dict, validate_benchmark_selection
 from .memory_ops import (
     MEMORY_OPERATION_CONTEXT_TOKENS,
     MEMORY_OPERATION_LLAMACPP_DIGEST,
@@ -188,7 +189,7 @@ def create_plan(
             f"{model.backend} direct profiles require the {direct_command} command"
         )
     validate_benchmark_selection(model, suite, context="plan")
-    model_data = asdict(model)
+    model_data = model_spec_to_dict(model)
     suite_data = asdict(suite)
     protocol_digest = suite_data.get("protocol_digest")
     if protocol_digest is None:
@@ -294,6 +295,98 @@ def _preflight(model: SimpleNamespace) -> None:
         raise PreflightError(
             f"Only {available_kib / 1024**2:.1f} GiB available; model plus reserve needs {required_gib:.1f} GiB"
         )
+
+
+def _host_safety_watchdog(model: SimpleNamespace) -> HostSafetyWatchdog | None:
+    thresholds = {
+        "min_memavailable_gib": getattr(
+            model, "host_safety_min_memavailable_gib", None
+        ),
+        "max_swap_growth_mib": getattr(
+            model, "host_safety_max_swap_growth_mib", None
+        ),
+        "max_starting_swap_mib": getattr(
+            model, "host_safety_max_starting_swap_mib", None
+        ),
+    }
+    configured = {
+        name: value for name, value in thresholds.items() if value is not None
+    }
+    if not configured:
+        return None
+    if len(configured) != len(thresholds):
+        raise PreflightError(
+            "Frozen host-safety thresholds must be configured together"
+        )
+    if str(getattr(model, "backend", "")) != "sglang":
+        raise PreflightError(
+            "Frozen host-safety thresholds are supported only for SGLang"
+        )
+    return HostSafetyWatchdog(**configured)
+
+
+def _record_host_safety_breach(
+    journal: Journal, error: HostSafetyError, *, stage: str
+) -> None:
+    events = journal.events()
+    last_start = max(
+        (
+            index
+            for index, event in enumerate(events)
+            if event.get("event") == "run_start"
+        ),
+        default=-1,
+    )
+    if any(
+        index > last_start and event.get("event") == "host_safety_breach"
+        for index, event in enumerate(events)
+    ):
+        return
+    sample = error.sample
+    journal.append(
+        {
+            "event": "host_safety_breach",
+            "stage": stage,
+            "code": error.code,
+            "observed_kib": error.observed_kib,
+            "limit_kib": error.limit_kib,
+            "starting_swap_used_kib": error.starting_swap_used_kib,
+            "memavailable_kib": (
+                sample.memavailable_kib if sample is not None else None
+            ),
+            "swap_used_kib": sample.swap_used_kib if sample is not None else None,
+        }
+    )
+
+
+def _record_host_safety_interrupt_failure(
+    journal: Journal, watchdog: HostSafetyWatchdog, *, stage: str
+) -> None:
+    error = watchdog.abort_callback_error
+    if error is None:
+        return
+    events = journal.events()
+    last_start = max(
+        (
+            index
+            for index, event in enumerate(events)
+            if event.get("event") == "run_start"
+        ),
+        default=-1,
+    )
+    if any(
+        index > last_start
+        and event.get("event") == "host_safety_interrupt_failed"
+        for index, event in enumerate(events)
+    ):
+        return
+    journal.append(
+        {
+            "event": "host_safety_interrupt_failed",
+            "stage": stage,
+            "error_type": type(error).__name__,
+        }
+    )
 
 
 def _needle(nonce: str) -> str:
@@ -2395,12 +2488,17 @@ def _record_run_aborted(
     )
     if last_start < 0:
         return
-    already_recorded = any(
-        index > last_start and event.get("event") == "run_aborted"
+    recorded_aborts = [
+        event
         for index, event in enumerate(events)
-    )
-    if already_recorded:
-        return
+        if index > last_start and event.get("event") == "run_aborted"
+    ]
+    if recorded_aborts:
+        safety_override = isinstance(error, HostSafetyError) and (
+            recorded_aborts[-1].get("error_type") != "HostSafetyError"
+        )
+        if not safety_override:
+            return
     journal.append(
         {
             "event": "run_aborted",
@@ -2777,7 +2875,10 @@ def execute_plan(
     lock_path = results_lock_path(workspace)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     telemetry = TelemetrySampler(run_dir / "telemetry.jsonl")
+    host_safety: HostSafetyWatchdog | None = None
     server = None
+    primary_error: BaseException | None = None
+    primary_error_stage: str | None = None
     with lock_path.open("w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -2912,13 +3013,23 @@ def execute_plan(
             journal.append({"event": "run_complete", "status": "no_work"})
             return summarize_run(run_dir)
 
-        failure_stage = "preflight"
+        failure_stage = "host_safety_policy"
+        measurement_started = time.perf_counter()
         try:
+            host_safety = _host_safety_watchdog(model)
+            if host_safety is not None and keep_server:
+                raise PreflightError(
+                    "--keep-server is not supported when host-safety "
+                    "monitoring is enabled"
+                )
+            failure_stage = "preflight"
             _preflight(model)
             failure_stage = "telemetry_start"
             telemetry.start()
-            primary_error: BaseException | None = None
             try:
+                failure_stage = "host_safety_start"
+                if host_safety is not None:
+                    host_safety.start()
                 validated_llamacpp_artifacts: dict[str, Any] | None = None
                 artifact_validation_s: float | None = None
                 if str(model.backend) == "llamacpp":
@@ -2970,6 +3081,16 @@ def execute_plan(
                     journal.append(artifact_event)
                 telemetry.set_phase("server_startup")
                 failure_stage = "server_start"
+                host_safety_callbacks: dict[str, Any] = {}
+                if host_safety is not None:
+                    host_safety_callbacks = {
+                        "abort_check": host_safety.raise_if_tripped,
+                        "on_server_created": (
+                            lambda created_server: host_safety.register_abort_callback(
+                                created_server.interrupt_owned
+                            )
+                        ),
+                    }
                 server = start_server(
                     model,
                     workspace=workspace,
@@ -2978,7 +3099,10 @@ def execute_plan(
                     process_state_path=run_dir / "server" / "process.json",
                     validated_llamacpp_artifacts=validated_llamacpp_artifacts,
                     artifact_validation_s=artifact_validation_s,
+                    **host_safety_callbacks,
                 )
+                if host_safety is not None:
+                    host_safety.raise_if_tripped()
                 failure_stage = "server_provenance"
                 provenance = capture_server_provenance(server)
                 write_json(
@@ -3005,9 +3129,13 @@ def execute_plan(
                         "keep_server_requested": keep_server,
                     }
                 )
+                if host_safety is not None:
+                    host_safety.raise_if_tripped()
                 failure_stage = "first_request"
                 telemetry.set_phase("first_request_after_start")
                 first_request = _prime_model(server, model)
+                if host_safety is not None:
+                    host_safety.raise_if_tripped()
                 journal.append(
                     {
                         "event": "first_request_complete",
@@ -3017,6 +3145,8 @@ def execute_plan(
                 )
                 failure_stage = "case_execution"
                 for case in runnable:
+                    if host_safety is not None:
+                        host_safety.raise_if_tripped()
                     try:
                         _execute_case(
                             server=server,
@@ -3026,8 +3156,12 @@ def execute_plan(
                             telemetry=telemetry,
                         )
                     except Exception:
+                        if host_safety is not None:
+                            host_safety.raise_if_tripped()
                         if not continue_on_error:
                             raise
+                    if host_safety is not None:
+                        host_safety.raise_if_tripped()
                 nextn_depth = (
                     sglang_nextn_depth(getattr(model, "args", ()))
                     if server.backend == "sglang"
@@ -3074,16 +3208,41 @@ def execute_plan(
                             "metrics": spec_decode_metrics,
                         }
                     )
+                    if host_safety is not None:
+                        host_safety.raise_if_tripped()
+                failure_stage = "measurement_complete"
+                journal.append(
+                    {
+                        "event": "measurement_complete",
+                        "elapsed_s": time.perf_counter() - measurement_started,
+                    }
+                )
             except BaseException as error:
-                primary_error = error
-                _record_run_aborted(journal, error, stage=failure_stage)
-                raise
+                safety_error = (
+                    host_safety.failure if host_safety is not None else None
+                )
+                primary_error = safety_error or error
+                primary_error_stage = failure_stage
+                raise primary_error
             finally:
                 failure_stage = "server_cleanup"
                 telemetry.set_phase("server_shutdown")
+                effective_keep_server = keep_server
+                cleanup_started = time.perf_counter()
                 try:
                     if server:
                         try:
+                            if host_safety is not None and host_safety.tripped:
+                                # Synchronize with, or retry, the background
+                                # callback before any potentially slow scrape
+                                # or log capture. Ownership state remains intact
+                                # for the ordinary final cleanup below.
+                                server.interrupt_owned()
+                                _record_host_safety_interrupt_failure(
+                                    journal,
+                                    host_safety,
+                                    stage=failure_stage,
+                                )
                             # A vLLM metrics scrape is valid only for a server that this
                             # run actually started.  In particular, never probe a
                             # loopback endpoint supplied by an external or mocked
@@ -3135,13 +3294,30 @@ def execute_plan(
                                 server, run_dir / "server" / "server.log"
                             )
                         finally:
-                            server.stop(keep_server=keep_server)
+                            if host_safety is not None:
+                                effective_keep_server = (
+                                    keep_server and not host_safety.tripped
+                                )
+                            server.stop(keep_server=effective_keep_server)
+                            if host_safety is not None:
+                                # Keep monitoring through the exact owned stop.
+                                # The server lifecycle lock serializes a racing
+                                # watchdog callback with this cleanup path.
+                                host_safety.stop()
+                                if host_safety.tripped and effective_keep_server:
+                                    effective_keep_server = False
+                                    server.stop(keep_server=False)
                         journal.append(
                             {
                                 "event": (
-                                    "server_kept" if keep_server else "server_stopped"
+                                    "server_kept"
+                                    if effective_keep_server
+                                    else "server_stopped"
                                 ),
                                 "backend": server.backend,
+                                "cleanup_elapsed_s": (
+                                    time.perf_counter() - cleanup_started
+                                ),
                             }
                         )
                 except Exception as cleanup_error:
@@ -3155,7 +3331,11 @@ def execute_plan(
                     if primary_error is None:
                         raise
                 finally:
+                    if host_safety is not None:
+                        host_safety.stop()
                     telemetry.stop()
+            if host_safety is not None:
+                host_safety.raise_if_tripped()
             failure_stage = "mtp_evidence"
             if str(model.backend) == "llamacpp":
                 require_llamacpp_mtp_evidence(
@@ -3170,12 +3350,30 @@ def execute_plan(
                 {
                     "event": "run_complete",
                     "status": (
-                        "completed_server_kept" if keep_server else "completed"
+                        "completed_server_kept"
+                        if effective_keep_server
+                        else "completed"
                     ),
                 }
             )
         except BaseException as error:
-            _record_run_aborted(journal, error, stage=failure_stage)
+            safety_error = host_safety.failure if host_safety is not None else None
+            terminal_error = safety_error or error
+            terminal_stage = (
+                primary_error_stage
+                if primary_error is terminal_error
+                and primary_error_stage is not None
+                else failure_stage
+            )
+            if isinstance(terminal_error, HostSafetyError):
+                _record_host_safety_breach(
+                    journal, terminal_error, stage=terminal_stage
+                )
+                if host_safety is not None:
+                    _record_host_safety_interrupt_failure(
+                        journal, host_safety, stage=terminal_stage
+                    )
+            _record_run_aborted(journal, terminal_error, stage=terminal_stage)
             try:
                 summarize_run(run_dir)
             except Exception as summary_error:
@@ -3186,7 +3384,7 @@ def execute_plan(
                         "error": str(summary_error),
                     }
                 )
-            raise
+            raise terminal_error
     return summarize_run(run_dir)
 
 

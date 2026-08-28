@@ -24,11 +24,13 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from bench.journal import Journal, content_hash, utc_now, write_json
+    from bench.manifest import model_spec_to_dict
     from bench.report import _telemetry_summaries
     from bench.runner import _preflight, results_lock_path
     from bench.telemetry import TelemetrySampler
 else:
     from .journal import Journal, content_hash, utc_now, write_json
+    from .manifest import model_spec_to_dict
     from .report import _telemetry_summaries
     from .runner import _preflight, results_lock_path
     from .telemetry import TelemetrySampler
@@ -615,8 +617,9 @@ def run_direct_diffusion(
 
         verification = verify_direct_profile(model)
         logic_hash = verification["worker_logic_sha256"]
+        model_record = model_spec_to_dict(model)
         plan_basis = {
-            "model": asdict(model),
+            "model": model_record,
             "suite": asdict(suite),
             "verification": verification,
             "prompt_sha256": hashlib.sha256(DIRECT_PROMPT.encode()).hexdigest(),
@@ -631,7 +634,7 @@ def run_direct_diffusion(
                 **asdict(case),
                 "case_id": (
                     f"{case.id}--"
-                    f"{content_hash({'model': asdict(model), 'case': asdict(case)}, 12)}"
+                    f"{content_hash({'model': model_record, 'case': asdict(case)}, 12)}"
                 ),
             }
             for case in suite.cases

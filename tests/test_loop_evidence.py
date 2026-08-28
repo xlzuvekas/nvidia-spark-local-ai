@@ -29,7 +29,7 @@ from bench.loop_campaign import (
     load_campaign_manifest,
     summarize_campaign,
 )
-from bench.manifest import load_models
+from bench.manifest import load_models, model_spec_to_dict
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -68,7 +68,7 @@ def _rehash_plan(plan: dict[str, object]) -> dict[str, object]:
 def _model_record(profile: object) -> dict[str, object]:
     # Keep this conversion independent of the evidence projector while matching the
     # controller's frozen-plan representation.
-    record = asdict(profile)
+    record = model_spec_to_dict(profile)
     record["tasks"] = list(profile.tasks)
     record["args"] = list(profile.args)
     record["model_shards"] = [asdict(shard) for shard in profile.model_shards]

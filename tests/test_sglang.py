@@ -1687,6 +1687,129 @@ class SGLangRuntimeTests(unittest.TestCase):
             server_log_path=log_path,
         )
 
+    def test_dispatch_forwards_host_safety_callbacks_only_to_sglang(self) -> None:
+        model = self._model()
+        abort_check = lambda: None
+        on_server_created = lambda server: None
+        expected = object()
+        with patch("bench.runtime.start_sglang", return_value=expected) as start:
+            actual = start_server(
+                model,
+                workspace=Path("/mock/workspace"),
+                abort_check=abort_check,
+                on_server_created=on_server_created,
+            )
+
+        self.assertIs(actual, expected)
+        start.assert_called_once_with(
+            model,
+            workspace=Path("/mock/workspace"),
+            allow_download=False,
+            server_log_path=None,
+            abort_check=abort_check,
+            on_server_created=on_server_created,
+        )
+
+    def test_server_created_callback_precedes_endpoint_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            model = self._model()
+            snapshot = (
+                workspace
+                / "data"
+                / "huggingface"
+                / "hub"
+                / "models--nvidia--Phi-4-multimodal-instruct-NVFP4"
+                / "snapshots"
+                / model.revision
+            )
+            snapshot.mkdir(parents=True)
+            observed: list[ManagedServer] = []
+            abort_checks = 0
+
+            def abort_check() -> None:
+                nonlocal abort_checks
+                abort_checks += 1
+
+            def on_server_created(server: ManagedServer) -> None:
+                observed.append(server)
+
+            def wait(*args: object, **kwargs: object) -> float:
+                self.assertEqual(len(observed), 1)
+                self.assertEqual(observed[0].container_id, "container-id")
+                self.assertIs(kwargs["abort_check"], abort_check)
+                return 1.25
+
+            with (
+                patch("bench.runtime._existing_container", return_value=None),
+                patch("bench.runtime._port_is_free", return_value=True),
+                patch("bench.runtime.wait_for_endpoint", side_effect=wait),
+                patch(
+                    "bench.runtime.secrets.token_urlsafe",
+                    return_value="fixture-key",
+                ),
+                patch(
+                    "bench.runtime._run",
+                    return_value=_completed(stdout="container-id\n"),
+                ),
+            ):
+                server = start_sglang(
+                    model,
+                    workspace=workspace,
+                    abort_check=abort_check,
+                    on_server_created=on_server_created,
+                )
+
+        self.assertIs(server, observed[0])
+        self.assertEqual(server.startup_s, 1.25)
+        self.assertGreaterEqual(abort_checks, 2)
+
+    def test_host_safety_rechecks_immediately_before_docker_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            model = self._model()
+            snapshot = (
+                workspace
+                / "data"
+                / "huggingface"
+                / "hub"
+                / "models--nvidia--Phi-4-multimodal-instruct-NVFP4"
+                / "snapshots"
+                / model.revision
+            )
+            snapshot.mkdir(parents=True)
+            log_path = workspace / "run" / "server" / "server.log"
+            marker = RuntimeError("synthetic pre-launch safety breach")
+            abort_checks = 0
+
+            def abort_check() -> None:
+                nonlocal abort_checks
+                abort_checks += 1
+                if abort_checks == 2:
+                    raise marker
+
+            with (
+                patch("bench.runtime._existing_container", return_value=None),
+                patch("bench.runtime._port_is_free", return_value=True),
+                patch(
+                    "bench.runtime.secrets.token_urlsafe",
+                    return_value="fixture-key",
+                ),
+                patch("bench.runtime._run") as run,
+            ):
+                with self.assertRaises(RuntimeError) as raised:
+                    start_sglang(
+                        model,
+                        workspace=workspace,
+                        server_log_path=log_path,
+                        abort_check=abort_check,
+                    )
+                self.assertFalse((log_path.parent / "api-key").exists())
+
+        self.assertIs(raised.exception, marker)
+        self.assertEqual(abort_checks, 2)
+        run.assert_not_called()
+
     def test_owned_sglang_stop_checks_exact_run_label(self) -> None:
         server = ManagedServer(
             backend="sglang",
