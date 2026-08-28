@@ -243,12 +243,27 @@ conflict; the PR remains open without upstream code-test CI.
 Model-support [PR #53896](https://github.com/vllm-project/vllm/pull/53896)
 also remains open. Its reviewed head was
 [`89d0bb71aeb2f3e15c16efc69d33c3fbe223a765`](https://github.com/peakcrosser7/vllm/commit/89d0bb71aeb2f3e15c16efc69d33c3fbe223a765).
+A separately accepted performance fix,
+[`4df2ce22d086007a81930d93b3b657a1d197aecc`](https://github.com/peakcrosser7/vllm/commit/4df2ce22d086007a81930d93b3b657a1d197aecc),
+limits the packed PLE hash view to `:num_tokens`. Without it, the implementation
+fills and hashes the full configured batched-token width even for a one-token
+decode call. That fix is present in the newer model-support lineage but absent
+from PR #54129 head `8e4e036`.
+
+Preserve `8e4e036` as the author-shape control, then test only the live-width
+slice as a separately hashed integration. Do not use scheduler ceilings as the
+first workaround for that wasted decode work. The live-width change preserves
+the mmap branch's existing whole-operation graph boundary and should precede
+mmap worker or chunk tuning.
+
 A new correctness commit,
 [`0e0802f4637c73589c9943d420758177df454d9a`](https://github.com/peakcrosser7/vllm/commit/0e0802f4637c73589c9943d420758177df454d9a),
 moves request-layout-dependent PLE n-gram ID computation into the splitting
 custom operation used with piecewise CUDA graphs. That commit belongs to the
 newer #53896 head and is not contained in reviewed PR #54129 head `8e4e036`;
-combining them would be a new integration arm rather than exact reproduction.
+it is needed only if a later experiment narrows the mmap boundary to
+gather-only. Combining it prematurely would be a new integration arm rather
+than exact reproduction.
 
 **Supplemental:** the pull request also contains useful one-GB10 community
 data that was not included in the day-one report. One
