@@ -185,8 +185,8 @@ defined by the PR. Varied-token NIAH is much stronger than repeated-word
 retention but is still synthetic rather than broad natural-context coverage.
 
 PR #36567 and PR #36845 diverge from the earlier SM121 enablement; neither
-contains the other. The concrete storage-plus-safe-kernel candidate is a new
-integration: rebase only #36567's Rust reader
+contains the other. The concrete storage-plus-restriction-preserving-kernel
+candidate is a new integration: rebase only #36567's Rust reader
 [`04648a7`](https://github.com/jzinno/sglang/commit/04648a701501e473081ebabd2c110474f915e924)
 and PLE streaming
 [`9f101e3`](https://github.com/jzinno/sglang/commit/9f101e39ff09b356355e6a11183eaa3f7bb15f8c)
@@ -554,8 +554,8 @@ The support matrix at this review is therefore:
 | Route | One-Spark GB10 status | Local action |
 | --- | --- | --- |
 | SGLang TRT-LLM sparse decode | SM121 excluded by the reviewed `qwen4-main-squashed` gate after corruption reports; no release support | Preserve only for historical provenance and the sole already-frozen campaign exception; do not use for new integration |
-| SGLang SM121 Triton QSA | Open corrective PR directly atop the restriction; useful one-Spark correctness evidence, but unmerged and publicly red/gated | Leading safe-kernel component candidate; reproduce before combining with storage |
-| SGLang `io_uring` PLE streaming | Open stacked PR with exact-checkpoint data, but its head predates the SM121 safety restriction and its public checks are red | Rebase/force the safe QSA fallback before testing the reader; use narrow syscall admission |
+| SGLang SM121 Triton QSA | Open corrective PR directly atop the restriction; useful one-Spark correctness evidence, but unmerged and publicly red/gated | Leading SM121 Triton component candidate; build and admit before combining with storage |
+| SGLang `io_uring` PLE streaming | Open stacked PR with exact-checkpoint data, but its head predates the SM121 safety restriction and its public checks are red | Rebase/force the SM121 Triton QSA fallback before testing the reader; use narrow syscall admission |
 | vLLM direct PLE mmap | Open PR stacked on open model support; promising row and spot checks; a different mmap stack has a growing-prefix cache-on crash | Highest-priority post-cutoff reproduction target, cache-off first |
 | Mixed-FP8 dense projections | Private-candidate checkpoint directly targets dense GEMV traffic; external speed claim lacks matched protocol and DeepGEMM hard-faults on SM121 | Quality-first arm after mmap baseline; force and attest CUTLASS |
 | vLLM CPU PLE offload | Open PR; default container isolation blocks `pidfd_getfd` | Do not add `SYS_PTRACE` merely to benchmark it; prefer mmap |

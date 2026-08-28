@@ -25,14 +25,14 @@ default until it passes its own admission and matched task gates.
 That baseline is a historical measured prior and the immutable campaign's
 frozen identity, not a runtime for new work: it uses the superseded SM121
 TRT-LLM overlay. Before any backlog experiment, build and admit a newly pinned
-safe SM121 Triton runtime, admit a safe PLE-capacity mechanism, reproduce the
-baseline geometry and correctness, and establish fresh C1 rates. The current
-`3681c4e`-derived safe composition uses the `io_uring` PLE reader; it does not
+SM121 Triton runtime and PLE-capacity mechanism, reproduce the baseline geometry
+and correctness, and establish fresh C1 rates. The current statically composed
+`3681c4e`-derived candidate uses the `io_uring` PLE reader; it does not
 by itself preserve the historical persistent-mmap overlay. Treat a future mmap
 port as a separate integration and admission gate. The ranking below orders
 product questions, not permission to reuse the historical image. Never pool
 performance across the d91-image composition and a `3681c4e`-derived or later
-safe runtime.
+admitted runtime.
 
 ## Evidence-backed prior
 
@@ -136,7 +136,7 @@ selects `ChunkCache`. Bundle A has a four-slot lazy peak at C1 while B needs one
 live recurrent-state slot, but the explicit four-slot pool likely remains
 allocated in both, so do not claim reclaimed model memory. The public d91 tree
 predates public Qwen4/QSA support; these mechanics are a historical source
-prior only. Re-audit them on the newly admitted safe source and attest its exact
+prior only. Re-audit them on the newly built and admitted source and attest its exact
 runtime before claiming that a matched hybrid prefix restores full/QSA KV or
 that matched Mamba-slot copy-on-write restores PLE side state.
 The result estimates whether the retained cache/state bundle avoids repeated
@@ -161,7 +161,7 @@ parallel work.
   reserved outputs, and draft allowances. It must fit the shared pool with an
   explicit safety margin; full-60K requests are therefore outside this arm.
 - Geometry control: compare the C2-capable profile at C1 against the newly
-  admitted safe C1 profile before using it. Before launch, freeze an exact
+  admitted C1 profile before using it. Before launch, freeze an exact
   fixed-agent workload, an unscored warmup, a lifetime-level resident-wall
   estimator, at least two fresh lifetimes per profile, and a numeric
   non-inferiority bound. Require every oracle and pressure gate; keep D256 as a
@@ -214,7 +214,7 @@ an MTP2 prediction, or an end-to-end measurement.
 Do not run the planned `num_continuous_decode_steps=1` versus `2` ABBA on the
 reviewed public sources. On both the reported-base
 [`d91c3682` tree](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/server_args.py#L966-L970)
-and the safe-candidate public
+and the corrective-source candidate's public
 [`3681c4e` source](https://github.com/sgl-project/sglang/blob/3681c4e03f6848dff82972b3f572602d3b8394cc/python/sglang/srt/server_args.py#L972-L976),
 the field is declared with default one but no scheduler or worker reads it. The
 generated scalar CLI accepts any integer without a choices/range gate, while
@@ -308,7 +308,8 @@ latency or pressure safety.
 ### 7. Rejected at source gate: adaptive NEXTN
 
 The generic adaptive EAGLE machinery exists at both reviewed public pins, and
-safe `3681c4e` makes the Qwen4Exp draft load path inspectable. Public d91 lacks
+corrective-source candidate `3681c4e` makes the Qwen4Exp draft load path
+inspectable. Public d91 lacks
 native Qwen4Exp draft support, so the historical Qwen path still depends on the
 digest-pinned image, baked patches, and overlays; pristine d91 alone cannot
 attest its Qwen-specific consumption. This does not admit a benchmark arm. The
@@ -316,7 +317,7 @@ attest its Qwen-specific consumption. This does not admit a benchmark arm. The
 is `{0, 1, 3, 7}`, so the retained depth-two setting fails the exact
 [membership gate](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/arg_groups/speculative_hook.py#L788-L810)
 rather than becoming the baseline tier. A custom adaptive config is therefore
-a coupled bundle, not a one-flag treatment. On the safe source, adaptive mode
+a coupled bundle, not a one-flag treatment. On that reviewed source, adaptive mode
 also
 [disables Qwen QSA index sharing](https://github.com/sgl-project/sglang/blob/3681c4e03f6848dff82972b3f572602d3b8394cc/python/sglang/srt/speculative/eagle_worker_v2.py#L382-L389).
 After alias resolution, adaptive also requires EAGLE/EAGLE3 with top-k one;
@@ -342,7 +343,7 @@ NEXTN on these pins. Reconsider only after an admitted source change records
 exact proposed tokens per verify, active-tier residence, and accepted position;
 then freeze and hash a matched custom policy. The smallest future pair is
 adaptive `[2]` as a no-switch control versus `[1, 2]`, both initialized at two:
-both retain a three-slot maximum and disable safe-source QSA index sharing,
+both retain a three-slot maximum and disable candidate-source QSA index sharing,
 while the candidate adds only step-one runtime state. Run an unscored counter
 oracle before any ABBA.
 
@@ -353,9 +354,9 @@ control `stream_interval=1` versus a candidate changing only
 `--stream-interval 2`; reject any raw `/generate` request-level override. The
 field is a real output-side axis on both reviewed pins, but neither server nor
 request parsing validates a positive value. Those pins provide historical
-mechanics only: re-audit consumption and parser behavior on the newly admitted
-safe runtime, pin its source identity, and statically require exactly one or
-two before launch.
+mechanics only: re-audit consumption and parser behavior on a newly built and
+admitted SM121 Triton runtime, pin its source identity, and statically require
+exactly one or two before launch.
 
 Do not describe the candidate as a two-token buffer. The exact
 [output streamer](https://github.com/sgl-project/sglang/blob/d91c3682b0b429e4c70df63cd57f819588ce29b0/python/sglang/srt/managers/scheduler_components/output_streamer.py#L362-L390)

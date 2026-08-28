@@ -20,7 +20,7 @@ long-context validation. The
 [day-two review](../../docs/qwen38-flash-next-gb10-day-two-delta-2026-08-28.md)
 records the exact ancestry, caveats and current component plan.
 
-## Current safe-reader integration candidate
+## Current storage-reader integration candidate
 
 A read-only static replay applied storage-only commits `04648a7` and `9f101e3`
 in that order to SM121 Triton base `3681c4e`, excluding competing QSA commit
@@ -29,7 +29,7 @@ the reader is `cb9b2dffb10ae70bc91915c3eade4957fa649eaa`; the tree after PLE
 streaming is `ddda8dde3b6655c4e0c0ff094d87ef1f5cc71a92`.
 
 The integration changes eleven files. No added line references QSA, TRT-LLM or
-SM121, and the safe resolver, Triton fallback, architecture detector and QSA
+SM121, and the SM120-restricted resolver, Triton fallback, architecture detector and QSA
 test blobs remain byte-identical to `3681c4e`. Static diff, Python AST, Ruff,
 Rustfmt and locked/offline Cargo-metadata checks pass. These facts establish
 source composition only; no extension, image, server or model was built or
