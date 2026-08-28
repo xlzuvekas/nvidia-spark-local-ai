@@ -18,6 +18,7 @@ quality checks, and the provenance needed to interpret each number.
 | What do matched PLE mapping/omission and NEXTN depths show? | [Replicated lazy-C8 depth results, semantic-ablation failures, and quality-clean exact-answer v2](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md) |
 | How is the single-user Qwen3.8-Flash-Next serving search frozen? | [Frozen 14-cell, nine-case 64K autoresearch protocol and pre-measurement swap safety stop](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md) |
 | What should the next single-user Flash-Next experiments test? | [Ranked long-prefix cache, two-way fan-out, MTP break-even, continuous-decode, CUDA-graph, chunk-size, adaptive-NEXTN, and streaming backlog](docs/qwen38-flash-next-single-user-next-experiments-2026-08-28.md) |
+| What is limiting single-user Flash-Next TPS on Spark? | [Evidence-backed target-pass, batching, MTP, PLE, startup, and profiler analysis](docs/qwen38-flash-next-tps-bottleneck-2026-08-28.md) |
 | How should Pi and richer cowork tasks be benchmarked locally? | [Pinned Pi-in-Harbor adapter and deterministic cowork-core-v1 plan](docs/pi-cowork-harness-plan-2026-08-28.md) |
 | What does native llama.cpp prompt-KV reuse change for Qwen3.6? | [Prefix-cache controls: 8K and 32K shared-prefix cold/warm observations](docs/qwen36-prefix-cache-results-2026-08-18.md) |
 | How did Qwen3-Coder-Next fare on terminal coding tasks? | [Harbor/Terminal-Bench-derived results: Qwen Code versus OpenCode](docs/harbor-terminal-results-2026-08-18.md) |
@@ -248,6 +249,7 @@ geometries, slot counts, or validation states.
 - [Qwen3.8-Flash-Next GB10 day-one literature review](docs/qwen38-flash-next-gb10-day-one-2026-08-27.md)
 - [Qwen3.8-Flash-Next single-user autoresearch protocol](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md)
 - [Qwen3.8-Flash-Next single-user serving backlog](docs/qwen38-flash-next-single-user-next-experiments-2026-08-28.md)
+- [Qwen3.8-Flash-Next TPS bottleneck analysis](docs/qwen38-flash-next-tps-bottleneck-2026-08-28.md)
 - [Pinned Pi and cowork harness plan](docs/pi-cowork-harness-plan-2026-08-28.md)
 - [Autoresearch controller post-cutoff hardening plan](docs/autoresearch-controller-hardening-2026-08-28.md)
 - [Nemotron diffusion direct-run guide](docs/nemotron-diffusion-direct.md)
