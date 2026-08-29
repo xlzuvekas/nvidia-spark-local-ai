@@ -39,6 +39,14 @@ from .sglang_sm121_cache_observability import (
     SM121CacheObservabilityError,
     validate_sm121_cache_observability_suite,
 )
+from .sglang_sm121_cache_semantic import (
+    SM121_CACHE_SEMANTIC_PROFILE_IDS,
+    SM121_CACHE_SEMANTIC_SUITE_ID,
+    SM121CacheSemanticError,
+    is_sm121_cache_semantic_candidate,
+    validate_sm121_cache_semantic_candidate,
+    validate_sm121_cache_semantic_suite,
+)
 
 
 SCHEMA_VERSION = 1
@@ -160,6 +168,8 @@ _FLASH_NEXT_AGENT64K_PROFILE_IDS = frozenset(
 _SM121_STORAGE_PROFILE_ID = SM121_STORAGE_PROFILE_ID
 _SM121_STORAGE_SUITE_ID = SM121_STORAGE_SUITE_ID
 _SM121_STORAGE_CACHE_OBSERVABILITY_SUITE_ID = SM121_CACHE_OBSERVABILITY_SUITE_ID
+_SM121_CACHE_SEMANTIC_SUITE_ID = SM121_CACHE_SEMANTIC_SUITE_ID
+_SM121_CACHE_SEMANTIC_PROFILE_IDS = SM121_CACHE_SEMANTIC_PROFILE_IDS
 _SM121_STORAGE_SUITE_IDS = frozenset(
     {
         _SM121_STORAGE_SUITE_ID,
@@ -1661,8 +1671,11 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
                 f"{context}.sglang_storage_mode is supported only for sglang"
             )
         try:
-            validate_sm121_storage_candidate(model)
-        except SM121StorageCandidateError as error:
+            if is_sm121_cache_semantic_candidate(model):
+                validate_sm121_cache_semantic_candidate(model)
+            else:
+                validate_sm121_storage_candidate(model)
+        except (SM121StorageCandidateError, SM121CacheSemanticError) as error:
             raise ManifestError(f"{context}: {error}") from error
     if model.image_digest and not _DIGEST_PATTERN.fullmatch(model.image_digest):
         raise ManifestError(f"{context}.image_digest must be a sha256 digest")
@@ -1908,6 +1921,11 @@ def validate_suite(suite: SuiteSpec, *, context: str = "suite") -> None:
             validate_sm121_cache_observability_suite(suite)
         except SM121CacheObservabilityError as error:
             raise ManifestError(f"{context}: {error}") from error
+    if suite.id == _SM121_CACHE_SEMANTIC_SUITE_ID:
+        try:
+            validate_sm121_cache_semantic_suite(suite)
+        except SM121CacheSemanticError as error:
+            raise ManifestError(f"{context}: {error}") from error
     cache_cases = [case for case in suite.cases if case.kind == "cache"]
     cache_suite = suite.id == PREFIX_CACHE_SUITE_ID
     if cache_suite or cache_cases:
@@ -2017,6 +2035,18 @@ def validate_benchmark_selection(
         raise ManifestError(
             f"{context}: the SM121 pre-admission suite requires "
             f"the {_SM121_STORAGE_PROFILE_ID!r} profile"
+        )
+    sm121_cache_semantic_profile = model_id in _SM121_CACHE_SEMANTIC_PROFILE_IDS
+    sm121_cache_semantic_suite = suite.id == _SM121_CACHE_SEMANTIC_SUITE_ID
+    if sm121_cache_semantic_profile and not sm121_cache_semantic_suite:
+        raise ManifestError(
+            f"{context}: the {model.id!r} profile requires "
+            f"the {_SM121_CACHE_SEMANTIC_SUITE_ID!r} suite"
+        )
+    if sm121_cache_semantic_suite and not sm121_cache_semantic_profile:
+        raise ManifestError(
+            f"{context}: the {_SM121_CACHE_SEMANTIC_SUITE_ID!r} suite requires "
+            "one of its exact paired cache-policy profiles"
         )
     ple_study_suite_profiles = _PLE_STUDY_PROFILE_IDS_BY_SUITE.get(suite.id)
     ple_study_profile_suites = _PLE_STUDY_SUITE_IDS_BY_PROFILE_ID.get(model_id)

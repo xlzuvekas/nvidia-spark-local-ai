@@ -44,6 +44,11 @@ from .sglang_sm121_cache_observability import (
     is_sm121_cache_observability_plan,
     sm121_cache_observability_lifecycle_issues,
 )
+from .sglang_sm121_cache_semantic import (
+    is_sm121_cache_semantic_plan,
+    sm121_cache_semantic_arm,
+    sm121_cache_semantic_lifecycle_issues,
+)
 from .vllm_metrics import aggregate_vllm_spec_decode_metrics
 
 
@@ -381,6 +386,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     planned_suite = plan.get("suite") or {}
     sm121_storage_lifecycle_issues: tuple[dict[str, object], ...] = ()
     sm121_cache_observability_issues: tuple[dict[str, object], ...] = ()
+    sm121_cache_semantic_issues: tuple[dict[str, object], ...] = ()
     if (
         isinstance(planned_model, dict)
         and isinstance(planned_suite, dict)
@@ -419,6 +425,34 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
             sm121_cache_observability_lifecycle_issues(
                 events, planned_case_ids=planned_case_ids
             )
+        )
+    sm121_cache_semantic_plan = bool(
+        isinstance(planned_model, dict)
+        and isinstance(planned_suite, dict)
+        and is_sm121_cache_semantic_plan(planned_model, planned_suite)
+    )
+    if sm121_cache_semantic_plan:
+        planned_cases = planned_suite.get("cases")
+        planned_case_ids = (
+            tuple(
+                case.get("case_id")
+                for case in planned_cases
+                if isinstance(case, dict) and isinstance(case.get("case_id"), str)
+            )
+            if isinstance(planned_cases, list)
+            else ()
+        )
+        try:
+            semantic_arm = sm121_cache_semantic_arm(planned_model)
+        except ValueError:
+            # The dedicated source/evidence validators will fail closed with
+            # a more precise identity error.  Summary generation must still
+            # mark the malformed run partial rather than crash mid-journal.
+            semantic_arm = ""
+        sm121_cache_semantic_issues = sm121_cache_semantic_lifecycle_issues(
+            events,
+            planned_case_ids=planned_case_ids,
+            arm=semantic_arm,
         )
     mtp_requested = bool(
         planned_model.get("backend") == "llamacpp"
@@ -1190,7 +1224,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
                     },
                 }
             )
-        if sm121_cache_observability_plan:
+        if sm121_cache_observability_plan or sm121_cache_semantic_plan:
             # B0 uses normal request plumbing only to prove response and native
             # counter semantics.  Suppress latency, TPS, and energy-derived
             # fields so its summary cannot be read as a serving benchmark.
@@ -1209,11 +1243,16 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
                     "request_tps": None,
                 }
             )
+            if sm121_cache_semantic_plan:
+                # The paired semantic lane retains raw request timing only in
+                # its ignored journal for generic plumbing.  Its summary must
+                # never expose a wall-time, latency, TPS, or energy claim.
+                row["elapsed_s"] = None
             if kind == "quality":
                 row["quality_total_request_latency_s"] = None
         phase_telemetry = (
             None
-            if sm121_cache_observability_plan
+            if sm121_cache_observability_plan or sm121_cache_semantic_plan
             else (
                 telemetry.get(f"case:{case_id}:{attempt_id}")
                 or telemetry.get(case_id)
@@ -1346,6 +1385,8 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         status = "partial"
     elif sm121_cache_observability_issues:
         status = "partial"
+    elif sm121_cache_semantic_issues:
+        status = "partial"
     run_error = None
     if status == "aborted" and last_abort >= 0:
         aborted_event = events[last_abort]
@@ -1388,7 +1429,9 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         "startup_measurement_annotations": startup_annotations,
         "startup_safety_gates": startup_safety_gates,
         "measurement_invalid_cases": sorted(case_annotations),
-        "startup_telemetry": telemetry.get("server_startup"),
+        "startup_telemetry": (
+            None if sm121_cache_semantic_plan else telemetry.get("server_startup")
+        ),
         "first_request_after_start": next(
             (
                 event.get("result")
@@ -1396,31 +1439,45 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
                 if event.get("event") == "first_request_complete"
             ),
             None,
+        ) if not sm121_cache_semantic_plan else None,
+        "first_request_telemetry": (
+            None
+            if sm121_cache_semantic_plan
+            else telemetry.get("first_request_after_start")
         ),
-        "first_request_telemetry": telemetry.get("first_request_after_start"),
-        "shutdown_telemetry": telemetry.get("server_shutdown"),
-        "artifact_validation": next(
-            (
-                {
-                    key: event.get(key)
-                    for key in (
-                        "elapsed_s",
-                        "runtime_binary_sha256",
-                        "model_sha256",
-                        "model_shard_count",
-                        "model_total_size_bytes",
-                        "model_shard_sha256s",
-                        "mmproj_sha256",
-                        "draft_model_sha256",
-                    )
-                    if key in event
-                }
-                for event in reversed(events)
-                if event.get("event") == "artifact_validation_complete"
-            ),
-            None,
+        "shutdown_telemetry": (
+            None if sm121_cache_semantic_plan else telemetry.get("server_shutdown")
         ),
-        "artifact_validation_telemetry": telemetry.get("artifact_validation"),
+        "artifact_validation": (
+            None
+            if sm121_cache_semantic_plan
+            else next(
+                (
+                    {
+                        key: event.get(key)
+                        for key in (
+                            "elapsed_s",
+                            "runtime_binary_sha256",
+                            "model_sha256",
+                            "model_shard_count",
+                            "model_total_size_bytes",
+                            "model_shard_sha256s",
+                            "mmproj_sha256",
+                            "draft_model_sha256",
+                        )
+                        if key in event
+                    }
+                    for event in reversed(events)
+                    if event.get("event") == "artifact_validation_complete"
+                ),
+                None,
+            )
+        ),
+        "artifact_validation_telemetry": (
+            None
+            if sm121_cache_semantic_plan
+            else telemetry.get("artifact_validation")
+        ),
         "speculative_decoding": speculative_decoding,
         "llamacpp_mtp_evidence": (
             llamacpp_mtp_evidence if mtp_requested else None
@@ -1433,6 +1490,10 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     if sm121_cache_observability_plan:
         summary["sm121_cache_observability_lifecycle_issues"] = list(
             sm121_cache_observability_issues
+        )
+    if sm121_cache_semantic_plan:
+        summary["sm121_cache_semantic_lifecycle_issues"] = list(
+            sm121_cache_semantic_issues
         )
     if memory_run_results:
         memory_battery_completed = (

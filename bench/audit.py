@@ -22,6 +22,23 @@ from .sglang_sm121_cache_observability import (
     validate_sm121_cache_observability_candidate,
     validate_sm121_cache_observability_suite,
 )
+from .sglang_sm121_cache_semantic import (
+    SM121_CACHE_SEMANTIC_CACHE_OFF_ARM,
+    SM121_CACHE_SEMANTIC_CACHE_OFF_PROFILE_ID,
+    SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
+    SM121_CACHE_SEMANTIC_EXECUTION_MODE,
+    SM121_CACHE_SEMANTIC_PAIR_BINDING_SCHEMA_VERSION,
+    SM121CacheSemanticError,
+    is_sm121_cache_semantic_plan,
+    sm121_cache_semantic_arm,
+    sm121_cache_semantic_cache_off_receipt_sha256,
+    sm121_cache_semantic_lifecycle_issues,
+    sm121_cache_semantic_pair_binding_sha256,
+    sm121_cache_semantic_pair_instance_sha256,
+    validate_sm121_cache_semantic_pair_binding,
+    validate_sm121_cache_semantic_candidate,
+    validate_sm121_cache_semantic_suite,
+)
 
 
 IssueAdder = Callable[..., None]
@@ -34,6 +51,54 @@ _CASE_OUTCOMES = {
     "case_skipped_unsupported",
 }
 _CASE_EVENTS = _CASE_OUTCOMES | {"case_start", "request_complete"}
+
+_SM121_CACHE_SEMANTIC_ADMISSION_ISSUE_CODES = frozenset(
+    {
+        "semantic_t0_prompt_window",
+        "semantic_shared_prefix_window",
+        "semantic_append_identity",
+        "semantic_metrics_unavailable",
+        "semantic_guardrail_metrics_unavailable",
+        "semantic_metric_settle_polls",
+        "semantic_metric_settle",
+        "semantic_input_delta",
+        "semantic_cache_guardrail",
+        "semantic_zero_hit_details",
+        "semantic_zero_hit_native",
+        "semantic_positive_detail",
+        "semantic_positive_native_reconciliation",
+        "semantic_usage_reconciliation",
+        "semantic_case_validation",
+    }
+)
+_SM121_CACHE_SEMANTIC_AUDIT_PATH_KEYS = frozenset(
+    {"path", "run_dir", "summary_run_dir"}
+)
+
+
+def _redact_sm121_cache_semantic_audit_value(value: Any, *, root: Path) -> Any:
+    """Remove local filesystem identity from a semantic audit report."""
+
+    if isinstance(value, dict):
+        return {
+            key: _redact_sm121_cache_semantic_audit_value(item, root=root)
+            for key, item in value.items()
+            if key not in _SM121_CACHE_SEMANTIC_AUDIT_PATH_KEYS
+        }
+    if isinstance(value, list):
+        return [
+            _redact_sm121_cache_semantic_audit_value(item, root=root)
+            for item in value
+        ]
+    if isinstance(value, str):
+        return value.replace(str(root), "<local-run>")
+    return value
+
+
+def _sm121_cache_semantic_audit_run_id(root: Path) -> str:
+    """Return the only local-run identifier permitted in semantic audit output."""
+
+    return root.name
 
 
 def _resolve_matrix_run_reference(raw: str, matrix_root: Path) -> Path:
@@ -1165,6 +1230,554 @@ def audit_sm121_cache_observability_run(run_dir: Path) -> dict[str, Any]:
                     if key not in {"code", "message"}
                 },
             )
+    report["error_count"] = len(report["errors"])
+    report["ok"] = not report["errors"]
+    return report
+
+
+def _audit_sm121_cache_semantic_plan_binding(
+    plan: dict[str, Any],
+    *,
+    model: dict[str, Any],
+    suite: dict[str, Any],
+    arm: str,
+    add_issue: IssueAdder,
+) -> dict[str, str] | None:
+    """Validate one arm's non-sensitive cross-plan binding.
+
+    The plan binding deliberately contains only immutable plan fingerprints and
+    the fixed B/A order.  It must never grow a run path, nonce, prompt digest,
+    token identity, or request identifier.
+    """
+
+    pair = plan.get("semantic_pair")
+    try:
+        validate_sm121_cache_semantic_pair_binding(pair, model, suite)
+    except SM121CacheSemanticError as error:
+        add_issue("semantic_pair_binding", str(error))
+        return None
+    assert isinstance(pair, dict)  # established by the contract validator
+    if pair.get("schema_version") != SM121_CACHE_SEMANTIC_PAIR_BINDING_SCHEMA_VERSION:
+        add_issue("semantic_pair_binding", "semantic pair binding schema changed")
+        return None
+    if pair.get("arm") != arm:
+        add_issue(
+            "semantic_pair_binding_arm",
+            "semantic plan binding arm disagrees with its frozen profile",
+        )
+        return None
+    # Public audit output carries only the relationship scalars, not the
+    # renderer metadata duplicated in the frozen plan.
+    return {
+        key: str(pair[key])
+        for key in ("peer_plan_fingerprint", "pair_binding_sha256")
+    }
+
+
+def _sm121_cache_semantic_expected_cache_off_receipt(
+    cache_on_binding: dict[str, Any], *, cache_on_plan_fingerprint: object
+) -> str:
+    """Derive A's B-terminal receipt from its scalar plan binding."""
+
+    cache_off_plan_fingerprint = cache_on_binding.get("peer_plan_fingerprint")
+    pair_instance_sha256 = cache_on_binding.get("pair_instance_sha256")
+    cache_off_binding = dict(cache_on_binding)
+    cache_off_binding.update(
+        {
+            "arm": SM121_CACHE_SEMANTIC_CACHE_OFF_ARM,
+            "profile_id": SM121_CACHE_SEMANTIC_CACHE_OFF_PROFILE_ID,
+            "peer_plan_fingerprint": cache_on_plan_fingerprint,
+        }
+    )
+    cache_off_binding["pair_binding_sha256"] = (
+        sm121_cache_semantic_pair_binding_sha256(cache_off_binding)
+    )
+    return sm121_cache_semantic_cache_off_receipt_sha256(
+        pair_instance_sha256,
+        cache_off_plan_fingerprint,
+        cache_off_binding["pair_binding_sha256"],
+    )
+
+
+def audit_sm121_cache_semantic_arm_run(run_dir: Path) -> dict[str, Any]:
+    """Read-only audit of one cache-policy semantic canary arm.
+
+    A successful arm is intentionally not a standalone cache-performance
+    claim.  It validates the arm's two fresh lifetimes and scalar semantics;
+    ``audit_sm121_cache_semantic_pair`` adds the reciprocal B-then-A binding.
+    """
+
+    root = run_dir.resolve()
+    report: dict[str, Any] = {
+        "schema_version": 1,
+        "run_id": _sm121_cache_semantic_audit_run_id(root),
+        "read_only": True,
+        "ok": False,
+        "errors": [],
+    }
+
+    def add_issue(code: str, message: str, **context: Any) -> None:
+        issue = _redact_sm121_cache_semantic_audit_value(
+            {"code": code, "message": message, **context}, root=root
+        )
+        assert isinstance(issue, dict)
+        report["errors"].append(issue)
+
+    plan = _load_json_object(root / "plan.json", add_issue=add_issue)
+    events = _load_jsonl(
+        root / "events.jsonl",
+        add_issue=add_issue,
+        run={"run_id": _sm121_cache_semantic_audit_run_id(root)},
+    )
+    if plan is None:
+        report["error_count"] = len(report["errors"])
+        return report
+    model = plan.get("model")
+    suite = plan.get("suite")
+    if not isinstance(model, dict):
+        add_issue("invalid_plan_model", "plan.model must be an object")
+    if not isinstance(suite, dict):
+        add_issue("invalid_plan_suite", "plan.suite must be an object")
+    if not isinstance(model, dict) or not isinstance(suite, dict):
+        report["error_count"] = len(report["errors"])
+        return report
+
+    arm = ""
+    if not is_sm121_cache_semantic_plan(model, suite):
+        add_issue(
+            "not_sm121_cache_semantic_plan",
+            "run plan does not select the dedicated SM121 semantic canary",
+        )
+    else:
+        try:
+            validate_sm121_cache_semantic_candidate(model)
+            validate_sm121_cache_semantic_suite(suite)
+            arm = sm121_cache_semantic_arm(model)
+        except SM121CacheSemanticError as error:
+            add_issue("invalid_sm121_cache_semantic_plan", str(error))
+    if arm:
+        report["arm"] = arm
+        binding = _audit_sm121_cache_semantic_plan_binding(
+            plan, model=model, suite=suite, arm=arm, add_issue=add_issue
+        )
+        if binding is not None:
+            report["pair_binding"] = binding
+            run_starts = [event for event in events if event.get("event") == "run_start"]
+            if len(run_starts) != 1:
+                add_issue(
+                    "semantic_run_start_binding",
+                    "semantic arm requires exactly one run_start record",
+                )
+            else:
+                peer_fingerprint = binding["peer_plan_fingerprint"]
+                expected_start = {
+                    "event": "run_start",
+                    "execution_mode": SM121_CACHE_SEMANTIC_EXECUTION_MODE,
+                    "arm": arm,
+                    "plan_fingerprint": plan.get("fingerprint"),
+                    "semantic_pair_binding_sha256": binding["pair_binding_sha256"],
+                    "cache_off_plan_fingerprint": (
+                        None if arm == SM121_CACHE_SEMANTIC_CACHE_OFF_ARM else peer_fingerprint
+                    ),
+                    "cache_off_audit_passed": (
+                        None if arm == SM121_CACHE_SEMANTIC_CACHE_OFF_ARM else True
+                    ),
+                }
+                observed_start = {
+                    key: value
+                    for key, value in run_starts[0].items()
+                    if key != "timestamp"
+                }
+                if arm == SM121_CACHE_SEMANTIC_CACHE_OFF_ARM:
+                    expected_start["cache_off_terminal_receipt_sha256"] = None
+                else:
+                    try:
+                        expected_start["cache_off_terminal_receipt_sha256"] = (
+                            _sm121_cache_semantic_expected_cache_off_receipt(
+                                plan["semantic_pair"],
+                                cache_on_plan_fingerprint=plan.get("fingerprint"),
+                            )
+                        )
+                    except (
+                        KeyError,
+                        SM121CacheSemanticError,
+                        TypeError,
+                        ValueError,
+                    ):
+                        add_issue(
+                            "semantic_run_start_binding",
+                            "semantic cache-on receipt cannot be derived",
+                        )
+                if observed_start != expected_start:
+                    add_issue(
+                        "semantic_run_start_binding",
+                        "semantic run_start disagrees with its frozen plan binding",
+                    )
+
+    model_id = model.get("id")
+    suite_id = suite.get("id")
+    if isinstance(model_id, str) and isinstance(suite_id, str):
+        planned_case_ids, _ = _audit_plan(
+            plan,
+            matrix_suite=suite_id,
+            model_id=model_id,
+            run_dir=root,
+            add_issue=add_issue,
+            run={"run_id": _sm121_cache_semantic_audit_run_id(root)},
+        )
+    else:
+        planned_case_ids = set()
+    planned_case_order = _planned_case_id_order(suite)
+    report["planned_case_ids"] = list(planned_case_order)
+    if set(planned_case_order) != planned_case_ids:
+        add_issue(
+            "semantic_plan_case_identity_mismatch",
+            "frozen semantic plan case IDs are not a complete ordered set",
+        )
+    if arm:
+        for lifecycle_issue in sm121_cache_semantic_lifecycle_issues(
+            events, planned_case_ids=planned_case_order, arm=arm
+        ):
+            code = lifecycle_issue.get("code")
+            message = lifecycle_issue.get("message")
+            if isinstance(code, str) and isinstance(message, str):
+                add_issue(
+                    code,
+                    message,
+                    **{
+                        key: value
+                        for key, value in lifecycle_issue.items()
+                        if key not in {"code", "message"}
+                    },
+                )
+    report["error_count"] = len(report["errors"])
+    report["ok"] = not report["errors"]
+    return report
+
+
+def _sm121_cache_semantic_files_are_truly_unstarted(root: Path) -> bool:
+    """Return whether the controller has not created either execution artifact."""
+
+    events_path = root / "events.jsonl"
+    summary_path = root / "summary.json"
+    return not (
+        events_path.exists()
+        or events_path.is_symlink()
+        or summary_path.exists()
+        or summary_path.is_symlink()
+    )
+
+
+def _audit_sm121_cache_semantic_unstarted_arm(run_dir: Path) -> dict[str, Any]:
+    """Audit the frozen but intentionally untouched A plan without a journal."""
+
+    root = run_dir.resolve()
+    report: dict[str, Any] = {
+        "schema_version": 1,
+        "run_id": _sm121_cache_semantic_audit_run_id(root),
+        "execution_state": "unstarted",
+        "read_only": True,
+        "ok": False,
+        "errors": [],
+    }
+
+    def add_issue(code: str, message: str, **context: Any) -> None:
+        issue = _redact_sm121_cache_semantic_audit_value(
+            {"code": code, "message": message, **context}, root=root
+        )
+        assert isinstance(issue, dict)
+        report["errors"].append(issue)
+
+    if not _sm121_cache_semantic_files_are_truly_unstarted(root):
+        add_issue(
+            "semantic_unstarted_artifact",
+            "unstarted semantic arm must not contain events.jsonl or summary.json",
+        )
+    plan = _load_json_object(root / "plan.json", add_issue=add_issue)
+    if plan is None:
+        report["error_count"] = len(report["errors"])
+        return report
+    model = plan.get("model")
+    suite = plan.get("suite")
+    if not isinstance(model, dict):
+        add_issue("invalid_plan_model", "plan.model must be an object")
+    if not isinstance(suite, dict):
+        add_issue("invalid_plan_suite", "plan.suite must be an object")
+    if not isinstance(model, dict) or not isinstance(suite, dict):
+        report["error_count"] = len(report["errors"])
+        return report
+    arm = ""
+    if not is_sm121_cache_semantic_plan(model, suite):
+        add_issue(
+            "not_sm121_cache_semantic_plan",
+            "run plan does not select the dedicated SM121 semantic canary",
+        )
+    else:
+        try:
+            validate_sm121_cache_semantic_candidate(model)
+            validate_sm121_cache_semantic_suite(suite)
+            arm = sm121_cache_semantic_arm(model)
+        except SM121CacheSemanticError as error:
+            add_issue("invalid_sm121_cache_semantic_plan", str(error))
+    if arm:
+        report["arm"] = arm
+        binding = _audit_sm121_cache_semantic_plan_binding(
+            plan, model=model, suite=suite, arm=arm, add_issue=add_issue
+        )
+        if binding is not None:
+            report["pair_binding"] = binding
+    model_id = model.get("id")
+    suite_id = suite.get("id")
+    if isinstance(model_id, str) and isinstance(suite_id, str):
+        planned_case_ids, _ = _audit_plan(
+            plan,
+            matrix_suite=suite_id,
+            model_id=model_id,
+            run_dir=root,
+            add_issue=add_issue,
+            run={"run_id": _sm121_cache_semantic_audit_run_id(root)},
+        )
+    else:
+        planned_case_ids = set()
+    planned_case_order = _planned_case_id_order(suite)
+    report["planned_case_ids"] = list(planned_case_order)
+    if set(planned_case_order) != planned_case_ids:
+        add_issue(
+            "semantic_plan_case_identity_mismatch",
+            "frozen semantic plan case IDs are not a complete ordered set",
+        )
+    if arm != SM121_CACHE_SEMANTIC_CACHE_ON_ARM:
+        add_issue(
+            "semantic_unstarted_arm",
+            "only the cache-on A arm may remain unstarted",
+        )
+    report["error_count"] = len(report["errors"])
+    report["ok"] = not report["errors"]
+    return report
+
+
+def _sm121_cache_semantic_terminal_partial_control(
+    report: dict[str, Any], root: Path
+) -> bool:
+    """Recognize the sole policy-failure topology allowed to suppress A."""
+
+    if report.get("arm") != SM121_CACHE_SEMANTIC_CACHE_OFF_ARM:
+        return False
+    errors = report.get("errors")
+    if not isinstance(errors, list) or not errors:
+        return False
+    if any(
+        not isinstance(issue, dict)
+        or issue.get("code") not in _SM121_CACHE_SEMANTIC_ADMISSION_ISSUE_CODES
+        for issue in errors
+    ):
+        return False
+    try:
+        summary = json.loads((root / "summary.json").read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return isinstance(summary, dict) and summary.get("status") == "partial"
+
+
+def audit_sm121_cache_semantic_pair(
+    cache_off_run: Path, cache_on_run: Path
+) -> dict[str, Any]:
+    """Read-only cross-arm audit of the ordered B-then-A semantic pair.
+
+    This checks reciprocal immutable fingerprints on top of the individual
+    journal audits.  It intentionally does not read or materialize prompts,
+    completions, token sequences, request identifiers, or timing data.
+    """
+
+    cache_off_root = cache_off_run.resolve()
+    cache_on_root = cache_on_run.resolve()
+    cache_on_unstarted = _sm121_cache_semantic_files_are_truly_unstarted(
+        cache_on_root
+    )
+    cache_off = audit_sm121_cache_semantic_arm_run(cache_off_root)
+    cache_on = (
+        _audit_sm121_cache_semantic_unstarted_arm(cache_on_root)
+        if cache_on_unstarted
+        else audit_sm121_cache_semantic_arm_run(cache_on_root)
+    )
+    report: dict[str, Any] = {
+        "schema_version": 1,
+        "read_only": True,
+        "ok": False,
+        "errors": [],
+        "arms": {
+            SM121_CACHE_SEMANTIC_CACHE_OFF_ARM: cache_off,
+            SM121_CACHE_SEMANTIC_CACHE_ON_ARM: cache_on,
+        },
+    }
+
+    def add_issue(code: str, message: str, **context: Any) -> None:
+        issue: Any = {"code": code, "message": message, **context}
+        for root in (cache_off_root, cache_on_root):
+            issue = _redact_sm121_cache_semantic_audit_value(issue, root=root)
+        assert isinstance(issue, dict)
+        report["errors"].append(issue)
+
+    if cache_off.get("arm") != SM121_CACHE_SEMANTIC_CACHE_OFF_ARM:
+        add_issue("semantic_pair_off_arm", "first run is not the cache-off B arm")
+    if cache_on.get("arm") != SM121_CACHE_SEMANTIC_CACHE_ON_ARM:
+        add_issue("semantic_pair_on_arm", "second run is not the cache-on A arm")
+    def load_plan(run: Path) -> dict[str, Any] | None:
+        try:
+            value = json.loads((run.resolve() / "plan.json").read_text())
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    off_plan = load_plan(cache_off_root)
+    on_plan = load_plan(cache_on_root)
+    pair_binding_valid = False
+    pair_instance_sha256: str | None = None
+    off_fingerprint: str | None = None
+    on_fingerprint: str | None = None
+    off_binding: dict[str, Any] | None = None
+    on_binding: dict[str, Any] | None = None
+    if off_plan is None or on_plan is None:
+        add_issue("semantic_pair_plan", "paired semantic plan is unavailable")
+    else:
+        off_fingerprint = off_plan.get("fingerprint")
+        on_fingerprint = on_plan.get("fingerprint")
+        off_binding = off_plan.get("semantic_pair")
+        on_binding = on_plan.get("semantic_pair")
+        if not isinstance(off_fingerprint, str) or not isinstance(on_fingerprint, str):
+            add_issue("semantic_pair_fingerprint", "paired semantic fingerprint is invalid")
+        elif not isinstance(off_binding, dict) or not isinstance(on_binding, dict):
+            add_issue("semantic_pair_binding", "paired semantic binding is missing")
+        else:
+            off_model = off_plan.get("model")
+            off_suite = off_plan.get("suite")
+            on_model = on_plan.get("model")
+            on_suite = on_plan.get("suite")
+            try:
+                pair_instance_sha256 = sm121_cache_semantic_pair_instance_sha256(
+                    off_plan.get("run_nonce"), on_plan.get("run_nonce")
+                )
+                if (
+                    off_binding.get("pair_instance_sha256") != pair_instance_sha256
+                    or on_binding.get("pair_instance_sha256") != pair_instance_sha256
+                ):
+                    raise SM121CacheSemanticError(
+                        "semantic pair instance does not match frozen plan nonces"
+                    )
+                validate_sm121_cache_semantic_pair_binding(
+                    off_binding,
+                    off_model,
+                    off_suite,
+                    peer_plan_fingerprint=on_fingerprint,
+                    peer_binding=on_binding,
+                )
+                validate_sm121_cache_semantic_pair_binding(
+                    on_binding,
+                    on_model,
+                    on_suite,
+                    peer_plan_fingerprint=off_fingerprint,
+                    peer_binding=off_binding,
+                )
+                pair_binding_valid = True
+            except SM121CacheSemanticError as error:
+                add_issue(
+                    "semantic_pair_binding_mismatch",
+                    str(error),
+                )
+
+            def run_start(run: Path) -> dict[str, Any] | None:
+                try:
+                    lines = (run.resolve() / "events.jsonl").read_text().splitlines()
+                    first = json.loads(lines[0]) if lines else None
+                except (OSError, UnicodeError, json.JSONDecodeError, IndexError):
+                    return None
+                return first if isinstance(first, dict) else None
+
+            off_start = run_start(cache_off_root)
+            if off_start is None:
+                add_issue(
+                    "semantic_pair_run_start",
+                    "cache-off semantic run_start record is unavailable",
+                )
+            elif (
+                off_start.get("execution_mode") != SM121_CACHE_SEMANTIC_EXECUTION_MODE
+                or off_start.get("arm") != SM121_CACHE_SEMANTIC_CACHE_OFF_ARM
+                or off_start.get("plan_fingerprint") != off_fingerprint
+                or off_start.get("semantic_pair_binding_sha256")
+                != off_binding.get("pair_binding_sha256")
+                or off_start.get("cache_off_plan_fingerprint") is not None
+                or off_start.get("cache_off_audit_passed") is not None
+                or off_start.get("cache_off_terminal_receipt_sha256") is not None
+            ):
+                add_issue(
+                    "semantic_pair_control_start",
+                    "cache-off control run_start does not preserve B-first semantics",
+                )
+
+            if not cache_on_unstarted:
+                on_start = run_start(cache_on_root)
+                if on_start is None:
+                    add_issue(
+                        "semantic_pair_run_start",
+                        "cache-on semantic run_start record is unavailable",
+                    )
+                else:
+                    try:
+                        expected_receipt = (
+                            sm121_cache_semantic_cache_off_receipt_sha256(
+                                pair_instance_sha256,
+                                off_fingerprint,
+                                off_binding.get("pair_binding_sha256"),
+                            )
+                        )
+                    except SM121CacheSemanticError:
+                        expected_receipt = None
+                        add_issue(
+                            "semantic_pair_candidate_receipt",
+                            "cache-on control receipt cannot be derived",
+                        )
+                    if (
+                        on_start.get("execution_mode")
+                        != SM121_CACHE_SEMANTIC_EXECUTION_MODE
+                        or on_start.get("arm") != SM121_CACHE_SEMANTIC_CACHE_ON_ARM
+                        or on_start.get("plan_fingerprint") != on_fingerprint
+                        or on_start.get("semantic_pair_binding_sha256")
+                        != on_binding.get("pair_binding_sha256")
+                        or on_start.get("cache_off_plan_fingerprint") != off_fingerprint
+                        or on_start.get("cache_off_audit_passed") is not True
+                        or on_start.get("cache_off_terminal_receipt_sha256")
+                        != expected_receipt
+                    ):
+                        add_issue(
+                            "semantic_pair_candidate_start",
+                            "cache-on candidate run_start does not attest the completed B control",
+                        )
+
+    if cache_on_unstarted:
+        report["topology"] = "cache_off_terminal_partial_cache_on_unstarted"
+        if (
+            pair_binding_valid
+            and cache_on.get("ok") is True
+            and _sm121_cache_semantic_terminal_partial_control(
+                cache_off, cache_off_root
+            )
+        ):
+            report["authorized_terminal_partial"] = True
+        elif cache_off.get("ok") is True:
+            add_issue(
+                "semantic_pair_unstarted_candidate",
+                "completed cache-off B control requires a started cache-on A candidate",
+            )
+        else:
+            add_issue(
+                "semantic_pair_partial_control",
+                "unstarted cache-on A requires a terminal policy-partial B control",
+            )
+    else:
+        report["topology"] = "cache_off_complete_cache_on_completed"
+        if not cache_off.get("ok") or not cache_on.get("ok"):
+            add_issue("semantic_pair_arm_audit", "one or both semantic arm audits failed")
+
     report["error_count"] = len(report["errors"])
     report["ok"] = not report["errors"]
     return report

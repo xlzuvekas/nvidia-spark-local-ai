@@ -1,0 +1,27 @@
+schema_version = 1
+
+[suite]
+id = "qwen38-flash-next-sm121-triton-storage-cache-policy-semantic-canary"
+description = "Admission-only paired cache-policy semantic canary for the pre-admission Qwen3.8 Flash-Next SM121 native-NVMe runtime. It runs cache-off B before cache-on A in separate fresh lifetimes, with an exact-answer quality gate and one dedicated append-only shared-prefix semantic probe. No timing or throughput claim is part of this suite."
+
+[[cases]]
+id = "synthetic-exact-answer-v2"
+kind = "quality"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 512
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "sm121-cache-policy-shared-prefix-semantic-v1"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0

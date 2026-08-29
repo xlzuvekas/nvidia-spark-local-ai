@@ -116,6 +116,40 @@ from .sglang_sm121_cache_observability import (
     validate_sm121_cache_static_attestation_event,
     validate_sm121_cache_zero_hit_event,
 )
+from .sglang_sm121_cache_semantic import (
+    SM121_CACHE_SEMANTIC_ARM_ORDER,
+    SM121_CACHE_SEMANTIC_CACHE_OFF_ARM,
+    SM121_CACHE_SEMANTIC_CACHE_OFF_PROFILE_ID,
+    SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
+    SM121_CACHE_SEMANTIC_CACHE_ON_PROFILE_ID,
+    SM121_CACHE_SEMANTIC_CASE_ID,
+    SM121_CACHE_SEMANTIC_EXECUTION_MODE,
+    SM121_CACHE_SEMANTIC_LOCAL_LIFETIME_ORDER,
+    SM121_CACHE_SEMANTIC_PAIR_BINDING_FIELDS,
+    SM121_CACHE_SEMANTIC_PAIR_BINDING_SCHEMA_VERSION,
+    SM121_CACHE_SEMANTIC_QUALITY_CASE_ID,
+    SM121_CACHE_SEMANTIC_RUNTIME_ATTESTATION_EVENT,
+    SM121_CACHE_SEMANTIC_STATIC_ATTESTATION_EVENT,
+    SM121_CACHE_SEMANTIC_SUITE_ID,
+    SM121_CACHE_SEMANTIC_TURN_OBSERVATION_EVENT,
+    SM121_CACHE_SEMANTIC_TURN_ORDER,
+    SM121CacheSemanticError,
+    expected_sm121_cache_semantic_event_counts,
+    is_sm121_cache_semantic_candidate,
+    is_sm121_cache_semantic_plan,
+    sm121_cache_semantic_arm,
+    sm121_cache_semantic_cache_off_receipt_sha256,
+    sm121_cache_semantic_case_metadata,
+    sm121_cache_semantic_lifecycle_issues,
+    sm121_cache_semantic_pair_binding_sha256,
+    sm121_cache_semantic_pair_instance_sha256,
+    validate_sm121_cache_semantic_candidate,
+    validate_sm121_cache_semantic_pair_binding,
+    validate_sm121_cache_semantic_runtime_attestation_event,
+    validate_sm121_cache_semantic_static_attestation_event,
+    validate_sm121_cache_semantic_suite,
+    validate_sm121_cache_semantic_turn_event,
+)
 
 
 SCHEMA_VERSION = "sparkbench-evidence-v1"
@@ -242,6 +276,64 @@ _SM121_CACHE_OBSERVABILITY_CASE_IDS = (
     "synthetic-exact-answer-v2--4660f9c6f3d1",
     "sm121-cache-zero-hit-observability-v1--9cd3f7845105",
 )
+# The semantic profiles are a fixed B-then-A pair.  Their fingerprints bind
+# private serving arguments without publishing those arguments, while these
+# deterministic case IDs bind the public scalar evidence to each distinct arm.
+_SM121_CACHE_SEMANTIC_PLAN_FINGERPRINTS = {
+    SM121_CACHE_SEMANTIC_CACHE_OFF_ARM: "d6c8e0c129527b4c",
+    SM121_CACHE_SEMANTIC_CACHE_ON_ARM: "c5469a6c02600fca",
+}
+_SM121_CACHE_SEMANTIC_CASE_IDS = {
+    SM121_CACHE_SEMANTIC_CACHE_OFF_ARM: (
+        "synthetic-exact-answer-v2--d52612409550",
+        "sm121-cache-policy-shared-prefix-semantic-v1--60757c436cf5",
+    ),
+    SM121_CACHE_SEMANTIC_CACHE_ON_ARM: (
+        "synthetic-exact-answer-v2--628654a9bd7c",
+        "sm121-cache-policy-shared-prefix-semantic-v1--ebfeb6c9ed39",
+    ),
+}
+
+
+def _expected_sm121_cache_semantic_pair_binding(
+    arm: str, *, pair_instance_sha256: str
+) -> dict[str, Any]:
+    """Reconstruct one arm's public binding from its opaque pair commitment."""
+
+    profile_id = {
+        SM121_CACHE_SEMANTIC_CACHE_OFF_ARM: SM121_CACHE_SEMANTIC_CACHE_OFF_PROFILE_ID,
+        SM121_CACHE_SEMANTIC_CACHE_ON_ARM: SM121_CACHE_SEMANTIC_CACHE_ON_PROFILE_ID,
+    }.get(arm)
+    peer_arm = (
+        SM121_CACHE_SEMANTIC_CACHE_ON_ARM
+        if arm == SM121_CACHE_SEMANTIC_CACHE_OFF_ARM
+        else SM121_CACHE_SEMANTIC_CACHE_OFF_ARM
+    )
+    if profile_id is None or peer_arm not in _SM121_CACHE_SEMANTIC_PLAN_FINGERPRINTS:
+        raise EvidenceError("SM121 semantic pair arm is invalid")
+    binding: dict[str, Any] = {
+        "schema_version": SM121_CACHE_SEMANTIC_PAIR_BINDING_SCHEMA_VERSION,
+        "suite_id": SM121_CACHE_SEMANTIC_SUITE_ID,
+        "execution_mode": SM121_CACHE_SEMANTIC_EXECUTION_MODE,
+        "arm": arm,
+        "profile_id": profile_id,
+        "arm_order": list(SM121_CACHE_SEMANTIC_ARM_ORDER),
+        "local_lifetime_order": list(SM121_CACHE_SEMANTIC_LOCAL_LIFETIME_ORDER),
+        "quality_case_id": SM121_CACHE_SEMANTIC_QUALITY_CASE_ID,
+        "semantic_case_id": SM121_CACHE_SEMANTIC_CASE_ID,
+        "semantic_case_metadata": sm121_cache_semantic_case_metadata(),
+        "peer_plan_fingerprint": _SM121_CACHE_SEMANTIC_PLAN_FINGERPRINTS[peer_arm],
+        "pair_instance_sha256": pair_instance_sha256,
+    }
+    try:
+        binding["pair_binding_sha256"] = sm121_cache_semantic_pair_binding_sha256(
+            binding
+        )
+    except SM121CacheSemanticError as error:
+        raise EvidenceError("SM121 semantic pair binding is invalid") from error
+    return binding
+
+
 _SM121_STORAGE_MODEL_SOURCE_FIELDS = frozenset(
     {
         "architecture",
@@ -1100,6 +1192,9 @@ _KNOWN_EVENTS = {
     SM121_CACHE_STATIC_ATTESTATION_EVENT,
     SM121_CACHE_RUNTIME_ATTESTATION_EVENT,
     SM121_CACHE_ZERO_HIT_EVENT,
+    SM121_CACHE_SEMANTIC_STATIC_ATTESTATION_EVENT,
+    SM121_CACHE_SEMANTIC_RUNTIME_ATTESTATION_EVENT,
+    SM121_CACHE_SEMANTIC_TURN_OBSERVATION_EVENT,
     SM121_STORAGE_RUNTIME_PROVENANCE_EVENT,
     "sglang_spec_decode_metrics_snapshot",
     "vllm_spec_decode_metrics_snapshot",
@@ -2114,6 +2209,7 @@ _SUMMARY_KEYS = {
     "shutdown_telemetry",
     "speculative_decoding",
     "sm121_cache_observability_lifecycle_issues",
+    "sm121_cache_semantic_lifecycle_issues",
     "startup_measurement_annotations",
     "startup_measurement_valid",
     "startup_safety_gates",
@@ -3021,10 +3117,26 @@ def _normalize_status(summary: dict[str, Any] | None, events: list[dict[str, Any
 
 
 def _sm121_singleton_lane(plan: dict[str, Any]) -> str | None:
-    """Classify an SM121 singleton plan without allowing suite downgrades."""
+    """Classify a dedicated SM121 plan without allowing suite downgrades.
+
+    The semantic pair shares the storage runtime marker, so it must be
+    recognized before the historical singleton classifier considers that
+    marker.  Otherwise a valid semantic arm would be rejected as a malformed
+    storage/B0 selection before its dedicated source contract gets a chance to
+    authenticate it.
+    """
 
     model = plan.get("model")
     suite = plan.get("suite")
+    semantic_model_marker = bool(
+        isinstance(model, dict) and is_sm121_cache_semantic_candidate(model)
+    )
+    suite_id = suite.get("id") if isinstance(suite, dict) else None
+    semantic_suite_marker = suite_id == SM121_CACHE_SEMANTIC_SUITE_ID
+    if semantic_model_marker or semantic_suite_marker:
+        if not semantic_model_marker or not semantic_suite_marker:
+            raise EvidenceError("SM121 semantic profile and suite binding is incomplete")
+        return "cache_semantic"
     model_marker = bool(
         isinstance(model, dict)
         and (
@@ -3032,7 +3144,6 @@ def _sm121_singleton_lane(plan: dict[str, Any]) -> str | None:
             or model.get("sglang_storage_mode") == SM121_STORAGE_MODE
         )
     )
-    suite_id = suite.get("id") if isinstance(suite, dict) else None
     suite_marker = suite_id in {
         SM121_STORAGE_SUITE_ID,
         SM121_CACHE_OBSERVABILITY_SUITE_ID,
@@ -3054,6 +3165,10 @@ def _selects_sm121_storage_canary(plan: dict[str, Any]) -> bool:
 
 def _selects_sm121_cache_observability(plan: dict[str, Any]) -> bool:
     return _sm121_singleton_lane(plan) == "cache_observability"
+
+
+def _selects_sm121_cache_semantic(plan: dict[str, Any]) -> bool:
+    return _sm121_singleton_lane(plan) == "cache_semantic"
 
 
 def _expected_sm121_storage_model() -> dict[str, Any]:
@@ -3137,6 +3252,58 @@ def _expected_sm121_cache_observability_suite() -> dict[str, Any]:
                 "id": SM121_CACHE_ZERO_HIT_CASE_ID,
                 "kind": "capability",
                 "max_output_tokens": SM121_CACHE_ZERO_HIT_MAX_OUTPUT_TOKENS,
+                "max_turns": 1,
+                "prompt_repetitions": 0,
+                "repetitions": 1,
+                "requires": ["chat"],
+                "temperature": 0.0,
+                "warmups": 0,
+            },
+        ],
+    }
+
+
+def _expected_sm121_cache_semantic_model(arm: str) -> dict[str, Any]:
+    """Return the exact public identity for one B/A semantic profile."""
+
+    profile_id = {
+        SM121_CACHE_SEMANTIC_CACHE_OFF_ARM: SM121_CACHE_SEMANTIC_CACHE_OFF_PROFILE_ID,
+        SM121_CACHE_SEMANTIC_CACHE_ON_ARM: SM121_CACHE_SEMANTIC_CACHE_ON_PROFILE_ID,
+    }.get(arm)
+    if profile_id is None:
+        raise EvidenceError("SM121 semantic arm is invalid")
+    return {**_expected_sm121_storage_model(), "id": profile_id}
+
+
+def _expected_sm121_cache_semantic_suite(arm: str) -> dict[str, Any]:
+    """Return the arm-bound public suite without prompt or renderer text."""
+
+    case_ids = _SM121_CACHE_SEMANTIC_CASE_IDS.get(arm)
+    if case_ids is None:
+        raise EvidenceError("SM121 semantic arm is invalid")
+    return {
+        "id": SM121_CACHE_SEMANTIC_SUITE_ID,
+        "schema_version": 1,
+        "cases": [
+            {
+                "case_id": case_ids[0],
+                "concurrency": 1,
+                "id": SM121_CACHE_SEMANTIC_QUALITY_CASE_ID,
+                "kind": "quality",
+                "max_output_tokens": 512,
+                "max_turns": 1,
+                "prompt_repetitions": 0,
+                "repetitions": 1,
+                "requires": ["chat"],
+                "temperature": 0.0,
+                "warmups": 0,
+            },
+            {
+                "case_id": case_ids[1],
+                "concurrency": 1,
+                "id": SM121_CACHE_SEMANTIC_CASE_ID,
+                "kind": "capability",
+                "max_output_tokens": 32,
                 "max_turns": 1,
                 "prompt_repetitions": 0,
                 "repetitions": 1,
@@ -3555,6 +3722,808 @@ def _validate_sm121_cache_observability_source(
         runtime_event=runtime_event,
         zero_event=zero_event,
     )
+
+
+_SM121_CACHE_SEMANTIC_ADMISSION_ISSUE_CODES = frozenset(
+    {
+        "semantic_t0_prompt_window",
+        "semantic_shared_prefix_window",
+        "semantic_append_identity",
+        "semantic_metrics_unavailable",
+        "semantic_guardrail_metrics_unavailable",
+        "semantic_metric_settle_polls",
+        "semantic_metric_settle",
+        "semantic_input_delta",
+        "semantic_cache_guardrail",
+        "semantic_zero_hit_details",
+        "semantic_zero_hit_native",
+        "semantic_positive_detail",
+        "semantic_positive_native_reconciliation",
+        "semantic_usage_reconciliation",
+        # Older intermediate journals mark the semantic aggregate false as a
+        # lifecycle issue.  The explicit aggregate reconciliation below is
+        # authoritative and permits a well-formed terminal partial arm.
+        "semantic_case_validation",
+    }
+)
+
+
+def _sm121_cache_semantic_public_turn(event: dict[str, Any]) -> dict[str, Any]:
+    """Project one turn proof while excluding journal/request identifiers."""
+
+    return {
+        key: value
+        for key, value in event.items()
+        if key
+        not in {
+            "event",
+            "timestamp",
+            "case_id",
+            "protocol_case_id",
+            "attempt_id",
+        }
+    }
+
+
+def _sm121_cache_semantic_runtime(
+    *,
+    arm: str,
+    pair_binding: dict[str, Any],
+    static_events: Sequence[dict[str, Any]],
+    runtime_events: Sequence[dict[str, Any]],
+    turn_events: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """Project the paired arm's public scalar cache-semantic proof."""
+
+    static = [
+        {key: value for key, value in event.items() if key not in {"event", "timestamp"}}
+        for event in static_events
+    ]
+    runtime = [
+        {key: value for key, value in event.items() if key not in {"event", "timestamp"}}
+        for event in runtime_events
+    ]
+    return {
+        "api_authentication": "ephemeral_bearer",
+        "api_key_file_mode": "0600",
+        "arm": arm,
+        "audit_issue_count": 0,
+        "benchmark_scope": "sm121_cache_policy_semantic",
+        "build_contract_sha256": _sha256(
+            SM121_STORAGE_BUILD_CONTRACT_SHA256,
+            name="SM121 storage build contract",
+        ),
+        "cache_runtime_attestations": runtime,
+        "cache_static_attestations": static,
+        "candidate_source_revision": SM121_STORAGE_SOURCE_TREE,
+        "container_capabilities": "dropped_all",
+        "container_no_new_privileges": True,
+        "container_rootfs": "readonly_tmpfs_writable_cache",
+        "docker_image_sha256": _sha256(
+            SM121_STORAGE_LOCAL_IMAGE_ID,
+            name="SM121 storage local image",
+        ),
+        "fresh_server_lifetime_count": 2,
+        "fresh_server_lifetimes": [1, 2],
+        "hf_network_policy": "offline",
+        "model_acquisition": "disabled_exact_read_only_snapshot",
+        "network_topology": "loopback_published_bridge",
+        "pair_binding": dict(pair_binding),
+        "plan_fingerprint": _SM121_CACHE_SEMANTIC_PLAN_FINGERPRINTS[arm],
+        "platform": SM121_STORAGE_PLATFORM,
+        "seccomp_profile_sha256": _sha256(
+            "sha256:" + SM121_STORAGE_SECCOMP_SHA256,
+            name="SM121 storage seccomp profile",
+        ),
+        "semantic_turn_observations": [
+            _sm121_cache_semantic_public_turn(event) for event in turn_events
+        ],
+        "sglang_ple_nvme_backend": "io_uring",
+        "sglang_ple_nvme_cache_pages": SM121_STORAGE_CACHE_PAGES,
+        "sglang_ple_nvme_max_batch_pages": SM121_STORAGE_MAX_BATCH_PAGES,
+        "sglang_ple_nvme_queue_depth": SM121_STORAGE_QUEUE_DEPTH,
+        "sglang_rust_build_mode": "never",
+        "sglang_storage_mode": SM121_STORAGE_MODE,
+    }
+
+
+def _validate_sm121_cache_semantic_plan(
+    plan: dict[str, Any],
+    *,
+    source_run_id: str,
+) -> tuple[str, dict[str, Any]] | None:
+    """Authenticate a frozen B/A plan before inspecting its execution.
+
+    This intentionally covers every immutable plan field, including the
+    run-directory fingerprint binding and schema-2 integrity hash.  The pair
+    exporter calls it for both plans before it considers the authorized B
+    partial/A-unstarted topology, so a frozen-but-never-started A cannot evade
+    static authentication.
+    """
+
+    if not _selects_sm121_cache_semantic(plan):
+        return None
+    if type(plan.get("schema_version")) is not int or plan["schema_version"] != 2:
+        raise EvidenceError("SM121 semantic canary requires frozen plan schema 2")
+    if set(plan) != {
+        "created_at",
+        "fingerprint",
+        "host_at_plan",
+        "integrity_hash",
+        "model",
+        "models_manifest",
+        "resolved",
+        "run_nonce",
+        "schema_version",
+        "semantic_pair",
+        "suite",
+        "suite_manifest",
+    }:
+        raise EvidenceError("SM121 semantic canary plan schema changed")
+    model = plan.get("model")
+    suite = plan.get("suite")
+    resolved = plan.get("resolved")
+    if (
+        not isinstance(model, dict)
+        or set(model) != _SM121_STORAGE_MODEL_SOURCE_FIELDS
+        or not isinstance(suite, dict)
+        or set(suite) != {"cases", "description", "id", "schema_version"}
+        or not isinstance(resolved, dict)
+        or set(resolved) != {"image_digest", "local_image"}
+    ):
+        raise EvidenceError("SM121 semantic canary frozen records changed")
+    try:
+        if not is_sm121_cache_semantic_plan(model, suite):
+            raise SM121CacheSemanticError("semantic plan selector is invalid")
+        validate_sm121_cache_semantic_candidate(model)
+        validate_sm121_cache_semantic_suite(suite)
+        arm = sm121_cache_semantic_arm(model)
+    except SM121CacheSemanticError as error:
+        raise EvidenceError(f"invalid SM121 semantic plan: {error}") from error
+    if not _json_strict_equal(
+        _project_model(plan, None), _expected_sm121_cache_semantic_model(arm)
+    ):
+        raise EvidenceError("SM121 semantic public model identity changed")
+    expected_case_ids = _SM121_CACHE_SEMANTIC_CASE_IDS[arm]
+    cases = suite.get("cases")
+    if not isinstance(cases, list) or len(cases) != 2:
+        raise EvidenceError("SM121 semantic case records changed")
+    for index, (case, expected_case_id) in enumerate(
+        zip(cases, expected_case_ids, strict=True)
+    ):
+        if not isinstance(case, dict) or set(case) != {
+            "case_id",
+            "concurrency",
+            "id",
+            "kind",
+            "max_output_tokens",
+            "max_turns",
+            "prompt_repetitions",
+            "repetitions",
+            "requires",
+            "temperature",
+            "warmups",
+        }:
+            raise EvidenceError("SM121 semantic case schema changed")
+        unbound = {key: value for key, value in case.items() if key != "case_id"}
+        calculated = f"{case['id']}--{content_hash({'model': model, 'case': unbound}, 12)}"
+        if case.get("case_id") != expected_case_id or calculated != expected_case_id:
+            raise EvidenceError(
+                f"SM121 semantic case {index} lost its frozen binding"
+            )
+    if not _json_strict_equal(
+        resolved.get("local_image"),
+        {
+            "docker_image_id": SM121_STORAGE_LOCAL_IMAGE_ID,
+            "platform": SM121_STORAGE_PLATFORM,
+            "source_tree": SM121_STORAGE_SOURCE_TREE,
+        },
+    ) or resolved.get("image_digest") is not None:
+        raise EvidenceError("SM121 semantic local image identity changed")
+    fingerprint_basis = {
+        "model": model,
+        "suite": {
+            **suite,
+            "cases": [
+                {key: value for key, value in case.items() if key != "case_id"}
+                for case in cases
+            ],
+        },
+        "resolved": resolved,
+    }
+    fingerprint = plan.get("fingerprint")
+    if (
+        fingerprint != _SM121_CACHE_SEMANTIC_PLAN_FINGERPRINTS[arm]
+        or content_hash(fingerprint_basis) != fingerprint
+        or not source_run_id.endswith("-" + fingerprint[:8])
+    ):
+        raise EvidenceError("SM121 semantic plan fingerprint changed")
+    integrity = plan.get("integrity_hash")
+    integrity_basis = {key: value for key, value in plan.items() if key != "integrity_hash"}
+    if (
+        not isinstance(integrity, str)
+        or re.fullmatch(r"[0-9a-f]{64}", integrity) is None
+        or content_hash(integrity_basis, 64) != integrity
+        or not isinstance(plan.get("run_nonce"), str)
+        or re.fullmatch(r"[0-9a-f]{32}", plan["run_nonce"]) is None
+    ):
+        raise EvidenceError("SM121 semantic plan integrity changed")
+    pair_binding = plan.get("semantic_pair")
+    peer_arm = (
+        SM121_CACHE_SEMANTIC_CACHE_ON_ARM
+        if arm == SM121_CACHE_SEMANTIC_CACHE_OFF_ARM
+        else SM121_CACHE_SEMANTIC_CACHE_OFF_ARM
+    )
+    try:
+        validate_sm121_cache_semantic_pair_binding(
+            pair_binding,
+            model,
+            suite,
+            peer_plan_fingerprint=_SM121_CACHE_SEMANTIC_PLAN_FINGERPRINTS[peer_arm],
+        )
+    except SM121CacheSemanticError as error:
+        raise EvidenceError("SM121 semantic pair binding changed") from error
+    assert isinstance(pair_binding, dict)
+    pair_instance_sha256 = pair_binding.get("pair_instance_sha256")
+    if not isinstance(pair_instance_sha256, str) or not _json_strict_equal(
+        pair_binding,
+        _expected_sm121_cache_semantic_pair_binding(
+            arm, pair_instance_sha256=pair_instance_sha256
+        ),
+    ):
+        raise EvidenceError("SM121 semantic pair binding changed")
+    return arm, pair_binding
+
+
+def _validate_sm121_cache_semantic_source(
+    plan: dict[str, Any],
+    events: list[dict[str, Any]],
+    summary: dict[str, Any] | None,
+    *,
+    source_run_id: str,
+) -> dict[str, Any] | None:
+    """Authenticate one B/A semantic arm before scalar publication.
+
+    A terminal partial is publishable only when the dedicated quality lifetime
+    is clean and the second lifetime records a valid, explicitly non-admitted
+    scalar observation.  Structural defects, raw event extensions, and any
+    arm/suite downgrade remain fail-closed.
+    """
+
+    static = _validate_sm121_cache_semantic_plan(
+        plan, source_run_id=source_run_id
+    )
+    if static is None:
+        return None
+    arm, pair_binding = static
+    expected_case_ids = _SM121_CACHE_SEMANTIC_CASE_IDS[arm]
+    fingerprint = plan["fingerprint"]
+    assert isinstance(fingerprint, str)
+    peer_arm = (
+        SM121_CACHE_SEMANTIC_CACHE_ON_ARM
+        if arm == SM121_CACHE_SEMANTIC_CACHE_OFF_ARM
+        else SM121_CACHE_SEMANTIC_CACHE_OFF_ARM
+    )
+
+    run_starts = [event for event in events if event.get("event") == "run_start"]
+    if len(run_starts) != 1:
+        raise EvidenceError("SM121 semantic run_start record is incomplete")
+    peer_fingerprint = _SM121_CACHE_SEMANTIC_PLAN_FINGERPRINTS[peer_arm]
+    if arm == SM121_CACHE_SEMANTIC_CACHE_OFF_ARM:
+        cache_off_terminal_receipt_sha256: str | None = None
+    else:
+        pair_instance_sha256 = pair_binding["pair_instance_sha256"]
+        assert isinstance(pair_instance_sha256, str)
+        cache_off_binding = _expected_sm121_cache_semantic_pair_binding(
+            SM121_CACHE_SEMANTIC_CACHE_OFF_ARM,
+            pair_instance_sha256=pair_instance_sha256,
+        )
+        try:
+            cache_off_terminal_receipt_sha256 = (
+                sm121_cache_semantic_cache_off_receipt_sha256(
+                    pair_instance_sha256,
+                    _SM121_CACHE_SEMANTIC_PLAN_FINGERPRINTS[
+                        SM121_CACHE_SEMANTIC_CACHE_OFF_ARM
+                    ],
+                    cache_off_binding["pair_binding_sha256"],
+                )
+            )
+        except SM121CacheSemanticError as error:
+            raise EvidenceError("SM121 semantic cache-off receipt changed") from error
+    expected_start = {
+        "event": "run_start",
+        "execution_mode": SM121_CACHE_SEMANTIC_EXECUTION_MODE,
+        "arm": arm,
+        "plan_fingerprint": fingerprint,
+        "semantic_pair_binding_sha256": pair_binding["pair_binding_sha256"],
+        "cache_off_plan_fingerprint": (
+            None
+            if arm == SM121_CACHE_SEMANTIC_CACHE_OFF_ARM
+            else peer_fingerprint
+        ),
+        "cache_off_audit_passed": (
+            None
+            if arm == SM121_CACHE_SEMANTIC_CACHE_OFF_ARM
+            else True
+        ),
+        "cache_off_terminal_receipt_sha256": cache_off_terminal_receipt_sha256,
+    }
+    run_start = run_starts[0]
+    source_start = {key: value for key, value in run_start.items() if key != "timestamp"}
+    if not _json_strict_equal(source_start, expected_start):
+        raise EvidenceError("SM121 semantic run_start binding changed")
+
+    lifecycle_issues = sm121_cache_semantic_lifecycle_issues(
+        events, planned_case_ids=expected_case_ids, arm=arm
+    )
+    structural_issues = [
+        issue
+        for issue in lifecycle_issues
+        if issue.get("code") not in _SM121_CACHE_SEMANTIC_ADMISSION_ISSUE_CODES
+    ]
+    if structural_issues:
+        codes = sorted(
+            str(issue.get("code"))
+            for issue in structural_issues
+            if isinstance(issue, dict)
+        )
+        raise EvidenceError("SM121 semantic lifecycle audit failed: " + ", ".join(codes))
+    static_events = [
+        event
+        for event in events
+        if event.get("event") == SM121_CACHE_SEMANTIC_STATIC_ATTESTATION_EVENT
+    ]
+    runtime_events = [
+        event
+        for event in events
+        if event.get("event") == SM121_CACHE_SEMANTIC_RUNTIME_ATTESTATION_EVENT
+    ]
+    turn_events = [
+        event
+        for event in events
+        if event.get("event") == SM121_CACHE_SEMANTIC_TURN_OBSERVATION_EVENT
+    ]
+    if not (
+        len(static_events) == len(runtime_events) == 2
+        and len(turn_events) == len(SM121_CACHE_SEMANTIC_TURN_ORDER)
+    ):
+        raise EvidenceError("SM121 semantic attestation events are incomplete")
+    try:
+        for event in static_events:
+            validate_sm121_cache_semantic_static_attestation_event(event)
+        for event in runtime_events:
+            validate_sm121_cache_semantic_runtime_attestation_event(event)
+        for event in turn_events:
+            validate_sm121_cache_semantic_turn_event(event)
+    except SM121CacheSemanticError as error:
+        raise EvidenceError("SM121 semantic attestation changed") from error
+    all_admitted = all(event.get("semantic_turn_admitted") is True for event in turn_events)
+    case_completes = [event for event in events if event.get("event") == "case_complete"]
+    if len(case_completes) != 2:
+        raise EvidenceError("SM121 semantic case completion records are incomplete")
+    if case_completes[0].get("validation_passed") is not True:
+        raise EvidenceError("SM121 semantic quality gate is not clean")
+    if case_completes[1].get("validation_passed") is not all_admitted:
+        raise EvidenceError("SM121 semantic aggregate admission is inconsistent")
+    if not isinstance(summary, dict):
+        raise EvidenceError("SM121 semantic canary requires a terminal summary")
+    expected_status = "complete" if all_admitted else "partial"
+    if summary.get("status") != expected_status:
+        raise EvidenceError("SM121 semantic summary status disagrees with its turns")
+    return _sm121_cache_semantic_runtime(
+        arm=arm,
+        pair_binding=pair_binding,
+        static_events=static_events,
+        runtime_events=runtime_events,
+        turn_events=turn_events,
+    )
+
+
+def _prepare_sm121_cache_semantic_pair_export(
+    run_dirs: Sequence[Path], results_root: Path
+) -> list[Path]:
+    """Gate source publication on the semantic B-then-A controller state.
+
+    The controller freezes both plan directories before it starts B.  A valid
+    B policy failure deliberately leaves the A plan unstarted; publish B's
+    terminal scalar partial in that case, but never mistake the frozen A plan
+    for an incomplete individual experiment.  Any started A requires a clean,
+    fully authenticated B plus reciprocal plan bindings.
+    """
+
+    semantic: dict[str, dict[str, Any]] = {}
+    for run_dir in run_dirs:
+        plan = _load_json(run_dir / "plan.json", results_root)
+        if not isinstance(plan, dict):
+            raise EvidenceError("semantic pair plan must be an object")
+        model = plan.get("model")
+        suite = plan.get("suite")
+        model_marker = isinstance(model, dict) and is_sm121_cache_semantic_candidate(model)
+        suite_marker = isinstance(suite, dict) and suite.get("id") == SM121_CACHE_SEMANTIC_SUITE_ID
+        if not model_marker and not suite_marker:
+            continue
+        if not model_marker or not suite_marker:
+            raise EvidenceError("SM121 semantic pair plan binding is incomplete")
+        try:
+            arm = sm121_cache_semantic_arm(model)
+        except SM121CacheSemanticError as error:
+            raise EvidenceError("SM121 semantic pair arm is invalid") from error
+        if arm in semantic:
+            raise EvidenceError("SM121 semantic evidence accepts only one frozen B/A pair")
+        events_path = run_dir / "events.jsonl"
+        summary_path = run_dir / "summary.json"
+        events_present = events_path.exists() or events_path.is_symlink()
+        summary_present = summary_path.exists() or summary_path.is_symlink()
+        if events_present and (
+            events_path.is_symlink() or not events_path.is_file()
+        ):
+            raise EvidenceError("SM121 semantic events journal is not a regular file")
+        if summary_present and (
+            summary_path.is_symlink() or not summary_path.is_file()
+        ):
+            raise EvidenceError("SM121 semantic summary is not a regular file")
+        events = (
+            _load_json_lines(events_path, results_root)
+            if events_present
+            else []
+        )
+        summary = (
+            _load_json(summary_path, results_root)
+            if summary_present
+            else None
+        )
+        if summary is not None and not isinstance(summary, dict):
+            raise EvidenceError("SM121 semantic pair summary must be an object")
+        semantic[arm] = {
+            "events": events,
+            "events_present": events_present,
+            "plan": plan,
+            "run_dir": run_dir,
+            "summary": summary,
+            "summary_present": summary_present,
+        }
+    if not semantic:
+        return list(run_dirs)
+    if set(semantic) != set(SM121_CACHE_SEMANTIC_ARM_ORDER):
+        raise EvidenceError("SM121 semantic evidence requires both frozen B and A plans")
+
+    cache_off = semantic[SM121_CACHE_SEMANTIC_CACHE_OFF_ARM]
+    cache_on = semantic[SM121_CACHE_SEMANTIC_CACHE_ON_ARM]
+    off_dir = cache_off["run_dir"]
+    off_plan = cache_off["plan"]
+    off_events = cache_off["events"]
+    off_summary = cache_off["summary"]
+    on_dir = cache_on["run_dir"]
+    on_plan = cache_on["plan"]
+    on_events = cache_on["events"]
+    on_summary = cache_on["summary"]
+    if not all(
+        isinstance(value, Path)
+        for value in (off_dir, on_dir)
+    ) or not all(
+        isinstance(value, dict)
+        for value in (off_plan, on_plan)
+    ) or not all(
+        isinstance(value, list)
+        for value in (off_events, on_events)
+    ):
+        raise EvidenceError("SM121 semantic pair source state is malformed")
+
+    # Authenticate *both* frozen plans, even when B's terminal policy finding
+    # intentionally prevents the controller from starting A.
+    off_static = _validate_sm121_cache_semantic_plan(
+        off_plan, source_run_id=off_dir.name
+    )
+    on_static = _validate_sm121_cache_semantic_plan(
+        on_plan, source_run_id=on_dir.name
+    )
+    if (
+        off_static is None
+        or on_static is None
+        or off_static[0] != SM121_CACHE_SEMANTIC_CACHE_OFF_ARM
+        or on_static[0] != SM121_CACHE_SEMANTIC_CACHE_ON_ARM
+    ):
+        raise EvidenceError("SM121 semantic pair plan arm binding is invalid")
+    off_model = off_plan.get("model")
+    off_suite = off_plan.get("suite")
+    on_model = on_plan.get("model")
+    on_suite = on_plan.get("suite")
+    off_binding = off_static[1]
+    on_binding = on_static[1]
+    off_fingerprint = off_plan.get("fingerprint")
+    on_fingerprint = on_plan.get("fingerprint")
+    try:
+        pair_instance_sha256 = sm121_cache_semantic_pair_instance_sha256(
+            off_plan.get("run_nonce"), on_plan.get("run_nonce")
+        )
+        if (
+            off_binding.get("pair_instance_sha256") != pair_instance_sha256
+            or on_binding.get("pair_instance_sha256") != pair_instance_sha256
+        ):
+            raise SM121CacheSemanticError("semantic pair instance binding changed")
+        validate_sm121_cache_semantic_pair_binding(
+            off_binding,
+            off_model,
+            off_suite,
+            peer_plan_fingerprint=on_fingerprint,
+            peer_binding=on_binding,
+        )
+        validate_sm121_cache_semantic_pair_binding(
+            on_binding,
+            on_model,
+            on_suite,
+            peer_plan_fingerprint=off_fingerprint,
+            peer_binding=off_binding,
+        )
+    except SM121CacheSemanticError as error:
+        raise EvidenceError("SM121 semantic source pair binding changed") from error
+
+    # Authenticate B before looking at A.  This is the export-side analogue
+    # of the controller's B audit and retains no raw execution material.
+    _validate_sm121_cache_semantic_source(
+        off_plan, off_events, off_summary, source_run_id=off_dir.name
+    )
+    cache_on_unstarted = (
+        cache_on["events_present"] is False
+        and cache_on["summary_present"] is False
+    )
+    if cache_on_unstarted:
+        if off_summary is None or off_summary.get("status") != "partial":
+            raise EvidenceError(
+                "SM121 semantic cache-on arm is unstarted without a terminal B partial"
+            )
+        return [path for path in run_dirs if path != on_dir]
+    if off_summary is None or off_summary.get("status") != "complete":
+        raise EvidenceError("SM121 semantic cache-on arm requires a completed B control")
+    _validate_sm121_cache_semantic_source(
+        on_plan, on_events, on_summary, source_run_id=on_dir.name
+    )
+    return list(run_dirs)
+
+
+_SM121_CACHE_SEMANTIC_QUALITY_CATEGORIES = (
+    "arithmetic",
+    "logic",
+    "instruction_following",
+    "code_reasoning",
+)
+_SM121_CACHE_SEMANTIC_SAMPLE_FIELDS = frozenset(
+    {
+        "case_attempt",
+        "case_id",
+        "case_sample_index",
+        "completion_tokens",
+        "emission_event_count",
+        "kind",
+        "prompt_tokens",
+        "reasoning_tokens",
+        "repetition",
+        "sample_index",
+        "sample_type",
+        "selected_attempt",
+        "validation_passed",
+    }
+)
+
+
+def _sm121_cache_semantic_positive_int(value: Any, *, name: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise EvidenceError(f"SM121 semantic {name} must be a positive integer")
+    return value
+
+
+def _sm121_cache_semantic_nonnegative_int(value: Any, *, name: str) -> int:
+    if type(value) is not int or value < 0:
+        raise EvidenceError(
+            f"SM121 semantic {name} must be a non-negative integer"
+        )
+    return value
+
+
+def _project_sm121_cache_semantic_samples(
+    requests: Sequence[dict[str, Any]],
+    *,
+    arm: str,
+    turn_events: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Publish only request/correctness scalars for one semantic arm.
+
+    The generic request projector is deliberately used first so ignored raw
+    fields are still subject to the normal source allowlist.  This second
+    projector is intentionally a fresh whitelist: no client elapsed time,
+    latency, rate, server timing, or response payload can reach the semantic
+    bundle by merely being added to generic serving output.
+    """
+
+    if arm not in SM121_CACHE_SEMANTIC_ARM_ORDER:
+        raise EvidenceError("SM121 semantic sample arm is invalid")
+    if len(requests) != 7 or len(turn_events) != len(SM121_CACHE_SEMANTIC_TURN_ORDER):
+        raise EvidenceError("SM121 semantic request topology is incomplete")
+    case_ids = _SM121_CACHE_SEMANTIC_CASE_IDS[arm]
+    result: list[dict[str, Any]] = []
+    for index, source in enumerate(requests, start=1):
+        if not isinstance(source, dict):
+            raise EvidenceError("SM121 semantic request sample is not an object")
+        quality = index <= len(_SM121_CACHE_SEMANTIC_QUALITY_CATEGORIES)
+        expected_case_id = case_ids[0 if quality else 1]
+        expected_kind = "quality" if quality else "capability"
+        expected_case_index = index if quality else index - len(
+            _SM121_CACHE_SEMANTIC_QUALITY_CATEGORIES
+        )
+        expected_repetition = 0 if quality else expected_case_index - 1
+        if (
+            source.get("sample_index") != index
+            or source.get("sample_type") != "measured_request"
+            or source.get("case_attempt") != 1
+            or source.get("case_id") != expected_case_id
+            or source.get("case_sample_index") != expected_case_index
+            or source.get("kind") != expected_kind
+            or source.get("repetition") != expected_repetition
+            or source.get("selected_attempt") is not True
+        ):
+            raise EvidenceError("SM121 semantic request topology changed")
+        prompt_tokens = _sm121_cache_semantic_positive_int(
+            source.get("prompt_tokens"), name="sample prompt_tokens"
+        )
+        completion_tokens = _sm121_cache_semantic_positive_int(
+            source.get("completion_tokens"), name="sample completion_tokens"
+        )
+        reasoning_tokens = _sm121_cache_semantic_nonnegative_int(
+            source.get("reasoning_tokens"), name="sample reasoning_tokens"
+        )
+        emission_events = _sm121_cache_semantic_positive_int(
+            source.get("emission_event_count"), name="sample emission_event_count"
+        )
+        if quality:
+            if (
+                source.get("validation_passed") is not True
+                or source.get("quality_category")
+                != _SM121_CACHE_SEMANTIC_QUALITY_CATEGORIES[index - 1]
+            ):
+                raise EvidenceError("SM121 semantic quality request is not clean")
+        else:
+            turn = turn_events[expected_case_index - 1]
+            if not isinstance(turn, dict):
+                raise EvidenceError("SM121 semantic turn proof is not an object")
+            if (
+                prompt_tokens != turn.get("prompt_tokens")
+                or completion_tokens != turn.get("completion_tokens")
+                or reasoning_tokens != turn.get("reasoning_tokens")
+                or source.get("validation_passed")
+                is not turn.get("semantic_turn_admitted")
+            ):
+                raise EvidenceError(
+                    "SM121 semantic request counters disagree with its turn proof"
+                )
+        sample = {
+            "case_attempt": 1,
+            "case_id": expected_case_id,
+            "case_sample_index": expected_case_index,
+            "completion_tokens": completion_tokens,
+            "emission_event_count": emission_events,
+            "kind": expected_kind,
+            "prompt_tokens": prompt_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "repetition": expected_repetition,
+            "sample_index": index,
+            "sample_type": "measured_request",
+            "selected_attempt": True,
+            "validation_passed": source.get("validation_passed"),
+        }
+        if quality:
+            sample["quality_category"] = _SM121_CACHE_SEMANTIC_QUALITY_CATEGORIES[
+                index - 1
+            ]
+        result.append(sample)
+    return result
+
+
+def _project_sm121_cache_semantic_summary(
+    *,
+    samples: Sequence[dict[str, Any]],
+    arm: str,
+) -> dict[str, Any]:
+    """Create the exact observability-only aggregate document for one arm."""
+
+    if arm not in SM121_CACHE_SEMANTIC_ARM_ORDER or len(samples) != 7:
+        raise EvidenceError("SM121 semantic aggregate inputs are invalid")
+    case_ids = _SM121_CACHE_SEMANTIC_CASE_IDS[arm]
+    quality_samples = list(samples[:4])
+    semantic_samples = list(samples[4:])
+    if any(sample.get("kind") != "quality" for sample in quality_samples) or any(
+        sample.get("kind") != "capability" for sample in semantic_samples
+    ):
+        raise EvidenceError("SM121 semantic aggregate sample kinds changed")
+    semantic_admitted = all(
+        sample.get("validation_passed") is True for sample in semantic_samples
+    )
+    quality_prompt_tokens = sum(
+        _sm121_cache_semantic_positive_int(
+            sample.get("prompt_tokens"), name="quality prompt_tokens"
+        )
+        for sample in quality_samples
+    )
+    quality_completion_tokens = sum(
+        _sm121_cache_semantic_positive_int(
+            sample.get("completion_tokens"), name="quality completion_tokens"
+        )
+        for sample in quality_samples
+    )
+    quality_reasoning_tokens = sum(
+        _sm121_cache_semantic_nonnegative_int(
+            sample.get("reasoning_tokens"), name="quality reasoning_tokens"
+        )
+        for sample in quality_samples
+    )
+    semantic_prompt_tokens = sum(
+        _sm121_cache_semantic_positive_int(
+            sample.get("prompt_tokens"), name="semantic prompt_tokens"
+        )
+        for sample in semantic_samples
+    )
+    semantic_completion_tokens = sum(
+        _sm121_cache_semantic_positive_int(
+            sample.get("completion_tokens"), name="semantic completion_tokens"
+        )
+        for sample in semantic_samples
+    )
+    semantic_reasoning_tokens = sum(
+        _sm121_cache_semantic_nonnegative_int(
+            sample.get("reasoning_tokens"), name="semantic reasoning_tokens"
+        )
+        for sample in semantic_samples
+    )
+    expected_status = "complete" if semantic_admitted else "partial"
+    return {
+        "cases": [
+            {
+                "case_id": case_ids[0],
+                "completion_tokens": quality_completion_tokens,
+                "concurrency": 1,
+                "kind": "quality",
+                "measurement_valid": True,
+                "observability_only": True,
+                "prompt_tokens": quality_prompt_tokens,
+                "quality_accuracy": 1.0,
+                "quality_accuracy_by_category": {
+                    category: 1.0
+                    for category in sorted(
+                        _SM121_CACHE_SEMANTIC_QUALITY_CATEGORIES
+                    )
+                },
+                "quality_correct": 4,
+                "quality_items": 4,
+                "quality_scored_items": 4,
+                "reasoning_tokens": quality_reasoning_tokens,
+                "requests": 4,
+                "validation_passed": True,
+            },
+            {
+                "case_id": case_ids[1],
+                "completion_tokens": semantic_completion_tokens,
+                "concurrency": 1,
+                "kind": "capability",
+                "measurement_valid": True,
+                "observability_only": True,
+                "prompt_tokens": semantic_prompt_tokens,
+                "reasoning_tokens": semantic_reasoning_tokens,
+                "requests": 3,
+                "validation_passed": semantic_admitted,
+            },
+        ],
+        "completed_cases": 2,
+        "context_limited_cases": [],
+        "failed_cases": [],
+        "measurement_invalid_cases": [],
+        "run_completion_status": "completed",
+        "startup_measurement_valid": True,
+        "startup_safety_gates": [],
+        "status": expected_status,
+        "suite": SM121_CACHE_SEMANTIC_SUITE_ID,
+        "unimplemented_cases": [],
+        "unsupported_cases": [],
+        "validation_failed_cases": [] if semantic_admitted else [case_ids[1]],
+    }
 
 
 def _project_model(plan: dict[str, Any], summary: dict[str, Any] | None) -> dict[str, Any]:
@@ -4052,6 +5021,7 @@ def _project_suite(plan: dict[str, Any]) -> dict[str, Any] | None:
     if suite.get("id") in {
         SM121_STORAGE_SUITE_ID,
         SM121_CACHE_OBSERVABILITY_SUITE_ID,
+        SM121_CACHE_SEMANTIC_SUITE_ID,
     }:
         projected = {
             "id": _safe_id(suite.get("id"), name="suite.id"),
@@ -4087,11 +5057,19 @@ def _project_suite(plan: dict[str, Any]) -> dict[str, Any] | None:
                     }
                 }
             )
-        expected_suite = (
-            _expected_sm121_storage_suite()
-            if suite.get("id") == SM121_STORAGE_SUITE_ID
-            else _expected_sm121_cache_observability_suite()
-        )
+        if suite.get("id") == SM121_STORAGE_SUITE_ID:
+            expected_suite = _expected_sm121_storage_suite()
+        elif suite.get("id") == SM121_CACHE_OBSERVABILITY_SUITE_ID:
+            expected_suite = _expected_sm121_cache_observability_suite()
+        else:
+            model = plan.get("model")
+            if not isinstance(model, dict):
+                raise EvidenceError("SM121 semantic suite lacks its frozen model")
+            try:
+                arm = sm121_cache_semantic_arm(model)
+            except SM121CacheSemanticError as error:
+                raise EvidenceError("SM121 semantic suite arm is invalid") from error
+            expected_suite = _expected_sm121_cache_semantic_suite(arm)
         if not _json_strict_equal(projected, expected_suite):
             raise EvidenceError("SM121 singleton public suite identity changed")
         return projected
@@ -5316,6 +6294,278 @@ def _validate_sm121_cache_observability_published_bundle(
     ):
         if not _json_strict_equal(quality_case.get(key), expected):
             raise EvidenceError(f"SM121 B0 quality aggregate {key} changed")
+
+
+def _validate_sm121_cache_semantic_public_pair_binding(
+    binding: Any, *, arm: str, peer_plan_fingerprint: str
+) -> dict[str, Any]:
+    """Validate the binding after the private frozen model has been redacted.
+
+    Source validation uses the semantic-contract validator against the full
+    plan.  Public evidence intentionally has no command arguments or served
+    name, so it rechecks the same binding shape, fixed metadata, peer pin, and
+    canonical digest without attempting to reconstruct hidden model fields.
+    """
+
+    if not isinstance(binding, dict) or set(binding) != SM121_CACHE_SEMANTIC_PAIR_BINDING_FIELDS:
+        raise EvidenceError("published SM121 semantic pair binding schema changed")
+    pair_instance_sha256 = binding.get("pair_instance_sha256")
+    if (
+        not isinstance(pair_instance_sha256, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", pair_instance_sha256) is None
+    ):
+        raise EvidenceError("published SM121 semantic pair instance is invalid")
+    expected = _expected_sm121_cache_semantic_pair_binding(
+        arm, pair_instance_sha256=pair_instance_sha256
+    )
+    if (
+        expected["peer_plan_fingerprint"] != peer_plan_fingerprint
+        or not _json_strict_equal(binding, expected)
+    ):
+        raise EvidenceError("published SM121 semantic pair binding changed")
+    return binding
+
+
+def _validate_sm121_cache_semantic_hardware(value: Any) -> None:
+    """Validate optional, non-performance hardware identity only."""
+
+    if not isinstance(value, dict):
+        raise EvidenceError("SM121 semantic hardware must be an object")
+    allowed = {
+        "compute_capability",
+        "driver_version",
+        "gpu",
+        "harness_revision",
+        "harness_worktree_dirty",
+        "platform",
+        "unified_memory_bytes",
+    }
+    if set(value) - allowed:
+        raise EvidenceError("SM121 semantic hardware has an unknown field")
+    gpu_fields = {"compute_capability", "driver_version", "gpu", "platform"}
+    if set(value) & gpu_fields:
+        if not gpu_fields <= set(value):
+            raise EvidenceError("SM121 semantic GPU identity is incomplete")
+        if value.get("gpu") != "NVIDIA GB10" or value.get("platform") != "NVIDIA DGX Spark":
+            raise EvidenceError("SM121 semantic GPU identity changed")
+        _safe_id(value["compute_capability"], name="semantic.hardware.compute_capability")
+        _safe_id(value["driver_version"], name="semantic.hardware.driver_version")
+    if "unified_memory_bytes" in value:
+        _sm121_cache_semantic_positive_int(
+            value["unified_memory_bytes"], name="hardware unified_memory_bytes"
+        )
+    if "harness_revision" in value:
+        _revision(value["harness_revision"], name="semantic.hardware.harness_revision")
+    if "harness_worktree_dirty" in value and type(value["harness_worktree_dirty"]) is not bool:
+        raise EvidenceError("SM121 semantic hardware worktree state is invalid")
+
+
+def _validate_sm121_cache_semantic_published_bundle(
+    manifest: dict[str, Any],
+    samples: list[dict[str, Any]],
+    aggregates: dict[str, Any],
+) -> None:
+    """Validate the exact scalar-only public bundle for one B/A arm.
+
+    Unlike B0, this lane intentionally carries no generic request timing.  It
+    is a semantic admission result, so the verifier reconstructs the proof
+    from its scalar attestation records and rejects even checksum-refreshed
+    additions of timing, throughput, or energy output.
+    """
+
+    suite = manifest.get("suite")
+    model = manifest.get("model")
+    runtime = manifest.get("runtime")
+    is_semantic_suite = (
+        isinstance(suite, dict) and suite.get("id") == SM121_CACHE_SEMANTIC_SUITE_ID
+    )
+    semantic_runtime_present = isinstance(runtime, dict) and "sm121_cache_semantic" in runtime
+    if not is_semantic_suite:
+        if semantic_runtime_present:
+            raise EvidenceError("SM121 semantic runtime lost its exact suite binding")
+        return
+    if not isinstance(model, dict) or not isinstance(runtime, dict):
+        raise EvidenceError("SM121 semantic manifest identity is incomplete")
+    try:
+        arm = sm121_cache_semantic_arm(model)
+    except SM121CacheSemanticError as error:
+        raise EvidenceError("published SM121 semantic profile is invalid") from error
+    if not _json_strict_equal(model, _expected_sm121_cache_semantic_model(arm)):
+        raise EvidenceError("published SM121 semantic model identity changed")
+    if not _json_strict_equal(suite, _expected_sm121_cache_semantic_suite(arm)):
+        raise EvidenceError("published SM121 semantic suite identity changed")
+
+    allowed_manifest_fields = {
+        "artifacts",
+        "evidence_kind",
+        "hardware",
+        "lifecycle",
+        "model",
+        "run_date_utc",
+        "runtime",
+        "sanitization",
+        "schema_version",
+        "source_run_id",
+        "status",
+        "suite",
+    }
+    required_manifest_fields = allowed_manifest_fields - {"hardware"}
+    if (
+        set(manifest) - allowed_manifest_fields
+        or not required_manifest_fields <= set(manifest)
+        or manifest.get("evidence_kind") != "serving"
+        or manifest.get("schema_version") != SCHEMA_VERSION
+    ):
+        raise EvidenceError("SM121 semantic manifest schema changed")
+    source_run_id = _safe_id(
+        manifest.get("source_run_id"), name="semantic manifest.source_run_id"
+    )
+    if manifest.get("run_date_utc") != _date_from_run_id(source_run_id):
+        raise EvidenceError("SM121 semantic manifest date changed")
+    expected_sanitization = {
+        "free_form_text_included": False,
+        "payloads_included": False,
+        "policy": SANITIZATION_POLICY,
+        "raw_identifiers_included": False,
+    }
+    if not _json_strict_equal(manifest.get("sanitization"), expected_sanitization):
+        raise EvidenceError("SM121 semantic sanitization contract changed")
+    if "hardware" in manifest:
+        _validate_sm121_cache_semantic_hardware(manifest["hardware"])
+
+    proof = runtime.get("sm121_cache_semantic")
+    if not isinstance(proof, dict):
+        raise EvidenceError("published SM121 semantic cache proof is missing")
+    static_records = proof.get("cache_static_attestations")
+    runtime_records = proof.get("cache_runtime_attestations")
+    public_turns = proof.get("semantic_turn_observations")
+    pair_binding = proof.get("pair_binding")
+    if not (
+        isinstance(static_records, list)
+        and isinstance(runtime_records, list)
+        and isinstance(public_turns, list)
+        and isinstance(pair_binding, dict)
+        and len(static_records) == len(runtime_records) == 2
+        and len(public_turns) == len(SM121_CACHE_SEMANTIC_TURN_ORDER)
+    ):
+        raise EvidenceError("published SM121 semantic cache proof is malformed")
+    peer_arm = (
+        SM121_CACHE_SEMANTIC_CACHE_ON_ARM
+        if arm == SM121_CACHE_SEMANTIC_CACHE_OFF_ARM
+        else SM121_CACHE_SEMANTIC_CACHE_OFF_ARM
+    )
+    _validate_sm121_cache_semantic_public_pair_binding(
+        pair_binding,
+        arm=arm,
+        peer_plan_fingerprint=_SM121_CACHE_SEMANTIC_PLAN_FINGERPRINTS[peer_arm],
+    )
+
+    static_events: list[dict[str, Any]] = []
+    runtime_events: list[dict[str, Any]] = []
+    turn_events: list[dict[str, Any]] = []
+    semantic_case_id = _SM121_CACHE_SEMANTIC_CASE_IDS[arm][1]
+    for lifetime, record in enumerate(static_records, start=1):
+        if not isinstance(record, dict):
+            raise EvidenceError("published SM121 semantic static proof is invalid")
+        event = {"event": SM121_CACHE_SEMANTIC_STATIC_ATTESTATION_EVENT, **record}
+        try:
+            validate_sm121_cache_semantic_static_attestation_event(event)
+        except SM121CacheSemanticError as error:
+            raise EvidenceError("published SM121 semantic static proof changed") from error
+        if event.get("arm") != arm or event.get("fresh_server_lifetime") != lifetime:
+            raise EvidenceError("published SM121 semantic static lifetime changed")
+        static_events.append(event)
+    for lifetime, record in enumerate(runtime_records, start=1):
+        if not isinstance(record, dict):
+            raise EvidenceError("published SM121 semantic runtime proof is invalid")
+        event = {"event": SM121_CACHE_SEMANTIC_RUNTIME_ATTESTATION_EVENT, **record}
+        try:
+            validate_sm121_cache_semantic_runtime_attestation_event(event)
+        except SM121CacheSemanticError as error:
+            raise EvidenceError("published SM121 semantic runtime proof changed") from error
+        if event.get("arm") != arm or event.get("fresh_server_lifetime") != lifetime:
+            raise EvidenceError("published SM121 semantic runtime lifetime changed")
+        runtime_events.append(event)
+    for turn, record in zip(
+        SM121_CACHE_SEMANTIC_TURN_ORDER, public_turns, strict=True
+    ):
+        if not isinstance(record, dict):
+            raise EvidenceError("published SM121 semantic turn proof is invalid")
+        event = {
+            "event": SM121_CACHE_SEMANTIC_TURN_OBSERVATION_EVENT,
+            "case_id": semantic_case_id,
+            "protocol_case_id": SM121_CACHE_SEMANTIC_CASE_ID,
+            "attempt_id": "evidence_verifier",
+            **record,
+        }
+        try:
+            validate_sm121_cache_semantic_turn_event(event)
+        except SM121CacheSemanticError as error:
+            raise EvidenceError("published SM121 semantic turn proof changed") from error
+        if event.get("arm") != arm or event.get("turn") != turn:
+            raise EvidenceError("published SM121 semantic turn ordering changed")
+        turn_events.append(event)
+    expected_proof = _sm121_cache_semantic_runtime(
+        arm=arm,
+        pair_binding=pair_binding,
+        static_events=static_events,
+        runtime_events=runtime_events,
+        turn_events=turn_events,
+    )
+    expected_runtime = {
+        "backend": "sglang",
+        "image": SM121_STORAGE_LOCAL_IMAGE_TAG,
+        "lifecycle": "docker",
+        "sglang_ple_cache_mode": "disabled",
+        "sglang_ple_mmap": False,
+        "sglang_ple_omitted": False,
+        "sglang_provenance_version": _SGLANG_PROVENANCE_CURRENT_VERSION,
+        "sglang_source_overlay_artifacts": [],
+        "sm121_cache_semantic": expected_proof,
+    }
+    if not _json_strict_equal(runtime, expected_runtime):
+        raise EvidenceError("published SM121 semantic runtime identity changed")
+    expected_artifacts = [
+        {
+            "role": "container_image",
+            "sha256": expected_proof["docker_image_sha256"],
+            "target": "container-image",
+        }
+    ]
+    if not _json_strict_equal(manifest.get("artifacts"), expected_artifacts):
+        raise EvidenceError("published SM121 semantic image artifact changed")
+
+    lifecycle = manifest.get("lifecycle")
+    expected_event_counts = expected_sm121_cache_semantic_event_counts()
+    expected_lifecycle = {
+        "event_count": sum(expected_event_counts.values()),
+        "event_counts": expected_event_counts,
+        "terminal": True,
+        "terminal_event": "run_complete",
+    }
+    if not _json_strict_equal(lifecycle, expected_lifecycle):
+        raise EvidenceError("published SM121 semantic lifecycle changed")
+
+    expected_samples = _project_sm121_cache_semantic_samples(
+        samples, arm=arm, turn_events=turn_events
+    )
+    if not _json_strict_equal(samples, expected_samples):
+        raise EvidenceError("published SM121 semantic request samples changed")
+    for index, sample in enumerate(samples, start=1):
+        expected_fields = _SM121_CACHE_SEMANTIC_SAMPLE_FIELDS | (
+            {"quality_category"} if index <= 4 else set()
+        )
+        if set(sample) != expected_fields:
+            raise EvidenceError("published SM121 semantic sample schema changed")
+
+    expected_aggregates = _project_sm121_cache_semantic_summary(
+        samples=samples, arm=arm
+    )
+    if not _json_strict_equal(aggregates, expected_aggregates):
+        raise EvidenceError("published SM121 semantic aggregate schema changed")
+    expected_status = expected_aggregates["status"]
+    if manifest.get("status") != expected_status:
+        raise EvidenceError("published SM121 semantic manifest status is inconsistent")
 
 
 def _project_hardware(plan: dict[str, Any]) -> dict[str, Any]:
@@ -10165,6 +11415,7 @@ def _project_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
         "run_dir": (str,),
         "run_error": (dict, type(None)),
         "sm121_cache_observability_lifecycle_issues": (list,),
+        "sm121_cache_semantic_lifecycle_issues": (list,),
     }
     for key, expected_types in dropped_types.items():
         if key in summary and not isinstance(summary[key], expected_types):
@@ -10266,7 +11517,9 @@ def _project_telemetry(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return projected
 
 
-def _lifecycle(events: list[dict[str, Any]]) -> dict[str, Any]:
+def _lifecycle(
+    events: list[dict[str, Any]], *, include_elapsed: bool = True
+) -> dict[str, Any]:
     names: list[str] = []
     timestamps: list[datetime] = []
     failure: dict[str, Any] | None = None
@@ -10294,7 +11547,7 @@ def _lifecycle(events: list[dict[str, Any]]) -> dict[str, Any]:
             None,
         ),
     }
-    if len(timestamps) >= 2:
+    if include_elapsed and len(timestamps) >= 2:
         elapsed = (timestamps[-1] - timestamps[0]).total_seconds()
         if elapsed < 0:
             raise EvidenceError("journal timestamps move backwards")
@@ -10648,7 +11901,10 @@ def _export_run(
     )
     kind = _run_kind(plan)
     status = _normalize_status(summary, events)
-    lifecycle = _lifecycle(events)
+    sm121_cache_semantic_selected = _selects_sm121_cache_semantic(plan)
+    lifecycle = _lifecycle(
+        events, include_elapsed=not sm121_cache_semantic_selected
+    )
     sm121_storage_runtime = _validate_sm121_storage_source(
         plan,
         events,
@@ -10661,10 +11917,18 @@ def _export_run(
         summary,
         source_run_id=source_run_id,
     )
+    sm121_cache_semantic_runtime = _validate_sm121_cache_semantic_source(
+        plan,
+        events,
+        summary,
+        source_run_id=source_run_id,
+    )
     if sm121_storage_runtime is not None and matrix_id is not None:
         raise EvidenceError("SM121 storage canary cannot be exported from a matrix")
     if sm121_cache_observability_runtime is not None and matrix_id is not None:
         raise EvidenceError("SM121 B0 canary cannot be exported from a matrix")
+    if sm121_cache_semantic_runtime is not None and matrix_id is not None:
+        raise EvidenceError("SM121 semantic canary cannot be exported from a matrix")
     projected_model = _project_model(plan, summary)
     suite = _project_suite(plan)
     memory_protocol = bool(
@@ -10724,6 +11988,18 @@ def _export_run(
             }
         )
         runtime["sm121_cache_observability"] = sm121_cache_observability_runtime
+    if sm121_cache_semantic_runtime is not None:
+        artifacts.append(
+            {
+                "role": "container_image",
+                "sha256": sm121_cache_semantic_runtime["docker_image_sha256"],
+                "target": "container-image",
+            }
+        )
+        # Version strings are neither required nor useful for the semantic
+        # claim.  Keep the public runtime proof to the pinned scalar contract.
+        runtime.pop("versions", None)
+        runtime["sm121_cache_semantic"] = sm121_cache_semantic_runtime
     manifest: dict[str, Any] = {
         "artifacts": artifacts,
         "evidence_kind": kind,
@@ -10783,6 +12059,18 @@ def _export_run(
             {**sample, "sample_index": index}
             for index, sample in enumerate(requests, start=1)
         ]
+    if sm121_cache_semantic_runtime is not None:
+        semantic_arm = sm121_cache_semantic_runtime["arm"]
+        if not isinstance(semantic_arm, str):
+            raise EvidenceError("SM121 semantic runtime arm is invalid")
+        turn_events = [
+            event
+            for event in events
+            if event.get("event") == SM121_CACHE_SEMANTIC_TURN_OBSERVATION_EVENT
+        ]
+        requests = _project_sm121_cache_semantic_samples(
+            requests, arm=semantic_arm, turn_events=turn_events
+        )
     if cache_protocol:
         unexpected = [
             sample
@@ -10809,9 +12097,21 @@ def _export_run(
             )
         )
     telemetry = _project_telemetry(telemetry_records)
-    if memory_protocol or sm121_cache_observability_runtime is not None:
+    if (
+        memory_protocol
+        or sm121_cache_observability_runtime is not None
+        or sm121_cache_semantic_runtime is not None
+    ):
         telemetry = []
-    projected_summary = _project_summary(summary)
+    # The report deliberately nulls every semantic timing field.  The generic
+    # summary projector treats a null case elapsed as malformed because normal
+    # serving evidence needs it; this dedicated lane replaces that aggregate
+    # document below with its exact semantic-only schema instead.
+    projected_summary = (
+        {"startup_safety_gates": []}
+        if sm121_cache_semantic_runtime is not None
+        else _project_summary(summary)
+    )
     try:
         journal_annotations = startup_safety_gate_annotations_from_annotations(
             measurement_annotations(events)
@@ -10847,12 +12147,24 @@ def _export_run(
         )
         if manifest["status"] != projected_summary["status"]:
             raise EvidenceError("memory manifest status disagrees with its aggregates")
+    if sm121_cache_semantic_runtime is not None:
+        semantic_arm = sm121_cache_semantic_runtime["arm"]
+        assert isinstance(semantic_arm, str)
+        projected_summary = _project_sm121_cache_semantic_summary(
+            samples=requests, arm=semantic_arm
+        )
+        if manifest["status"] != projected_summary["status"]:
+            raise EvidenceError("SM121 semantic manifest status disagrees with aggregates")
     if sm121_storage_runtime is not None:
         _validate_sm121_storage_published_bundle(
             manifest, requests, projected_summary
         )
     if sm121_cache_observability_runtime is not None:
         _validate_sm121_cache_observability_published_bundle(
+            manifest, requests, projected_summary
+        )
+    if sm121_cache_semantic_runtime is not None:
+        _validate_sm121_cache_semantic_published_bundle(
             manifest, requests, projected_summary
         )
     _validate_agentic_aggregates(
@@ -10877,6 +12189,8 @@ def _export_run(
     telemetry_files = _telemetry_files(telemetry)
     if memory_protocol and telemetry_files != _telemetry_files([]):
         raise EvidenceError("memory evidence telemetry projection changed")
+    if sm121_cache_semantic_runtime is not None and telemetry_files != _telemetry_files([]):
+        raise EvidenceError("SM121 semantic telemetry projection changed")
     if cache_protocol:
         telemetry_index = telemetry_files["telemetry.json"]
         assert isinstance(telemetry_index, dict)
@@ -13453,6 +14767,10 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
         isinstance(manifest_suite, dict)
         and manifest_suite.get("id") == SM121_CACHE_OBSERVABILITY_SUITE_ID
     )
+    is_sm121_cache_semantic_manifest = (
+        isinstance(manifest_suite, dict)
+        and manifest_suite.get("id") == SM121_CACHE_SEMANTIC_SUITE_ID
+    )
     if is_prefix_cache_manifest:
         # Cache bundles are intentionally a complete, exact outer document.
         # Do not rely on checksums alone: an attacker can refresh checksums
@@ -13553,12 +14871,19 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     _validate_sm121_cache_observability_published_bundle(
         manifest, samples["samples"], aggregates
     )
+    _validate_sm121_cache_semantic_published_bundle(
+        manifest, samples["samples"], aggregates
+    )
     cold_start_annotations = (
         _project_cold_start_safety_annotations(aggregates, source=False)
         if "cold_start_safety_annotations" in aggregates
         else []
     )
-    exact_protocol = is_prefix_cache_manifest or memory_suite is not None
+    exact_protocol = (
+        is_prefix_cache_manifest
+        or memory_suite is not None
+        or is_sm121_cache_semantic_manifest
+    )
     if exact_protocol:
         gates: list[dict[str, Any]] = []
     else:
@@ -13655,6 +14980,19 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
         }
         if {path.name for path in directory.iterdir()} != expected_b0_files:
             raise EvidenceError("SM121 B0 bundle file set changed")
+    if is_sm121_cache_semantic_manifest:
+        expected_semantic_telemetry = _telemetry_files([])["telemetry.json"]
+        if not _json_strict_equal(telemetry, expected_semantic_telemetry):
+            raise EvidenceError("SM121 semantic telemetry index changed")
+        expected_semantic_files = {
+            "checksums.json",
+            "manifest.json",
+            "samples.json",
+            "summary.json",
+            "telemetry.json",
+        }
+        if {path.name for path in directory.iterdir()} != expected_semantic_files:
+            raise EvidenceError("SM121 semantic bundle file set changed")
     sample_count = 0
     segment_count = 0
     expected_sample_index = 1
@@ -15254,6 +16592,72 @@ def _verify_simple_bundle(
             raise EvidenceError(f"campaign telemetry count mismatch: {identity}")
 
 
+def _validate_sm121_cache_semantic_published_pairs(
+    root: Path, entries: Sequence[dict[str, Any]]
+) -> None:
+    """Recheck B/A relationship after checksums may have been refreshed.
+
+    A standalone terminal B partial is an honest cache-policy finding: the
+    controller never starts A in that state.  Every other published semantic
+    outcome must retain one B and one A bundle with reciprocal public plan
+    fingerprints.
+    """
+
+    arms: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        run_id = entry.get("run_id")
+        if not isinstance(run_id, str):
+            continue
+        manifest = _load_json(root / "runs" / run_id / "manifest.json", root)
+        if not isinstance(manifest, dict):
+            raise EvidenceError("SM121 semantic published manifest is invalid")
+        suite = manifest.get("suite")
+        if not (
+            isinstance(suite, dict)
+            and suite.get("id") == SM121_CACHE_SEMANTIC_SUITE_ID
+        ):
+            continue
+        runtime = manifest.get("runtime")
+        proof = runtime.get("sm121_cache_semantic") if isinstance(runtime, dict) else None
+        arm = proof.get("arm") if isinstance(proof, dict) else None
+        if arm not in SM121_CACHE_SEMANTIC_ARM_ORDER or arm in arms:
+            raise EvidenceError("SM121 semantic published pair arms are ambiguous")
+        arms[arm] = {"entry": entry, "manifest": manifest, "proof": proof}
+    if not arms:
+        return
+    cache_off = arms.get(SM121_CACHE_SEMANTIC_CACHE_OFF_ARM)
+    cache_on = arms.get(SM121_CACHE_SEMANTIC_CACHE_ON_ARM)
+    if cache_off is None:
+        raise EvidenceError("SM121 semantic A bundle lacks its B control")
+    off_manifest = cache_off["manifest"]
+    off_proof = cache_off["proof"]
+    if not isinstance(off_proof, dict):
+        raise EvidenceError("SM121 semantic B proof is invalid")
+    if cache_on is None:
+        if off_manifest.get("status") != "partial":
+            raise EvidenceError("SM121 semantic completed B bundle lacks A")
+        return
+    on_manifest = cache_on["manifest"]
+    on_proof = cache_on["proof"]
+    if not isinstance(on_proof, dict):
+        raise EvidenceError("SM121 semantic A proof is invalid")
+    if off_manifest.get("status") != "complete":
+        raise EvidenceError("SM121 semantic A bundle follows a non-complete B")
+    if on_manifest.get("status") not in {"complete", "partial"}:
+        raise EvidenceError("SM121 semantic A bundle has an invalid terminal status")
+    off_binding = off_proof.get("pair_binding")
+    on_binding = on_proof.get("pair_binding")
+    if not isinstance(off_binding, dict) or not isinstance(on_binding, dict):
+        raise EvidenceError("SM121 semantic published pair binding is missing")
+    if (
+        off_binding.get("peer_plan_fingerprint") != on_proof.get("plan_fingerprint")
+        or on_binding.get("peer_plan_fingerprint") != off_proof.get("plan_fingerprint")
+        or off_binding.get("pair_instance_sha256")
+        != on_binding.get("pair_instance_sha256")
+    ):
+        raise EvidenceError("SM121 semantic published pair binding is not reciprocal")
+
+
 def _verify_evidence_topology(root: Path) -> None:
     expected_top = {"README.md", "campaigns", "checksums.json", "index.json", "matrices", "runs", "standalone"}
     if {entry.name for entry in root.iterdir()} != expected_top:
@@ -15302,6 +16706,7 @@ def _verify_evidence_topology(root: Path) -> None:
         if not isinstance(entry, dict):
             raise EvidenceError("run index entry must be an object")
         _verify_run_bundle(root, entry)
+    _validate_sm121_cache_semantic_published_pairs(root, index["runs"])
     expected_status_counts = dict(
         sorted(Counter(entry["status"] for entry in index["runs"]).items())
     )
@@ -16882,7 +18287,7 @@ def _export_evidence_locked(
             locked_topology=locked_autoresearch_topology,
         )
         autoresearch_root = results_root / AUTORESEARCH_RESULT_ROOT
-        run_dirs = sorted(
+        source_run_dirs = sorted(
             {
                 path.parent
                 for path in results_root.rglob("plan.json")
@@ -16891,6 +18296,9 @@ def _export_evidence_locked(
                 )
                 and autoresearch_root not in path.parents
             }
+        )
+        run_dirs = _prepare_sm121_cache_semantic_pair_export(
+            source_run_dirs, results_root
         )
         all_run_dirs = [*run_dirs, *(path for path, _ in autoresearch_runs)]
         has_runtime_overlays = _validate_runtime_overlay_tree(
@@ -16909,6 +18317,16 @@ def _export_evidence_locked(
             "ninfer-qwen38-nvfp4-sm121a-20260817T200147Z",
             "upstream-bench-matrix-dspark-sglang-20260817.json",
         }
+        # A terminal B partial deliberately leaves its sibling A plan frozen
+        # but unstarted.  It remains a recognized source directory even though
+        # no A bundle is materialized.
+        for skipped_run_dir in set(source_run_dirs) - set(run_dirs):
+            skipped_relative = skipped_run_dir.relative_to(results_root)
+            if len(skipped_relative.parts) != 1:
+                raise EvidenceError(
+                    "unpublished SM121 semantic sibling has an unsafe layout"
+                )
+            recognized_top.add(skipped_relative.parts[0])
         if has_runtime_overlays:
             recognized_top.add("runtime-overlays")
         if autoresearch_runs or autoresearch_campaigns:

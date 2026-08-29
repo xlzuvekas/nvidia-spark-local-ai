@@ -40,6 +40,12 @@ from .sglang_sm121_storage import (
     validate_sm121_storage_candidate,
     validate_sm121_storage_image_inspection,
 )
+from .sglang_sm121_cache_semantic import (
+    SM121_CACHE_SEMANTIC_EXECUTION_MODE,
+    SM121CacheSemanticError,
+    is_sm121_cache_semantic_candidate,
+    validate_sm121_cache_semantic_candidate,
+)
 from .sglang_sm121_cache_observability import (
     SM121_CACHE_RUNTIME_ATTESTATION_EVENT,
     SM121_CACHE_RUNTIME_EXPECTED,
@@ -1225,13 +1231,22 @@ def _start_sglang_sm121_storage(
 ) -> ManagedServer:
     """Start the dedicated native-NVMe PLE canary with narrow containment."""
 
-    if getattr(model, "storage_canary_authorized", False) is not True:
+    semantic_candidate = is_sm121_cache_semantic_candidate(model)
+    authorized = (
+        getattr(model, "cache_semantic_canary_authorized", False) is True
+        if semantic_candidate
+        else getattr(model, "storage_canary_authorized", False) is True
+    )
+    if not authorized:
         raise RuntimeErrorWithContext(
-            "SM121 storage serving requires the dedicated canary executor"
+            "SM121 storage serving requires its dedicated canary executor"
         )
     try:
-        validate_sm121_storage_candidate(model)
-    except SM121StorageCandidateError as error:
+        if semantic_candidate:
+            validate_sm121_cache_semantic_candidate(model)
+        else:
+            validate_sm121_storage_candidate(model)
+    except (SM121StorageCandidateError, SM121CacheSemanticError) as error:
         raise RuntimeErrorWithContext(str(error)) from error
     if abort_check is not None:
         abort_check()
@@ -1370,7 +1385,11 @@ def _start_sglang_sm121_storage(
         api_key_path=api_key_path,
     )
     server.native_provenance = {
-        "candidate_id": SM121_STORAGE_CANDIDATE_ID,
+        "candidate_id": (
+            str(getattr(model, "id", ""))
+            if semantic_candidate
+            else SM121_STORAGE_CANDIDATE_ID
+        ),
         "candidate_source_tree": SM121_STORAGE_SOURCE_TREE,
         "build_contract_sha256": SM121_STORAGE_BUILD_CONTRACT_SHA256,
         "docker_image_id": image_id,
@@ -1386,7 +1405,11 @@ def _start_sglang_sm121_storage(
         "container_no_new_privileges": True,
         "hf_network_policy": "offline",
         "network_topology": "loopback_published_bridge",
-        "benchmark_scope": "sm121_storage_pre_admission_canary",
+        "benchmark_scope": (
+            SM121_CACHE_SEMANTIC_EXECUTION_MODE
+            if semantic_candidate
+            else "sm121_storage_pre_admission_canary"
+        ),
         "model_acquisition": "disabled_exact_read_only_snapshot",
         "api_authentication": "ephemeral_bearer",
         "api_key_file_mode": "0600" if api_key_path is not None else None,
@@ -1470,17 +1493,15 @@ _SM121_CACHE_LABEL_RE = re.compile(
 )
 
 
-def attest_sm121_cache_observability_static_source(model: Any) -> dict[str, Any]:
-    """Return an exact scalar cache-source attestation for the local image.
+def inspect_sm121_cache_source_digests(model: Any) -> dict[str, str]:
+    """Hash the reviewed cache sources from the exact local image.
 
-    This does not mount a snapshot, use a GPU, or retain raw source output.
-    A digest mismatch fails closed before the serving container is started.
+    The check is read-only, networkless, and GPU-free.  It returns only the
+    allowlisted digest fields, so both cache-policy arms can bind source
+    semantics to their frozen local image without retaining source text or
+    container filesystem paths.
     """
 
-    try:
-        validate_sm121_storage_candidate(model)
-    except SM121StorageCandidateError as error:
-        raise RuntimeErrorWithContext(str(error)) from error
     image_id = _sm121_storage_image_id(model)
     source_files = tuple(_SM121_CACHE_SOURCE_FILES.values())
     command = [
@@ -1526,6 +1547,21 @@ def attest_sm121_cache_observability_static_source(model: Any) -> dict[str, Any]
         observed[field] = "sha256:" + digest
     if set(observed) != set(_SM121_CACHE_SOURCE_FILES):
         raise RuntimeErrorWithContext("SM121 cache-source inspection was incomplete")
+    return observed
+
+
+def attest_sm121_cache_observability_static_source(model: Any) -> dict[str, Any]:
+    """Return an exact scalar cache-source attestation for the local image.
+
+    This does not mount a snapshot, use a GPU, or retain raw source output.
+    A digest mismatch fails closed before the serving container is started.
+    """
+
+    try:
+        validate_sm121_storage_candidate(model)
+    except SM121StorageCandidateError as error:
+        raise RuntimeErrorWithContext(str(error)) from error
+    observed = inspect_sm121_cache_source_digests(model)
     event = {
         "event": SM121_CACHE_STATIC_ATTESTATION_EVENT,
         "candidate_source_tree": SM121_STORAGE_SOURCE_TREE,
@@ -1539,8 +1575,75 @@ def attest_sm121_cache_observability_static_source(model: Any) -> dict[str, Any]
     return event
 
 
+def _sm121_cache_server_info_fields(server: ManagedServer) -> dict[str, object]:
+    """Read a small, allowlisted cache identity from ``/server_info`` only.
+
+    The full server-info reply can contain operational details which must not
+    enter a journal.  This helper therefore searches it in memory for the
+    three resolved cache fields needed by the SM121 cache contracts, verifies
+    that repeated copies agree, and returns only scalar values.
+    """
+
+    root = server.base_url.removesuffix("/v1").rstrip("/")
+    request = urllib.request.Request(
+        root + "/server_info", headers=_authorization_headers(server.authorization)
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = json.load(response)
+    except (OSError, ValueError, urllib.error.URLError) as error:
+        raise RuntimeErrorWithContext(
+            "Could not read the SM121 cache runtime attestation"
+        ) from error
+    wanted = {
+        "disable_radix_cache": bool,
+        "mamba_radix_cache_strategy": str,
+        "max_mamba_cache_size": (int, type(None)),
+    }
+    values: dict[str, list[object]] = {field: [] for field in wanted}
+
+    def walk(value: object, *, depth: int = 0) -> None:
+        if depth > 24:
+            raise RuntimeErrorWithContext("SM121 server-info nesting is invalid")
+        if isinstance(value, dict):
+            for key, child in value.items():
+                expected_type = wanted.get(key)
+                if expected_type is not None:
+                    if key == "disable_radix_cache":
+                        valid = type(child) is bool
+                    elif key == "mamba_radix_cache_strategy":
+                        valid = isinstance(child, str) and bool(child)
+                    else:
+                        valid = child is None or (
+                            isinstance(child, int) and not isinstance(child, bool)
+                        )
+                    if not valid:
+                        raise RuntimeErrorWithContext(
+                            "SM121 cache runtime field is invalid"
+                        )
+                    values[key].append(child)
+                walk(child, depth=depth + 1)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child, depth=depth + 1)
+
+    walk(payload)
+    result: dict[str, object] = {}
+    for field, observed in values.items():
+        if not observed or any(value != observed[0] for value in observed[1:]):
+            raise RuntimeErrorWithContext("SM121 cache runtime field is unavailable")
+        result[field] = observed[0]
+    return result
+
+
 def _sm121_cache_server_info_disable_radix(server: ManagedServer) -> bool:
-    """Extract only the cache-off boolean from an authenticated server-info reply."""
+    """Extract the legacy B0 cache-off flag without widening its contract.
+
+    The paired semantic lane requires all three resolved cache settings, but
+    B0 predates that stronger contract and is intentionally attested only to
+    ``disable_radix_cache``.  Keep this read narrow so a compatible cache-off
+    server cannot regress merely because it omits unrelated Mamba fields.
+    """
 
     root = server.base_url.removesuffix("/v1").rstrip("/")
     request = urllib.request.Request(
@@ -1577,8 +1680,15 @@ def _sm121_cache_server_info_disable_radix(server: ManagedServer) -> bool:
     return values[0]
 
 
-def attest_sm121_cache_observability_runtime(server: ManagedServer) -> dict[str, Any]:
-    """Capture the one cache-off startup fact set without persisting logs/info."""
+def inspect_sm121_cache_runtime_identity(
+    server: ManagedServer, *, disable_radix_cache_override: bool | None = None
+) -> dict[str, Any]:
+    """Return the compact resolved cache identity without retaining raw logs.
+
+    This is shared by the cache-off B0 lane and the paired semantic canary.
+    It intentionally returns resolved arguments and startup identity only; the
+    caller still supplies the exact arm-specific acceptance contract.
+    """
 
     if server.backend != "sglang" or not server.container_id:
         raise RuntimeErrorWithContext("SM121 cache runtime is not an owned SGLang server")
@@ -1597,20 +1707,59 @@ def attest_sm121_cache_observability_runtime(server: ManagedServer) -> dict[str,
     if not matches or any(match != matches[0] for match in matches[1:]):
         raise RuntimeErrorWithContext("SM121 cache startup attestation is unavailable")
     parsed = matches[0]
-    event = {
-        "event": SM121_CACHE_RUNTIME_ATTESTATION_EVENT,
+    if disable_radix_cache_override is None:
+        server_info = _sm121_cache_server_info_fields(server)
+        disabled = server_info["disable_radix_cache"]
+        strategy = server_info["mamba_radix_cache_strategy"]
+        max_mamba_cache_size = server_info["max_mamba_cache_size"]
+    else:
+        if type(disable_radix_cache_override) is not bool:
+            raise RuntimeErrorWithContext("SM121 cache runtime identity is invalid")
+        disabled = disable_radix_cache_override
+        # A disabled Radix cache makes both source-attested predicates false.
+        # The legacy B0 contract only attests that cache-off implication and
+        # deliberately does not retain the unrelated resolved strategy.
+        strategy = "no_buffer"
+        max_mamba_cache_size = None
+    if type(disabled) is not bool or not isinstance(strategy, str):
+        raise RuntimeErrorWithContext("SM121 cache runtime identity is invalid")
+    if max_mamba_cache_size is not None and (
+        not isinstance(max_mamba_cache_size, int)
+        or isinstance(max_mamba_cache_size, bool)
+        or max_mamba_cache_size <= 0
+    ):
+        raise RuntimeErrorWithContext("SM121 cache runtime identity is invalid")
+    return {
         "cache_impl": parsed["cache_impl"],
         "cache_source": parsed["cache_source"],
         "hybrid_swa": parsed["hybrid_swa"] == "True",
         "hybrid_ssm": parsed["hybrid_ssm"] == "True",
         "hicache_attached": parsed["hicache_attached"] == "True",
         "streaming_wrapped": parsed["streaming_wrapped"] == "True",
-        "disable_radix_cache": _sm121_cache_server_info_disable_radix(server),
-        # These two booleans are the source-attested predicates for the
-        # observed cache-off server-info flag; the exact source hashes were
-        # recorded before startup and validate this implication.
-        "mamba_extra_buffer_enabled": False,
-        "mamba_extra_buffer_lazy_enabled": False,
+        "disable_radix_cache": disabled,
+        "mamba_radix_cache_strategy": strategy,
+        "max_mamba_cache_size": max_mamba_cache_size,
+        "mamba_extra_buffer_enabled": (
+            not disabled and strategy in {"extra_buffer", "extra_buffer_lazy"}
+        ),
+        "mamba_extra_buffer_lazy_enabled": (
+            not disabled and strategy == "extra_buffer_lazy"
+        ),
+    }
+
+
+def attest_sm121_cache_observability_runtime(server: ManagedServer) -> dict[str, Any]:
+    """Capture the one cache-off startup fact set without persisting logs/info."""
+    observed = inspect_sm121_cache_runtime_identity(
+        server,
+        disable_radix_cache_override=_sm121_cache_server_info_disable_radix(server),
+    )
+    event = {
+        "event": SM121_CACHE_RUNTIME_ATTESTATION_EVENT,
+        **{
+            field: observed[field]
+            for field in SM121_CACHE_RUNTIME_EXPECTED
+        },
     }
     try:
         validate_sm121_cache_runtime_attestation_event(event)
@@ -1622,6 +1771,11 @@ def attest_sm121_cache_observability_runtime(server: ManagedServer) -> dict[str,
 def _sm121_cache_metric_defaults() -> dict[str, Any]:
     return {
         "available": False,
+        # The B0 observer does not depend on guardrail counters, but the
+        # paired semantic canary does.  Keep their availability distinct so
+        # adding that stronger lane cannot retrospectively change B0's
+        # admitted zero-hit semantics.
+        "guardrail_metrics_available": False,
         "prefill_input_tokens": 0,
         "prefill_device_hit_tokens": 0,
         "prefill_host_hit_tokens": 0,
@@ -1640,6 +1794,8 @@ def _sm121_cache_metric_defaults() -> dict[str, Any]:
         "mamba_available_tokens": 0,
         "mamba_evictable_tokens": 0,
         "mamba_used_tokens": 0,
+        "evicted_tokens": 0,
+        "retracted_requests": 0,
     }
 
 
@@ -1708,6 +1864,14 @@ def snapshot_sm121_cache_observability_metrics(server: ManagedServer) -> dict[st
         "host": False,
         "storage": False,
     }
+    guardrail_seen = {
+        "sglang:evicted_tokens_total": False,
+        "sglang:num_retracted_requests_total": False,
+    }
+    guardrails = {
+        "sglang:evicted_tokens_total": "evicted_tokens",
+        "sglang:num_retracted_requests_total": "retracted_requests",
+    }
     base_labels: dict[str, str] | None = None
 
     def bind_base_labels(candidate: dict[str, str]) -> bool:
@@ -1729,6 +1893,7 @@ def snapshot_sm121_cache_observability_metrics(server: ManagedServer) -> dict[st
             "sglang:prefill_effective_tokens_total",
             "sglang:cached_tokens_total",
             *gauges,
+            *guardrails,
         }:
             continue
         labels = _sm121_cache_labels(match.group("labels"))
@@ -1780,6 +1945,12 @@ def snapshot_sm121_cache_observability_metrics(server: ManagedServer) -> dict[st
             snapshot[f"cached_{source_kind}_tokens"] = value
             snapshot[f"cached_{source_kind}_series_present"] = True
             cached_seen[source_kind] = True
+        elif name in guardrails:
+            if not bind_base_labels(labels) or guardrail_seen[name]:
+                malformed = True
+                continue
+            snapshot[guardrails[name]] = value
+            guardrail_seen[name] = True
         else:
             if not bind_base_labels(labels):
                 malformed = True
@@ -1792,6 +1963,9 @@ def snapshot_sm121_cache_observability_metrics(server: ManagedServer) -> dict[st
             gauge_seen[name] = True
     snapshot["available"] = not malformed and all(prefill_seen.values()) and all(
         gauge_seen.values()
+    )
+    snapshot["guardrail_metrics_available"] = (
+        not malformed and all(guardrail_seen.values())
     )
     return snapshot
 
@@ -1980,6 +2154,160 @@ def request_sm121_cache_observability_zero_hit(
         "completion_tokens": completion_tokens,
         "reasoning_tokens": reasoning_tokens,
         "elapsed_s": elapsed_s,
+        "response_detail_state": response_state,
+        "response_device_cached_tokens": response_device,
+        "response_host_cached_tokens": response_host,
+        "response_storage_cached_tokens": response_storage,
+        "usage_detail_state": usage_state,
+        "usage_cached_tokens": usage_cached,
+    }
+
+
+def request_sm121_cache_semantic_turn(
+    server: ManagedServer,
+    *,
+    served_name: object,
+    messages: list[dict[str, str]],
+    expected_response: str,
+    max_tokens: int,
+) -> dict[str, Any]:
+    """Issue one non-streaming semantic-cache request without retaining text.
+
+    Prompt token IDs are returned only to the caller's in-memory identity
+    checker.  The caller must project them to counts/booleans before journaling;
+    neither prompt text, response text, IDs, nor token IDs are returned in the
+    scalar result projection.
+    """
+
+    parsed = urlsplit(server.base_url)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != "127.0.0.1"
+        or parsed.port is None
+        or parsed.path.rstrip("/") != "/v1"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeErrorWithContext("SM121 semantic-cache endpoint is not loopback")
+    if not isinstance(served_name, str) or not served_name:
+        raise RuntimeErrorWithContext("SM121 semantic-cache served name is invalid")
+    if not isinstance(expected_response, str) or not expected_response:
+        raise RuntimeErrorWithContext("SM121 semantic-cache expected response is invalid")
+    if (
+        isinstance(max_tokens, bool)
+        or not isinstance(max_tokens, int)
+        or not 1 <= max_tokens <= 128
+    ):
+        raise RuntimeErrorWithContext("SM121 semantic-cache output cap is invalid")
+    if not isinstance(messages, list) or not 1 <= len(messages) <= 16:
+        raise RuntimeErrorWithContext("SM121 semantic-cache messages are invalid")
+    for message in messages:
+        if (
+            type(message) is not dict
+            or set(message) != {"role", "content"}
+            or message.get("role") not in {"system", "user", "assistant"}
+            or not isinstance(message.get("content"), str)
+            or not message["content"]
+        ):
+            raise RuntimeErrorWithContext("SM121 semantic-cache messages are invalid")
+    request_body = {
+        "model": served_name,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0.0,
+        "n": 1,
+        "stream": False,
+        "return_cached_tokens_details": True,
+        "return_prompt_token_ids": True,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    encoded = json.dumps(request_body, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > 4_194_304:
+        raise RuntimeErrorWithContext("SM121 semantic-cache request exceeded its limit")
+    request = urllib.request.Request(
+        server.base_url.rstrip("/") + "/chat/completions",
+        data=encoded,
+        headers={
+            "Content-Type": "application/json",
+            **_authorization_headers(server.authorization),
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=900) as response:
+            raw = response.read(4_194_305)
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise RuntimeErrorWithContext("SM121 semantic-cache request was rejected") from None
+    except (OSError, urllib.error.URLError, TimeoutError) as error:
+        raise RuntimeErrorWithContext("SM121 semantic-cache request failed") from error
+    if len(raw) > 4_194_304:
+        raise RuntimeErrorWithContext("SM121 semantic-cache response exceeded its limit")
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeErrorWithContext("SM121 semantic-cache response was invalid") from error
+    if not isinstance(payload, dict):
+        raise RuntimeErrorWithContext("SM121 semantic-cache response was not an object")
+    usage = payload.get("usage")
+    choices = payload.get("choices")
+    if (
+        not isinstance(usage, dict)
+        or not isinstance(choices, list)
+        or len(choices) != 1
+        or not isinstance(choices[0], dict)
+        or choices[0].get("index") != 0
+    ):
+        raise RuntimeErrorWithContext("SM121 semantic-cache response lacks required scalars")
+    message = choices[0].get("message")
+    if (
+        not isinstance(message, dict)
+        or not isinstance(message.get("content"), str)
+        or message["content"].strip() != expected_response
+    ):
+        raise RuntimeErrorWithContext("SM121 semantic-cache response failed validation")
+    raw_prompt_token_ids = choices[0].get("prompt_token_ids")
+    if (
+        not isinstance(raw_prompt_token_ids, list)
+        or not raw_prompt_token_ids
+        or len(raw_prompt_token_ids) > 65_536
+    ):
+        raise RuntimeErrorWithContext("SM121 semantic-cache prompt IDs are unavailable")
+    prompt_token_ids: tuple[int, ...] = tuple()
+    parsed_ids: list[int] = []
+    for token_id in raw_prompt_token_ids:
+        if (
+            isinstance(token_id, bool)
+            or not isinstance(token_id, int)
+            or token_id < 0
+            or token_id > 2**31 - 1
+        ):
+            raise RuntimeErrorWithContext("SM121 semantic-cache prompt IDs are invalid")
+        parsed_ids.append(token_id)
+    prompt_token_ids = tuple(parsed_ids)
+    prompt_tokens = _sm121_cache_exact_json_count(
+        usage.get("prompt_tokens"), "prompt tokens"
+    )
+    if prompt_tokens != len(prompt_token_ids):
+        raise RuntimeErrorWithContext("SM121 semantic-cache prompt token count disagrees")
+    completion_tokens = _sm121_cache_exact_json_count(
+        usage.get("completion_tokens"), "completion tokens"
+    )
+    if completion_tokens <= 0:
+        raise RuntimeErrorWithContext("SM121 semantic-cache response has no completion")
+    reasoning_tokens = _sm121_cache_optional_json_count(
+        usage.get("reasoning_tokens"), "reasoning tokens"
+    )
+    response_state, response_device, response_host, response_storage = (
+        _sm121_cache_response_detail_observation(payload)
+    )
+    usage_state, usage_cached = _sm121_cache_usage_detail_observation(usage)
+    return {
+        "private_prompt_token_ids": prompt_token_ids,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "reasoning_tokens": reasoning_tokens,
         "response_detail_state": response_state,
         "response_device_cached_tokens": response_device,
         "response_host_cached_tokens": response_host,
@@ -2349,8 +2677,13 @@ def start_sglang(
     storage_canary_authorized = (
         getattr(model, "storage_canary_authorized", False) is True
     )
+    cache_semantic_canary_authorized = (
+        getattr(model, "cache_semantic_canary_authorized", False) is True
+    )
     blocker = model_execution_blocker(
-        model, allow_sm121_storage_canary=storage_canary_authorized
+        model,
+        allow_sm121_storage_canary=storage_canary_authorized,
+        allow_sm121_cache_semantic_canary=cache_semantic_canary_authorized,
     )
     if blocker is not None:
         raise RuntimeErrorWithContext(blocker)
@@ -2385,7 +2718,7 @@ def start_sglang(
     target_repository, container_snapshot = _exact_sglang_snapshot(
         hf_cache, source=source, revision=revision, role="target"
     )
-    if is_sm121_storage_candidate(model):
+    if is_sm121_cache_semantic_candidate(model) or is_sm121_storage_candidate(model):
         return _start_sglang_sm121_storage(
             model,
             workspace=workspace,

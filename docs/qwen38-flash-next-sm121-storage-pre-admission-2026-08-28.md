@@ -227,6 +227,60 @@ IDs, response bodies, raw metrics, source text, and timings presented as a
 performance result. It also rejects a checksum-refreshed generic downgrade of
 the B0 bundle.
 
+## Paired cache-policy semantic canary — ready, not yet measured
+
+The next admission-only step is a paired B-then-A semantic probe, not a
+benchmark. It uses two newly isolated profiles against the same pinned local
+image, snapshot, C1 geometry, disabled CUDA graphs, and
+`extra_buffer_lazy`/four-state setting. The only serving-argument difference
+is `--disable-radix-cache` in B. Neither arm can be selected by generic
+planning, matrix, or serving entry points.
+
+Its order is deliberately four independent server lifetimes:
+
+1. Cache-off B quality gate.
+2. Cache-off B semantic probe.
+3. Cache-on A quality gate, only after B is complete.
+4. Cache-on A semantic probe, only after B's scalar lifecycle and private
+   prompt-identity controls pass.
+
+The quality lifetime cannot populate the semantic cache. In its own fresh
+second lifetime, each arm makes a cold T0 request followed by two deterministic
+append-only turns with a 32K–48K synthetic shared prefix. Prompt text,
+completions, and token IDs never leave process memory. The runner compares the
+three A token-ID sequences to B in memory, then persists only counts and
+booleans.
+
+B requires settled input-counter progress and zero device, host, and storage
+hits on every turn. A requires the same zero result on T0; T1 and T2 must each
+report explicit positive device-only details that reconcile exactly with native
+device-hit and residency deltas. Both arms reject host/storage hits, eviction,
+retraction, missing guardrail counters, unsettled snapshots, or a failed exact
+answer. A non-admitted semantic result is terminal `partial`; it is never
+silently promoted to a speed result.
+
+Run and inspect the pair only through the dedicated commands:
+
+```bash
+python3 sparkbench.py sm121-cache-policy-semantic-canary
+python3 sparkbench.py audit-sm121-cache-policy-semantic \
+  results/<cache-off-b-run> results/<cache-on-a-run>
+```
+
+The semantic evidence lane emits no wall time, latency, TPS, energy, telemetry,
+prompt, completion, token-ID, request-ID, or source-text field. A successful
+pair establishes semantic cache behavior for this exact candidate only. A
+separate matched cold A/B/B/A protocol remains necessary before making a cache
+benefit or serving-performance claim.
+
+Each frozen pair carries an opaque pair-instance SHA-256 commitment derived
+from its two raw plan nonces; the raw nonces never leave the ignored plans. A
+also records a scalar receipt for the completed B control before it can start.
+Those commitments prevent static profile fingerprints from accidentally pairing
+separate attempts, without exposing a path, prompt, token sequence, or timing
+field. The exporter still accepts one B/A pair per results root, so a retry
+uses a separate results root/archive rather than mixing campaigns.
+
 ## What remains blocked
 
 The runtime-attestation schema intentionally accepts only an `admitted` record

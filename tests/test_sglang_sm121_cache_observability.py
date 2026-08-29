@@ -275,7 +275,9 @@ def _valid_lifecycle_events(*, admitted: bool = True) -> tuple[
 def _metric_exposition(
     *,
     cached_total: int | None = None,
+    cached_source: str = "total",
     bad_source: bool = False,
+    guardrails: bool = False,
     scheduler_labels: bool = False,
 ) -> str:
     base = (
@@ -302,9 +304,16 @@ def _metric_exposition(
         f"sglang:mamba_used_tokens{labels()} 20",
     ]
     if cached_total is not None:
-        source = "unknown" if bad_source else "total"
+        source = "unknown" if bad_source else cached_source
         lines.append(
             f'sglang:cached_tokens_total{labels(f"cache_source=\"{source}\"")} {cached_total}'
+        )
+    if guardrails:
+        lines.extend(
+            (
+                f"sglang:evicted_tokens_total{labels()} 0",
+                f"sglang:num_retracted_requests_total{labels()} 0",
+            )
         )
     return "\n".join(lines) + "\n"
 
@@ -513,6 +522,7 @@ class SM121CacheObservabilityRuntimeTests(unittest.TestCase):
         ):
             empty = runtime.snapshot_sm121_cache_observability_metrics(server)
         self.assertTrue(empty["available"])
+        self.assertFalse(empty["guardrail_metrics_available"])
         self.assertEqual(empty["prefill_input_tokens"], 17)
         self.assertEqual(empty["cached_total_tokens"], 0)
         self.assertFalse(empty["cached_total_series_present"])
@@ -544,6 +554,27 @@ class SM121CacheObservabilityRuntimeTests(unittest.TestCase):
         ):
             malformed = runtime.snapshot_sm121_cache_observability_metrics(server)
         self.assertFalse(malformed["available"])
+
+    def test_metrics_snapshot_tracks_device_hits_and_guardrail_counters(self) -> None:
+        server = self._server()
+        with patch(
+            "bench.runtime.urllib.request.urlopen",
+            return_value=_Response(
+                _metric_exposition(
+                    cached_total=32_768,
+                    cached_source="device",
+                    guardrails=True,
+                    scheduler_labels=True,
+                ).encode("utf-8")
+            ),
+        ):
+            snapshot = runtime.snapshot_sm121_cache_observability_metrics(server)
+        self.assertTrue(snapshot["available"])
+        self.assertTrue(snapshot["guardrail_metrics_available"])
+        self.assertEqual(snapshot["cached_device_tokens"], 32_768)
+        self.assertTrue(snapshot["cached_device_series_present"])
+        self.assertEqual(snapshot["evicted_tokens"], 0)
+        self.assertEqual(snapshot["retracted_requests"], 0)
 
     def test_metrics_settlement_requires_two_identical_available_snapshots(self) -> None:
         server = self._server()
@@ -616,6 +647,22 @@ class SM121CacheObservabilityRuntimeTests(unittest.TestCase):
         ):
             observed = runtime.attest_sm121_cache_observability_runtime(self._server())
         validate_sm121_cache_runtime_attestation_event(observed)
+
+    def test_b0_runtime_flag_reader_does_not_require_semantic_fields(self) -> None:
+        """B0 only binds cache-off; the paired lane owns richer server-info checks."""
+
+        with patch(
+            "bench.runtime.urllib.request.urlopen",
+            return_value=_Response(
+                json.dumps({"server_args": {"disable_radix_cache": True}}).encode(
+                    "utf-8"
+                )
+            ),
+        ):
+            self.assertIs(
+                runtime._sm121_cache_server_info_disable_radix(self._server()),
+                True,
+            )
 
     def test_zero_hit_request_is_loopback_and_returns_only_scalars(self) -> None:
         server = self._server()

@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .sglang_sm121_storage import is_sm121_storage_candidate
+from .sglang_sm121_cache_semantic import is_sm121_cache_semantic_candidate
 
 
 RETIRED_SGLANG_SOURCE_OVERLAY_DIGESTS = frozenset(
@@ -24,6 +25,10 @@ _SM121_STORAGE_CANARY_MESSAGE = (
     "This SM121 native-storage profile is pre-admission and requires the "
     "dedicated sm121-storage-canary command"
 )
+_SM121_CACHE_SEMANTIC_CANARY_MESSAGE = (
+    "This SM121 cache-policy semantic profile is pre-admission and requires "
+    "the dedicated sm121-cache-policy-semantic-canary command"
+)
 
 
 def _field(value: Any, name: str) -> Any:
@@ -33,11 +38,24 @@ def _field(value: Any, name: str) -> Any:
 
 
 def model_execution_blocker(
-    model: Any, *, allow_sm121_storage_canary: bool = False
+    model: Any,
+    *,
+    allow_sm121_storage_canary: bool = False,
+    allow_sm121_cache_semantic_canary: bool = False,
 ) -> str | None:
     """Return a stable blocker when a model contains a retired artifact."""
 
-    if is_sm121_storage_candidate(model) and not allow_sm121_storage_canary:
+    semantic_candidate = is_sm121_cache_semantic_candidate(model)
+    if (
+        semantic_candidate
+        and not allow_sm121_cache_semantic_canary
+    ):
+        return _SM121_CACHE_SEMANTIC_CANARY_MESSAGE
+    if (
+        is_sm121_storage_candidate(model)
+        and not semantic_candidate
+        and not allow_sm121_storage_canary
+    ):
         return _SM121_STORAGE_CANARY_MESSAGE
     overlays = _field(model, "sglang_source_overlays")
     if overlays is None:

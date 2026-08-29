@@ -165,6 +165,25 @@ def _write_frozen_runner_plan(run_dir: Path) -> Path:
 
 
 class ExecutionBlockerTests(unittest.TestCase):
+    def test_semantic_cache_profiles_require_their_dedicated_executor(self) -> None:
+        profiles = load_models(ROOT / "manifests" / "models.toml")
+        for profile_id in (
+            "qwen38-flash-next-nvfp4-sm121-triton-storage-cache-policy-off-sglang",
+            "qwen38-flash-next-nvfp4-sm121-triton-storage-cache-policy-on-sglang",
+        ):
+            with self.subTest(profile_id=profile_id):
+                profile = profiles[profile_id]
+                self.assertIn(
+                    "cache-policy semantic profile",
+                    model_execution_blocker(profile) or "",
+                )
+                self.assertIsNone(
+                    model_execution_blocker(
+                        profile,
+                        allow_sm121_cache_semantic_canary=True,
+                    )
+                )
+
     def test_retired_manifest_inventory_and_statuses_are_exact(self) -> None:
         self.assertEqual(
             RETIRED_SGLANG_SOURCE_OVERLAY_DIGESTS,

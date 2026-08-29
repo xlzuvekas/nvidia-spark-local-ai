@@ -88,12 +88,15 @@ from .runtime import (
     attest_sm121_cache_observability_runtime,
     attest_sm121_cache_observability_static_source,
     capture_server_provenance,
+    inspect_sm121_cache_runtime_identity,
+    inspect_sm121_cache_source_digests,
     ollama_model_loaded,
     recover_owned_llamacpp,
     recover_owned_sglang,
     recover_owned_vllm,
     save_server_logs,
     request_sm121_cache_observability_zero_hit,
+    request_sm121_cache_semantic_turn,
     settle_sm121_cache_observability_metrics,
     start_server,
     validate_llamacpp_artifacts,
@@ -117,6 +120,42 @@ from .sglang_sm121_storage import (
     validate_sm121_storage_image_inspection,
     validate_sm121_storage_runtime_provenance_event,
     validate_sm121_storage_suite,
+)
+from .sglang_sm121_cache_semantic import (
+    SM121_CACHE_SEMANTIC_ARM_ORDER,
+    SM121_CACHE_SEMANTIC_CACHE_OFF_PROFILE_ID,
+    SM121_CACHE_SEMANTIC_CACHE_ON_PROFILE_ID,
+    SM121_CACHE_SEMANTIC_CASE_ID,
+    SM121_CACHE_SEMANTIC_COLD_INPUT_MAX_TOKENS,
+    SM121_CACHE_SEMANTIC_COLD_INPUT_MIN_TOKENS,
+    SM121_CACHE_SEMANTIC_EXECUTION_MODE,
+    SM121_CACHE_SEMANTIC_LOCAL_LIFETIME_ORDER,
+    SM121_CACHE_SEMANTIC_METRIC_FIELDS,
+    SM121_CACHE_SEMANTIC_PAIR_BINDING_SCHEMA_VERSION,
+    SM121_CACHE_SEMANTIC_RUNTIME_ATTESTATION_EVENT,
+    SM121_CACHE_SEMANTIC_QUALITY_CASE_ID,
+    SM121_CACHE_SEMANTIC_STATIC_ASSERTIONS,
+    SM121_CACHE_SEMANTIC_STATIC_ATTESTATION_EVENT,
+    SM121_CACHE_SEMANTIC_TURN_OBSERVATION_EVENT,
+    SM121_CACHE_SEMANTIC_TURN_ORDER,
+    SM121_CACHE_SEMANTIC_SUITE_ID,
+    SM121CacheSemanticError,
+    derive_sm121_cache_semantic_turn_admission,
+    is_sm121_cache_semantic_candidate,
+    is_sm121_cache_semantic_plan,
+    sm121_cache_semantic_arm,
+    sm121_cache_semantic_case_metadata,
+    sm121_cache_semantic_cache_off_receipt_sha256,
+    sm121_cache_semantic_lifecycle_issues,
+    sm121_cache_semantic_pair_binding_sha256,
+    sm121_cache_semantic_pair_instance_sha256,
+    validate_sm121_cache_semantic_runtime_attestation_event,
+    validate_sm121_cache_semantic_static_attestation_event,
+    validate_sm121_cache_semantic_candidate,
+    validate_sm121_cache_semantic_pair,
+    validate_sm121_cache_semantic_pair_binding,
+    validate_sm121_cache_semantic_suite,
+    validate_sm121_cache_semantic_turn_event,
 )
 from .sglang_sm121_cache_observability import (
     SM121_CACHE_OBSERVABILITY_CACHED_SERIES,
@@ -154,6 +193,20 @@ _SM121_STORAGE_QUALITY_GATE_FAILURE_MESSAGE = (
 _SM121_CACHE_OBSERVABILITY_FAILURE_MESSAGE = (
     "SM121 cache observability request failed; details omitted"
 )
+_SM121_CACHE_SEMANTIC_FAILURE_MESSAGE = (
+    "SM121 cache-policy semantic request failed; details omitted"
+)
+# These are synthetic fixed protocol strings, kept private to the executor.
+# They are never written to journals, reports, or evidence. The repeated
+# ledger token was locally tokenizer-checked to place T0 in the 32--48 KiB
+# cold-input window once Qwen's chat template is applied.
+_SM121_CACHE_SEMANTIC_LEDGER_WORD = "shared-ledger-entry "
+_SM121_CACHE_SEMANTIC_LEDGER_REPETITIONS = 10_240
+_SM121_CACHE_SEMANTIC_EXPECTED_RESPONSES = (
+    "SEMANTIC-CACHE-T0-17",
+    "SEMANTIC-CACHE-T1-29",
+    "SEMANTIC-CACHE-T2-43",
+)
 
 
 class MultiHopNeedleError(RuntimeError):
@@ -182,6 +235,13 @@ class SM121CacheObservabilityRequestError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__(_SM121_CACHE_OBSERVABILITY_FAILURE_MESSAGE)
+
+
+class SM121CacheSemanticRequestError(RuntimeError):
+    """A public-safe failure for the paired cache-policy semantic probe."""
+
+    def __init__(self) -> None:
+        super().__init__(_SM121_CACHE_SEMANTIC_FAILURE_MESSAGE)
 
 
 class PrefixCacheError(RuntimeError):
@@ -278,10 +338,14 @@ def create_plan(
     models_path: Path,
     suite_path: Path,
     allow_sm121_storage_canary: bool = False,
+    allow_sm121_cache_semantic_canary: bool = False,
 ) -> Path:
-    storage_candidate = is_sm121_storage_candidate(model)
+    semantic_candidate = is_sm121_cache_semantic_candidate(model)
+    storage_candidate = is_sm121_storage_candidate(model) and not semantic_candidate
     blocker = model_execution_blocker(
-        model, allow_sm121_storage_canary=allow_sm121_storage_canary
+        model,
+        allow_sm121_storage_canary=allow_sm121_storage_canary,
+        allow_sm121_cache_semantic_canary=allow_sm121_cache_semantic_canary,
     )
     if blocker is not None:
         raise RuntimeError(blocker)
@@ -297,7 +361,12 @@ def create_plan(
             f"{model.backend} direct profiles require the {direct_command} command"
         )
     validate_benchmark_selection(model, suite, context="plan")
-    if storage_candidate:
+    if semantic_candidate:
+        try:
+            validate_sm121_cache_semantic_candidate(model)
+        except SM121CacheSemanticError as error:
+            raise RuntimeError(str(error)) from error
+    elif storage_candidate:
         try:
             validate_sm121_storage_candidate(model)
         except SM121StorageCandidateError as error:
@@ -318,7 +387,7 @@ def create_plan(
         for case in suite_data["cases"]
     ]
     resolved_image = _image_digest(model.image)
-    if storage_candidate:
+    if storage_candidate or semantic_candidate:
         local_image = _sm121_storage_image_identity(model)
         resolved: dict[str, Any] = {
             "image_digest": resolved_image,
@@ -409,6 +478,123 @@ def create_sm121_cache_observability_plan(
         suite_path=suite_path,
         allow_sm121_storage_canary=True,
     )
+
+
+def create_sm121_cache_semantic_pair_plans(
+    *,
+    cache_off_model: Any,
+    cache_on_model: Any,
+    suite: Any,
+    results_root: Path,
+    models_path: Path,
+    suite_path: Path,
+) -> tuple[Path, Path]:
+    """Freeze the two semantic-cache arm plans in fixed B-then-A order.
+
+    This only freezes the profiles.  The paired executor is the sole path
+    that may serve either plan, and it runs B completely before it permits A.
+    Keeping the plans independent lets the normal scalar exporter validate
+    each arm without carrying any prompt/token material between directories.
+    """
+
+    if (
+        str(getattr(cache_off_model, "id", ""))
+        != SM121_CACHE_SEMANTIC_CACHE_OFF_PROFILE_ID
+        or str(getattr(cache_on_model, "id", ""))
+        != SM121_CACHE_SEMANTIC_CACHE_ON_PROFILE_ID
+    ):
+        raise RuntimeError("The semantic canary requires the exact B-then-A profiles")
+    try:
+        validate_sm121_cache_semantic_pair(cache_off_model, cache_on_model)
+        validate_sm121_cache_semantic_suite(suite)
+    except SM121CacheSemanticError as error:
+        raise RuntimeError(str(error)) from error
+    cache_off_run = create_plan(
+        model=cache_off_model,
+        suite=suite,
+        results_root=results_root,
+        models_path=models_path,
+        suite_path=suite_path,
+        allow_sm121_cache_semantic_canary=True,
+    )
+    try:
+        cache_on_run = create_plan(
+            model=cache_on_model,
+            suite=suite,
+            results_root=results_root,
+            models_path=models_path,
+            suite_path=suite_path,
+            allow_sm121_cache_semantic_canary=True,
+        )
+    except BaseException:
+        # The B plan is harmless and intentionally left as a frozen, ignored
+        # record if creating A fails; no server has started at this point.
+        raise
+    _bind_sm121_cache_semantic_pair_plans(cache_off_run, cache_on_run)
+    return cache_off_run, cache_on_run
+
+
+def _bind_sm121_cache_semantic_pair_plans(
+    cache_off_run: Path, cache_on_run: Path
+) -> None:
+    """Add one deterministic, non-sensitive cross-plan binding to both arms."""
+
+    plans: dict[str, tuple[Path, dict[str, Any]]] = {}
+    for arm, run_dir in zip(SM121_CACHE_SEMANTIC_ARM_ORDER, (cache_off_run, cache_on_run)):
+        try:
+            plan = json.loads((run_dir / "plan.json").read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError("Could not bind the frozen semantic-cache plans") from error
+        fingerprint = plan.get("fingerprint") if isinstance(plan, dict) else None
+        if not isinstance(fingerprint, str) or re.fullmatch(r"[0-9a-f]{16}", fingerprint) is None:
+            raise RuntimeError("Frozen semantic-cache plan fingerprint is invalid")
+        plans[arm] = (run_dir, plan)
+    try:
+        pair_instance_sha256 = sm121_cache_semantic_pair_instance_sha256(
+            plans[SM121_CACHE_SEMANTIC_ARM_ORDER[0]][1].get("run_nonce"),
+            plans[SM121_CACHE_SEMANTIC_ARM_ORDER[1]][1].get("run_nonce"),
+        )
+    except SM121CacheSemanticError as error:
+        raise RuntimeError("Frozen semantic-cache pair instance is invalid") from error
+    for index, arm in enumerate(SM121_CACHE_SEMANTIC_ARM_ORDER):
+        run_dir, plan = plans[arm]
+        peer_arm = SM121_CACHE_SEMANTIC_ARM_ORDER[1 - index]
+        model = plan.get("model")
+        suite = plan.get("suite")
+        if type(model) is not dict or type(suite) is not dict:
+            raise RuntimeError("Frozen semantic-cache plan has invalid binding inputs")
+        binding: dict[str, object] = {
+            "schema_version": SM121_CACHE_SEMANTIC_PAIR_BINDING_SCHEMA_VERSION,
+            "suite_id": SM121_CACHE_SEMANTIC_SUITE_ID,
+            "execution_mode": SM121_CACHE_SEMANTIC_EXECUTION_MODE,
+            "arm": arm,
+            "profile_id": model.get("id"),
+            "arm_order": list(SM121_CACHE_SEMANTIC_ARM_ORDER),
+            "local_lifetime_order": list(SM121_CACHE_SEMANTIC_LOCAL_LIFETIME_ORDER),
+            "quality_case_id": SM121_CACHE_SEMANTIC_QUALITY_CASE_ID,
+            "semantic_case_id": SM121_CACHE_SEMANTIC_CASE_ID,
+            "semantic_case_metadata": sm121_cache_semantic_case_metadata(),
+            "peer_plan_fingerprint": plans[peer_arm][1]["fingerprint"],
+            "pair_instance_sha256": pair_instance_sha256,
+        }
+        try:
+            binding["pair_binding_sha256"] = sm121_cache_semantic_pair_binding_sha256(
+                binding
+            )
+            validate_sm121_cache_semantic_pair_binding(
+                binding,
+                model,
+                suite,
+                peer_plan_fingerprint=plans[peer_arm][1]["fingerprint"],
+            )
+        except SM121CacheSemanticError as error:
+            raise RuntimeError("Frozen semantic-cache pair binding is invalid") from error
+        plan["semantic_pair"] = binding
+        plan["integrity_hash"] = content_hash(
+            {key: value for key, value in plan.items() if key != "integrity_hash"},
+            64,
+        )
+        write_json(run_dir / "plan.json", plan)
 
 
 def _namespace(value: Any) -> Any:
@@ -574,6 +760,91 @@ def _load_sm121_cache_observability_plan(
     model.resolved_local_image_id = local_image["docker_image_id"]
     model.run_identity = f"{plan['fingerprint']}-{run_nonce}"
     model.storage_canary_authorized = True
+    return plan, model, suite
+
+
+def _load_sm121_cache_semantic_plan(
+    run_dir: Path,
+) -> tuple[dict[str, Any], Any, Any]:
+    """Load one immutable arm plan; pair binding is checked by the controller."""
+
+    try:
+        plan = json.loads((run_dir / "plan.json").read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise PreflightError("SM121 semantic-cache plan is unavailable or invalid") from error
+    if type(plan) is not dict or int(plan.get("schema_version", 0)) != 2:
+        raise PreflightError("SM121 semantic-cache plan schema is invalid")
+    model_data = plan.get("model")
+    suite_data = plan.get("suite")
+    resolved = plan.get("resolved")
+    if (
+        type(model_data) is not dict
+        or type(suite_data) is not dict
+        or type(resolved) is not dict
+        or type(suite_data.get("cases")) is not list
+    ):
+        raise PreflightError("SM121 semantic-cache plan has invalid core fields")
+    suite_without_case_ids = {
+        **suite_data,
+        "cases": [
+            {key: value for key, value in case.items() if key != "case_id"}
+            for case in suite_data["cases"]
+            if type(case) is dict
+        ],
+    }
+    if len(suite_without_case_ids["cases"]) != len(suite_data["cases"]):
+        raise PreflightError("SM121 semantic-cache case records are invalid")
+    expected_fingerprint = content_hash(
+        {"model": model_data, "suite": suite_without_case_ids, "resolved": resolved}
+    )
+    integrity_hash = plan.get("integrity_hash")
+    integrity_payload = {
+        key: value for key, value in plan.items() if key != "integrity_hash"
+    }
+    integrity_valid = isinstance(integrity_hash, str) and (
+        content_hash(integrity_payload, len(integrity_hash)) == integrity_hash
+    )
+    if not integrity_valid or plan.get("fingerprint") != expected_fingerprint:
+        raise PreflightError("SM121 semantic-cache plan fingerprint is invalid")
+    protocol_digest = suite_data.get("protocol_digest")
+    for case in suite_data["cases"]:
+        assert isinstance(case, dict)
+        case_without_id = {key: value for key, value in case.items() if key != "case_id"}
+        expected_case_id = _canonical_case(
+            model_data, case_without_id, protocol_digest=protocol_digest
+        )["case_id"]
+        if case.get("case_id") != expected_case_id:
+            raise PreflightError("SM121 semantic-cache case identity is invalid")
+    model = _namespace(model_data)
+    suite = _namespace(suite_data)
+    try:
+        if not is_sm121_cache_semantic_plan(model, suite):
+            raise SM121CacheSemanticError("semantic-cache plan selector is invalid")
+        validate_sm121_cache_semantic_candidate(model)
+        validate_sm121_cache_semantic_suite(suite)
+    except SM121CacheSemanticError as error:
+        raise PreflightError(str(error)) from error
+    local_image = resolved.get("local_image")
+    if (
+        type(local_image) is not dict
+        or set(local_image) != {"docker_image_id", "platform", "source_tree"}
+        or local_image.get("docker_image_id") != SM121_STORAGE_LOCAL_IMAGE_ID
+        or local_image.get("platform") != SM121_STORAGE_PLATFORM
+        or local_image.get("source_tree") != SM121_STORAGE_SOURCE_TREE
+    ):
+        raise PreflightError("SM121 semantic-cache local image identity is invalid")
+    run_nonce = plan.get("run_nonce")
+    if not isinstance(run_nonce, str) or re.fullmatch(r"[0-9a-f]{32}", run_nonce) is None:
+        raise PreflightError("SM121 semantic-cache run nonce is invalid")
+    pair = plan.get("semantic_pair")
+    try:
+        validate_sm121_cache_semantic_pair_binding(pair, model, suite)
+    except SM121CacheSemanticError as error:
+        raise PreflightError("SM121 semantic-cache plan binding is invalid") from error
+    model.resolved_local_image_id = local_image["docker_image_id"]
+    model.run_identity = f"{plan['fingerprint']}-{run_nonce}"
+    model.cache_semantic_canary_authorized = True
+    model.semantic_pair_binding = pair
     return plan, model, suite
 
 
@@ -2924,6 +3195,774 @@ def _require_sm121_storage_quality_gate(
     ]
     if len(completions) != 1 or completions[0].get("validation_passed") is not True:
         raise SM121StorageQualityGateError()
+
+
+def _sm121_cache_semantic_messages() -> tuple[list[dict[str, str]], ...]:
+    """Build T0/T1/T2 only in memory for the paired semantic probe.
+
+    The renderer has no external inputs.  Each later turn appends fixed,
+    already-verified synthetic assistant history to the immediately prior
+    message list; it never uses model text as a new prompt component.
+    """
+
+    system = {
+        "role": "system",
+        "content": (
+            "Follow the synthetic ledger protocol exactly. Reply with only the "
+            "requested token and no explanation."
+        ),
+    }
+    ledger = _SM121_CACHE_SEMANTIC_LEDGER_WORD * _SM121_CACHE_SEMANTIC_LEDGER_REPETITIONS
+    initial_user = {
+        "role": "user",
+        "content": (
+            "Read the complete synthetic ledger before replying.\n"
+            + ledger
+            + "\nReturn exactly "
+            + _SM121_CACHE_SEMANTIC_EXPECTED_RESPONSES[0]
+        ),
+    }
+    t0 = [system, initial_user]
+    t1 = [
+        *t0,
+        {"role": "assistant", "content": _SM121_CACHE_SEMANTIC_EXPECTED_RESPONSES[0]},
+        {
+            "role": "user",
+            "content": (
+                "Keep the same ledger history and return exactly "
+                + _SM121_CACHE_SEMANTIC_EXPECTED_RESPONSES[1]
+            ),
+        },
+    ]
+    t2 = [
+        *t1,
+        {"role": "assistant", "content": _SM121_CACHE_SEMANTIC_EXPECTED_RESPONSES[1]},
+        {
+            "role": "user",
+            "content": (
+                "Keep the same ledger history and return exactly "
+                + _SM121_CACHE_SEMANTIC_EXPECTED_RESPONSES[2]
+            ),
+        },
+    ]
+    return t0, t1, t2
+
+
+def _sm121_cache_semantic_common_prefix_tokens(
+    first: tuple[int, ...], second: tuple[int, ...]
+) -> int:
+    """Count a private token-prefix overlap without storing token IDs."""
+
+    common = 0
+    for left, right in zip(first, second):
+        if left != right:
+            break
+        common += 1
+    return common
+
+
+def _sm121_cache_semantic_static_event(
+    *, model: SimpleNamespace, arm: str, lifetime: int
+) -> dict[str, Any]:
+    """Bind one fresh semantic lifetime to reviewed cache-source roles."""
+
+    event = {
+        "event": SM121_CACHE_SEMANTIC_STATIC_ATTESTATION_EVENT,
+        "arm": arm,
+        "fresh_server_lifetime": lifetime,
+        "candidate_source_tree": SM121_STORAGE_SOURCE_TREE,
+        **inspect_sm121_cache_source_digests(model),
+        **SM121_CACHE_SEMANTIC_STATIC_ASSERTIONS,
+    }
+    try:
+        validate_sm121_cache_semantic_static_attestation_event(event)
+    except SM121CacheSemanticError as error:
+        raise SM121CacheSemanticRequestError() from error
+    return event
+
+
+def _sm121_cache_semantic_runtime_event(
+    *, server: Any, arm: str, lifetime: int
+) -> dict[str, Any]:
+    """Record only the resolved scalar cache identity for a fresh server."""
+
+    event = {
+        "event": SM121_CACHE_SEMANTIC_RUNTIME_ATTESTATION_EVENT,
+        "arm": arm,
+        "fresh_server_lifetime": lifetime,
+        **inspect_sm121_cache_runtime_identity(server),
+    }
+    try:
+        validate_sm121_cache_semantic_runtime_attestation_event(event)
+    except SM121CacheSemanticError as error:
+        raise SM121CacheSemanticRequestError() from error
+    return event
+
+
+def _sm121_cache_semantic_turn_event(
+    *,
+    case: SimpleNamespace,
+    attempt_id: str,
+    arm: str,
+    turn: str,
+    result: dict[str, Any],
+    before: dict[str, Any],
+    before_polls: int,
+    before_settled: bool,
+    after: dict[str, Any],
+    after_polls: int,
+    after_settled: bool,
+    append_only_prompt_identity_verified: bool,
+    cross_arm_prompt_identity_verified: bool | None,
+    shared_prefix_tokens: int,
+) -> dict[str, Any]:
+    """Project one private turn into a validated scalar-only observation."""
+
+    event: dict[str, Any] = {
+        "event": SM121_CACHE_SEMANTIC_TURN_OBSERVATION_EVENT,
+        "case_id": case.case_id,
+        "protocol_case_id": SM121_CACHE_SEMANTIC_CASE_ID,
+        "attempt_id": attempt_id,
+        "turn": turn,
+        "arm": arm,
+        "cache_details_requested": True,
+        "prompt_token_ids_requested": True,
+        "streaming": False,
+        "thinking_disabled": True,
+        "prompt_tokens": result["prompt_tokens"],
+        "completion_tokens": result["completion_tokens"],
+        "reasoning_tokens": result["reasoning_tokens"],
+        "append_only_prompt_identity_verified": append_only_prompt_identity_verified,
+        "cross_arm_prompt_identity_verified": cross_arm_prompt_identity_verified,
+        "shared_prefix_tokens": shared_prefix_tokens,
+        "response_detail_state": result["response_detail_state"],
+        "usage_detail_state": result["usage_detail_state"],
+        "response_device_cached_tokens": result["response_device_cached_tokens"],
+        "response_host_cached_tokens": result["response_host_cached_tokens"],
+        "response_storage_cached_tokens": result["response_storage_cached_tokens"],
+        "usage_cached_tokens": result["usage_cached_tokens"],
+        "metrics_available": bool(
+            before.get("available") is True and after.get("available") is True
+        ),
+        "guardrail_metrics_available": bool(
+            before.get("guardrail_metrics_available") is True
+            and after.get("guardrail_metrics_available") is True
+        ),
+        "metrics_before_polls": before_polls,
+        "metrics_after_polls": after_polls,
+        "metrics_before_settled": before_settled,
+        "metrics_after_settled": after_settled,
+    }
+    for prefix, snapshot in (("before", before), ("after", after)):
+        for metric in SM121_CACHE_SEMANTIC_METRIC_FIELDS:
+            event[f"{prefix}_{metric}"] = snapshot[metric]
+        for source in SM121_CACHE_OBSERVABILITY_CACHED_SERIES:
+            event[f"{prefix}_cached_{source}_series_present"] = snapshot[
+                f"cached_{source}_series_present"
+            ]
+    for metric in SM121_CACHE_SEMANTIC_METRIC_FIELDS:
+        event[f"delta_{metric}"] = event[f"after_{metric}"] - event[
+            f"before_{metric}"
+        ]
+    try:
+        admitted, basis = derive_sm121_cache_semantic_turn_admission(event)
+    except SM121CacheSemanticError as error:
+        raise SM121CacheSemanticRequestError() from error
+    event["semantic_turn_admitted"] = admitted
+    event["semantic_turn_basis"] = basis
+    try:
+        validate_sm121_cache_semantic_turn_event(event)
+    except SM121CacheSemanticError as error:
+        raise SM121CacheSemanticRequestError() from error
+    return event
+
+
+def _execute_sm121_cache_semantic_case(
+    *,
+    server: Any,
+    model: SimpleNamespace,
+    case: SimpleNamespace,
+    arm: str,
+    control_prompt_token_ids: tuple[tuple[int, ...], ...] | None,
+    journal: Journal,
+    telemetry: TelemetrySampler,
+) -> tuple[tuple[int, ...], ...]:
+    """Run T0/T1/T2 in one fresh lifetime and retain prompt IDs only in RAM."""
+
+    if str(case.id) != SM121_CACHE_SEMANTIC_CASE_ID:
+        raise SM121CacheSemanticRequestError()
+    if arm == "A" and (
+        control_prompt_token_ids is None
+        or len(control_prompt_token_ids) != len(SM121_CACHE_SEMANTIC_TURN_ORDER)
+    ):
+        raise SM121CacheSemanticRequestError()
+    if arm == "B" and control_prompt_token_ids is not None:
+        raise SM121CacheSemanticRequestError()
+    attempt_id = uuid.uuid4().hex
+    journal.append(
+        {
+            "event": "case_start",
+            "case_id": case.case_id,
+            "attempt_id": attempt_id,
+            "kind": case.kind,
+            "concurrency": case.concurrency,
+        }
+    )
+    telemetry.set_phase(f"case:{case.case_id}:{attempt_id}")
+    started = time.perf_counter()
+    private_turn_ids: list[tuple[int, ...]] = []
+    turn_events: list[dict[str, Any]] = []
+    try:
+        for index, (turn, messages, expected_response) in enumerate(
+            zip(
+                SM121_CACHE_SEMANTIC_TURN_ORDER,
+                _sm121_cache_semantic_messages(),
+                _SM121_CACHE_SEMANTIC_EXPECTED_RESPONSES,
+                strict=True,
+            )
+        ):
+            before, _ignored_before_wait_s, before_polls, before_settled = (
+                settle_sm121_cache_observability_metrics(server)
+            )
+            request_started = time.perf_counter()
+            result = request_sm121_cache_semantic_turn(
+                server,
+                served_name=model.served_name,
+                messages=messages,
+                expected_response=expected_response,
+                max_tokens=int(case.max_output_tokens),
+            )
+            request_elapsed_s = time.perf_counter() - request_started
+            after, _ignored_after_wait_s, after_polls, after_settled = (
+                settle_sm121_cache_observability_metrics(server)
+            )
+            prompt_token_ids = result.pop("private_prompt_token_ids", None)
+            if (
+                not isinstance(prompt_token_ids, tuple)
+                or not prompt_token_ids
+                or any(type(token) is not int or token < 0 for token in prompt_token_ids)
+            ):
+                raise SM121CacheSemanticRequestError()
+            if index == 0:
+                shared_prefix_tokens = 0
+                append_verified = True
+            else:
+                shared_prefix_tokens = _sm121_cache_semantic_common_prefix_tokens(
+                    private_turn_ids[-1], prompt_token_ids
+                )
+                append_verified = (
+                    shared_prefix_tokens >= SM121_CACHE_SEMANTIC_COLD_INPUT_MIN_TOKENS
+                )
+            if arm == "A":
+                assert control_prompt_token_ids is not None
+                if prompt_token_ids != control_prompt_token_ids[index]:
+                    # Do not journal an ID-derived mismatch or a digest. The A
+                    # arm is not an admissible matched workload in that case.
+                    raise SM121CacheSemanticRequestError()
+                cross_arm_verified: bool | None = True
+            else:
+                cross_arm_verified = None
+            event = _sm121_cache_semantic_turn_event(
+                case=case,
+                attempt_id=attempt_id,
+                arm=arm,
+                turn=turn,
+                result=result,
+                before=before,
+                before_polls=before_polls,
+                before_settled=before_settled,
+                after=after,
+                after_polls=after_polls,
+                after_settled=after_settled,
+                append_only_prompt_identity_verified=append_verified,
+                cross_arm_prompt_identity_verified=cross_arm_verified,
+                shared_prefix_tokens=shared_prefix_tokens,
+            )
+            journal.append(event)
+            journal.append(
+                {
+                    "event": "request_complete",
+                    "case_id": case.case_id,
+                    "attempt_id": attempt_id,
+                    "kind": case.kind,
+                    "repetition": index,
+                    "burst_elapsed_s": request_elapsed_s,
+                    "result": {
+                        "prompt_tokens": result["prompt_tokens"],
+                        "completion_tokens": result["completion_tokens"],
+                        "reasoning_tokens": result["reasoning_tokens"],
+                        "ttft_s": None,
+                        "elapsed_s": request_elapsed_s,
+                        "decode_s": None,
+                        "decode_tps": None,
+                        "output_tps": None,
+                        "emission_events": 1,
+                        "finish_reason": None,
+                        "response_model": None,
+                        "decode_metric_source": None,
+                    },
+                    "validation": {"passed": event["semantic_turn_admitted"]},
+                }
+            )
+            turn_events.append(event)
+            private_turn_ids.append(prompt_token_ids)
+        validation_passed = all(
+            event["semantic_turn_admitted"] for event in turn_events
+        )
+        journal.append(
+            {
+                "event": "case_complete",
+                "case_id": case.case_id,
+                "attempt_id": attempt_id,
+                "kind": case.kind,
+                "concurrency": case.concurrency,
+                "elapsed_s": time.perf_counter() - started,
+                "validation_passed": validation_passed,
+            }
+        )
+        return tuple(private_turn_ids)
+    except BaseException as error:
+        safe_error = SM121CacheSemanticRequestError()
+        journal.append(
+            {
+                "event": "case_failed",
+                "case_id": case.case_id,
+                "attempt_id": attempt_id,
+                "error_type": type(safe_error).__name__,
+                "error": str(safe_error),
+                "elapsed_s": time.perf_counter() - started,
+            }
+        )
+        raise safe_error from None
+    finally:
+        telemetry.set_phase("between_cases")
+
+
+def _execute_sm121_cache_semantic_lifetime(
+    *,
+    run_dir: Path,
+    workspace: Path,
+    model: SimpleNamespace,
+    arm: str,
+    lifetime: int,
+    case: SimpleNamespace,
+    control_prompt_token_ids: tuple[tuple[int, ...], ...] | None,
+    journal: Journal,
+    telemetry: TelemetrySampler,
+) -> tuple[tuple[int, ...], ...] | None:
+    """Execute one fully isolated quality or semantic server lifetime."""
+
+    server = None
+    watchdog: HostSafetyWatchdog | None = None
+    terminal_error: BaseException | None = None
+    private_ids: tuple[tuple[int, ...], ...] | None = None
+    phase = "quality" if lifetime == 1 else "semantic"
+    try:
+        journal.append(
+            _sm121_cache_semantic_static_event(
+                model=model, arm=arm, lifetime=lifetime
+            )
+        )
+        watchdog = _host_safety_watchdog(model)
+        if watchdog is not None:
+            watchdog.start()
+        telemetry.set_phase(f"server_startup:{lifetime}")
+        callbacks: dict[str, Any] = {}
+        if watchdog is not None:
+            callbacks = {
+                "abort_check": watchdog.raise_if_tripped,
+                "on_server_created": (
+                    lambda created_server: watchdog.register_abort_callback(
+                        created_server.interrupt_owned
+                    )
+                ),
+            }
+        server = start_server(
+            model,
+            workspace=workspace,
+            allow_download=False,
+            server_log_path=run_dir / "server" / f"lifetime-{lifetime}" / "server.log",
+            **callbacks,
+        )
+        if watchdog is not None:
+            watchdog.raise_if_tripped()
+        journal.append(
+            _sm121_cache_semantic_runtime_event(
+                server=server, arm=arm, lifetime=lifetime
+            )
+        )
+        journal.append(
+            {
+                "event": "server_ready",
+                "backend": server.backend,
+                "fresh_server_lifetime": lifetime,
+                "first_inference_is_case": True,
+                "case_id": case.case_id,
+            }
+        )
+        telemetry.set_phase(f"first_case_after_start:{lifetime}")
+        if phase == "quality":
+            _execute_case(
+                server=server,
+                model=model,
+                case=case,
+                journal=journal,
+                telemetry=telemetry,
+            )
+            _require_sm121_storage_quality_gate(journal, case)
+        else:
+            private_ids = _execute_sm121_cache_semantic_case(
+                server=server,
+                model=model,
+                case=case,
+                arm=arm,
+                control_prompt_token_ids=control_prompt_token_ids,
+                journal=journal,
+                telemetry=telemetry,
+            )
+        if watchdog is not None:
+            watchdog.raise_if_tripped()
+    except BaseException as error:
+        terminal_error = watchdog.failure if watchdog is not None and watchdog.failure else error
+    finally:
+        telemetry.set_phase(f"server_shutdown:{lifetime}")
+        cleanup_error: BaseException | None = None
+        if server is not None:
+            if watchdog is not None and watchdog.tripped:
+                try:
+                    _retry_host_safety_interrupt_if_needed(server, watchdog)
+                    _record_host_safety_interrupt_failure(
+                        journal, watchdog, stage=f"semantic_{phase}_lifetime"
+                    )
+                except BaseException as error:
+                    cleanup_error = error
+            try:
+                save_server_logs(
+                    server, run_dir / "server" / f"lifetime-{lifetime}" / "server.log"
+                )
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+            try:
+                server.stop()
+                journal.append(
+                    {
+                        "event": "server_stopped",
+                        "backend": server.backend,
+                        "fresh_server_lifetime": lifetime,
+                    }
+                )
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+        if watchdog is not None:
+            watchdog.stop()
+            if terminal_error is None:
+                try:
+                    watchdog.raise_if_tripped()
+                except BaseException as error:
+                    terminal_error = error
+        if cleanup_error is not None:
+            journal.append(
+                {"event": "cleanup_failed", "error_type": type(cleanup_error).__name__}
+            )
+            if terminal_error is None:
+                terminal_error = cleanup_error
+    if terminal_error is not None:
+        raise terminal_error
+    return private_ids
+
+
+def _sm121_cache_semantic_case_ids(suite: SimpleNamespace) -> tuple[str, str]:
+    cases = list(getattr(suite, "cases", ()))
+    if len(cases) != 2:
+        raise PreflightError("SM121 semantic-cache cases are invalid")
+    quality, semantic = cases
+    if (
+        str(getattr(quality, "id", "")) != SM121_CACHE_SEMANTIC_QUALITY_CASE_ID
+        or str(getattr(semantic, "id", "")) != SM121_CACHE_SEMANTIC_CASE_ID
+        or not isinstance(getattr(quality, "case_id", None), str)
+        or not isinstance(getattr(semantic, "case_id", None), str)
+    ):
+        raise PreflightError("SM121 semantic-cache cases are invalid")
+    return quality.case_id, semantic.case_id
+
+
+def _sm121_cache_semantic_arm_complete(
+    *,
+    summary: dict[str, Any],
+    journal: Journal,
+    suite: SimpleNamespace,
+    arm: str,
+) -> bool:
+    """Require a complete summary and exact scalar-only arm lifecycle."""
+
+    planned_case_ids = _sm121_cache_semantic_case_ids(suite)
+    issues = sm121_cache_semantic_lifecycle_issues(
+        journal.events(), planned_case_ids=planned_case_ids, arm=arm
+    )
+    return summary.get("status") == "complete" and not issues
+
+
+def _execute_sm121_cache_semantic_arm(
+    *,
+    plan: dict[str, Any],
+    model: SimpleNamespace,
+    suite: SimpleNamespace,
+    run_dir: Path,
+    workspace: Path,
+    cache_off_plan_fingerprint: str | None,
+    cache_off_audit_passed: bool | None,
+    cache_off_terminal_receipt_sha256: str | None,
+    control_prompt_token_ids: tuple[tuple[int, ...], ...] | None,
+) -> tuple[dict[str, Any], tuple[tuple[int, ...], ...] | None]:
+    """Execute one arm with two fresh lifetimes; it is intentionally non-resumable."""
+
+    journal = Journal(run_dir / "events.jsonl")
+    if journal.events():
+        raise PreflightError(
+            "SM121 semantic-cache canary is non-resumable; freeze a new pair"
+        )
+    arm = sm121_cache_semantic_arm(model)
+    cases = list(suite.cases)
+    planned_case_ids = _sm121_cache_semantic_case_ids(suite)
+    for case in cases:
+        missing = set(case.requires) - set(model.tasks)
+        if missing:
+            raise PreflightError(
+                "SM121 semantic-cache case has unsupported capabilities"
+            )
+    if (
+        SM121_CACHE_SEMANTIC_COLD_INPUT_MAX_TOKENS
+        + int(cases[1].max_output_tokens)
+        + 1_024
+        > int(model.max_context)
+    ):
+        raise PreflightError("SM121 semantic-cache context admission is insufficient")
+    binding = getattr(model, "semantic_pair_binding", None)
+    if not isinstance(binding, dict):
+        raise PreflightError("SM121 semantic-cache pair binding is unavailable")
+    journal.append(
+        {
+            "event": "run_start",
+            "execution_mode": SM121_CACHE_SEMANTIC_EXECUTION_MODE,
+            "arm": arm,
+            "plan_fingerprint": str(plan["fingerprint"]),
+            "semantic_pair_binding_sha256": binding["pair_binding_sha256"],
+            "cache_off_plan_fingerprint": cache_off_plan_fingerprint,
+            "cache_off_audit_passed": cache_off_audit_passed,
+            "cache_off_terminal_receipt_sha256": cache_off_terminal_receipt_sha256,
+        }
+    )
+    # These are ordering markers, not duration measurements.  The semantic
+    # evidence lane rejects elapsed/monotonic fields for this protocol.
+    journal.append({"event": "measurement_started"})
+    telemetry = TelemetrySampler(run_dir / "telemetry.jsonl")
+    stage = "preflight"
+    private_ids: tuple[tuple[int, ...], ...] | None = None
+    try:
+        _preflight(model)
+        stage = "quality_lifetime"
+        _execute_sm121_cache_semantic_lifetime(
+            run_dir=run_dir,
+            workspace=workspace,
+            model=model,
+            arm=arm,
+            lifetime=1,
+            case=cases[0],
+            control_prompt_token_ids=None,
+            journal=journal,
+            telemetry=telemetry,
+        )
+        stage = "semantic_lifetime"
+        private_ids = _execute_sm121_cache_semantic_lifetime(
+            run_dir=run_dir,
+            workspace=workspace,
+            model=model,
+            arm=arm,
+            lifetime=2,
+            case=cases[1],
+            control_prompt_token_ids=control_prompt_token_ids,
+            journal=journal,
+            telemetry=telemetry,
+        )
+        if private_ids is None:
+            raise SM121CacheSemanticRequestError()
+    except BaseException as error:
+        safe_error: BaseException
+        if isinstance(error, (HostSafetyError, PreflightError, SM121CacheSemanticRequestError)):
+            safe_error = error
+        else:
+            safe_error = SM121CacheSemanticRequestError()
+        if isinstance(safe_error, HostSafetyError):
+            _record_host_safety_breach(journal, safe_error, stage=stage)
+        _record_run_aborted(journal, safe_error, stage=stage)
+        try:
+            summarize_run(run_dir)
+        except Exception as summary_error:
+            journal.append(
+                {"event": "summary_failed", "error_type": type(summary_error).__name__}
+            )
+        raise safe_error from None
+    finally:
+        # Not started: this is only a no-op phase carrier for the generic
+        # quality plumbing, and therefore produces no telemetry file.
+        telemetry.stop()
+    journal.append({"event": "measurement_complete"})
+    journal.append({"event": "run_complete", "status": "completed"})
+    summary = summarize_run(run_dir)
+    if not _sm121_cache_semantic_arm_complete(
+        summary=summary, journal=journal, suite=suite, arm=arm
+    ):
+        # The journal remains complete and auditable; the controller will not
+        # promote a partial B control into the cache-on arm.
+        return summary, private_ids
+    return summary, private_ids
+
+
+def _validate_sm121_cache_semantic_pair_plans(
+    cache_off_plan: dict[str, Any],
+    cache_off_model: SimpleNamespace,
+    cache_off_suite: SimpleNamespace,
+    cache_on_plan: dict[str, Any],
+    cache_on_model: SimpleNamespace,
+    cache_on_suite: SimpleNamespace,
+) -> None:
+    """Verify reciprocal scalar plan bindings before any arm is allowed to start."""
+
+    try:
+        validate_sm121_cache_semantic_pair(cache_off_model, cache_on_model)
+        validate_sm121_cache_semantic_suite(cache_off_suite)
+        validate_sm121_cache_semantic_suite(cache_on_suite)
+        off_binding = cache_off_plan.get("semantic_pair")
+        on_binding = cache_on_plan.get("semantic_pair")
+        off_fingerprint = cache_off_plan.get("fingerprint")
+        on_fingerprint = cache_on_plan.get("fingerprint")
+        validate_sm121_cache_semantic_pair_binding(
+            off_binding,
+            cache_off_model,
+            cache_off_suite,
+            peer_plan_fingerprint=on_fingerprint,
+            peer_binding=on_binding,
+        )
+        validate_sm121_cache_semantic_pair_binding(
+            on_binding,
+            cache_on_model,
+            cache_on_suite,
+            peer_plan_fingerprint=off_fingerprint,
+            peer_binding=off_binding,
+        )
+        if (
+            not isinstance(off_binding, dict)
+            or not isinstance(on_binding, dict)
+            or off_binding.get("peer_plan_fingerprint") != on_fingerprint
+            or on_binding.get("peer_plan_fingerprint") != off_fingerprint
+        ):
+            raise SM121CacheSemanticError("semantic pair reciprocal binding is invalid")
+        pair_instance_sha256 = sm121_cache_semantic_pair_instance_sha256(
+            cache_off_plan.get("run_nonce"), cache_on_plan.get("run_nonce")
+        )
+        if (
+            off_binding.get("pair_instance_sha256") != pair_instance_sha256
+            or on_binding.get("pair_instance_sha256") != pair_instance_sha256
+        ):
+            raise SM121CacheSemanticError("semantic pair instance binding is invalid")
+    except SM121CacheSemanticError as error:
+        raise PreflightError("SM121 semantic-cache pair binding is invalid") from error
+
+
+def execute_sm121_cache_semantic_canary(
+    cache_off_run_dir: Path, cache_on_run_dir: Path, *, workspace: Path
+) -> dict[str, Any]:
+    """Run B then A in four fresh lifetimes without making a speed claim."""
+
+    cache_off_plan, cache_off_model, cache_off_suite = _load_sm121_cache_semantic_plan(
+        cache_off_run_dir
+    )
+    cache_on_plan, cache_on_model, cache_on_suite = _load_sm121_cache_semantic_plan(
+        cache_on_run_dir
+    )
+    _validate_sm121_cache_semantic_pair_plans(
+        cache_off_plan,
+        cache_off_model,
+        cache_off_suite,
+        cache_on_plan,
+        cache_on_model,
+        cache_on_suite,
+    )
+    lock_path = results_lock_path(workspace)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError("Another SparkBench run holds the benchmark lock") from error
+        cache_off_summary, control_prompt_token_ids = _execute_sm121_cache_semantic_arm(
+            plan=cache_off_plan,
+            model=cache_off_model,
+            suite=cache_off_suite,
+            run_dir=cache_off_run_dir,
+            workspace=workspace,
+            cache_off_plan_fingerprint=None,
+            cache_off_audit_passed=None,
+            cache_off_terminal_receipt_sha256=None,
+            control_prompt_token_ids=None,
+        )
+        cache_off_journal = Journal(cache_off_run_dir / "events.jsonl")
+        cache_off_complete = _sm121_cache_semantic_arm_complete(
+            summary=cache_off_summary,
+            journal=cache_off_journal,
+            suite=cache_off_suite,
+            arm="B",
+        )
+        if not cache_off_complete or control_prompt_token_ids is None:
+            return {
+                "status": "partial",
+                "cache_off": cache_off_summary,
+                "cache_on": None,
+                "cache_on_started": False,
+            }
+        cache_off_binding = cache_off_plan.get("semantic_pair")
+        cache_on_binding = cache_on_plan.get("semantic_pair")
+        if not isinstance(cache_off_binding, dict) or not isinstance(cache_on_binding, dict):
+            raise PreflightError("SM121 semantic-cache pair binding is unavailable")
+        try:
+            cache_off_terminal_receipt_sha256 = (
+                sm121_cache_semantic_cache_off_receipt_sha256(
+                    cache_on_binding.get("pair_instance_sha256"),
+                    cache_off_plan.get("fingerprint"),
+                    cache_off_binding.get("pair_binding_sha256"),
+                )
+            )
+        except SM121CacheSemanticError as error:
+            raise PreflightError(
+                "SM121 semantic-cache cache-off receipt is unavailable"
+            ) from error
+        cache_on_summary, _private_cache_on_ids = _execute_sm121_cache_semantic_arm(
+            plan=cache_on_plan,
+            model=cache_on_model,
+            suite=cache_on_suite,
+            run_dir=cache_on_run_dir,
+            workspace=workspace,
+            cache_off_plan_fingerprint=str(cache_off_plan["fingerprint"]),
+            cache_off_audit_passed=True,
+            cache_off_terminal_receipt_sha256=cache_off_terminal_receipt_sha256,
+            control_prompt_token_ids=control_prompt_token_ids,
+        )
+        del control_prompt_token_ids
+        del _private_cache_on_ids
+        cache_on_complete = _sm121_cache_semantic_arm_complete(
+            summary=cache_on_summary,
+            journal=Journal(cache_on_run_dir / "events.jsonl"),
+            suite=cache_on_suite,
+            arm="A",
+        )
+        return {
+            "status": "complete" if cache_on_complete else "partial",
+            "cache_off": cache_off_summary,
+            "cache_on": cache_on_summary,
+            "cache_on_started": True,
+        }
 
 
 def _recover_pending_lifecycle(

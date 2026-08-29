@@ -20,6 +20,7 @@ from bench.acquire import fetch_model_snapshot
 from bench.audit import (
     audit_matrix,
     audit_sm121_cache_observability_run,
+    audit_sm121_cache_semantic_pair,
     audit_sm121_storage_canary_run,
 )
 from bench.autoresearch_campaign import (
@@ -50,10 +51,16 @@ from bench.report import summarize_run
 from bench.runner import (
     create_plan,
     create_sm121_cache_observability_plan,
+    create_sm121_cache_semantic_pair_plans,
     create_sm121_storage_canary_plan,
     execute_plan,
     execute_sm121_cache_observability_canary,
+    execute_sm121_cache_semantic_canary,
     execute_sm121_storage_canary,
+)
+from bench.sglang_sm121_cache_semantic import (
+    SM121_CACHE_SEMANTIC_CACHE_OFF_PROFILE_ID,
+    SM121_CACHE_SEMANTIC_CACHE_ON_PROFILE_ID,
 )
 from bench.trtllm_direct import run_direct_trtllm
 
@@ -73,6 +80,12 @@ DEFAULT_SM121_CACHE_OBSERVABILITY_SUITE = (
     / "manifests"
     / "suites"
     / "qwen38_flash_next_sm121_triton_storage_cache_observability_canary.toml"
+)
+DEFAULT_SM121_CACHE_SEMANTIC_SUITE = (
+    WORKSPACE
+    / "manifests"
+    / "suites"
+    / "qwen38_flash_next_sm121_triton_storage_cache_policy_semantic_canary.toml"
 )
 DEFAULT_EVIDENCE = WORKSPACE / "evidence"
 DEFAULT_RESULTS = WORKSPACE / "results"
@@ -336,6 +349,37 @@ def command_sm121_cache_observability_canary(args: argparse.Namespace) -> int:
     return 0 if summary["status"] == "complete" else 1
 
 
+def command_sm121_cache_policy_semantic_canary(args: argparse.Namespace) -> int:
+    """Run the dedicated cache-off B then cache-on A semantic canary."""
+
+    models = load_models(args.models)
+    try:
+        cache_off_model = models[SM121_CACHE_SEMANTIC_CACHE_OFF_PROFILE_ID]
+        cache_on_model = models[SM121_CACHE_SEMANTIC_CACHE_ON_PROFILE_ID]
+    except KeyError as error:
+        raise ManifestError(
+            "SM121 semantic canary requires both exact paired cache-policy profiles"
+        ) from error
+    suite = load_suite(args.suite)
+    cache_off_run, cache_on_run = create_sm121_cache_semantic_pair_plans(
+        cache_off_model=cache_off_model,
+        cache_on_model=cache_on_model,
+        suite=suite,
+        results_root=args.results,
+        models_path=args.models,
+        suite_path=args.suite,
+    )
+    print(f"Cache-off B plan: {cache_off_run}")
+    print(f"Cache-on A plan: {cache_on_run}")
+    summary = execute_sm121_cache_semantic_canary(
+        cache_off_run,
+        cache_on_run,
+        workspace=WORKSPACE,
+    )
+    print(json.dumps(summary, indent=2))
+    return 0 if summary["status"] == "complete" else 1
+
+
 def command_run(args: argparse.Namespace) -> int:
     summary = execute_plan(
         args.run_dir,
@@ -579,6 +623,15 @@ def command_audit_sm121_cache_observability(args: argparse.Namespace) -> int:
     return 0 if report["ok"] else 1
 
 
+def command_audit_sm121_cache_policy_semantic(args: argparse.Namespace) -> int:
+    report = audit_sm121_cache_semantic_pair(
+        args.cache_off_run_dir,
+        args.cache_on_run_dir,
+    )
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["ok"] else 1
+
+
 def command_export_evidence(args: argparse.Namespace) -> int:
     report = export_evidence(
         results_root=args.results,
@@ -690,6 +743,19 @@ def build_parser() -> argparse.ArgumentParser:
     add_selection(cache_observability)
     cache_observability.set_defaults(suite=DEFAULT_SM121_CACHE_OBSERVABILITY_SUITE)
     cache_observability.set_defaults(function=command_sm121_cache_observability_canary)
+
+    cache_semantic = subparsers.add_parser(
+        "sm121-cache-policy-semantic-canary",
+        help="run the cache-off B then cache-on A SM121 semantic canary",
+    )
+    cache_semantic.add_argument("--models", type=Path, default=DEFAULT_MODELS)
+    cache_semantic.add_argument(
+        "--suite", type=Path, default=DEFAULT_SM121_CACHE_SEMANTIC_SUITE
+    )
+    cache_semantic.add_argument(
+        "--results", type=Path, default=WORKSPACE / "results"
+    )
+    cache_semantic.set_defaults(function=command_sm121_cache_policy_semantic_canary)
 
     run = subparsers.add_parser("run", aliases=["resume"], help="execute or resume a frozen plan")
     run.add_argument("run_dir", type=Path)
@@ -813,6 +879,16 @@ def build_parser() -> argparse.ArgumentParser:
     cache_observability_audit.add_argument("run_dir", type=Path)
     cache_observability_audit.set_defaults(
         function=command_audit_sm121_cache_observability
+    )
+
+    cache_semantic_audit = subparsers.add_parser(
+        "audit-sm121-cache-policy-semantic",
+        help="read-only verification of a completed SM121 B-then-A semantic pair",
+    )
+    cache_semantic_audit.add_argument("cache_off_run_dir", type=Path)
+    cache_semantic_audit.add_argument("cache_on_run_dir", type=Path)
+    cache_semantic_audit.set_defaults(
+        function=command_audit_sm121_cache_policy_semantic
     )
 
     export = subparsers.add_parser(
