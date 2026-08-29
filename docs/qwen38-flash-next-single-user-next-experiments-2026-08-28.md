@@ -97,9 +97,14 @@ The tracked [cache-policy reducer](../bench/sglang_cache_policy_protocol.py)
 and its [contract tests](../tests/test_sglang_cache_policy_protocol.py) remain
 the historical product-backlog draft. The executable lane is now the separate,
 frozen [SM121 cache-policy timing protocol](qwen38-flash-next-sm121-cache-performance-protocol-2026-08-29.md):
-it has not run, but it has a dedicated controller, audit, scalar evidence
-contract, and no-resume policy. Its `--results` value is the parent root and
-the controller creates `cache-policy-campaigns/` below it.
+it has completed one read-only-audited A/B/B/A campaign, with all 12 timing
+rows admitted. The reducer retained cache-on A: its two-replica mean later-turn
+request wall time was 2.808 seconds versus 45.017 seconds for cache-off B, and
+its full three-turn mean was 37.151 seconds versus 85.718 seconds. It remains a
+strict request-wall result only—no TTFT, decode TPS, throughput, or agent-speed
+claim—with a dedicated controller, audit, scalar evidence contract, and
+no-resume policy. Its `--results` value is the parent root and the controller
+creates `cache-policy-campaigns/` below it.
 
 - Bundle A: the newly admitted C1 baseline, default Radix behavior, and requested
   `extra_buffer_lazy`; require startup `impl=UnifiedRadixCache` with hybrid SSM.

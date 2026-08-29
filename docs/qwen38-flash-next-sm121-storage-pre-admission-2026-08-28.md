@@ -358,12 +358,17 @@ The next execution-gated step is now frozen in the separate
 It retains the immutable image/model/tokenizer/profile pins, fresh-process
 quality and B0-derived admission, teardown checks, and scalar-only export. Its
 dedicated controller executes cold A/B/B/A in eight separate quality/timing
-lifetimes with 1,200-second admission deadlines and remains unexecuted at this
-writing.
+lifetimes with 1,200-second admission deadlines. One complete campaign has now
+passed read-only audit with all 12 timing rows admitted and returned `retain_a`:
+the cache-on policy's two-replica mean later-turn request wall time was 2.808
+seconds versus 45.017 seconds for cache-off, while its full three-turn mean was
+37.151 seconds versus 85.718 seconds. That is a narrow request-wall cache-policy
+result for the exact pinned lane, not a general serving, TPS, TTFT, or agent
+speed claim.
 
 The retired overlay and all historical TRT-LLM measurements remain excluded
-from this candidate. Passing this pre-admission does not license a speed claim
-or an overnight cache campaign.
+from this candidate. Passing this pre-admission alone does not license a
+general speed claim or an overnight cache campaign.
 
 ## Repository verification
 

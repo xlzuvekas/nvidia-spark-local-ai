@@ -1298,8 +1298,12 @@ full-sequence wall-time regression. Any failure is terminal `partial` and
 `not_evaluated`; it cannot be resumed. See the
 [operational protocol](docs/qwen38-flash-next-sm121-cache-performance-protocol-2026-08-29.md)
 for the exact profiles, source/evidence binding, audit command, and privacy
-boundary. This lane is frozen but unexecuted, so it provides no performance
-conclusion yet.
+boundary. One complete read-only-audited campaign admitted all 12 timing rows
+and returned `retain_a`: the cache-on A policy's two-replica mean later-turn
+request wall time was 2.808 seconds versus 45.017 seconds for cache-off B, and
+its full three-turn mean was 37.151 seconds versus 85.718 seconds. This is a
+bounded request-wall result for the exact lane, not a TTFT, TPS, throughput,
+energy, or agent-speed claim.
 
 ### Publishing sanitized evidence
 
