@@ -54,6 +54,14 @@ from bench.manifest import (
     load_suite,
     validate_benchmark_selection,
 )
+from bench.pi_core_prefix import (
+    PI_CORE_CANDIDATE_LOCK_SHA256,
+    PiCorePrefixError,
+    audit_pi_core_cache,
+    freeze_pinned_pi_core_lock,
+    load_frozen_pi_core_lock,
+    write_new_frozen_pi_core_lock,
+)
 from bench.prefix_cache_protocol import PREFIX_CACHE_SUITE_ID
 from bench.journal import utc_now, write_json
 from bench.report import summarize_run
@@ -169,6 +177,12 @@ DEFAULT_AUTORESEARCH_V2_CACHE_POLICY_CAMPAIGN = (
 )
 DEFAULT_EVIDENCE = WORKSPACE / "evidence"
 DEFAULT_RESULTS = WORKSPACE / "results"
+DEFAULT_PI_CORE_CLOSURE_LOCK = (
+    WORKSPACE / "manifests" / "prefixes" / "pi-core-0.57.1.closure-lock.json"
+)
+DEFAULT_NPM_SHA512_CONTENT_STORE = (
+    Path.home() / ".npm" / "_cacache" / "content-v2" / "sha512"
+)
 AUTORESEARCH_CHECKPOINT_READINESS_CODES = frozenset(
     {
         "checkpoint_boundary_unsettled",
@@ -470,6 +484,47 @@ def command_sm121_agent_parser_preflight(args: argparse.Namespace) -> int:
         probe_sm121_agent_parser_static_preflight(model)
     )
     print(json.dumps(probe, indent=2, sort_keys=True))
+    return 0
+
+
+def command_pi_core_closure_freeze(args: argparse.Namespace) -> int:
+    """Freeze the pinned Pi-core source closure without installing packages."""
+
+    summary = freeze_pinned_pi_core_lock(args.source_lock)
+    try:
+        existing = load_frozen_pi_core_lock(DEFAULT_PI_CORE_CLOSURE_LOCK)
+    except PiCorePrefixError:
+        if (
+            DEFAULT_PI_CORE_CLOSURE_LOCK.exists()
+            or DEFAULT_PI_CORE_CLOSURE_LOCK.is_symlink()
+        ):
+            raise
+        write_new_frozen_pi_core_lock(DEFAULT_PI_CORE_CLOSURE_LOCK, summary)
+        status = "frozen"
+    else:
+        if existing.frozen_lock_sha256 != summary.frozen_lock_sha256:
+            raise PiCorePrefixError("Pi core frozen closure does not match candidate")
+        status = "already_frozen"
+    print(
+        json.dumps(
+            summary.scalar(
+                status=status, origin_lock_sha256=PI_CORE_CANDIDATE_LOCK_SHA256
+            ),
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def command_pi_core_closure_audit(args: argparse.Namespace) -> int:
+    """Read-only hash audit of every cached Pi-core closure artifact."""
+
+    summary = load_frozen_pi_core_lock(DEFAULT_PI_CORE_CLOSURE_LOCK)
+    audit = audit_pi_core_cache(
+        summary, cache_sha512_root=args.cache_sha512_content_store
+    )
+    print(json.dumps(audit.scalar(), indent=2, sort_keys=True))
     return 0
 
 
@@ -1107,6 +1162,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     agent_parser_preflight.add_argument("--models", type=Path, default=DEFAULT_MODELS)
     agent_parser_preflight.set_defaults(function=command_sm121_agent_parser_preflight)
+
+    pi_core_closure_freeze = subparsers.add_parser(
+        "pi-core-closure-freeze",
+        help=(
+            "freeze the pinned Pi-core direct-materialization closure without "
+            "installing or executing packages"
+        ),
+    )
+    pi_core_closure_freeze.add_argument(
+        "--source-lock",
+        type=Path,
+        required=True,
+        help="candidate npm lockfile authenticated by the fixed source digest",
+    )
+    pi_core_closure_freeze.set_defaults(function=command_pi_core_closure_freeze)
+
+    pi_core_closure_audit = subparsers.add_parser(
+        "pi-core-closure-audit",
+        help=(
+            "read-only hash audit of the cached Pi-core closure; does not run "
+            "npm, Node, Pi, containers, or inference"
+        ),
+    )
+    pi_core_closure_audit.add_argument(
+        "--cache-sha512-content-store",
+        type=Path,
+        default=DEFAULT_NPM_SHA512_CONTENT_STORE,
+        help="npm content-v2 SHA-512 blob root to audit read-only",
+    )
+    pi_core_closure_audit.set_defaults(function=command_pi_core_closure_audit)
 
     cache_observability = subparsers.add_parser(
         "sm121-cache-observability-canary",
