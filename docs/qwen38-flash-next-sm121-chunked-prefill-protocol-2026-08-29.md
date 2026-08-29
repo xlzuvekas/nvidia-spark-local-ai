@@ -1,4 +1,4 @@
-# SM121 1K/2K chunked-prefill protocol — 2026-08-29
+# SM121 chunked-prefill studies — 2026-08-29
 
 ## Status
 
@@ -19,8 +19,10 @@ and the [initial non-decisive partial bundle](../evidence/campaigns/qwen38-flash
 contain no request content. Profiles remain blocked from generic execution;
 the dedicated `sm121-chunked-prefill-performance` command is the only path that
 can admit another v1 live A/B/B/A campaign. The separately named v2 2K/4K
-follow-up is frozen but not yet measured; it uses its own command, campaign
-identity, profiles, and evidence bundle namespace.
+follow-up also completed, passed all four quality lifetimes, and its
+read-only audit reported zero errors. Its separate campaign identity,
+profiles, and evidence namespace keep it distinct from the completed 1K/2K
+evidence.
 
 ## Question
 
@@ -35,7 +37,7 @@ thinking disabled and no configured tool parser. A genuine agentic-coding
 comparison needs a separately admitted current-runtime tool/parser and
 reasoning-policy lane before it can reuse this axis.
 
-## Completed result
+## Completed v1 result (1K/2K)
 
 The frozen reducer uses the unweighted mean of two fresh lifetimes per arm.
 All timed requests were non-streaming and quality-admitted; the table reports
@@ -53,7 +55,7 @@ decision is therefore `retain_b`. This result promotes only the current
 SM121/cache-on/C1/no-thinking static-history prefill setting. It makes no
 claim about TTFT, decode TPS, concurrency, tool calling, or agentic coding.
 
-## Frozen siblings
+## Frozen v1 siblings
 
 | Arm | Profile | Chunked prefill | Held constant |
 | --- | --- | ---: | --- |
@@ -66,7 +68,7 @@ tool parser, or hidden profile-specific request policy. The profile contract
 normalizes the served name and verifies that the only command-line difference
 is the chunk-size value.
 
-## Registered v2 follow-up — not yet measured
+## Completed v2 follow-up (2K/4K)
 
 The retained 2K setting is the control for a separate 2K-versus-4K panel. It
 is deliberately not an extension of the completed v1 campaign: its frozen
@@ -77,16 +79,30 @@ profile, attestation, turn, or run-binding mixtures.
 | Arm | Profile | Chunked prefill | Status |
 | --- | --- | ---: | --- |
 | A | `...chunked-prefill-performance-2k-v2-sglang` | 2,048 | Retained v1 setting, new v2 control |
-| B | `...chunked-prefill-performance-4k-v2-sglang` | 4,096 | Candidate; no live result yet |
+| B | `...chunked-prefill-performance-4k-v2-sglang` | 4,096 | Retained by the audited v2 panel |
 
 It keeps the same current cache-on/C1/no-thinking 60K static-history request
 wall protocol, ABBA order, fresh lifetimes, quality gate, cache-cold and
 append checks, 1,200-second lifetime bound, and reducer thresholds. The only
-serving delta within v2 is `--chunked-prefill-size`. Use
-`sm121-chunked-prefill-performance-v2` to freeze and execute it. Until its
-audit and scalar evidence are complete, it makes no performance claim.
+serving delta within v2 is `--chunked-prefill-size`. The completed A/B/B/A
+panel had two fresh timed lifetimes per arm, eight static and eight runtime
+attestations, and zero audit errors. Its [completed scalar bundle](../evidence/campaigns/qwen38-flash-next-sm121-chunked-prefill-performance-v2-d569ae86eb6d/manifest.json)
+contains no request content.
 
-## Planned measurement
+| Metric | 2K A mean (s) | 4K B mean (s) | B/A | Frozen rule |
+| --- | ---: | ---: | ---: | --- |
+| Cache-cold `T0` 60K request | 38.634 | 30.026 | 0.777 | retain B at `<= 0.95` |
+| Append proxy `T1 + T2` | 3.245 | 3.263 | 1.006 | guardrail `<= 1.05` |
+| Full `T0`–`T2` | 41.879 | 33.290 | 0.795 | guardrail `<= 1.05` |
+
+The 4K setting lowers cache-cold request wall by 22.3%, remains within the
+append guardrail, and lowers full three-turn wall by 20.5%; the frozen
+decision is `retain_b`. Together with v1, this promotes 4,096-token chunked
+prefill only for the current SM121/cache-on/C1/no-thinking 60K static-history
+proxy. It does not establish TTFT, decode TPS, concurrency, tool-calling, or
+agentic-coding performance.
+
+## Measurement protocol
 
 The dedicated controller will use a controller-private deterministic 60K
 static-history generator. It issues a cold `T0` request, then two fixed
@@ -110,8 +126,8 @@ rendered request bodies stay in memory or ignored raw provenance.
   `T0`, device-only append hits, no eviction, no retraction, and no pressure
   breach.
 
-The first version will use the existing non-streaming, exact-response adapter,
-so it measures request wall only. TTFT requires a separately admitted
+Both versions use the existing non-streaming, exact-response adapter, so they
+measure request wall only. TTFT requires a separately admitted
 privacy-safe streaming adapter and is not inferred from request wall.
 
 ## Decision rule
