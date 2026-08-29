@@ -1863,7 +1863,7 @@ def audit_sm121_cache_performance_campaign(
 def audit_sm121_chunked_prefill_performance_campaign(
     campaign_dir: Path,
 ) -> dict[str, Any]:
-    """Read-only validation of one SM121 1K/2K A/B/B/A campaign.
+    """Read-only validation of one SM121 chunk-size A/B/B/A campaign.
 
     It shares the scalar source validator with publication and never opens
     prompt content, responses, token IDs, request identifiers, logs, or keys.
@@ -1872,7 +1872,7 @@ def audit_sm121_chunked_prefill_performance_campaign(
     report: dict[str, Any] = {
         "schema_version": 1,
         "read_only": True,
-        "campaign_id": "qwen38-flash-next-sm121-chunked-prefill-performance-v1",
+        "campaign_id": None,
         "ok": False,
         "errors": [],
     }
@@ -1898,6 +1898,7 @@ def audit_sm121_chunked_prefill_performance_campaign(
             summary = source["summary"]
             report.update(
                 {
+                    "campaign_id": summary["campaign_id"],
                     "status": summary["status"],
                     "decision": summary["decision"],
                     "completed_arms": summary["completed_arms"],

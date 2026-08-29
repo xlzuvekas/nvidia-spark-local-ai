@@ -1,4 +1,4 @@
-"""Offline controller tests for the SM121 1K/2K prefill A/B/B/A campaign."""
+"""Offline controller tests for SM121 chunk-size A/B/B/A campaigns."""
 
 from __future__ import annotations
 
@@ -16,6 +16,13 @@ from bench.sglang_sm121_chunked_prefill_performance import (
     SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER,
     SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_PROFILE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_PROFILE_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_MAX_MAMBA_CACHE_SIZE,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_RUNTIME_EXPECTED,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V1_STUDY,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CAMPAIGN_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_PROFILE_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_PROFILE_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY,
 )
 from bench.sglang_sm121_storage import (
     SM121_STORAGE_LOCAL_IMAGE_ID,
@@ -24,14 +31,18 @@ from bench.sglang_sm121_storage import (
 )
 from bench.sm121_chunked_prefill_runner import (
     _load_campaign,
+    _runtime_event,
+    SM121ChunkedPrefillPerformanceRequestError,
     create_sm121_chunked_prefill_performance_campaign,
     execute_sm121_chunked_prefill_performance_campaign,
 )
 from sparkbench import (
     DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE,
+    DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_V2_SUITE,
     build_parser,
     command_audit_sm121_chunked_prefill_performance,
     command_sm121_chunked_prefill_performance,
+    command_sm121_chunked_prefill_performance_v2,
 )
 from tests.test_sglang_sm121_chunked_prefill_performance import _lifetime
 
@@ -53,6 +64,19 @@ class SM121ChunkedPrefillRunnerTests(unittest.TestCase):
             / "qwen38_flash_next_sm121_triton_storage_chunked_prefill_performance_v1.toml"
         )
         self.suite = load_suite(self.suite_path)
+        self.v2_control_model = models[
+            SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_PROFILE_ID
+        ]
+        self.v2_candidate_model = models[
+            SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_PROFILE_ID
+        ]
+        self.v2_suite_path = (
+            self.repository
+            / "manifests"
+            / "suites"
+            / "qwen38_flash_next_sm121_triton_storage_chunked_prefill_performance_v2.toml"
+        )
+        self.v2_suite = load_suite(self.v2_suite_path)
 
     def test_cli_exposes_dedicated_non_resumable_campaign_and_audit(self) -> None:
         parser = build_parser()
@@ -60,6 +84,10 @@ class SM121ChunkedPrefillRunnerTests(unittest.TestCase):
         self.assertEqual(DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE, run_args.suite)
         self.assertEqual(command_sm121_chunked_prefill_performance, run_args.function)
         self.assertFalse(hasattr(run_args, "allow_download"))
+        v2_args = parser.parse_args(["sm121-chunked-prefill-performance-v2"])
+        self.assertEqual(DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_V2_SUITE, v2_args.suite)
+        self.assertEqual(command_sm121_chunked_prefill_performance_v2, v2_args.function)
+        self.assertFalse(hasattr(v2_args, "allow_download"))
         audit_args = parser.parse_args(
             ["audit-sm121-chunked-prefill-performance", "synthetic-campaign"]
         )
@@ -108,7 +136,8 @@ class SM121ChunkedPrefillRunnerTests(unittest.TestCase):
                     )
                 )
             )
-            _campaign, loaded = _load_campaign(campaign_dir)
+            _campaign, study, loaded = _load_campaign(campaign_dir)
+            self.assertEqual(SM121_CHUNKED_PREFILL_PERFORMANCE_V1_STUDY, study)
             self.assertEqual(
                 list(SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER),
                 [
@@ -130,11 +159,70 @@ class SM121ChunkedPrefillRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(PreflightError, "binding is invalid"):
                 _load_campaign(campaign_dir)
 
+    def test_v2_freeze_is_separate_and_binds_2k_4k(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch("bench.runner._image_digest", return_value=None),
+                patch(
+                    "bench.runner._sm121_storage_image_identity",
+                    return_value={
+                        "docker_image_id": SM121_STORAGE_LOCAL_IMAGE_ID,
+                        "platform": SM121_STORAGE_PLATFORM,
+                        "source_tree": SM121_STORAGE_SOURCE_TREE,
+                    },
+                ),
+                patch("bench.runner._host_snapshot", return_value={"host": "fixture"}),
+            ):
+                campaign_dir = create_sm121_chunked_prefill_performance_campaign(
+                    control_model=self.v2_control_model,
+                    candidate_model=self.v2_candidate_model,
+                    suite=self.v2_suite,
+                    results_root=root / "chunked-prefill-campaigns",
+                    models_path=self.repository / "manifests" / "models.toml",
+                    suite_path=self.v2_suite_path,
+                )
+            campaign = json.loads((campaign_dir / "campaign.json").read_text())
+            self.assertEqual(SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CAMPAIGN_ID, campaign["campaign_id"])
+            self.assertEqual([2048, 4096], campaign["pair_binding"]["chunked_prefill_sizes"])
+            _campaign, study, _loaded = _load_campaign(campaign_dir)
+            self.assertEqual(SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY, study)
+
+    def test_v2_runtime_attestation_rejects_a_valid_but_wrong_study_chunk(self) -> None:
+        observed = {
+            "mamba_radix_cache_strategy": "extra_buffer_lazy",
+            "max_mamba_cache_size": SM121_CHUNKED_PREFILL_PERFORMANCE_MAX_MAMBA_CACHE_SIZE,
+            **SM121_CHUNKED_PREFILL_PERFORMANCE_RUNTIME_EXPECTED,
+        }
+        with patch(
+            "bench.sm121_chunked_prefill_runner.inspect_sm121_chunked_prefill_runtime_identity",
+            return_value={**observed, "chunked_prefill_size": 2048},
+        ):
+            event = _runtime_event(
+                server=object(),
+                study=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY,
+                arm="A",
+                lifetime_ordinal=1,
+            )
+        self.assertEqual(2048, event["chunked_prefill_size"])
+        with patch(
+            "bench.sm121_chunked_prefill_runner.inspect_sm121_chunked_prefill_runtime_identity",
+            return_value={**observed, "chunked_prefill_size": 1024},
+        ):
+            with self.assertRaises(SM121ChunkedPrefillPerformanceRequestError):
+                _runtime_event(
+                    server=object(),
+                    study=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY,
+                    arm="A",
+                    lifetime_ordinal=1,
+                )
+
     @staticmethod
     def _loaded_campaign(
         root: Path,
     ) -> tuple[
         dict[str, object],
+        object,
         list[tuple[Path, dict[str, object], SimpleNamespace, SimpleNamespace]],
     ]:
         loaded: list[
@@ -160,6 +248,7 @@ class SM121ChunkedPrefillRunnerTests(unittest.TestCase):
             )
         return (
             {"pair_binding": {"pair_binding_sha256": "sha256:" + "a" * 64}},
+            SM121_CHUNKED_PREFILL_PERFORMANCE_V1_STUDY,
             loaded,
         )
 
@@ -169,7 +258,7 @@ class SM121ChunkedPrefillRunnerTests(unittest.TestCase):
                 root = Path(directory)
                 campaign_dir = root / "campaign"
                 campaign_dir.mkdir()
-                campaign, loaded = self._loaded_campaign(root)
+                campaign, study, loaded = self._loaded_campaign(root)
                 calls: list[tuple[int, str, tuple[tuple[int, ...], ...] | None]] = []
                 private_ids = ((101,), (202,), (303,))
 
@@ -206,7 +295,7 @@ class SM121ChunkedPrefillRunnerTests(unittest.TestCase):
                 with (
                     patch(
                         "bench.sm121_chunked_prefill_runner._load_campaign",
-                        return_value=(campaign, loaded),
+                        return_value=(campaign, study, loaded),
                     ),
                     patch(
                         "bench.sm121_chunked_prefill_runner._execute_arm",

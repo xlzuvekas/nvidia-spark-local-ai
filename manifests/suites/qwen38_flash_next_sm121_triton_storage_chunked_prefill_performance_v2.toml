@@ -1,0 +1,27 @@
+schema_version = 1
+
+[suite]
+id = "qwen38-flash-next-sm121-triton-storage-chunked-prefill-performance-v2"
+description = "Frozen fresh-lifetime A/B/B/A long-context prefill follow-up of the current SM121 native-NVMe Qwen3.8 Flash-Next cache-on bundle. The 2K retained control and 4K candidate differ only in chunked-prefill size; the dedicated controller uses the same 60K deterministic static-history proxy and does not claim an agentic coding result."
+
+[[cases]]
+id = "synthetic-exact-answer-v2"
+kind = "quality"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 512
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "sm121-chunked-prefill-60k-static-history-v2"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0

@@ -18,7 +18,9 @@ proxy. The [completed scalar bundle](../evidence/campaigns/qwen38-flash-next-sm1
 and the [initial non-decisive partial bundle](../evidence/campaigns/qwen38-flash-next-sm121-chunked-prefill-performance-v1-8232b4449e14/manifest.json)
 contain no request content. Profiles remain blocked from generic execution;
 the dedicated `sm121-chunked-prefill-performance` command is the only path that
-can admit a further live A/B/B/A campaign.
+can admit another v1 live A/B/B/A campaign. The separately named v2 2K/4K
+follow-up is frozen but not yet measured; it uses its own command, campaign
+identity, profiles, and evidence bundle namespace.
 
 ## Question
 
@@ -63,6 +65,26 @@ revision. They have no source overlays, mapped PLE, speculative decoding,
 tool parser, or hidden profile-specific request policy. The profile contract
 normalizes the served name and verifies that the only command-line difference
 is the chunk-size value.
+
+## Registered v2 follow-up — not yet measured
+
+The retained 2K setting is the control for a separate 2K-versus-4K panel. It
+is deliberately not an extension of the completed v1 campaign: its frozen
+campaign ID is `qwen38-flash-next-sm121-chunked-prefill-performance-v2`, its
+timed case has a v2 identity, and its evidence projection rejects v1/v2
+profile, attestation, turn, or run-binding mixtures.
+
+| Arm | Profile | Chunked prefill | Status |
+| --- | --- | ---: | --- |
+| A | `...chunked-prefill-performance-2k-v2-sglang` | 2,048 | Retained v1 setting, new v2 control |
+| B | `...chunked-prefill-performance-4k-v2-sglang` | 4,096 | Candidate; no live result yet |
+
+It keeps the same current cache-on/C1/no-thinking 60K static-history request
+wall protocol, ABBA order, fresh lifetimes, quality gate, cache-cold and
+append checks, 1,200-second lifetime bound, and reducer thresholds. The only
+serving delta within v2 is `--chunked-prefill-size`. Use
+`sm121-chunked-prefill-performance-v2` to freeze and execute it. Until its
+audit and scalar evidence are complete, it makes no performance claim.
 
 ## Planned measurement
 
@@ -110,8 +132,8 @@ endpoint, no-download rule, ownership cleanup, and benchmark lock.
 
 ## Admission for a future campaign
 
-The controller requires an exact `chunked_prefill_size` server-info attestation
-for both arms and validates the current UnifiedRadix/lazy runtime identity.
-Run `audit-sm121-chunked-prefill-performance` before exporting the completed
-scalar result with `export-evidence`, then verify it. A generic `plan`, `run`,
-or matrix invocation remains rejected by execution admission.
+Each controller requires an exact `chunked_prefill_size` server-info
+attestation for both arms and validates the current UnifiedRadix/lazy runtime
+identity. Run `audit-sm121-chunked-prefill-performance` before exporting a
+completed scalar result with `export-evidence`, then verify it. A generic
+`plan`, `run`, or matrix invocation remains rejected by execution admission.

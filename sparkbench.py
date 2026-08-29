@@ -83,6 +83,8 @@ from bench.sglang_sm121_cache_performance import (
 from bench.sglang_sm121_chunked_prefill_performance import (
     SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_PROFILE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_PROFILE_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_PROFILE_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_PROFILE_ID,
 )
 from bench.trtllm_direct import run_direct_trtllm
 
@@ -120,6 +122,12 @@ DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE = (
     / "manifests"
     / "suites"
     / "qwen38_flash_next_sm121_triton_storage_chunked_prefill_performance_v1.toml"
+)
+DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_V2_SUITE = (
+    WORKSPACE
+    / "manifests"
+    / "suites"
+    / "qwen38_flash_next_sm121_triton_storage_chunked_prefill_performance_v2.toml"
 )
 DEFAULT_AUTORESEARCH_V2_CACHE_POLICY_CAMPAIGN = (
     WORKSPACE
@@ -504,6 +512,38 @@ def command_sm121_chunked_prefill_performance(args: argparse.Namespace) -> int:
     except KeyError as error:
         raise ManifestError(
             "SM121 chunked-prefill campaign requires both exact 1K/2K profiles"
+        ) from error
+    suite = load_suite(args.suite)
+    campaign_dir = create_sm121_chunked_prefill_performance_campaign(
+        control_model=control_model,
+        candidate_model=candidate_model,
+        suite=suite,
+        results_root=args.results / "chunked-prefill-campaigns",
+        models_path=args.models,
+        suite_path=args.suite,
+    )
+    print(f"Campaign: {campaign_dir}")
+    summary = execute_sm121_chunked_prefill_performance_campaign(
+        campaign_dir, workspace=WORKSPACE
+    )
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0 if summary["status"] == "complete" else 1
+
+
+def command_sm121_chunked_prefill_performance_v2(args: argparse.Namespace) -> int:
+    """Freeze and execute the separately admitted 2K/4K follow-up study."""
+
+    models = load_models(args.models)
+    try:
+        control_model = models[
+            SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_PROFILE_ID
+        ]
+        candidate_model = models[
+            SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_PROFILE_ID
+        ]
+    except KeyError as error:
+        raise ManifestError(
+            "SM121 chunked-prefill v2 campaign requires both exact 2K/4K profiles"
         ) from error
     suite = load_suite(args.suite)
     campaign_dir = create_sm121_chunked_prefill_performance_campaign(
@@ -986,6 +1026,23 @@ def build_parser() -> argparse.ArgumentParser:
         function=command_sm121_chunked_prefill_performance
     )
 
+    chunked_prefill_performance_v2 = subparsers.add_parser(
+        "sm121-chunked-prefill-performance-v2",
+        help="run the separately frozen SM121 2K/4K prefill A/B/B/A follow-up",
+    )
+    chunked_prefill_performance_v2.add_argument(
+        "--models", type=Path, default=DEFAULT_MODELS
+    )
+    chunked_prefill_performance_v2.add_argument(
+        "--suite", type=Path, default=DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_V2_SUITE
+    )
+    chunked_prefill_performance_v2.add_argument(
+        "--results", type=Path, default=WORKSPACE / "results"
+    )
+    chunked_prefill_performance_v2.set_defaults(
+        function=command_sm121_chunked_prefill_performance_v2
+    )
+
     run = subparsers.add_parser("run", aliases=["resume"], help="execute or resume a frozen plan")
     run.add_argument("run_dir", type=Path)
     run.add_argument("--allow-download", action="store_true")
@@ -1134,7 +1191,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     chunked_prefill_performance_audit = subparsers.add_parser(
         "audit-sm121-chunked-prefill-performance",
-        help="read-only verification of one SM121 1K/2K prefill campaign",
+        help="read-only verification of one SM121 chunk-size prefill campaign",
     )
     chunked_prefill_performance_audit.add_argument("campaign_dir", type=Path)
     chunked_prefill_performance_audit.set_defaults(

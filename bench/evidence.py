@@ -16854,7 +16854,7 @@ def _verify_sm121_cache_performance_bundle(
 def _verify_sm121_chunked_prefill_performance_bundle(
     root: Path, directory: Path, entry: dict[str, Any], manifest: dict[str, Any]
 ) -> None:
-    """Revalidate a 1K/2K scalar bundle without reopening raw provenance."""
+    """Revalidate a chunk-size scalar bundle without reopening raw provenance."""
 
     if {path.name for path in directory.iterdir()} != {
         "checksums.json",

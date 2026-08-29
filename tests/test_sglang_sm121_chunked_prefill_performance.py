@@ -1,4 +1,4 @@
-"""Offline contract tests for the SM121 1K-versus-2K prefill study."""
+"""Offline contract tests for SM121 chunked-prefill studies."""
 
 from __future__ import annotations
 
@@ -24,10 +24,19 @@ from bench.sglang_sm121_chunked_prefill_performance import (
     SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_TIMED_TURNS,
     SM121_CHUNKED_PREFILL_PERFORMANCE_TURN_EVENT,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V1_STUDY,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_CHUNK_SIZE,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_PROFILE_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CASE_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_CHUNK_SIZE,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_PROFILE_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_SUITE_ID,
     SM121ChunkedPrefillPerformanceError,
     derive_sm121_chunked_prefill_performance_turn_admission,
     score_sm121_chunked_prefill_performance_campaign,
     sm121_chunked_prefill_performance_arm,
+    sm121_chunked_prefill_performance_study,
     sm121_chunked_prefill_performance_pair_binding_sha256,
     sm121_chunked_prefill_performance_pair_instance_sha256,
     validate_sm121_chunked_prefill_performance_candidate,
@@ -47,6 +56,12 @@ SUITE = (
     / "suites"
     / "qwen38_flash_next_sm121_triton_storage_chunked_prefill_performance_v1.toml"
 )
+V2_SUITE = (
+    ROOT
+    / "manifests"
+    / "suites"
+    / "qwen38_flash_next_sm121_triton_storage_chunked_prefill_performance_v2.toml"
+)
 
 
 def _argument_value(arguments: tuple[str, ...], flag: str) -> str:
@@ -63,7 +78,14 @@ def _nonces() -> list[str]:
     ]
 
 
-def _turn(*, ordinal: int, arm: str, turn: str, wall_s: float) -> dict[str, object]:
+def _turn(
+    *,
+    ordinal: int,
+    arm: str,
+    turn: str,
+    wall_s: float,
+    timed_case_id: str = SM121_CHUNKED_PREFILL_PERFORMANCE_CASE_ID,
+) -> dict[str, object]:
     later = turn != "T0"
     prompt_tokens = 58_000 + SM121_CHUNKED_PREFILL_PERFORMANCE_TIMED_TURNS.index(
         turn
@@ -73,8 +95,8 @@ def _turn(*, ordinal: int, arm: str, turn: str, wall_s: float) -> dict[str, obje
         "event": SM121_CHUNKED_PREFILL_PERFORMANCE_TURN_EVENT,
         "arm": arm,
         "lifetime_ordinal": ordinal,
-        "case_id": SM121_CHUNKED_PREFILL_PERFORMANCE_CASE_ID + "--0123456789ab",
-        "protocol_case_id": SM121_CHUNKED_PREFILL_PERFORMANCE_CASE_ID,
+        "case_id": timed_case_id + "--0123456789ab",
+        "protocol_case_id": timed_case_id,
         "turn": turn,
         "cache_details_requested": True,
         "prompt_token_ids_requested": True,
@@ -120,7 +142,12 @@ def _turn(*, ordinal: int, arm: str, turn: str, wall_s: float) -> dict[str, obje
 
 
 def _lifetime(
-    ordinal: int, arm: str, *, t0: float, later: float
+    ordinal: int,
+    arm: str,
+    *,
+    t0: float,
+    later: float,
+    timed_case_id: str = SM121_CHUNKED_PREFILL_PERFORMANCE_CASE_ID,
 ) -> dict[str, object]:
     return {
         "ordinal": ordinal,
@@ -129,9 +156,27 @@ def _lifetime(
         "timed_admitted": True,
         "within_timeout": True,
         "turns": [
-            _turn(ordinal=ordinal * 2, arm=arm, turn="T0", wall_s=t0),
-            _turn(ordinal=ordinal * 2, arm=arm, turn="T1", wall_s=later / 2),
-            _turn(ordinal=ordinal * 2, arm=arm, turn="T2", wall_s=later / 2),
+            _turn(
+                ordinal=ordinal * 2,
+                arm=arm,
+                turn="T0",
+                wall_s=t0,
+                timed_case_id=timed_case_id,
+            ),
+            _turn(
+                ordinal=ordinal * 2,
+                arm=arm,
+                turn="T1",
+                wall_s=later / 2,
+                timed_case_id=timed_case_id,
+            ),
+            _turn(
+                ordinal=ordinal * 2,
+                arm=arm,
+                turn="T2",
+                wall_s=later / 2,
+                timed_case_id=timed_case_id,
+            ),
         ],
     }
 
@@ -143,6 +188,13 @@ class SM121ChunkedPrefillPerformanceTests(unittest.TestCase):
         cls.control = models[SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_PROFILE_ID]
         cls.candidate = models[SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_PROFILE_ID]
         cls.suite = load_suite(SUITE)
+        cls.v2_control = models[
+            SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_PROFILE_ID
+        ]
+        cls.v2_candidate = models[
+            SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_PROFILE_ID
+        ]
+        cls.v2_suite = load_suite(V2_SUITE)
 
     def test_pair_is_current_cache_on_and_differs_only_by_chunk_size(self) -> None:
         validate_sm121_chunked_prefill_performance_pair(
@@ -162,6 +214,40 @@ class SM121ChunkedPrefillPerformanceTests(unittest.TestCase):
         self.assertEqual(("chat",), self.candidate.tasks)
         self.assertNotIn("--tool-call-parser", self.control.args)
         self.assertNotIn("--tool-call-parser", self.candidate.args)
+
+    def test_v2_is_a_distinct_2k_4k_study_with_no_cross_study_pairing(self) -> None:
+        validate_sm121_chunked_prefill_performance_pair(
+            self.v2_control, self.v2_candidate
+        )
+        validate_sm121_chunked_prefill_performance_suite(self.v2_suite)
+        validate_benchmark_selection(self.v2_control, self.v2_suite)
+        self.assertEqual(
+            SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY,
+            sm121_chunked_prefill_performance_study(self.v2_control),
+        )
+        self.assertEqual(
+            SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY,
+            sm121_chunked_prefill_performance_study(self.v2_suite.id),
+        )
+        self.assertEqual(
+            SM121_CHUNKED_PREFILL_PERFORMANCE_V2_SUITE_ID, self.v2_suite.id
+        )
+        self.assertEqual(
+            str(SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_CHUNK_SIZE),
+            _argument_value(self.v2_control.args, "--chunked-prefill-size"),
+        )
+        self.assertEqual(
+            str(SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_CHUNK_SIZE),
+            _argument_value(self.v2_candidate.args, "--chunked-prefill-size"),
+        )
+        with self.assertRaisesRegex(
+            SM121ChunkedPrefillPerformanceError, "candidate profile"
+        ):
+            validate_sm121_chunked_prefill_performance_pair(
+                self.control, self.v2_candidate
+            )
+        with self.assertRaisesRegex(ManifestError, "requires"):
+            validate_benchmark_selection(self.control, self.v2_suite)
 
     def test_candidate_rejects_any_other_serving_delta(self) -> None:
         arguments = list(self.candidate.args)
@@ -321,6 +407,50 @@ class SM121ChunkedPrefillPerformanceTests(unittest.TestCase):
         result = score_sm121_chunked_prefill_performance_campaign(lifetimes)
         self.assertEqual("partial", result.status)
         self.assertEqual("not_evaluated", result.decision)
+
+    def test_v2_score_requires_its_own_timed_case(self) -> None:
+        lifetimes = [
+            _lifetime(
+                1,
+                "A",
+                t0=100.0,
+                later=20.0,
+                timed_case_id=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CASE_ID,
+            ),
+            _lifetime(
+                2,
+                "B",
+                t0=90.0,
+                later=20.0,
+                timed_case_id=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CASE_ID,
+            ),
+            _lifetime(
+                3,
+                "B",
+                t0=90.0,
+                later=20.0,
+                timed_case_id=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CASE_ID,
+            ),
+            _lifetime(
+                4,
+                "A",
+                t0=100.0,
+                later=20.0,
+                timed_case_id=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CASE_ID,
+            ),
+        ]
+        self.assertEqual(
+            "retain_b",
+            score_sm121_chunked_prefill_performance_campaign(
+                lifetimes, study=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY
+            ).decision,
+        )
+        with self.assertRaisesRegex(
+            SM121ChunkedPrefillPerformanceError, "turn topology"
+        ):
+            score_sm121_chunked_prefill_performance_campaign(
+                lifetimes, study=SM121_CHUNKED_PREFILL_PERFORMANCE_V1_STUDY
+            )
 
     def test_pair_binding_commits_the_only_two_chunk_sizes(self) -> None:
         binding: dict[str, object] = {

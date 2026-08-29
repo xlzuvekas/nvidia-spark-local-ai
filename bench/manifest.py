@@ -57,9 +57,9 @@ from .sglang_sm121_cache_performance import (
 )
 from .sglang_sm121_chunked_prefill_performance import (
     SM121_CHUNKED_PREFILL_PERFORMANCE_PROFILE_IDS,
-    SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE_ID,
     SM121ChunkedPrefillPerformanceError,
     is_sm121_chunked_prefill_performance_candidate,
+    sm121_chunked_prefill_performance_study,
     validate_sm121_chunked_prefill_performance_candidate,
     validate_sm121_chunked_prefill_performance_suite,
 )
@@ -1956,7 +1956,16 @@ def validate_suite(suite: SuiteSpec, *, context: str = "suite") -> None:
             validate_sm121_cache_performance_suite(suite)
         except SM121CachePerformanceError as error:
             raise ManifestError(f"{context}: {error}") from error
-    if suite.id == SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE_ID:
+    try:
+        chunked_prefill_suite_study = sm121_chunked_prefill_performance_study(
+            suite.id
+        )
+    except SM121ChunkedPrefillPerformanceError:
+        chunked_prefill_suite_study = None
+    if (
+        chunked_prefill_suite_study is not None
+        and suite.id == chunked_prefill_suite_study.suite_id
+    ):
         try:
             validate_sm121_chunked_prefill_performance_suite(suite)
         except SM121ChunkedPrefillPerformanceError as error:
@@ -2095,26 +2104,47 @@ def validate_benchmark_selection(
             f"{context}: the {SM121_CACHE_PERFORMANCE_SUITE_ID!r} suite requires "
             "one of its exact paired cache-policy performance profiles"
         )
+    try:
+        chunked_prefill_profile_study = sm121_chunked_prefill_performance_study(
+            model_id
+        )
+    except SM121ChunkedPrefillPerformanceError:
+        chunked_prefill_profile_study = None
+    try:
+        chunked_prefill_suite_study = sm121_chunked_prefill_performance_study(
+            suite.id
+        )
+    except SM121ChunkedPrefillPerformanceError:
+        chunked_prefill_suite_study = None
     sm121_chunked_prefill_performance_profile = (
         model_id in SM121_CHUNKED_PREFILL_PERFORMANCE_PROFILE_IDS
     )
     sm121_chunked_prefill_performance_suite = (
-        suite.id == SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE_ID
+        chunked_prefill_suite_study is not None
+        and suite.id == chunked_prefill_suite_study.suite_id
     )
     if (
         sm121_chunked_prefill_performance_profile
-        and not sm121_chunked_prefill_performance_suite
+        and (
+            not sm121_chunked_prefill_performance_suite
+            or chunked_prefill_profile_study != chunked_prefill_suite_study
+        )
     ):
+        assert chunked_prefill_profile_study is not None
         raise ManifestError(
             f"{context}: the {model.id!r} profile requires "
-            f"the {SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE_ID!r} suite"
+            f"the {chunked_prefill_profile_study.suite_id!r} suite"
         )
     if (
         sm121_chunked_prefill_performance_suite
-        and not sm121_chunked_prefill_performance_profile
+        and (
+            not sm121_chunked_prefill_performance_profile
+            or chunked_prefill_profile_study != chunked_prefill_suite_study
+        )
     ):
+        assert chunked_prefill_suite_study is not None
         raise ManifestError(
-            f"{context}: the {SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE_ID!r} "
+            f"{context}: the {chunked_prefill_suite_study.suite_id!r} "
             "suite requires one of its exact chunked-prefill profiles"
         )
     ple_study_suite_profiles = _PLE_STUDY_PROFILE_IDS_BY_SUITE.get(suite.id)

@@ -1,4 +1,4 @@
-"""Scalar-only evidence contracts for the SM121 1K/2K prefill campaign."""
+"""Scalar-only evidence contracts for SM121 chunk-size prefill campaigns."""
 
 from __future__ import annotations
 
@@ -27,7 +27,11 @@ from bench.sglang_sm121_chunked_prefill_performance import (
     SM121_CHUNKED_PREFILL_PERFORMANCE_STATIC_EVENT,
     SM121_CHUNKED_PREFILL_PERFORMANCE_TIMED_TURNS,
     SM121_CHUNKED_PREFILL_PERFORMANCE_TURN_EVENT,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_PROFILE_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_PROFILE_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY,
     score_sm121_chunked_prefill_performance_campaign,
+    sm121_chunked_prefill_performance_study,
 )
 from bench.sglang_sm121_storage import (
     SM121_STORAGE_LOCAL_IMAGE_ID,
@@ -59,6 +63,19 @@ class SM121ChunkedPrefillEvidenceTests(unittest.TestCase):
             / "qwen38_flash_next_sm121_triton_storage_chunked_prefill_performance_v1.toml"
         )
         self.suite = load_suite(self.suite_path)
+        self.v2_control = models[
+            SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_PROFILE_ID
+        ]
+        self.v2_candidate = models[
+            SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_PROFILE_ID
+        ]
+        self.v2_suite_path = (
+            self.repository
+            / "manifests"
+            / "suites"
+            / "qwen38_flash_next_sm121_triton_storage_chunked_prefill_performance_v2.toml"
+        )
+        self.v2_suite = load_suite(self.v2_suite_path)
 
     @staticmethod
     def _export(
@@ -72,7 +89,15 @@ class SM121ChunkedPrefillEvidenceTests(unittest.TestCase):
                 results_root=fixture.results, output_root=fixture.output, replace=replace
             )
 
-    def _freeze(self, fixture: evidence_test_support.EvidenceFixture) -> Path:
+    def _freeze(
+        self,
+        fixture: evidence_test_support.EvidenceFixture,
+        *,
+        control: object | None = None,
+        candidate: object | None = None,
+        suite: object | None = None,
+        suite_path: Path | None = None,
+    ) -> Path:
         with (
             patch("bench.runner._image_digest", return_value=None),
             patch(
@@ -86,35 +111,39 @@ class SM121ChunkedPrefillEvidenceTests(unittest.TestCase):
             patch("bench.runner._host_snapshot", return_value={"host": "fixture"}),
         ):
             return create_sm121_chunked_prefill_performance_campaign(
-                control_model=self.control,
-                candidate_model=self.candidate,
-                suite=self.suite,
+                control_model=self.control if control is None else control,
+                candidate_model=self.candidate if candidate is None else candidate,
+                suite=self.suite if suite is None else suite,
                 results_root=fixture.results / "chunked-prefill-campaigns",
                 models_path=self.repository / "manifests" / "models.toml",
-                suite_path=self.suite_path,
+                suite_path=self.suite_path if suite_path is None else suite_path,
             )
 
     @staticmethod
-    def _static_event(arm: str, lifetime_ordinal: int) -> dict[str, object]:
+    def _static_event(
+        arm: str, lifetime_ordinal: int, *, control_chunk_size: int, candidate_chunk_size: int
+    ) -> dict[str, object]:
         return {
             "event": SM121_CHUNKED_PREFILL_PERFORMANCE_STATIC_EVENT,
             "arm": arm,
             "lifetime_ordinal": lifetime_ordinal,
             "candidate_source_tree": SM121_STORAGE_SOURCE_TREE,
-            "chunked_prefill_size": 1024 if arm == "A" else 2048,
+            "chunked_prefill_size": control_chunk_size if arm == "A" else candidate_chunk_size,
             **SM121_CACHE_SOURCE_DIGESTS,
             **SM121_CACHE_SEMANTIC_STATIC_ASSERTIONS,
         }
 
     @staticmethod
-    def _runtime_event(arm: str, lifetime_ordinal: int) -> dict[str, object]:
+    def _runtime_event(
+        arm: str, lifetime_ordinal: int, *, control_chunk_size: int, candidate_chunk_size: int
+    ) -> dict[str, object]:
         return {
             "event": SM121_CHUNKED_PREFILL_PERFORMANCE_RUNTIME_EVENT,
             "arm": arm,
             "lifetime_ordinal": lifetime_ordinal,
             "mamba_radix_cache_strategy": "extra_buffer_lazy",
             "max_mamba_cache_size": SM121_CHUNKED_PREFILL_PERFORMANCE_MAX_MAMBA_CACHE_SIZE,
-            "chunked_prefill_size": 1024 if arm == "A" else 2048,
+            "chunked_prefill_size": control_chunk_size if arm == "A" else candidate_chunk_size,
             **SM121_CHUNKED_PREFILL_PERFORMANCE_RUNTIME_EXPECTED,
         }
 
@@ -129,6 +158,7 @@ class SM121ChunkedPrefillEvidenceTests(unittest.TestCase):
                 arm=arm,
                 turn=turn,
                 wall_s=100.0 if turn == "T0" else 10.0 + index,
+                timed_case_id=timed_case_id.rsplit("--", 1)[0],
             )
             observation["case_id"] = timed_case_id
             turns.append(observation)
@@ -143,6 +173,7 @@ class SM121ChunkedPrefillEvidenceTests(unittest.TestCase):
 
     def _write_completed_campaign(self, campaign_dir: Path) -> None:
         campaign = json.loads((campaign_dir / "campaign.json").read_text())
+        study = sm121_chunked_prefill_performance_study(campaign["campaign_id"])
         lifetimes: list[dict[str, object]] = []
         start = datetime(2026, 8, 29, 2, 0, tzinfo=timezone.utc)
         for ordinal, (name, arm) in enumerate(
@@ -153,7 +184,7 @@ class SM121ChunkedPrefillEvidenceTests(unittest.TestCase):
             plan = json.loads((run_dir / "plan.json").read_text())
             case_ids = {case["id"]: case["case_id"] for case in plan["suite"]["cases"]}
             quality_case_id = case_ids["synthetic-exact-answer-v2"]
-            timed_case_id = case_ids[SM121_CHUNKED_PREFILL_PERFORMANCE_CASE_ID]
+            timed_case_id = case_ids[study.timed_case_id]
             quality_ordinal, timed_ordinal = ordinal * 2 - 1, ordinal * 2
             events: list[dict[str, object]] = []
 
@@ -168,7 +199,7 @@ class SM121ChunkedPrefillEvidenceTests(unittest.TestCase):
             append(
                 {
                     "event": "run_start",
-                    "execution_mode": "sm121_storage_chunked_prefill_performance_abba_fresh_lifetimes",
+                    "execution_mode": study.execution_mode,
                     "arm": arm,
                     "campaign_ordinal": ordinal,
                     "plan_fingerprint": plan["fingerprint"],
@@ -181,8 +212,22 @@ class SM121ChunkedPrefillEvidenceTests(unittest.TestCase):
                 }
             )
             append({"event": "measurement_started"})
-            append(self._static_event(arm, quality_ordinal))
-            append(self._runtime_event(arm, quality_ordinal))
+            append(
+                self._static_event(
+                    arm,
+                    quality_ordinal,
+                    control_chunk_size=study.control_chunk_size,
+                    candidate_chunk_size=study.candidate_chunk_size,
+                )
+            )
+            append(
+                self._runtime_event(
+                    arm,
+                    quality_ordinal,
+                    control_chunk_size=study.control_chunk_size,
+                    candidate_chunk_size=study.candidate_chunk_size,
+                )
+            )
             append(
                 {
                     "event": "server_ready",
@@ -229,8 +274,22 @@ class SM121ChunkedPrefillEvidenceTests(unittest.TestCase):
                     "admitted": True,
                 }
             )
-            append(self._static_event(arm, timed_ordinal))
-            append(self._runtime_event(arm, timed_ordinal))
+            append(
+                self._static_event(
+                    arm,
+                    timed_ordinal,
+                    control_chunk_size=study.control_chunk_size,
+                    candidate_chunk_size=study.candidate_chunk_size,
+                )
+            )
+            append(
+                self._runtime_event(
+                    arm,
+                    timed_ordinal,
+                    control_chunk_size=study.control_chunk_size,
+                    candidate_chunk_size=study.candidate_chunk_size,
+                )
+            )
             append(
                 {
                     "event": "server_ready",
@@ -287,7 +346,9 @@ class SM121ChunkedPrefillEvidenceTests(unittest.TestCase):
                 run_dir / "events.jsonl", events
             )
             lifetimes.append(lifetime)
-        score = score_sm121_chunked_prefill_performance_campaign(lifetimes)
+        score = score_sm121_chunked_prefill_performance_campaign(
+            lifetimes, study=study
+        )
         summary: dict[str, object] = {
             "schema_version": 1,
             "campaign_id": campaign["campaign_id"],
@@ -341,6 +402,54 @@ class SM121ChunkedPrefillEvidenceTests(unittest.TestCase):
             serialized = b"\n".join(original.values()).decode("utf-8", errors="ignore")
             for private in (PRIVATE_PROMPT, PRIVATE_COMPLETION, PRIVATE_REQUEST_ID):
                 self.assertNotIn(private, serialized)
+
+    def test_v2_export_uses_a_distinct_protocol_and_rejects_cross_study_mixups(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = evidence_test_support.EvidenceFixture(Path(directory))
+            self._export(fixture)
+            campaign = self._freeze(
+                fixture,
+                control=self.v2_control,
+                candidate=self.v2_candidate,
+                suite=self.v2_suite,
+                suite_path=self.v2_suite_path,
+            )
+            self._write_completed_campaign(campaign)
+            report = audit_sm121_chunked_prefill_performance_campaign(campaign)
+            self.assertTrue(report["ok"])
+            self.assertEqual(
+                SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY.campaign_id,
+                report["campaign_id"],
+            )
+            self.assertTrue(self._export(fixture, replace=True)["changed"])
+            self.assertEqual("verified", verify_evidence(fixture.output)["status"])
+            index = json.loads((fixture.output / "index.json").read_text())
+            entry = next(
+                item
+                for item in index["campaigns"]
+                if item["evidence_kind"] == "sm121_chunked_prefill_performance"
+                and item["campaign_id"].startswith(
+                    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY.campaign_id + "-"
+                )
+            )
+            manifest = json.loads((fixture.output / entry["file"]).read_text())
+            self.assertEqual(
+                SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY.campaign_id,
+                manifest["protocol"]["campaign_id"],
+            )
+            self.assertEqual([2048, 4096], manifest["protocol"]["chunked_prefill_sizes"])
+            campaign_data = json.loads((campaign / "campaign.json").read_text())
+            events_path = (
+                campaign / "runs" / campaign_data["run_directories"][0] / "events.jsonl"
+            )
+            events = [json.loads(line) for line in events_path.read_text().splitlines()]
+            next(
+                event
+                for event in events
+                if event["event"] == SM121_CHUNKED_PREFILL_PERFORMANCE_STATIC_EVENT
+            )["chunked_prefill_size"] = 1024
+            evidence_test_support.EvidenceFixture.write_jsonl(events_path, events)
+            self.assertFalse(audit_sm121_chunked_prefill_performance_campaign(campaign)["ok"])
 
     def test_export_retains_the_audited_bootstrap_counter_partial(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

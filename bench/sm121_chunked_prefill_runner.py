@@ -1,4 +1,4 @@
-"""Dedicated fresh-lifetime executor for the SM121 1K/2K prefill study.
+"""Dedicated fresh-lifetime executor for SM121 chunked-prefill studies.
 
 This controller is intentionally independent of the cache-policy performance
 lane.  Both arms keep UnifiedRadixCache and lazy Mamba state; only the
@@ -33,25 +33,19 @@ from .runtime import (
 )
 from .sglang_sm121_cache_semantic import SM121_CACHE_SEMANTIC_STATIC_ASSERTIONS
 from .sglang_sm121_chunked_prefill_performance import (
+    ChunkedPrefillPerformanceStudy,
     SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER,
     SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_ARM,
-    SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_PROFILE_ID,
-    SM121_CHUNKED_PREFILL_PERFORMANCE_CAMPAIGN_ID,
-    SM121_CHUNKED_PREFILL_PERFORMANCE_CASE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_CELL_TIMEOUT_S,
     SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_ARM,
-    SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_PROFILE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_COLD_INPUT_MAX_TOKENS,
     SM121_CHUNKED_PREFILL_PERFORMANCE_COLD_INPUT_MIN_TOKENS,
-    SM121_CHUNKED_PREFILL_PERFORMANCE_EXECUTION_MODE,
-    SM121_CHUNKED_PREFILL_PERFORMANCE_LIFETIME_ARMS,
     SM121_CHUNKED_PREFILL_PERFORMANCE_METRIC_FIELDS,
     SM121_CHUNKED_PREFILL_PERFORMANCE_PAIR_BINDING_SCHEMA_VERSION,
     SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_CASE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_ITEM_COUNT,
     SM121_CHUNKED_PREFILL_PERFORMANCE_RUNTIME_EVENT,
     SM121_CHUNKED_PREFILL_PERFORMANCE_STATIC_EVENT,
-    SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_TIMED_TURNS,
     SM121_CHUNKED_PREFILL_PERFORMANCE_TURN_EVENT,
     SM121ChunkedPrefillPerformanceError,
@@ -59,6 +53,7 @@ from .sglang_sm121_chunked_prefill_performance import (
     is_sm121_chunked_prefill_performance_plan,
     score_sm121_chunked_prefill_performance_campaign,
     sm121_chunked_prefill_performance_arm,
+    sm121_chunked_prefill_performance_study,
     sm121_chunked_prefill_performance_pair_binding_sha256,
     sm121_chunked_prefill_performance_pair_instance_sha256,
     validate_sm121_chunked_prefill_performance_candidate,
@@ -106,17 +101,20 @@ def create_sm121_chunked_prefill_performance_campaign(
     models_path: Path,
     suite_path: Path,
 ) -> Path:
-    """Freeze one non-resumable A/B/B/A 1K/2K campaign without serving."""
+    """Freeze one non-resumable A/B/B/A chunk-size campaign without serving."""
 
     try:
         validate_sm121_chunked_prefill_performance_pair(control_model, candidate_model)
         validate_sm121_chunked_prefill_performance_suite(suite)
+        study = sm121_chunked_prefill_performance_study(control_model)
+        if study != sm121_chunked_prefill_performance_study(getattr(suite, "id", None)):
+            raise SM121ChunkedPrefillPerformanceError(
+                "chunked-prefill profile and suite studies differ"
+            )
     except SM121ChunkedPrefillPerformanceError as error:
         raise RuntimeError("SM121 chunked-prefill admission is unavailable") from error
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    campaign_dir = results_root / (
-        f"{stamp}-qwen38-flash-next-sm121-chunked-prefill-performance-v1"
-    )
+    campaign_dir = results_root / f"{stamp}-{study.campaign_id}"
     campaign_dir.mkdir(parents=True, exist_ok=False)
     runs_root = campaign_dir / "runs"
     arm_models = {
@@ -136,16 +134,16 @@ def create_sm121_chunked_prefill_performance_campaign(
                 run_label=f"prefill-{ordinal}-{arm.lower()}",
             )
         )
-    _bind_campaign_plans(run_dirs)
+    _bind_campaign_plans(run_dirs, study=study)
     plans = [json.loads((run_dir / "plan.json").read_text()) for run_dir in run_dirs]
     binding = plans[0].get("chunked_prefill_performance_pair")
     if not isinstance(binding, dict):
         raise RuntimeError("SM121 chunked-prefill plan binding is unavailable")
     campaign = {
         "schema_version": 1,
-        "campaign_id": SM121_CHUNKED_PREFILL_PERFORMANCE_CAMPAIGN_ID,
+        "campaign_id": study.campaign_id,
         "created_at": utc_now(),
-        "execution_mode": SM121_CHUNKED_PREFILL_PERFORMANCE_EXECUTION_MODE,
+        "execution_mode": study.execution_mode,
         "pair_binding": binding,
         "run_directories": [run_dir.name for run_dir in run_dirs],
     }
@@ -154,7 +152,9 @@ def create_sm121_chunked_prefill_performance_campaign(
     return campaign_dir
 
 
-def _bind_campaign_plans(run_dirs: list[Path]) -> None:
+def _bind_campaign_plans(
+    run_dirs: list[Path], *, study: ChunkedPrefillPerformanceStudy
+) -> None:
     """Bind four frozen plans to one opaque, scalar-only instance digest."""
 
     if len(run_dirs) != len(SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER):
@@ -173,6 +173,8 @@ def _bind_campaign_plans(run_dirs: list[Path]) -> None:
         try:
             if sm121_chunked_prefill_performance_arm(plan["model"]) != arm:
                 raise SM121ChunkedPrefillPerformanceError("chunked-prefill plan arm changed")
+            if sm121_chunked_prefill_performance_study(plan["model"]) != study:
+                raise SM121ChunkedPrefillPerformanceError("chunked-prefill plan study changed")
             validate_sm121_chunked_prefill_performance_candidate(plan["model"])
             validate_sm121_chunked_prefill_performance_suite(
                 base_runner._namespace(plan["suite"])
@@ -193,16 +195,19 @@ def _bind_campaign_plans(run_dirs: list[Path]) -> None:
         raise RuntimeError("SM121 chunked-prefill plan nonce is invalid") from error
     binding: dict[str, object] = {
         "schema_version": SM121_CHUNKED_PREFILL_PERFORMANCE_PAIR_BINDING_SCHEMA_VERSION,
-        "suite_id": SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE_ID,
-        "execution_mode": SM121_CHUNKED_PREFILL_PERFORMANCE_EXECUTION_MODE,
+        "suite_id": study.suite_id,
+        "execution_mode": study.execution_mode,
         "arm_order": list(SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER),
         "profile_ids": [
-            SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_PROFILE_ID,
-            SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_PROFILE_ID,
+            study.control_profile_id,
+            study.candidate_profile_id,
         ],
-        "chunked_prefill_sizes": [1024, 2048],
+        "chunked_prefill_sizes": [
+            study.control_chunk_size,
+            study.candidate_chunk_size,
+        ],
         "quality_case_id": SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_CASE_ID,
-        "timed_case_id": SM121_CHUNKED_PREFILL_PERFORMANCE_CASE_ID,
+        "timed_case_id": study.timed_case_id,
         "cell_timeout_s": SM121_CHUNKED_PREFILL_PERFORMANCE_CELL_TIMEOUT_S,
         "campaign_instance_sha256": instance,
         "plan_fingerprints": [str(plan["fingerprint"]) for plan in plans],
@@ -225,7 +230,12 @@ def _bind_campaign_plans(run_dirs: list[Path]) -> None:
 
 def _load_plan(
     run_dir: Path,
-) -> tuple[dict[str, Any], SimpleNamespace, SimpleNamespace]:
+) -> tuple[
+    dict[str, Any],
+    SimpleNamespace,
+    SimpleNamespace,
+    ChunkedPrefillPerformanceStudy,
+]:
     """Authenticate one frozen performance arm before it can create a server."""
 
     try:
@@ -274,6 +284,9 @@ def _load_plan(
             raise SM121ChunkedPrefillPerformanceError("chunked-prefill selector is invalid")
         validate_sm121_chunked_prefill_performance_candidate(model)
         validate_sm121_chunked_prefill_performance_suite(suite)
+        study = sm121_chunked_prefill_performance_study(model)
+        if study != sm121_chunked_prefill_performance_study(getattr(suite, "id", None)):
+            raise SM121ChunkedPrefillPerformanceError("chunked-prefill plan study changed")
     except SM121ChunkedPrefillPerformanceError as error:
         raise base_runner.PreflightError("SM121 chunked-prefill plan contract is invalid") from error
     local_image = resolved.get("local_image")
@@ -297,6 +310,8 @@ def _load_plan(
         raise base_runner.PreflightError("SM121 chunked-prefill plan arm is invalid")
     if not isinstance(binding, dict) or binding["plan_fingerprints"][ordinal - 1] != plan.get("fingerprint"):
         raise base_runner.PreflightError("SM121 chunked-prefill plan binding moved")
+    if not isinstance(binding, dict) or binding.get("suite_id") != study.suite_id:
+        raise base_runner.PreflightError("SM121 chunked-prefill plan study changed")
     run_nonce = plan.get("run_nonce")
     if not isinstance(run_nonce, str) or re.fullmatch(r"[0-9a-f]{32}", run_nonce) is None:
         raise base_runner.PreflightError("SM121 chunked-prefill run nonce is invalid")
@@ -304,17 +319,19 @@ def _load_plan(
     model.run_identity = f"{plan['fingerprint']}-{run_nonce}"
     model.chunked_prefill_performance_authorized = True
     model.chunked_prefill_performance_pair = binding
-    return plan, model, suite
+    return plan, model, suite, study
 
 
-def _case_pair(suite: SimpleNamespace) -> tuple[SimpleNamespace, SimpleNamespace]:
+def _case_pair(
+    suite: SimpleNamespace, *, study: ChunkedPrefillPerformanceStudy
+) -> tuple[SimpleNamespace, SimpleNamespace]:
     cases = list(getattr(suite, "cases", ()))
     if len(cases) != 2:
         raise base_runner.PreflightError("SM121 chunked-prefill cases are invalid")
     quality, timed = cases
     if (
         getattr(quality, "id", None) != SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_CASE_ID
-        or getattr(timed, "id", None) != SM121_CHUNKED_PREFILL_PERFORMANCE_CASE_ID
+        or getattr(timed, "id", None) != study.timed_case_id
         or not isinstance(getattr(quality, "case_id", None), str)
         or not isinstance(getattr(timed, "case_id", None), str)
     ):
@@ -323,7 +340,11 @@ def _case_pair(suite: SimpleNamespace) -> tuple[SimpleNamespace, SimpleNamespace
 
 
 def _static_event(
-    *, model: SimpleNamespace, arm: str, lifetime_ordinal: int
+    *,
+    model: SimpleNamespace,
+    study: ChunkedPrefillPerformanceStudy,
+    arm: str,
+    lifetime_ordinal: int,
 ) -> dict[str, Any]:
     event = {
         "event": SM121_CHUNKED_PREFILL_PERFORMANCE_STATIC_EVENT,
@@ -331,7 +352,9 @@ def _static_event(
         "lifetime_ordinal": lifetime_ordinal,
         "candidate_source_tree": SM121_STORAGE_SOURCE_TREE,
         "chunked_prefill_size": (
-            1024 if arm == SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_ARM else 2048
+            study.control_chunk_size
+            if arm == SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_ARM
+            else study.candidate_chunk_size
         ),
         **inspect_sm121_cache_source_digests(model),
         **SM121_CACHE_SEMANTIC_STATIC_ASSERTIONS,
@@ -344,7 +367,11 @@ def _static_event(
 
 
 def _runtime_event(
-    *, server: Any, arm: str, lifetime_ordinal: int
+    *,
+    server: Any,
+    study: ChunkedPrefillPerformanceStudy,
+    arm: str,
+    lifetime_ordinal: int,
 ) -> dict[str, Any]:
     event = {
         "event": SM121_CHUNKED_PREFILL_PERFORMANCE_RUNTIME_EVENT,
@@ -356,6 +383,13 @@ def _runtime_event(
         validate_sm121_chunked_prefill_performance_runtime_event(event)
     except SM121ChunkedPrefillPerformanceError as error:
         raise SM121ChunkedPrefillPerformanceRequestError() from error
+    expected_chunk_size = (
+        study.control_chunk_size
+        if arm == SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_ARM
+        else study.candidate_chunk_size
+    )
+    if event["chunked_prefill_size"] != expected_chunk_size:
+        raise SM121ChunkedPrefillPerformanceRequestError()
     return event
 
 
@@ -434,6 +468,7 @@ def _common_prefix_tokens(first: tuple[int, ...], second: tuple[int, ...]) -> in
 
 def _turn_event(
     *,
+    study: ChunkedPrefillPerformanceStudy,
     case: SimpleNamespace,
     arm: str,
     lifetime_ordinal: int,
@@ -455,7 +490,7 @@ def _turn_event(
         "arm": arm,
         "lifetime_ordinal": lifetime_ordinal,
         "case_id": case.case_id,
-        "protocol_case_id": SM121_CHUNKED_PREFILL_PERFORMANCE_CASE_ID,
+        "protocol_case_id": study.timed_case_id,
         "turn": turn,
         "cache_details_requested": True,
         "prompt_token_ids_requested": True,
@@ -515,6 +550,7 @@ def _run_quality_lifetime(
     run_dir: Path,
     workspace: Path,
     model: SimpleNamespace,
+    study: ChunkedPrefillPerformanceStudy,
     arm: str,
     lifetime_ordinal: int,
     case: SimpleNamespace,
@@ -533,7 +569,10 @@ def _run_quality_lifetime(
         _remaining_s(deadline)
         journal.append(
             _static_event(
-                model=model, arm=arm, lifetime_ordinal=lifetime_ordinal
+                model=model,
+                study=study,
+                arm=arm,
+                lifetime_ordinal=lifetime_ordinal,
             )
         )
         watchdog = base_runner._host_safety_watchdog(model)
@@ -559,7 +598,10 @@ def _run_quality_lifetime(
         _abort_check(watchdog=watchdog, deadline=deadline)
         journal.append(
             _runtime_event(
-                server=server, arm=arm, lifetime_ordinal=lifetime_ordinal
+                server=server,
+                study=study,
+                arm=arm,
+                lifetime_ordinal=lifetime_ordinal,
             )
         )
         journal.append(
@@ -696,7 +738,11 @@ def _run_quality_lifetime(
 
 
 def _timed_turn_prefix(
-    *, journal: Journal, arm: str, campaign_ordinal: int
+    *,
+    journal: Journal,
+    study: ChunkedPrefillPerformanceStudy,
+    arm: str,
+    campaign_ordinal: int,
 ) -> list[dict[str, Any]]:
     """Return only a validated, scalar prefix after a terminal timed failure."""
 
@@ -720,6 +766,7 @@ def _timed_turn_prefix(
             scalar["arm"] != arm
             or scalar["lifetime_ordinal"] != campaign_ordinal * 2
             or scalar["turn"] != expected_turn
+            or scalar["protocol_case_id"] != study.timed_case_id
             or (
                 index + 1 < len(events)
                 and scalar["timed_turn_admitted"] is not True
@@ -735,6 +782,7 @@ def _run_timed_lifetime(
     run_dir: Path,
     workspace: Path,
     model: SimpleNamespace,
+    study: ChunkedPrefillPerformanceStudy,
     arm: str,
     lifetime_ordinal: int,
     case: SimpleNamespace,
@@ -756,7 +804,10 @@ def _run_timed_lifetime(
         _remaining_s(deadline)
         journal.append(
             _static_event(
-                model=model, arm=arm, lifetime_ordinal=lifetime_ordinal
+                model=model,
+                study=study,
+                arm=arm,
+                lifetime_ordinal=lifetime_ordinal,
             )
         )
         watchdog = base_runner._host_safety_watchdog(model)
@@ -782,7 +833,10 @@ def _run_timed_lifetime(
         _abort_check(watchdog=watchdog, deadline=deadline)
         journal.append(
             _runtime_event(
-                server=server, arm=arm, lifetime_ordinal=lifetime_ordinal
+                server=server,
+                study=study,
+                arm=arm,
+                lifetime_ordinal=lifetime_ordinal,
             )
         )
         journal.append(
@@ -868,6 +922,7 @@ def _run_timed_lifetime(
                     raise SM121ChunkedPrefillPerformanceRequestError()
                 cross_lifetime_verified = True
             event = _turn_event(
+                study=study,
                 case=case,
                 arm=arm,
                 lifetime_ordinal=lifetime_ordinal,
@@ -983,6 +1038,7 @@ def _load_campaign(
     campaign_dir: Path,
 ) -> tuple[
     dict[str, Any],
+    ChunkedPrefillPerformanceStudy,
     list[tuple[Path, dict[str, Any], SimpleNamespace, SimpleNamespace]],
 ]:
     """Load only one complete, untouched frozen A/B/B/A campaign."""
@@ -1009,12 +1065,16 @@ def _load_campaign(
         len(integrity),
     ) != integrity:
         raise base_runner.PreflightError("SM121 chunked-prefill campaign integrity is invalid")
+    try:
+        study = sm121_chunked_prefill_performance_study(campaign.get("campaign_id"))
+    except SM121ChunkedPrefillPerformanceError as error:
+        raise base_runner.PreflightError(
+            "SM121 chunked-prefill campaign contract is invalid"
+        ) from error
     if (
         campaign.get("schema_version") != 1
-        or campaign.get("campaign_id")
-        != "qwen38-flash-next-sm121-chunked-prefill-performance-v1"
-        or campaign.get("execution_mode")
-        != SM121_CHUNKED_PREFILL_PERFORMANCE_EXECUTION_MODE
+        or campaign.get("campaign_id") != study.campaign_id
+        or campaign.get("execution_mode") != study.execution_mode
         or not isinstance(campaign.get("created_at"), str)
     ):
         raise base_runner.PreflightError("SM121 chunked-prefill campaign contract is invalid")
@@ -1025,6 +1085,8 @@ def _load_campaign(
         raise base_runner.PreflightError("SM121 chunked-prefill admission is unavailable") from error
     if not isinstance(binding, dict):
         raise base_runner.PreflightError("SM121 chunked-prefill pair binding is invalid")
+    if binding.get("suite_id") != study.suite_id:
+        raise base_runner.PreflightError("SM121 chunked-prefill campaign study changed")
     names = campaign.get("run_directories")
     if (
         type(names) is not list
@@ -1056,11 +1118,12 @@ def _load_campaign(
             ) from error
         if resolved_run_dir.parent != runs_root or run_dir.is_symlink():
             raise base_runner.PreflightError("SM121 chunked-prefill run directory is invalid")
-        plan, model, suite = _load_plan(resolved_run_dir)
+        plan, model, suite, plan_study = _load_plan(resolved_run_dir)
         if (
             plan.get("chunked_prefill_performance_ordinal") != ordinal
             or sm121_chunked_prefill_performance_arm(model) != arm
             or plan.get("chunked_prefill_performance_pair") != binding
+            or plan_study != study
         ):
             raise base_runner.PreflightError("SM121 chunked-prefill run binding moved")
         loaded.append((resolved_run_dir, plan, model, suite))
@@ -1077,7 +1140,7 @@ def _load_campaign(
         != sm121_chunked_prefill_performance_pair_binding_sha256(binding)
     ):
         raise base_runner.PreflightError("SM121 chunked-prefill binding is invalid")
-    return campaign, loaded
+    return campaign, study, loaded
 
 
 def _execute_arm(
@@ -1086,6 +1149,7 @@ def _execute_arm(
     plan: dict[str, Any],
     model: SimpleNamespace,
     suite: SimpleNamespace,
+    study: ChunkedPrefillPerformanceStudy,
     campaign_ordinal: int,
     workspace: Path,
     reference_prompt_token_ids: tuple[tuple[int, ...], ...] | None,
@@ -1098,7 +1162,7 @@ def _execute_arm(
             "SM121 chunked-prefill campaign is non-resumable; freeze a new campaign"
         )
     arm = sm121_chunked_prefill_performance_arm(model)
-    quality_case, timed_case = _case_pair(suite)
+    quality_case, timed_case = _case_pair(suite, study=study)
     if set(quality_case.requires) - set(model.tasks) or set(timed_case.requires) - set(model.tasks):
         raise base_runner.PreflightError("SM121 chunked-prefill case capabilities are invalid")
     if (
@@ -1114,7 +1178,7 @@ def _execute_arm(
     journal.append(
         {
             "event": "run_start",
-            "execution_mode": SM121_CHUNKED_PREFILL_PERFORMANCE_EXECUTION_MODE,
+            "execution_mode": study.execution_mode,
             "arm": arm,
             "campaign_ordinal": campaign_ordinal,
             "plan_fingerprint": str(plan["fingerprint"]),
@@ -1138,6 +1202,7 @@ def _execute_arm(
             run_dir=run_dir,
             workspace=workspace,
             model=model,
+            study=study,
             arm=arm,
             lifetime_ordinal=campaign_ordinal * 2 - 1,
             case=quality_case,
@@ -1150,6 +1215,7 @@ def _execute_arm(
             run_dir=run_dir,
             workspace=workspace,
             model=model,
+            study=study,
             arm=arm,
             lifetime_ordinal=campaign_ordinal * 2,
             case=timed_case,
@@ -1186,7 +1252,10 @@ def _execute_arm(
             base_runner._record_host_safety_breach(journal, safe_error, stage=stage)
         if stage == "timed_lifetime":
             turns = _timed_turn_prefix(
-                journal=journal, arm=arm, campaign_ordinal=campaign_ordinal
+                journal=journal,
+                study=study,
+                arm=arm,
+                campaign_ordinal=campaign_ordinal,
             )
         base_runner._record_run_aborted(journal, safe_error, stage=stage)
         return (
@@ -1233,9 +1302,9 @@ def _unstarted_lifetime(*, ordinal: int, arm: str) -> dict[str, Any]:
 def execute_sm121_chunked_prefill_performance_campaign(
     campaign_dir: Path, *, workspace: Path
 ) -> dict[str, Any]:
-    """Run one frozen non-resumable A/B/B/A 1K/2K measurement."""
+    """Run one frozen non-resumable A/B/B/A chunk-size measurement."""
 
-    campaign, loaded = _load_campaign(campaign_dir)
+    campaign, study, loaded = _load_campaign(campaign_dir)
     if (campaign_dir / "summary.json").exists():
         raise base_runner.PreflightError(
             "SM121 chunked-prefill campaign is terminal; freeze a new campaign"
@@ -1265,6 +1334,7 @@ def execute_sm121_chunked_prefill_performance_campaign(
                 plan=plan,
                 model=model,
                 suite=suite,
+                study=study,
                 campaign_ordinal=ordinal,
                 workspace=workspace,
                 reference_prompt_token_ids=reference_prompt_token_ids,
@@ -1272,13 +1342,15 @@ def execute_sm121_chunked_prefill_performance_campaign(
             lifetimes.append(lifetime)
             terminal = not completed
         try:
-            score = score_sm121_chunked_prefill_performance_campaign(lifetimes)
+            score = score_sm121_chunked_prefill_performance_campaign(
+                lifetimes, study=study
+            )
         except SM121ChunkedPrefillPerformanceError as error:
             raise base_runner.PreflightError("SM121 chunked-prefill score is invalid") from error
         summary = {
             "schema_version": 1,
-            "campaign_id": SM121_CHUNKED_PREFILL_PERFORMANCE_CAMPAIGN_ID,
-            "execution_mode": SM121_CHUNKED_PREFILL_PERFORMANCE_EXECUTION_MODE,
+            "campaign_id": study.campaign_id,
+            "execution_mode": study.execution_mode,
             "pair_binding_sha256": campaign["pair_binding"]["pair_binding_sha256"],
             "status": score.status,
             "decision": score.decision,

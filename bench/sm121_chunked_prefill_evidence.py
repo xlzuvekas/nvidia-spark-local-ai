@@ -1,7 +1,7 @@
 """Scalar-only source and bundle validation for SM121 chunked-prefill runs.
 
 The implementation is deliberately independent from the cache-policy evidence
-lane.  It accepts only the dedicated 1K/2K A/B/B/A root, projects no raw
+lane. It accepts only dedicated chunk-size A/B/B/A roots, projects no raw
 journal payloads, and exposes a small API used by the exporter and audit.
 """
 
@@ -15,23 +15,19 @@ from typing import Any, Mapping, Sequence
 
 from .journal import content_hash
 from .sglang_sm121_chunked_prefill_performance import (
+    ChunkedPrefillPerformanceStudy,
     SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER,
-    SM121_CHUNKED_PREFILL_PERFORMANCE_CAMPAIGN_ID,
-    SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_CHUNK_SIZE,
-    SM121_CHUNKED_PREFILL_PERFORMANCE_CASE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_CELL_TIMEOUT_S,
-    SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_CHUNK_SIZE,
-    SM121_CHUNKED_PREFILL_PERFORMANCE_EXECUTION_MODE,
     SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_CASE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_ITEM_COUNT,
     SM121_CHUNKED_PREFILL_PERFORMANCE_RUNTIME_EVENT,
     SM121_CHUNKED_PREFILL_PERFORMANCE_STATIC_EVENT,
-    SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_TIMED_TURNS,
     SM121_CHUNKED_PREFILL_PERFORMANCE_TURN_EVENT,
     SM121ChunkedPrefillPerformanceError,
     score_sm121_chunked_prefill_performance_campaign,
     sm121_chunked_prefill_performance_arm,
+    sm121_chunked_prefill_performance_study,
     sm121_chunked_prefill_performance_pair_binding_sha256,
     sm121_chunked_prefill_performance_pair_instance_sha256,
     validate_sm121_chunked_prefill_performance_candidate,
@@ -105,6 +101,33 @@ class ChunkedPrefillEvidenceError(ValueError):
     """Raised when raw provenance or scalar publication drifts from contract."""
 
 
+def _study_from_campaign_id(value: object) -> ChunkedPrefillPerformanceStudy:
+    try:
+        study = sm121_chunked_prefill_performance_study(value)
+    except SM121ChunkedPrefillPerformanceError as error:
+        raise ChunkedPrefillEvidenceError("chunked-prefill campaign study is invalid") from error
+    if value != study.campaign_id:
+        raise ChunkedPrefillEvidenceError("chunked-prefill campaign study is invalid")
+    return study
+
+
+def _expected_chunk_size(study: ChunkedPrefillPerformanceStudy, arm: object) -> int:
+    if arm == "A":
+        return study.control_chunk_size
+    if arm == "B":
+        return study.candidate_chunk_size
+    raise ChunkedPrefillEvidenceError("chunked-prefill attestation arm is invalid")
+
+
+def _validate_study_attestation(
+    event: Mapping[str, object], *, study: ChunkedPrefillPerformanceStudy
+) -> None:
+    if event.get("chunked_prefill_size") != _expected_chunk_size(
+        study, event.get("arm")
+    ):
+        raise ChunkedPrefillEvidenceError("chunked-prefill attestation study changed")
+
+
 def _safe_resolve(path: Path, root: Path) -> Path:
     try:
         resolved = path.resolve(strict=True)
@@ -165,6 +188,7 @@ def _validate_plan(
     *,
     plan: object,
     binding: Mapping[str, object],
+    study: ChunkedPrefillPerformanceStudy,
     ordinal: int,
     expected_arm: str,
 ) -> tuple[str, str]:
@@ -181,7 +205,11 @@ def _validate_plan(
     try:
         validate_sm121_chunked_prefill_performance_candidate(model)
         validate_sm121_chunked_prefill_performance_suite(suite)
-        if sm121_chunked_prefill_performance_arm(model) != expected_arm:
+        if (
+            sm121_chunked_prefill_performance_study(model) != study
+            or sm121_chunked_prefill_performance_study(suite.get("id")) != study
+            or sm121_chunked_prefill_performance_arm(model) != expected_arm
+        ):
             raise SM121ChunkedPrefillPerformanceError("chunked-prefill arm changed")
     except SM121ChunkedPrefillPerformanceError as error:
         raise ChunkedPrefillEvidenceError("chunked-prefill plan contract is invalid") from error
@@ -211,7 +239,7 @@ def _validate_plan(
             raise ChunkedPrefillEvidenceError("chunked-prefill case identity is invalid")
         case_ids[case_name] = case_id
     quality_case_id = case_ids.get(SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_CASE_ID)
-    timed_case_id = case_ids.get(SM121_CHUNKED_PREFILL_PERFORMANCE_CASE_ID)
+    timed_case_id = case_ids.get(study.timed_case_id)
     if not isinstance(quality_case_id, str) or not isinstance(timed_case_id, str):
         raise ChunkedPrefillEvidenceError("chunked-prefill case topology is invalid")
     suite_without_case_ids = {
@@ -274,6 +302,34 @@ def _quality_attestation(
         "quality_admitted": True,
         "item_count": SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_ITEM_COUNT,
     }
+
+
+def _validate_run_start(
+    *,
+    events: Sequence[dict[str, Any]],
+    study: ChunkedPrefillPerformanceStudy,
+    binding: Mapping[str, object],
+    arm: str,
+    ordinal: int,
+    plan: Mapping[str, object],
+) -> None:
+    if not events:
+        return
+    starts = [event for event in events if event.get("event") == "run_start"]
+    if len(starts) != 1 or (
+        starts[0].get("execution_mode"),
+        starts[0].get("arm"),
+        starts[0].get("campaign_ordinal"),
+        starts[0].get("plan_fingerprint"),
+        starts[0].get("chunked_prefill_performance_pair_binding_sha256"),
+    ) != (
+        study.execution_mode,
+        arm,
+        ordinal,
+        plan.get("fingerprint"),
+        binding.get("pair_binding_sha256"),
+    ):
+        raise ChunkedPrefillEvidenceError("chunked-prefill run binding changed")
 
 
 def _validate_completed_lifecycle(
@@ -371,6 +427,7 @@ def _validate_completed_lifecycle(
 
 def _validate_attestation_topology(
     *,
+    study: ChunkedPrefillPerformanceStudy,
     lifetimes: Sequence[dict[str, object]],
     static_events: Sequence[dict[str, Any]],
     runtime_events: Sequence[dict[str, Any]],
@@ -396,6 +453,8 @@ def _validate_attestation_topology(
         seen_runtime += len(runtime)
         static_ordinals = [event["lifetime_ordinal"] for event in static]
         runtime_ordinals = [event["lifetime_ordinal"] for event in runtime]
+        for event in [*static, *runtime]:
+            _validate_study_attestation(event, study=study)
         if (
             static_ordinals != expected[: len(static_ordinals)]
             or runtime_ordinals != expected[: len(runtime_ordinals)]
@@ -431,11 +490,10 @@ def validate_source(campaign_dir: Path, results_root: Path) -> dict[str, Any] | 
         len(integrity),
     ) != integrity:
         raise ChunkedPrefillEvidenceError("chunked-prefill campaign integrity is invalid")
+    study = _study_from_campaign_id(campaign.get("campaign_id"))
     if (
         campaign.get("schema_version") != 1
-        or campaign.get("campaign_id") != SM121_CHUNKED_PREFILL_PERFORMANCE_CAMPAIGN_ID
-        or campaign.get("execution_mode")
-        != SM121_CHUNKED_PREFILL_PERFORMANCE_EXECUTION_MODE
+        or campaign.get("execution_mode") != study.execution_mode
         or not isinstance(campaign.get("created_at"), str)
     ):
         raise ChunkedPrefillEvidenceError("chunked-prefill campaign contract is invalid")
@@ -445,6 +503,8 @@ def validate_source(campaign_dir: Path, results_root: Path) -> dict[str, Any] | 
     except SM121ChunkedPrefillPerformanceError as error:
         raise ChunkedPrefillEvidenceError("chunked-prefill pair binding is invalid") from error
     assert isinstance(binding, dict)
+    if binding.get("suite_id") != study.suite_id:
+        raise ChunkedPrefillEvidenceError("chunked-prefill pair binding study changed")
     names = campaign.get("run_directories")
     if (
         type(names) is not list
@@ -474,7 +534,11 @@ def validate_source(campaign_dir: Path, results_root: Path) -> dict[str, Any] | 
             raise ChunkedPrefillEvidenceError("chunked-prefill run directory is invalid")
         plan = _load_json(run_dir / "plan.json", root)
         quality_case_id, timed_case_id = _validate_plan(
-            plan=plan, binding=binding, ordinal=ordinal, expected_arm=arm
+            plan=plan,
+            binding=binding,
+            study=study,
+            ordinal=ordinal,
+            expected_arm=arm,
         )
         assert isinstance(plan, dict)
         plans.append(plan)
@@ -485,16 +549,30 @@ def validate_source(campaign_dir: Path, results_root: Path) -> dict[str, Any] | 
             raise ChunkedPrefillEvidenceError(
                 "chunked-prefill journal contains an unexpected event"
             )
+        _validate_run_start(
+            events=events,
+            study=study,
+            binding=binding,
+            arm=arm,
+            ordinal=ordinal,
+            plan=plan,
+        )
         for event in events:
             try:
                 if event.get("event") == SM121_CHUNKED_PREFILL_PERFORMANCE_STATIC_EVENT:
                     validate_sm121_chunked_prefill_performance_static_event(event)
+                    _validate_study_attestation(event, study=study)
                     static_events.append(_without_timestamp(event))
                 elif event.get("event") == SM121_CHUNKED_PREFILL_PERFORMANCE_RUNTIME_EVENT:
                     validate_sm121_chunked_prefill_performance_runtime_event(event)
+                    _validate_study_attestation(event, study=study)
                     runtime_events.append(_without_timestamp(event))
                 elif event.get("event") == SM121_CHUNKED_PREFILL_PERFORMANCE_TURN_EVENT:
                     validate_sm121_chunked_prefill_performance_recorded_turn_event(event)
+                    if event.get("protocol_case_id") != study.timed_case_id:
+                        raise ChunkedPrefillEvidenceError(
+                            "chunked-prefill turn study changed"
+                        )
             except SM121ChunkedPrefillPerformanceError as error:
                 raise ChunkedPrefillEvidenceError(
                     "chunked-prefill journal event is invalid"
@@ -532,18 +610,19 @@ def validate_source(campaign_dir: Path, results_root: Path) -> dict[str, Any] | 
         raise ChunkedPrefillEvidenceError("chunked-prefill summary integrity is invalid")
     if (
         summary.get("schema_version") != 1
-        or summary.get("campaign_id") != SM121_CHUNKED_PREFILL_PERFORMANCE_CAMPAIGN_ID
-        or summary.get("execution_mode")
-        != SM121_CHUNKED_PREFILL_PERFORMANCE_EXECUTION_MODE
+        or summary.get("campaign_id") != study.campaign_id
+        or summary.get("execution_mode") != study.execution_mode
         or summary.get("pair_binding_sha256") != binding["pair_binding_sha256"]
         or summary.get("status") not in {"complete", "partial"}
         or not isinstance(summary.get("lifetimes"), list)
     ):
         raise ChunkedPrefillEvidenceError("chunked-prefill summary contract is invalid")
     try:
-        score = score_sm121_chunked_prefill_performance_campaign(summary["lifetimes"])
+        score = score_sm121_chunked_prefill_performance_campaign(
+            summary["lifetimes"], study=study
+        )
         lifetime_rows = validate_sm121_chunked_prefill_performance_lifetimes(
-            summary["lifetimes"]
+            summary["lifetimes"], study=study
         )
     except SM121ChunkedPrefillPerformanceError as error:
         raise ChunkedPrefillEvidenceError("chunked-prefill summary score is invalid") from error
@@ -563,6 +642,7 @@ def validate_source(campaign_dir: Path, results_root: Path) -> dict[str, Any] | 
     ):
         raise ChunkedPrefillEvidenceError("chunked-prefill summary reduction changed")
     _validate_attestation_topology(
+        study=study,
         lifetimes=lifetime_rows,
         static_events=static_events,
         runtime_events=runtime_events,
@@ -623,6 +703,7 @@ def validate_source(campaign_dir: Path, results_root: Path) -> dict[str, Any] | 
     if terminal and summary["status"] != "partial":
         raise ChunkedPrefillEvidenceError("chunked-prefill partial status changed")
     return {
+        "study": study,
         "binding": binding,
         "summary": summary,
         "static_events": static_events,
@@ -631,12 +712,14 @@ def validate_source(campaign_dir: Path, results_root: Path) -> dict[str, Any] | 
     }
 
 
-def evidence_id(binding: Mapping[str, object]) -> str:
+def evidence_id(
+    binding: Mapping[str, object], *, study: ChunkedPrefillPerformanceStudy
+) -> str:
     instance = binding.get("campaign_instance_sha256")
     if not isinstance(instance, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", instance) is None:
         raise ChunkedPrefillEvidenceError("chunked-prefill public instance is invalid")
     return (
-        SM121_CHUNKED_PREFILL_PERFORMANCE_CAMPAIGN_ID
+        study.campaign_id
         + "-"
         + instance.removeprefix("sha256:")[:12]
     )
@@ -647,20 +730,25 @@ def manifest_from_source(
 ) -> dict[str, Any]:
     binding = source.get("binding")
     summary = source.get("summary")
-    if not isinstance(binding, Mapping) or not isinstance(summary, Mapping):
+    study = source.get("study")
+    if (
+        not isinstance(binding, Mapping)
+        or not isinstance(summary, Mapping)
+        or not isinstance(study, ChunkedPrefillPerformanceStudy)
+    ):
         raise ChunkedPrefillEvidenceError("chunked-prefill source projection is invalid")
     return {
         "schema_version": schema_version,
         "evidence_kind": EVIDENCE_KIND,
-        "campaign_id": evidence_id(binding),
+        "campaign_id": evidence_id(binding, study=study),
         "protocol": {
-            "campaign_id": SM121_CHUNKED_PREFILL_PERFORMANCE_CAMPAIGN_ID,
-            "suite_id": SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE_ID,
-            "execution_mode": SM121_CHUNKED_PREFILL_PERFORMANCE_EXECUTION_MODE,
+            "campaign_id": study.campaign_id,
+            "suite_id": study.suite_id,
+            "execution_mode": study.execution_mode,
             "arm_order": list(SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER),
             "chunked_prefill_sizes": [
-                SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_CHUNK_SIZE,
-                SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_CHUNK_SIZE,
+                study.control_chunk_size,
+                study.candidate_chunk_size,
             ],
             "cell_timeout_s": SM121_CHUNKED_PREFILL_PERFORMANCE_CELL_TIMEOUT_S,
             "quality_item_count": SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_ITEM_COUNT,
@@ -717,24 +805,28 @@ def verify_manifest(
     }
     if type(manifest) is not dict or set(manifest) != expected_fields:
         raise ChunkedPrefillEvidenceError("chunked-prefill manifest fields changed")
+    protocol = manifest.get("protocol")
+    if type(protocol) is not dict:
+        raise ChunkedPrefillEvidenceError("chunked-prefill protocol changed")
+    study = _study_from_campaign_id(protocol.get("campaign_id"))
     if (
         manifest.get("schema_version") != schema_version
         or manifest.get("evidence_kind") != EVIDENCE_KIND
         or manifest.get("campaign_id") != entry.get("campaign_id")
         or not isinstance(manifest.get("campaign_id"), str)
         or not manifest["campaign_id"].startswith(
-            SM121_CHUNKED_PREFILL_PERFORMANCE_CAMPAIGN_ID + "-"
+            study.campaign_id + "-"
         )
     ):
         raise ChunkedPrefillEvidenceError("chunked-prefill manifest identity changed")
     expected_protocol = {
-        "campaign_id": SM121_CHUNKED_PREFILL_PERFORMANCE_CAMPAIGN_ID,
-        "suite_id": SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE_ID,
-        "execution_mode": SM121_CHUNKED_PREFILL_PERFORMANCE_EXECUTION_MODE,
+        "campaign_id": study.campaign_id,
+        "suite_id": study.suite_id,
+        "execution_mode": study.execution_mode,
         "arm_order": list(SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER),
         "chunked_prefill_sizes": [
-            SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_CHUNK_SIZE,
-            SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_CHUNK_SIZE,
+            study.control_chunk_size,
+            study.candidate_chunk_size,
         ],
         "cell_timeout_s": SM121_CHUNKED_PREFILL_PERFORMANCE_CELL_TIMEOUT_S,
         "quality_item_count": SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_ITEM_COUNT,
@@ -762,8 +854,10 @@ def verify_manifest(
         raise ChunkedPrefillEvidenceError("chunked-prefill public binding changed")
     lifetimes = manifest.get("lifetimes")
     try:
-        score = score_sm121_chunked_prefill_performance_campaign(lifetimes)
-        lifetime_rows = validate_sm121_chunked_prefill_performance_lifetimes(lifetimes)
+        score = score_sm121_chunked_prefill_performance_campaign(lifetimes, study=study)
+        lifetime_rows = validate_sm121_chunked_prefill_performance_lifetimes(
+            lifetimes, study=study
+        )
     except SM121ChunkedPrefillPerformanceError as error:
         raise ChunkedPrefillEvidenceError("chunked-prefill public score is invalid") from error
     if (
@@ -789,14 +883,19 @@ def verify_manifest(
             if not isinstance(event, dict) or "timestamp" in event:
                 raise SM121ChunkedPrefillPerformanceError("public static timestamp changed")
             validate_sm121_chunked_prefill_performance_static_event(event)
+            _validate_study_attestation(event, study=study)
         for event in runtime:
             if not isinstance(event, dict) or "timestamp" in event:
                 raise SM121ChunkedPrefillPerformanceError("public runtime timestamp changed")
             validate_sm121_chunked_prefill_performance_runtime_event(event)
+            _validate_study_attestation(event, study=study)
     except SM121ChunkedPrefillPerformanceError as error:
         raise ChunkedPrefillEvidenceError("chunked-prefill public attestation changed") from error
     _validate_attestation_topology(
-        lifetimes=lifetime_rows, static_events=static, runtime_events=runtime
+        study=study,
+        lifetimes=lifetime_rows,
+        static_events=static,
+        runtime_events=runtime,
     )
     quality = manifest.get("quality_attestations")
     expected_quality = sum(

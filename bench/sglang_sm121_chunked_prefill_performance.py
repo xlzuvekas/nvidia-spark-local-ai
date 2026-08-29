@@ -65,12 +65,6 @@ SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_PROFILE_ID = (
 SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_PROFILE_ID = (
     "qwen38-flash-next-nvfp4-sm121-triton-storage-chunked-prefill-performance-2k-sglang"
 )
-SM121_CHUNKED_PREFILL_PERFORMANCE_PROFILE_IDS = frozenset(
-    {
-        SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_PROFILE_ID,
-        SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_PROFILE_ID,
-    }
-)
 SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_ARM = "A"
 SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_ARM = "B"
 SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER = ("A", "B", "B", "A")
@@ -136,6 +130,50 @@ SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_DESCRIPTION = (
     "execute it."
 )
 
+# The completed v1 panel is immutable.  The v2 records name the next one-axis
+# 2K-versus-4K follow-up separately so its plan, evidence, and audit can never
+# be confused with the retained 1K/2K result.
+SM121_CHUNKED_PREFILL_PERFORMANCE_V2_SUITE_ID = (
+    "qwen38-flash-next-sm121-triton-storage-chunked-prefill-performance-v2"
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CAMPAIGN_ID = (
+    "qwen38-flash-next-sm121-chunked-prefill-performance-v2"
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V2_EXECUTION_MODE = (
+    "sm121_storage_chunked_prefill_performance_abba_fresh_lifetimes_v2"
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_PROFILE_ID = (
+    "qwen38-flash-next-nvfp4-sm121-triton-storage-chunked-prefill-performance-2k-v2-sglang"
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_PROFILE_ID = (
+    "qwen38-flash-next-nvfp4-sm121-triton-storage-chunked-prefill-performance-4k-v2-sglang"
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CASE_ID = (
+    "sm121-chunked-prefill-60k-static-history-v2"
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V2_SERVED_NAME = (
+    "qwen38-flash-next-nvfp4-sm121-storage-chunked-prefill-performance-v2"
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_CHUNK_SIZE = 2_048
+SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_CHUNK_SIZE = 4_096
+SM121_CHUNKED_PREFILL_PERFORMANCE_V2_SUITE_DESCRIPTION = (
+    "Frozen fresh-lifetime A/B/B/A long-context prefill follow-up of the "
+    "current SM121 native-NVMe Qwen3.8 Flash-Next cache-on bundle. The 2K "
+    "retained control and 4K candidate differ only in chunked-prefill size; "
+    "the dedicated controller uses the same 60K deterministic static-history "
+    "proxy and does not claim an agentic coding result."
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_DESCRIPTION = (
+    "SM121 chunked-prefill performance v2 A: retained current cache-on "
+    "lazy-Mamba 2,048 token control. Only the dedicated A/B/B/A performance "
+    "controller may execute it."
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_DESCRIPTION = (
+    "SM121 chunked-prefill performance v2 B: current cache-on lazy-Mamba "
+    "4,096 token candidate. Only the dedicated A/B/B/A performance controller "
+    "may execute it."
+)
+
 SM121_CHUNKED_PREFILL_PERFORMANCE_COMMON_ARGS = (
     "--served-model-name",
     SM121_CHUNKED_PREFILL_PERFORMANCE_SERVED_NAME,
@@ -178,10 +216,6 @@ SM121_CHUNKED_PREFILL_PERFORMANCE_COMMON_ARGS = (
     "--port",
     "30000",
 )
-_CHUNK_SIZE_INDEX = SM121_CHUNKED_PREFILL_PERFORMANCE_COMMON_ARGS.index(
-    "--chunked-prefill-size"
-) + 1
-
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _FINGERPRINT = re.compile(r"[0-9a-f]{16}\Z")
 _PAIR_BINDING_FIELDS = frozenset(
@@ -247,9 +281,11 @@ _TURN_EVENT_FIELDS = frozenset(
 )
 
 
-def _with_chunk_size(size: int) -> tuple[str, ...]:
-    arguments = list(SM121_CHUNKED_PREFILL_PERFORMANCE_COMMON_ARGS)
-    arguments[_CHUNK_SIZE_INDEX] = str(size)
+def _with_chunk_size(
+    size: int, *, common_args: tuple[str, ...] = SM121_CHUNKED_PREFILL_PERFORMANCE_COMMON_ARGS
+) -> tuple[str, ...]:
+    arguments = list(common_args)
+    arguments[common_args.index("--chunked-prefill-size") + 1] = str(size)
     return tuple(arguments)
 
 
@@ -259,15 +295,92 @@ SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_ARGS = _with_chunk_size(
 SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_ARGS = _with_chunk_size(
     SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_CHUNK_SIZE
 )
+SM121_CHUNKED_PREFILL_PERFORMANCE_V2_COMMON_ARGS = tuple(
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_SERVED_NAME
+    if value == SM121_CHUNKED_PREFILL_PERFORMANCE_SERVED_NAME
+    else value
+    for value in SM121_CHUNKED_PREFILL_PERFORMANCE_COMMON_ARGS
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_ARGS = _with_chunk_size(
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_CHUNK_SIZE,
+    common_args=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_COMMON_ARGS,
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_ARGS = _with_chunk_size(
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_CHUNK_SIZE,
+    common_args=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_COMMON_ARGS,
+)
 
 
 class SM121ChunkedPrefillPerformanceError(ValueError):
-    """Raised when a proposed 1K/2K prefill study drifts from its contract."""
+    """Raised when a frozen chunked-prefill study drifts from its contract."""
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkedPrefillPerformanceStudy:
+    """One immutable A/B chunk-size study sharing the cache-cold protocol."""
+
+    suite_id: str
+    campaign_id: str
+    execution_mode: str
+    control_profile_id: str
+    candidate_profile_id: str
+    control_chunk_size: int
+    candidate_chunk_size: int
+    timed_case_id: str
+    served_name: str
+    suite_description: str
+    control_description: str
+    candidate_description: str
+    control_args: tuple[str, ...]
+    candidate_args: tuple[str, ...]
+
+
+SM121_CHUNKED_PREFILL_PERFORMANCE_V1_STUDY = ChunkedPrefillPerformanceStudy(
+    suite_id=SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE_ID,
+    campaign_id=SM121_CHUNKED_PREFILL_PERFORMANCE_CAMPAIGN_ID,
+    execution_mode=SM121_CHUNKED_PREFILL_PERFORMANCE_EXECUTION_MODE,
+    control_profile_id=SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_PROFILE_ID,
+    candidate_profile_id=SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_PROFILE_ID,
+    control_chunk_size=SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_CHUNK_SIZE,
+    candidate_chunk_size=SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_CHUNK_SIZE,
+    timed_case_id=SM121_CHUNKED_PREFILL_PERFORMANCE_CASE_ID,
+    served_name=SM121_CHUNKED_PREFILL_PERFORMANCE_SERVED_NAME,
+    suite_description=SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE_DESCRIPTION,
+    control_description=SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_DESCRIPTION,
+    candidate_description=SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_DESCRIPTION,
+    control_args=SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_ARGS,
+    candidate_args=SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_ARGS,
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY = ChunkedPrefillPerformanceStudy(
+    suite_id=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_SUITE_ID,
+    campaign_id=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CAMPAIGN_ID,
+    execution_mode=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_EXECUTION_MODE,
+    control_profile_id=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_PROFILE_ID,
+    candidate_profile_id=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_PROFILE_ID,
+    control_chunk_size=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_CHUNK_SIZE,
+    candidate_chunk_size=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_CHUNK_SIZE,
+    timed_case_id=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CASE_ID,
+    served_name=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_SERVED_NAME,
+    suite_description=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_SUITE_DESCRIPTION,
+    control_description=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_DESCRIPTION,
+    candidate_description=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_DESCRIPTION,
+    control_args=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_ARGS,
+    candidate_args=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_ARGS,
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_STUDIES = (
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V1_STUDY,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY,
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_PROFILE_IDS = frozenset(
+    profile_id
+    for study in SM121_CHUNKED_PREFILL_PERFORMANCE_STUDIES
+    for profile_id in (study.control_profile_id, study.candidate_profile_id)
+)
 
 
 @dataclass(frozen=True, slots=True)
 class ChunkedPrefillPerformanceScore:
-    """Scalar reducer output for the one-axis 1K-versus-2K comparison."""
+    """Scalar reducer output for one frozen chunk-size comparison."""
 
     status: str
     decision: str
@@ -306,11 +419,55 @@ def _profile_id(value: Any) -> str | None:
     return candidate if isinstance(candidate, str) else None
 
 
+def sm121_chunked_prefill_performance_study(value: Any) -> ChunkedPrefillPerformanceStudy:
+    """Resolve one immutable study from a profile ID, suite ID, or campaign ID."""
+
+    candidate = _profile_id(value)
+    if candidate is None and isinstance(value, str):
+        candidate = value
+    if candidate is not None:
+        for study in SM121_CHUNKED_PREFILL_PERFORMANCE_STUDIES:
+            if candidate in {
+                study.control_profile_id,
+                study.candidate_profile_id,
+                study.suite_id,
+                study.campaign_id,
+                study.timed_case_id,
+            }:
+                return study
+    raise SM121ChunkedPrefillPerformanceError(
+        "value is not a chunked-prefill performance study member"
+    )
+
+
+def _study_for_suite(suite: Any) -> ChunkedPrefillPerformanceStudy:
+    suite_id = _value(suite, "id")
+    if not isinstance(suite_id, str):
+        raise SM121ChunkedPrefillPerformanceError("chunked-prefill suite ID is invalid")
+    return sm121_chunked_prefill_performance_study(suite_id)
+
+
+def _study_for_arm_chunk(
+    arm: str, chunk_size: object
+) -> ChunkedPrefillPerformanceStudy:
+    for study in SM121_CHUNKED_PREFILL_PERFORMANCE_STUDIES:
+        if (
+            arm == SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_ARM
+            and chunk_size == study.control_chunk_size
+        ) or (
+            arm == SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_ARM
+            and chunk_size == study.candidate_chunk_size
+        ):
+            return study
+    raise SM121ChunkedPrefillPerformanceError("chunked-prefill size is invalid")
+
+
 def sm121_chunked_prefill_performance_arm(value: Any) -> str:
     profile_id = _profile_id(value)
-    if profile_id == SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_PROFILE_ID:
+    study = sm121_chunked_prefill_performance_study(profile_id)
+    if profile_id == study.control_profile_id:
         return SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_ARM
-    if profile_id == SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_PROFILE_ID:
+    if profile_id == study.candidate_profile_id:
         return SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_ARM
     raise SM121ChunkedPrefillPerformanceError(
         "profile is not a chunked-prefill performance arm"
@@ -320,26 +477,33 @@ def sm121_chunked_prefill_performance_arm(value: Any) -> str:
 def is_sm121_chunked_prefill_performance_candidate(model: Any) -> bool:
     """Return whether a profile belongs exclusively to this frozen experiment."""
 
+    try:
+        sm121_chunked_prefill_performance_study(model)
+    except SM121ChunkedPrefillPerformanceError:
+        return False
     return _profile_id(model) in SM121_CHUNKED_PREFILL_PERFORMANCE_PROFILE_IDS
 
 
 def is_sm121_chunked_prefill_performance_plan(model: Any, suite: Any) -> bool:
-    return (
-        is_sm121_chunked_prefill_performance_candidate(model)
-        and _value(suite, "id") == SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE_ID
-    )
+    if not is_sm121_chunked_prefill_performance_candidate(model):
+        return False
+    try:
+        return sm121_chunked_prefill_performance_study(model) == _study_for_suite(suite)
+    except SM121ChunkedPrefillPerformanceError:
+        return False
 
 
 def _expected_profile(profile_id: str) -> dict[str, object]:
-    if profile_id == SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_PROFILE_ID:
+    study = sm121_chunked_prefill_performance_study(profile_id)
+    if profile_id == study.control_profile_id:
         return {
-            "description": SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_DESCRIPTION,
-            "args": SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_ARGS,
+            "description": study.control_description,
+            "args": study.control_args,
         }
-    if profile_id == SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_PROFILE_ID:
+    if profile_id == study.candidate_profile_id:
         return {
-            "description": SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_DESCRIPTION,
-            "args": SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_ARGS,
+            "description": study.candidate_description,
+            "args": study.candidate_args,
         }
     raise SM121ChunkedPrefillPerformanceError(
         "profile is not a chunked-prefill performance arm"
@@ -353,11 +517,12 @@ def validate_sm121_chunked_prefill_performance_candidate(model: Any) -> None:
         return
     profile_id = _profile_id(model)
     assert profile_id is not None
+    study = sm121_chunked_prefill_performance_study(profile_id)
     expected = {
         "backend": "sglang",
         "source": SM121_STORAGE_SOURCE,
         "revision": SM121_STORAGE_REVISION,
-        "served_name": SM121_CHUNKED_PREFILL_PERFORMANCE_SERVED_NAME,
+        "served_name": study.served_name,
         "tasks": ("chat",),
         "architecture": "moe+qsa+gdn",
         "quantization": "nvfp4+ple-fp8-nvme-io-uring",
@@ -452,11 +617,16 @@ def validate_sm121_chunked_prefill_performance_candidate(model: Any) -> None:
 def validate_sm121_chunked_prefill_performance_pair(
     control: Any, candidate: Any
 ) -> None:
-    """Require the cache-on 1K/2K pair with no other configuration delta."""
+    """Require one cache-on chunk-size pair with no other configuration delta."""
 
-    if _profile_id(control) != SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_PROFILE_ID:
+    control_id, candidate_id = _profile_id(control), _profile_id(candidate)
+    try:
+        study = sm121_chunked_prefill_performance_study(control_id)
+    except SM121ChunkedPrefillPerformanceError as error:
+        raise SM121ChunkedPrefillPerformanceError("control profile is invalid") from error
+    if control_id != study.control_profile_id:
         raise SM121ChunkedPrefillPerformanceError("control profile is invalid")
-    if _profile_id(candidate) != SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_PROFILE_ID:
+    if candidate_id != study.candidate_profile_id:
         raise SM121ChunkedPrefillPerformanceError("candidate profile is invalid")
     validate_sm121_chunked_prefill_performance_candidate(control)
     validate_sm121_chunked_prefill_performance_candidate(candidate)
@@ -480,9 +650,8 @@ def validate_sm121_chunked_prefill_performance_pair(
 def validate_sm121_chunked_prefill_performance_suite(suite: Any) -> None:
     """Require the small quality gate plus one controller-owned 60K proxy."""
 
-    if _value(suite, "id") != SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE_ID:
-        raise SM121ChunkedPrefillPerformanceError("chunked-prefill suite ID is invalid")
-    if _value(suite, "description") != SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE_DESCRIPTION:
+    study = _study_for_suite(suite)
+    if _value(suite, "description") != study.suite_description:
         raise SM121ChunkedPrefillPerformanceError(
             "chunked-prefill suite description changed"
         )
@@ -507,7 +676,7 @@ def validate_sm121_chunked_prefill_performance_suite(suite: Any) -> None:
             "max_turns": 1,
         },
         {
-            "id": SM121_CHUNKED_PREFILL_PERFORMANCE_CASE_ID,
+            "id": study.timed_case_id,
             "kind": "capability",
             "requires": ("chat",),
             "warmups": 0,
@@ -629,33 +798,37 @@ def validate_sm121_chunked_prefill_performance_pair_binding(
     binding: object,
 ) -> None:
     row = _require_exact_keys(binding, _PAIR_BINDING_FIELDS, "chunked-prefill binding")
+    try:
+        study = sm121_chunked_prefill_performance_study(row["suite_id"])
+    except SM121ChunkedPrefillPerformanceError as error:
+        raise SM121ChunkedPrefillPerformanceError(
+            "chunked-prefill binding suite changed"
+        ) from error
     if row["schema_version"] != SM121_CHUNKED_PREFILL_PERFORMANCE_PAIR_BINDING_SCHEMA_VERSION:
         raise SM121ChunkedPrefillPerformanceError(
             "chunked-prefill binding schema changed"
         )
-    if row["suite_id"] != SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE_ID:
-        raise SM121ChunkedPrefillPerformanceError("chunked-prefill binding suite changed")
-    if row["execution_mode"] != SM121_CHUNKED_PREFILL_PERFORMANCE_EXECUTION_MODE:
+    if row["execution_mode"] != study.execution_mode:
         raise SM121ChunkedPrefillPerformanceError("chunked-prefill binding mode changed")
     if row["arm_order"] != list(SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER):
         raise SM121ChunkedPrefillPerformanceError("chunked-prefill arm order changed")
     if row["profile_ids"] != [
-        SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_PROFILE_ID,
-        SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_PROFILE_ID,
+        study.control_profile_id,
+        study.candidate_profile_id,
     ]:
         raise SM121ChunkedPrefillPerformanceError(
             "chunked-prefill profile binding changed"
         )
     if row["chunked_prefill_sizes"] != [
-        SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_CHUNK_SIZE,
-        SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_CHUNK_SIZE,
+        study.control_chunk_size,
+        study.candidate_chunk_size,
     ]:
         raise SM121ChunkedPrefillPerformanceError(
             "chunked-prefill size binding changed"
         )
     if (
         row["quality_case_id"] != SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_CASE_ID
-        or row["timed_case_id"] != SM121_CHUNKED_PREFILL_PERFORMANCE_CASE_ID
+        or row["timed_case_id"] != study.timed_case_id
         or row["cell_timeout_s"] != SM121_CHUNKED_PREFILL_PERFORMANCE_CELL_TIMEOUT_S
     ):
         raise SM121ChunkedPrefillPerformanceError(
@@ -682,11 +855,11 @@ def validate_sm121_chunked_prefill_performance_pair_binding(
         )
 
 
-def _arm_chunk_size(arm: str) -> int:
+def _arm_chunk_size(study: ChunkedPrefillPerformanceStudy, arm: str) -> int:
     if arm == SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_ARM:
-        return SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_CHUNK_SIZE
+        return study.control_chunk_size
     if arm == SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_ARM:
-        return SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_CHUNK_SIZE
+        return study.candidate_chunk_size
     raise SM121ChunkedPrefillPerformanceError("chunked-prefill arm is invalid")
 
 
@@ -706,6 +879,7 @@ def validate_sm121_chunked_prefill_performance_static_event(event: object) -> No
     if row["event"] != SM121_CHUNKED_PREFILL_PERFORMANCE_STATIC_EVENT:
         raise SM121ChunkedPrefillPerformanceError("chunked-prefill static event changed")
     arm = _require_arm(row["arm"], "chunked-prefill static arm")
+    study = _study_for_arm_chunk(arm, row["chunked_prefill_size"])
     ordinal = _require_int(
         row["lifetime_ordinal"], "chunked-prefill static ordinal", positive=True
     )
@@ -713,7 +887,7 @@ def validate_sm121_chunked_prefill_performance_static_event(event: object) -> No
         raise SM121ChunkedPrefillPerformanceError("chunked-prefill static ordinal is invalid")
     if row["candidate_source_tree"] != SM121_STORAGE_SOURCE_TREE:
         raise SM121ChunkedPrefillPerformanceError("chunked-prefill source tree changed")
-    if row["chunked_prefill_size"] != _arm_chunk_size(arm):
+    if row["chunked_prefill_size"] != _arm_chunk_size(study, arm):
         raise SM121ChunkedPrefillPerformanceError("chunked-prefill static size changed")
     for field, wanted in SM121_CACHE_SOURCE_DIGESTS.items():
         if row[field] != wanted:
@@ -743,6 +917,7 @@ def validate_sm121_chunked_prefill_performance_runtime_event(event: object) -> N
     if row["event"] != SM121_CHUNKED_PREFILL_PERFORMANCE_RUNTIME_EVENT:
         raise SM121ChunkedPrefillPerformanceError("chunked-prefill runtime event changed")
     arm = _require_arm(row["arm"], "chunked-prefill runtime arm")
+    study = _study_for_arm_chunk(arm, row["chunked_prefill_size"])
     ordinal = _require_int(
         row["lifetime_ordinal"], "chunked-prefill runtime ordinal", positive=True
     )
@@ -752,7 +927,7 @@ def validate_sm121_chunked_prefill_performance_runtime_event(event: object) -> N
         raise SM121ChunkedPrefillPerformanceError("chunked-prefill cache strategy changed")
     if row["max_mamba_cache_size"] != SM121_CHUNKED_PREFILL_PERFORMANCE_MAX_MAMBA_CACHE_SIZE:
         raise SM121ChunkedPrefillPerformanceError("chunked-prefill Mamba size changed")
-    if row["chunked_prefill_size"] != _arm_chunk_size(arm):
+    if row["chunked_prefill_size"] != _arm_chunk_size(study, arm):
         raise SM121ChunkedPrefillPerformanceError("chunked-prefill runtime size changed")
     for field, wanted in SM121_CHUNKED_PREFILL_PERFORMANCE_RUNTIME_EXPECTED.items():
         if row[field] != wanted:
@@ -904,11 +1079,15 @@ def validate_sm121_chunked_prefill_performance_turn_event(event: object) -> None
         raise SM121ChunkedPrefillPerformanceError("chunked-prefill turn must be timed")
     if SM121_CHUNKED_PREFILL_PERFORMANCE_LIFETIME_ARMS.get(ordinal) != arm:
         raise SM121ChunkedPrefillPerformanceError("chunked-prefill turn arm is invalid")
-    if row["protocol_case_id"] != SM121_CHUNKED_PREFILL_PERFORMANCE_CASE_ID:
-        raise SM121ChunkedPrefillPerformanceError("chunked-prefill case ID changed")
+    try:
+        study = sm121_chunked_prefill_performance_study(row["protocol_case_id"])
+    except SM121ChunkedPrefillPerformanceError as error:
+        raise SM121ChunkedPrefillPerformanceError(
+            "chunked-prefill case ID changed"
+        ) from error
     case_id = row["case_id"]
     if not isinstance(case_id, str) or re.fullmatch(
-        rf"{re.escape(SM121_CHUNKED_PREFILL_PERFORMANCE_CASE_ID)}--[0-9a-f]{{12}}",
+        rf"{re.escape(study.timed_case_id)}--[0-9a-f]{{12}}",
         case_id,
     ) is None:
         raise SM121ChunkedPrefillPerformanceError(
@@ -1049,6 +1228,8 @@ def _is_legacy_bootstrap_counter_partial_turn(event: object) -> bool:
         return False
     if (
         row["turn"] != "T0"
+        or row["protocol_case_id"]
+        != SM121_CHUNKED_PREFILL_PERFORMANCE_V1_STUDY.timed_case_id
         or row["timed_turn_admitted"] is not False
         or row["timed_turn_basis"] != "cold_lifetime"
         or type(row["before_prefill_input_tokens"]) is not int
@@ -1077,6 +1258,8 @@ def validate_sm121_chunked_prefill_performance_recorded_turn_event(event: object
 
 def validate_sm121_chunked_prefill_performance_lifetimes(
     lifetimes: object,
+    *,
+    study: ChunkedPrefillPerformanceStudy = SM121_CHUNKED_PREFILL_PERFORMANCE_V1_STUDY,
 ) -> tuple[dict[str, object], ...]:
     """Validate an A/B/B/A public summary, including a terminal prefix."""
 
@@ -1131,6 +1314,7 @@ def validate_sm121_chunked_prefill_performance_lifetimes(
                 event["arm"] != expected_arm
                 or event["lifetime_ordinal"] != ordinal * 2
                 or event["turn"] != expected_turn
+                or event["protocol_case_id"] != study.timed_case_id
             ):
                 raise SM121ChunkedPrefillPerformanceError(
                     "chunked-prefill turn topology changed"
@@ -1168,10 +1352,12 @@ def validate_sm121_chunked_prefill_performance_lifetimes(
 
 def score_sm121_chunked_prefill_performance_campaign(
     lifetimes: object,
+    *,
+    study: ChunkedPrefillPerformanceStudy = SM121_CHUNKED_PREFILL_PERFORMANCE_V1_STUDY,
 ) -> ChunkedPrefillPerformanceScore:
     """Reduce two replicas per arm against the frozen 60K decision rule."""
 
-    rows = validate_sm121_chunked_prefill_performance_lifetimes(lifetimes)
+    rows = validate_sm121_chunked_prefill_performance_lifetimes(lifetimes, study=study)
     by_arm: dict[str, list[tuple[Decimal, Decimal, Decimal]]] = {"A": [], "B": []}
     for row, arm in zip(
         rows, SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER, strict=True
