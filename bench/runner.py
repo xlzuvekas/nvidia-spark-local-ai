@@ -4421,6 +4421,12 @@ def _sm121_cache_performance_turn_event(
         "metrics_before_settled": before_settled,
         "metrics_after_settled": after_settled,
         "request_wall_s": request_wall_s,
+        # ``derive_sm121_cache_performance_turn_admission`` authenticates the
+        # exact public field set.  Seed its two derived fields before asking it
+        # for their final values; these placeholders are overwritten below and
+        # can never reach a journal or evidence record.
+        "timed_turn_admitted": False,
+        "timed_turn_basis": "pending",
     }
     for prefix, snapshot in (("before", before), ("after", after)):
         for metric in SM121_CACHE_PERFORMANCE_METRIC_FIELDS:

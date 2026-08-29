@@ -17,15 +17,20 @@ from bench.runner import (
     _execute_sm121_cache_performance_arm,
     _execute_sm121_cache_performance_quality_case,
     _load_sm121_cache_performance_campaign,
+    _sm121_cache_performance_turn_event,
     _sm121_cache_performance_interrupt_terminal_server,
     create_sm121_cache_performance_campaign,
     execute_sm121_cache_performance_campaign,
+)
+from bench.sglang_sm121_cache_observability import (
+    SM121_CACHE_OBSERVABILITY_CACHED_SERIES,
 )
 from bench.sglang_sm121_cache_performance import (
     SM121_CACHE_PERFORMANCE_ARM_ORDER,
     SM121_CACHE_PERFORMANCE_CASE_ID,
     SM121_CACHE_PERFORMANCE_CACHE_OFF_PROFILE_ID,
     SM121_CACHE_PERFORMANCE_CACHE_ON_PROFILE_ID,
+    SM121_CACHE_PERFORMANCE_METRIC_FIELDS,
     SM121_CACHE_PERFORMANCE_QUALITY_CASE_ID,
     SM121_CACHE_PERFORMANCE_TIMED_TURNS,
 )
@@ -252,6 +257,57 @@ class SM121CachePerformanceRunnerTests(unittest.TestCase):
             terminal_error=SM121CachePerformanceRequestError(),
         )
         self.assertEqual(2, server.interrupt_owned.call_count)
+
+    def test_turn_builder_seeds_derived_fields_before_admission(self) -> None:
+        source = _lifetime(1, "A", t0=20.0, later=100.0)["turns"][0]
+        result = {
+            field: source[field]
+            for field in (
+                "prompt_tokens",
+                "completion_tokens",
+                "reasoning_tokens",
+                "response_detail_state",
+                "usage_detail_state",
+                "response_device_cached_tokens",
+                "response_host_cached_tokens",
+                "response_storage_cached_tokens",
+                "usage_cached_tokens",
+            )
+        }
+        before = {
+            "available": True,
+            "guardrail_metrics_available": True,
+        }
+        after = dict(before)
+        for metric in SM121_CACHE_PERFORMANCE_METRIC_FIELDS:
+            before[metric] = source[f"before_{metric}"]
+            after[metric] = source[f"after_{metric}"]
+        for cache_source in SM121_CACHE_OBSERVABILITY_CACHED_SERIES:
+            before[f"cached_{cache_source}_series_present"] = source[
+                f"before_cached_{cache_source}_series_present"
+            ]
+            after[f"cached_{cache_source}_series_present"] = source[
+                f"after_cached_{cache_source}_series_present"
+            ]
+        event = _sm121_cache_performance_turn_event(
+            case=SimpleNamespace(case_id=source["case_id"]),
+            arm="A",
+            lifetime_ordinal=2,
+            turn="T0",
+            result=result,
+            request_wall_s=20.0,
+            before=before,
+            before_polls=2,
+            before_settled=True,
+            after=after,
+            after_polls=2,
+            after_settled=True,
+            append_only_prompt_identity_verified=True,
+            cross_lifetime_prompt_identity_verified=True,
+            shared_prefix_tokens=0,
+        )
+        self.assertTrue(event["timed_turn_admitted"])
+        self.assertEqual("admitted", event["timed_turn_basis"])
 
     def test_quality_gate_reuses_the_admitted_v2_prompt_variant(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
