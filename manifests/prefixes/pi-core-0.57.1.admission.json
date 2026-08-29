@@ -1,0 +1,20 @@
+{
+  "entrypoint": {
+    "digest": "sha256:3cb4d4c12c9f19b9113c10ad7d3451837a5d1b92040747c7e1251f1f41ac3687",
+    "mode": 292,
+    "relative_path": "node_modules/@mariozechner/pi-agent-core/dist/index.js",
+    "size_bytes": 210
+  },
+  "frozen_lock_sha256": "sha256:1002f0f898df7217500b7bfa838e6ae2e5e9d6b122c8f9dcac79c56c6737323d",
+  "prefix_directory_name": "pi-core-0.57.1-1002f0f898df",
+  "protocol": "sparkbench-pi-core-prefix-admission-v1",
+  "schema_version": 1,
+  "tree": {
+    "digest": "sha256:aebaccc9fa0c58d9ef15a8b718b08f700d2564cbcc31b518c492a6e993964ac8",
+    "entries": 15563,
+    "files": 13828,
+    "links": 0,
+    "protocol": "sparkbench-readonly-tree-v1",
+    "size_bytes": 75042106
+  }
+}

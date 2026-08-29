@@ -23,6 +23,10 @@ class PiCorePrefixCliTests(unittest.TestCase):
         materialize = sparkbench.build_parser().parse_args(
             ["pi-core-prefix-materialize", "--prefix-parent", str(prefix_parent)]
         )
+        prefix = Path("/synthetic/retained-pi-prefix")
+        admit = sparkbench.build_parser().parse_args(
+            ["pi-core-prefix-admit", "--prefix", str(prefix)]
+        )
 
         self.assertIs(freeze.function, sparkbench.command_pi_core_closure_freeze)
         self.assertEqual(freeze.source_lock, source_lock)
@@ -39,6 +43,8 @@ class PiCorePrefixCliTests(unittest.TestCase):
             materialize.cache_sha512_content_store,
             sparkbench.DEFAULT_NPM_SHA512_CONTENT_STORE,
         )
+        self.assertIs(admit.function, sparkbench.command_pi_core_prefix_admit)
+        self.assertEqual(admit.prefix, prefix)
 
     def test_freeze_writes_a_missing_fixed_output_target_and_prints_scalars(self) -> None:
         source_lock = Path("synthetic-candidate.package-lock.json")
@@ -230,6 +236,58 @@ class PiCorePrefixCliTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue()), expected)
         self.assertNotIn(str(cache_root), output.getvalue())
         self.assertNotIn(str(prefix_parent), output.getvalue())
+
+    def test_admit_uses_fixed_policy_and_prints_only_scalars(self) -> None:
+        prefix = Path("/synthetic/retained-pi-prefix")
+        args = sparkbench.build_parser().parse_args(
+            ["pi-core-prefix-admit", "--prefix", str(prefix)]
+        )
+        summary = Mock()
+        summary.frozen_lock_sha256 = "sha256:" + "a" * 64
+        pin = Mock()
+        expected = {
+            "protocol": "synthetic-pi-prefix-admission-v1",
+            "status": "admitted",
+            "frozen_lock_sha256": summary.frozen_lock_sha256,
+            "tree_protocol": "synthetic-tree-v1",
+            "tree_digest": "sha256:" + "b" * 64,
+            "tree_entries": 12,
+            "tree_files": 8,
+            "tree_links": 0,
+            "tree_size_bytes": 5678,
+            "entrypoint_digest": "sha256:" + "c" * 64,
+            "entrypoint_size_bytes": 210,
+            "entrypoint_mode": "0444",
+        }
+        result = Mock()
+        result.scalar.return_value = expected
+        output = io.StringIO()
+        with (
+            patch("sparkbench.load_frozen_pi_core_lock", return_value=summary) as load,
+            patch(
+                "sparkbench.load_pi_core_prefix_admission_pin", return_value=pin
+            ) as load_pin,
+            patch("sparkbench.admit_pi_core_prefix", return_value=result) as admit,
+            redirect_stdout(output),
+        ):
+            status = args.function(args)
+
+        self.assertEqual(status, 0)
+        load.assert_called_once_with(sparkbench.DEFAULT_PI_CORE_CLOSURE_LOCK)
+        load_pin.assert_called_once_with(sparkbench.DEFAULT_PI_CORE_PREFIX_ADMISSION_PIN)
+        admit.assert_called_once_with(
+            prefix,
+            repo_root=sparkbench.WORKSPACE,
+            frozen_lock_sha256=summary.frozen_lock_sha256,
+            pin=pin,
+        )
+        result.scalar.assert_called_once_with()
+        self.assertEqual(json.loads(output.getvalue()), expected)
+        self.assertNotIn(str(prefix), output.getvalue())
+        self.assertNotIn(str(sparkbench.DEFAULT_PI_CORE_CLOSURE_LOCK), output.getvalue())
+        self.assertNotIn(
+            str(sparkbench.DEFAULT_PI_CORE_PREFIX_ADMISSION_PIN), output.getvalue()
+        )
 
 
 if __name__ == "__main__":

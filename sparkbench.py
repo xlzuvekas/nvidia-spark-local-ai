@@ -63,6 +63,10 @@ from bench.pi_core_prefix import (
     materialize_pi_core_prefix,
     write_new_frozen_pi_core_lock,
 )
+from bench.pi_core_prefix_admission import (
+    admit_pi_core_prefix,
+    load_pi_core_prefix_admission_pin,
+)
 from bench.prefix_cache_protocol import PREFIX_CACHE_SUITE_ID
 from bench.journal import utc_now, write_json
 from bench.report import summarize_run
@@ -180,6 +184,9 @@ DEFAULT_EVIDENCE = WORKSPACE / "evidence"
 DEFAULT_RESULTS = WORKSPACE / "results"
 DEFAULT_PI_CORE_CLOSURE_LOCK = (
     WORKSPACE / "manifests" / "prefixes" / "pi-core-0.57.1.closure-lock.json"
+)
+DEFAULT_PI_CORE_PREFIX_ADMISSION_PIN = (
+    WORKSPACE / "manifests" / "prefixes" / "pi-core-0.57.1.admission.json"
 )
 DEFAULT_NPM_SHA512_CONTENT_STORE = (
     Path.home() / ".npm" / "_cacache" / "content-v2" / "sha512"
@@ -538,6 +545,21 @@ def command_pi_core_prefix_materialize(args: argparse.Namespace) -> int:
         cache_sha512_root=args.cache_sha512_content_store,
         prefix_parent=args.prefix_parent,
         repo_root=WORKSPACE,
+    )
+    print(json.dumps(result.scalar(), indent=2, sort_keys=True))
+    return 0
+
+
+def command_pi_core_prefix_admit(args: argparse.Namespace) -> int:
+    """Read-only verify one externally retained normalized Pi-core prefix."""
+
+    summary = load_frozen_pi_core_lock(DEFAULT_PI_CORE_CLOSURE_LOCK)
+    pin = load_pi_core_prefix_admission_pin(DEFAULT_PI_CORE_PREFIX_ADMISSION_PIN)
+    result = admit_pi_core_prefix(
+        args.prefix,
+        repo_root=WORKSPACE,
+        frozen_lock_sha256=summary.frozen_lock_sha256,
+        pin=pin,
     )
     print(json.dumps(result.scalar(), indent=2, sort_keys=True))
     return 0
@@ -1233,6 +1255,21 @@ def build_parser() -> argparse.ArgumentParser:
     pi_core_prefix_materialize.set_defaults(
         function=command_pi_core_prefix_materialize
     )
+
+    pi_core_prefix_admit = subparsers.add_parser(
+        "pi-core-prefix-admit",
+        help=(
+            "read-only verify one external immutable Pi-core prefix against the "
+            "fixed tree and entrypoint admission pins"
+        ),
+    )
+    pi_core_prefix_admit.add_argument(
+        "--prefix",
+        type=Path,
+        required=True,
+        help="external retained normalized Pi-core prefix to verify read-only",
+    )
+    pi_core_prefix_admit.set_defaults(function=command_pi_core_prefix_admit)
 
     cache_observability = subparsers.add_parser(
         "sm121-cache-observability-canary",

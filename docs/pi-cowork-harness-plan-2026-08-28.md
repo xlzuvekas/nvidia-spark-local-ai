@@ -39,6 +39,12 @@ and historical Harbor paths deliberately enforce
 different C1-only topologies; reuse their isolation and oracle patterns, but do
 not widen their schemas in place to admit Pi.
 
+The temporary tree and the `pi-agent-core` root entrypoint now also have a
+tracked, schema-locked static-admission pin. `pi-core-prefix-admit` can verify
+an explicitly supplied external retained prefix read-only against it; it does
+not create a prefix, import JavaScript, alter the tombstoned model profile, or
+authorize a Pi/cowork run.
+
 ## Local Pi availability
 
 For planning, a read-only local audit independently observed a complete

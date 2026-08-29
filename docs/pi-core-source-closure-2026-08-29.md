@@ -49,12 +49,22 @@ prefix.
 | Materialized tree entries | 15,563 |
 | Materialized tree bytes | 75,042,106 |
 | Materialized tree digest | `sha256:aebaccc9fa0c58d9ef15a8b718b08f700d2564cbcc31b518c492a6e993964ac8` |
+| Pi-core root-entrypoint bytes | 210 |
+| Pi-core root-entrypoint digest | `sha256:3cb4d4c12c9f19b9113c10ad7d3451837a5d1b92040747c7e1251f1f41ac3687` |
 
 The independent immutable-tree inspection reproduced all of those counts and
 the digest before the owner-private temporary directory was deleted. The smoke
 did not run Pi, Node, npm, lifecycle scripts, a network client, a container, a
 model server, inference, or an agent runtime. It supplies no behavioral,
 performance, tool-correctness, or benchmark result.
+
+A second disposable real-closure construction passed the repository's new
+read-only `pi-core-prefix-admit` check. That check binds the full no-links tree
+and the fixed `@mariozechner/pi-agent-core` root entrypoint to the tracked
+schema-locked policy in `manifests/prefixes/pi-core-0.57.1.admission.json`.
+It creates no prefix, imports no JavaScript, and prints only scalar identity.
+The verified temporary output was again removed immediately; the policy is not
+itself a retained prefix, wrapper admission, Pi execution, or benchmark.
 
 For every selected installation record, the command copies the mutable npm
 cache blob through no-follow descriptors to a private `0400` staging file
