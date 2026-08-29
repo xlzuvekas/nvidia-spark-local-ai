@@ -1,0 +1,18 @@
+schema_version = 1
+
+[campaign]
+id = "qwen38-flash-next-sm121-autoresearch-v2-cache-policy"
+runner = "sm121_cache_policy_performance_v1"
+axis = "cache_policy"
+control = "qwen38-flash-next-nvfp4-sm121-triton-storage-cache-performance-on-sglang"
+candidate = "qwen38-flash-next-nvfp4-sm121-triton-storage-cache-performance-off-sglang"
+control_arm = "A"
+candidate_arm = "B"
+models = "../models.toml"
+suite = "../suites/qwen38_flash_next_sm121_triton_storage_cache_policy_performance_v1.toml"
+cell_timeout_s = 1200
+required_lifetimes = 4
+primary = "later_turn_request_wall_s"
+promotion_ratio = 0.95
+full_wall_guardrail_ratio = 1.05
+min_cutoff_remaining_s = 10200

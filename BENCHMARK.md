@@ -1305,6 +1305,30 @@ its full three-turn mean was 37.151 seconds versus 85.718 seconds. This is a
 bounded request-wall result for the exact lane, not a TTFT, TPS, throughput,
 energy, or agent-speed claim.
 
+### Current-runtime SM121 autoresearch v2
+
+The historical 64K autoresearch campaign is sealed and cannot be reused. The
+separate `autoresearch-v2-*` commands are a current-runtime runner registry,
+not an extension of that historical controller. Its first registered round
+freezes cache-on A as the control and cache-off B as one candidate, an explicit
+offset-aware cutoff, and a binding to a newly frozen child cache-policy A/B/B/A
+campaign. No inference starts during planning.
+
+The registered child retains all of the cache-performance lane's eight fresh
+server lifetimes, 1,200-second per-lifetime deadlines, exact-answer gate,
+prompt-identity checks, cache/runtime attestations, safety watchdogs, global
+benchmark lock, loopback endpoint, and scalar-only output. V2 requires 10,200
+seconds before its cutoff so all eight child budgets and terminal audit reserve
+fit. A started round cannot resume. The child cache campaign is still the only
+measurement source and the only evidence-export input; the v2 wrapper binds
+its scalar identity and maps its audited decision to `retain`, `reject`, or
+`inconclusive` without recalculating rounded timings.
+
+See the [v2 protocol](docs/qwen38-flash-next-sm121-autoresearch-v2-2026-08-29.md)
+for its exact candidate orientation, decision table, commands, and expansion
+requirements. It does not make the historical lazy-buffer/depth interaction
+estimable and does not authorize arbitrary server-flag changes.
+
 ### Publishing sanitized evidence
 
 An evidence export creates a deterministic tracked archive without copying raw

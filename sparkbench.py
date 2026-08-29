@@ -30,6 +30,12 @@ from bench.autoresearch_campaign import (
     run_campaign,
     summarize_campaign,
 )
+from bench.autoresearch_v2 import (
+    freeze_autoresearch_v2,
+    preview_autoresearch_v2,
+    run_autoresearch_v2,
+    summarize_autoresearch_v2,
+)
 from bench.diffusion_direct import run_direct_diffusion
 from bench.evidence import export_evidence, verify_evidence, verify_staged_evidence
 from bench.execution_admission import model_execution_blocker
@@ -99,6 +105,12 @@ DEFAULT_SM121_CACHE_PERFORMANCE_SUITE = (
     / "manifests"
     / "suites"
     / "qwen38_flash_next_sm121_triton_storage_cache_policy_performance_v1.toml"
+)
+DEFAULT_AUTORESEARCH_V2_CACHE_POLICY_CAMPAIGN = (
+    WORKSPACE
+    / "manifests"
+    / "campaigns"
+    / "qwen38_flash_next_sm121_autoresearch_v2_cache_policy.toml"
 )
 DEFAULT_EVIDENCE = WORKSPACE / "evidence"
 DEFAULT_RESULTS = WORKSPACE / "results"
@@ -296,6 +308,45 @@ def command_autoresearch_summarize(args: argparse.Namespace) -> int:
     summary = summarize_campaign(args.campaign_dir)
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
+
+
+def command_autoresearch_v2_plan(args: argparse.Namespace) -> int:
+    """Preview or freeze one current-runtime autoresearch-v2 round."""
+
+    preview = preview_autoresearch_v2(args.campaign)
+    if args.dry_run:
+        print(json.dumps(preview, indent=2, sort_keys=True))
+        return 0
+    if not args.cutoff:
+        raise ValueError("autoresearch-v2 planning requires --cutoff")
+    round_dir = freeze_autoresearch_v2(
+        args.campaign,
+        results_root=args.results,
+        evidence_root=args.evidence,
+        cutoff=args.cutoff,
+    )
+    print(round_dir)
+    return 0
+
+
+def command_autoresearch_v2_run(args: argparse.Namespace) -> int:
+    """Execute the only authorized current-runtime v2 round once."""
+
+    summary = run_autoresearch_v2(
+        args.round_dir,
+        workspace=WORKSPACE,
+        evidence_root=args.evidence,
+    )
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0 if summary["status"] == "complete" else 1
+
+
+def command_autoresearch_v2_summarize(args: argparse.Namespace) -> int:
+    """Read-only verify a terminal current-runtime v2 round."""
+
+    summary = summarize_autoresearch_v2(args.round_dir, evidence_root=args.evidence)
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0 if summary["status"] == "complete" else 1
 
 
 def command_benchmark(args: argparse.Namespace) -> int:
@@ -772,6 +823,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autoresearch_summarize.add_argument("campaign_dir", type=Path)
     autoresearch_summarize.set_defaults(function=command_autoresearch_summarize)
+
+    autoresearch_v2_plan = subparsers.add_parser(
+        "autoresearch-v2-plan",
+        help="preview or freeze the registered current-runtime autoresearch round",
+    )
+    autoresearch_v2_plan.add_argument(
+        "--campaign",
+        type=Path,
+        default=DEFAULT_AUTORESEARCH_V2_CACHE_POLICY_CAMPAIGN,
+    )
+    autoresearch_v2_plan.add_argument("--results", type=Path, default=DEFAULT_RESULTS)
+    autoresearch_v2_plan.add_argument("--evidence", type=Path, default=DEFAULT_EVIDENCE)
+    autoresearch_v2_plan.add_argument(
+        "--cutoff",
+        help="required offset-aware ISO-8601 admission cutoff for a frozen round",
+    )
+    autoresearch_v2_plan.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate and print the scalar proposal without writing plans",
+    )
+    autoresearch_v2_plan.set_defaults(function=command_autoresearch_v2_plan)
+
+    autoresearch_v2_run = subparsers.add_parser(
+        "autoresearch-v2-run",
+        help="execute one frozen non-resumable current-runtime autoresearch round",
+    )
+    autoresearch_v2_run.add_argument("round_dir", type=Path)
+    autoresearch_v2_run.add_argument("--evidence", type=Path, default=DEFAULT_EVIDENCE)
+    autoresearch_v2_run.set_defaults(function=command_autoresearch_v2_run)
+
+    autoresearch_v2_summarize = subparsers.add_parser(
+        "autoresearch-v2-summarize",
+        help="read-only verify a terminal current-runtime autoresearch round",
+    )
+    autoresearch_v2_summarize.add_argument("round_dir", type=Path)
+    autoresearch_v2_summarize.add_argument(
+        "--evidence", type=Path, default=DEFAULT_EVIDENCE
+    )
+    autoresearch_v2_summarize.set_defaults(function=command_autoresearch_v2_summarize)
 
     benchmark = subparsers.add_parser("benchmark", help="create and immediately execute a plan")
     add_selection(benchmark)
