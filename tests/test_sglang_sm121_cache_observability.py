@@ -272,22 +272,40 @@ def _valid_lifecycle_events(*, admitted: bool = True) -> tuple[
     return events, (quality_case_id, capability_case_id)
 
 
-def _metric_exposition(*, cached_total: int | None = None, bad_source: bool = False) -> str:
+def _metric_exposition(
+    *,
+    cached_total: int | None = None,
+    bad_source: bool = False,
+    scheduler_labels: bool = False,
+) -> str:
+    base = (
+        'engine_type="prefill",model_name="synthetic",moe_ep_rank="0",'
+        'pp_rank="0",tp_rank="0"'
+        if scheduler_labels
+        else ""
+    )
+
+    def labels(selector: str = "") -> str:
+        joined = ",".join(item for item in (base, selector) if item)
+        return "{" + joined + "}" if joined else ""
+
     lines = [
-        'sglang:prefill_effective_tokens_total{mode="input"} 17',
-        'sglang:prefill_effective_tokens_total{mode="device_hit"} 0',
-        'sglang:prefill_effective_tokens_total{mode="host_hit"} 0',
-        'sglang:prefill_effective_tokens_total{mode="storage_hit"} 0',
-        "sglang:kv_available_tokens 90",
-        "sglang:kv_evictable_tokens 0",
-        "sglang:kv_used_tokens 10",
-        "sglang:mamba_available_tokens 80",
-        "sglang:mamba_evictable_tokens 0",
-        "sglang:mamba_used_tokens 20",
+        f'sglang:prefill_effective_tokens_total{labels("mode=\"input\"")} 17',
+        f'sglang:prefill_effective_tokens_total{labels("mode=\"device_hit\"")} 0',
+        f'sglang:prefill_effective_tokens_total{labels("mode=\"host_hit\"")} 0',
+        f'sglang:prefill_effective_tokens_total{labels("mode=\"storage_hit\"")} 0',
+        f"sglang:kv_available_tokens{labels()} 90",
+        f"sglang:kv_evictable_tokens{labels()} 0",
+        f"sglang:kv_used_tokens{labels()} 10",
+        f"sglang:mamba_available_tokens{labels()} 80",
+        f"sglang:mamba_evictable_tokens{labels()} 0",
+        f"sglang:mamba_used_tokens{labels()} 20",
     ]
     if cached_total is not None:
         source = "unknown" if bad_source else "total"
-        lines.append(f'sglang:cached_tokens_total{{cache_source="{source}"}} {cached_total}')
+        lines.append(
+            f'sglang:cached_tokens_total{labels(f"cache_source=\"{source}\"")} {cached_total}'
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -498,6 +516,16 @@ class SM121CacheObservabilityRuntimeTests(unittest.TestCase):
         self.assertEqual(empty["prefill_input_tokens"], 17)
         self.assertEqual(empty["cached_total_tokens"], 0)
         self.assertFalse(empty["cached_total_series_present"])
+
+        with patch(
+            "bench.runtime.urllib.request.urlopen",
+            return_value=_Response(
+                _metric_exposition(scheduler_labels=True).encode("utf-8")
+            ),
+        ):
+            labeled = runtime.snapshot_sm121_cache_observability_metrics(server)
+        self.assertTrue(labeled["available"])
+        self.assertEqual(labeled["prefill_input_tokens"], 17)
 
         with patch(
             "bench.runtime.urllib.request.urlopen",

@@ -1708,6 +1708,17 @@ def snapshot_sm121_cache_observability_metrics(server: ManagedServer) -> dict[st
         "host": False,
         "storage": False,
     }
+    base_labels: dict[str, str] | None = None
+
+    def bind_base_labels(candidate: dict[str, str]) -> bool:
+        """Require one common scheduler-label vector without retaining it."""
+
+        nonlocal base_labels
+        if base_labels is None:
+            base_labels = dict(candidate)
+            return True
+        return base_labels == candidate
+
     malformed = False
     for line in text.splitlines():
         match = _SM121_CACHE_METRIC_LINE_RE.fullmatch(line)
@@ -1733,7 +1744,12 @@ def snapshot_sm121_cache_observability_metrics(server: ManagedServer) -> dict[st
                 "host_hit": "prefill_host_hit_tokens",
                 "storage_hit": "prefill_storage_hit_tokens",
             }.get(mode)
-            if field is None or labels != {"mode": mode} or prefill_seen[mode]:
+            metric_base = {key: item for key, item in labels.items() if key != "mode"}
+            if (
+                field is None
+                or prefill_seen[mode]
+                or not bind_base_labels(metric_base)
+            ):
                 malformed = True
                 continue
             snapshot[field] = value
@@ -1751,10 +1767,13 @@ def snapshot_sm121_cache_observability_metrics(server: ManagedServer) -> dict[st
                 if isinstance(source, str) and source.startswith("storage_")
                 else None
             )
+            metric_base = {
+                key: item for key, item in labels.items() if key != "cache_source"
+            }
             if (
                 source_kind is None
-                or labels != {"cache_source": source}
                 or cached_seen[source_kind]
+                or not bind_base_labels(metric_base)
             ):
                 malformed = True
                 continue
@@ -1762,7 +1781,7 @@ def snapshot_sm121_cache_observability_metrics(server: ManagedServer) -> dict[st
             snapshot[f"cached_{source_kind}_series_present"] = True
             cached_seen[source_kind] = True
         else:
-            if labels:
+            if not bind_base_labels(labels):
                 malformed = True
                 continue
             field = gauges[name]
