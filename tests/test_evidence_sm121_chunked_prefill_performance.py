@@ -3,18 +3,33 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from bench.audit import audit_sm121_chunked_prefill_performance_campaign
-from bench.evidence import EvidenceError, export_evidence, verify_evidence
+from bench.evidence import (
+    EvidenceError,
+    SANITIZATION_POLICY,
+    SCHEMA_VERSION,
+    export_evidence,
+    verify_evidence,
+    verify_staged_evidence,
+)
 from bench.journal import content_hash
 from bench.manifest import load_models, load_suite
 from bench.sglang_sm121_cache_observability import SM121_CACHE_SOURCE_DIGESTS
 from bench.sglang_sm121_cache_semantic import SM121_CACHE_SEMANTIC_STATIC_ASSERTIONS
+from bench.sm121_chunked_prefill_evidence import (
+    ChunkedPrefillEvidenceError,
+    EVIDENCE_KIND,
+    manifest_from_source,
+    verify_manifest,
+)
 from bench.sglang_sm121_chunked_prefill_performance import (
     SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER,
     SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_PROFILE_ID,
@@ -30,6 +45,7 @@ from bench.sglang_sm121_chunked_prefill_performance import (
     SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_PROFILE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_PROFILE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY,
     score_sm121_chunked_prefill_performance_campaign,
     sm121_chunked_prefill_performance_study,
 )
@@ -364,6 +380,272 @@ class SM121ChunkedPrefillEvidenceTests(unittest.TestCase):
         evidence_test_support.EvidenceFixture.write_json(
             campaign_dir / "summary.json", summary
         )
+
+    def _valid_v3_scalar_bundle(self) -> tuple[dict[str, object], dict[str, object]]:
+        """Build a fully shaped V3 publication without an admission receipt."""
+
+        study = SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY
+        timed_case_id = study.timed_case_id + "--0123456789ab"
+        lifetimes = [
+            self._lifetime(ordinal=ordinal, arm=arm, timed_case_id=timed_case_id)
+            for ordinal, arm in enumerate(
+                SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER, start=1
+            )
+        ]
+        static_attestations: list[dict[str, object]] = []
+        runtime_attestations: list[dict[str, object]] = []
+        for ordinal, arm in enumerate(
+            SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER, start=1
+        ):
+            for lifetime_ordinal in (ordinal * 2 - 1, ordinal * 2):
+                static_attestations.append(
+                    self._static_event(
+                        arm,
+                        lifetime_ordinal,
+                        control_chunk_size=study.control_chunk_size,
+                        candidate_chunk_size=study.candidate_chunk_size,
+                    )
+                )
+                runtime_attestations.append(
+                    self._runtime_event(
+                        arm,
+                        lifetime_ordinal,
+                        control_chunk_size=study.control_chunk_size,
+                        candidate_chunk_size=study.candidate_chunk_size,
+                    )
+                )
+        score = score_sm121_chunked_prefill_performance_campaign(
+            lifetimes, study=study
+        )
+        instance = "a" * 64
+        campaign_id = study.campaign_id + "-" + instance[:12]
+        manifest: dict[str, object] = {
+            "schema_version": SCHEMA_VERSION,
+            "evidence_kind": EVIDENCE_KIND,
+            "campaign_id": campaign_id,
+            "protocol": {
+                "campaign_id": study.campaign_id,
+                "suite_id": study.suite_id,
+                "execution_mode": study.execution_mode,
+                "arm_order": list(SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER),
+                "chunked_prefill_sizes": [
+                    study.control_chunk_size,
+                    study.candidate_chunk_size,
+                ],
+                "cell_timeout_s": 1_200,
+                "quality_item_count": SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_ITEM_COUNT,
+                "timed_turns": list(SM121_CHUNKED_PREFILL_PERFORMANCE_TIMED_TURNS),
+                "measurement": "non_streaming_request_wall_s_only",
+                "primary": "cache_cold_t0_request_wall_s",
+                "ttft": None,
+            },
+            "binding": {
+                "campaign_instance_sha256": "sha256:" + instance,
+                "pair_binding_sha256": "sha256:" + "b" * 64,
+            },
+            "status": score.status,
+            "decision": score.decision,
+            "completed_arms": 4,
+            "lifetimes": lifetimes,
+            "score": score.to_mapping(),
+            "static_attestations": static_attestations,
+            "runtime_attestations": runtime_attestations,
+            "quality_attestations": [
+                {
+                    "arm": arm,
+                    "quality_lifetime_ordinal": ordinal * 2 - 1,
+                    "case_id": "synthetic-exact-answer-v2--0123456789ab",
+                    "quality_admitted": True,
+                    "item_count": SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_ITEM_COUNT,
+                }
+                for ordinal, arm in enumerate(
+                    SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER, start=1
+                )
+            ],
+            "sanitization": {
+                "free_form_text_included": False,
+                "payloads_included": False,
+                "policy": SANITIZATION_POLICY,
+                "raw_identifiers_included": False,
+            },
+        }
+        entry = {
+            "bundle_sha256": "c" * 64,
+            "campaign_id": campaign_id,
+            "evidence_kind": EVIDENCE_KIND,
+            "file": f"campaigns/{campaign_id}/manifest.json",
+            "status": score.status,
+        }
+        return manifest, entry
+
+    @staticmethod
+    def _refresh_v3_bundle_checksums(root: Path, campaign_id: str) -> None:
+        bundle = root / "campaigns" / campaign_id
+        bundle_checksums = {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(bundle.iterdir())
+            if path.name != "checksums.json"
+        }
+        evidence_test_support.EvidenceFixture.write_json(
+            bundle / "checksums.json",
+            {"files": bundle_checksums, "schema_version": SCHEMA_VERSION},
+        )
+        index_path = root / "index.json"
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        entry = next(
+            value
+            for value in index["campaigns"]
+            if value["campaign_id"] == campaign_id
+        )
+        entry["bundle_sha256"] = hashlib.sha256(
+            (bundle / "checksums.json").read_bytes()
+        ).hexdigest()
+        evidence_test_support.EvidenceFixture.write_json(index_path, index)
+        checksums_path = root / "checksums.json"
+        root_checksums = {
+            str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(root.rglob("*"))
+            if path.is_file() and path != checksums_path
+        }
+        evidence_test_support.EvidenceFixture.write_json(
+            checksums_path,
+            {"files": root_checksums, "schema_version": SCHEMA_VERSION},
+        )
+
+    def _forge_valid_v3_bundle(
+        self, fixture: evidence_test_support.EvidenceFixture
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        self._export(fixture)
+        campaign = self._freeze(
+            fixture,
+            control=self.v2_control,
+            candidate=self.v2_candidate,
+            suite=self.v2_suite,
+            suite_path=self.v2_suite_path,
+        )
+        self._write_completed_campaign(campaign)
+        self.assertTrue(self._export(fixture, replace=True)["changed"])
+        index_path = fixture.output / "index.json"
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        v2_entry = next(
+            entry
+            for entry in index["campaigns"]
+            if entry["evidence_kind"] == EVIDENCE_KIND
+            and entry["campaign_id"].startswith(
+                SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY.campaign_id + "-"
+            )
+        )
+        manifest, entry = self._valid_v3_scalar_bundle()
+        (fixture.output / "campaigns" / v2_entry["campaign_id"]).rename(
+            fixture.output / "campaigns" / entry["campaign_id"]
+        )
+        evidence_test_support.EvidenceFixture.write_json(
+            fixture.output / entry["file"], manifest
+        )
+        v2_entry.update(entry)
+        index["campaigns"].sort(key=lambda value: value["campaign_id"])
+        evidence_test_support.EvidenceFixture.write_json(index_path, index)
+        self._refresh_v3_bundle_checksums(fixture.output, entry["campaign_id"])
+        return manifest, entry
+
+    def test_v3_projection_and_manifest_are_blocked_without_admission_receipt(self) -> None:
+        manifest, entry = self._valid_v3_scalar_bundle()
+        source = {
+            "study": SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY,
+            "binding": manifest["binding"],
+            "summary": {
+                "status": manifest["status"],
+                "decision": manifest["decision"],
+                "completed_arms": manifest["completed_arms"],
+                "lifetimes": manifest["lifetimes"],
+                "score": manifest["score"],
+            },
+            "static_events": manifest["static_attestations"],
+            "runtime_events": manifest["runtime_attestations"],
+            "quality_attestations": manifest["quality_attestations"],
+        }
+        with patch(
+            "bench.sm121_chunked_prefill_evidence."
+            "SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY",
+            object(),
+        ):
+            self.assertEqual(
+                manifest,
+                manifest_from_source(
+                    source,
+                    schema_version=SCHEMA_VERSION,
+                    sanitization_policy=SANITIZATION_POLICY,
+                ),
+            )
+            verify_manifest(
+                manifest,
+                entry,
+                schema_version=SCHEMA_VERSION,
+                sanitization_policy=SANITIZATION_POLICY,
+            )
+        with self.assertRaisesRegex(
+            ChunkedPrefillEvidenceError, "requires a verified 8K admission receipt"
+        ):
+            manifest_from_source(
+                source,
+                schema_version=SCHEMA_VERSION,
+                sanitization_policy=SANITIZATION_POLICY,
+            )
+        with self.assertRaisesRegex(
+            ChunkedPrefillEvidenceError, "requires a verified 8K admission receipt"
+        ):
+            verify_manifest(
+                manifest,
+                entry,
+                schema_version=SCHEMA_VERSION,
+                sanitization_policy=SANITIZATION_POLICY,
+            )
+
+    def test_v3_bundle_cannot_pass_evidence_or_staged_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = evidence_test_support.EvidenceFixture(Path(directory))
+            matrix = fixture.results / "matrices" / "synthetic-matrix"
+            matrix.mkdir()
+            fixture.write_json(
+                matrix / "matrix.json",
+                {
+                    "models": ["synthetic-model"],
+                    "runs": [],
+                    "suite": "synthetic-suite",
+                },
+            )
+            _manifest, _entry = self._forge_valid_v3_bundle(fixture)
+            with patch(
+                "bench.sm121_chunked_prefill_evidence."
+                "SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY",
+                object(),
+            ):
+                self.assertEqual("verified", verify_evidence(fixture.output)["status"])
+            with self.assertRaisesRegex(
+                EvidenceError, "SM121 chunked-prefill evidence changed"
+            ):
+                verify_evidence(fixture.output)
+
+            subprocess.run(
+                ["git", "init", "--quiet"],
+                cwd=directory,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            subprocess.run(
+                ["git", "add", "--", fixture.output.name],
+                cwd=directory,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            with self.assertRaisesRegex(
+                EvidenceError, "SM121 chunked-prefill evidence changed"
+            ):
+                verify_staged_evidence(
+                    repo_root=Path(directory), evidence_root=Path(fixture.output.name)
+                )
 
     def test_export_is_scalar_only_deterministic_and_auditable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

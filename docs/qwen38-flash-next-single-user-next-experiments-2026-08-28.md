@@ -323,22 +323,23 @@ never publish a whole-lifetime rate that mixes those blocks.
 
 ### 6. Conditional next chunk size
 
-The stopped campaign produced no 1,024/2,048 result. First refreeze that pair on
-the newly admitted runtime. Propose another value only after the new pair
-completes validly:
+The stopped historical campaign produced no 1,024/2,048 result. Its
+current-runtime successors did complete: independent audited panels retained
+2,048 over 1,024 and then 4,096 over 2,048 for the bounded 60K static-history
+request-wall proxy. Their exact profiles, lifecycle, and scalar evidence are
+recorded in the [SM121 chunked-prefill protocol](qwen38-flash-next-sm121-chunked-prefill-protocol-2026-08-29.md).
 
-The current-runtime profile/suite preflight for that first pair is now tracked
-in the [SM121 1K/2K chunked-prefill protocol](qwen38-flash-next-sm121-chunked-prefill-protocol-2026-08-29.md).
-Its dedicated controller, runtime chunk-size attestation, auditor, and
-scalar-only exporter now exist; generic execution remains blocked, and only
-the dedicated command can admit it. Its scope is a long-context static-history
-proxy, not the still-unadmitted agentic-coding harness.
+The next 4K/8K question remains prospective. Before any comparison, the exact
+8K profile must pass a standalone, non-timing quality-plus-cold-`T0` admission
+gate. That check does not retain 8K or establish agentic-coding performance;
+any later comparison needs a separately designed receipt and a newly frozen
+fresh-lifetime A/B/B/A campaign.
 
-- If 2,048 wins, compare the promoted champion with 4,096.
-- If 2,048 loses, compare 1,024 with 512.
-- If the 1,024/2,048 pair is inconclusive, stop; do not propose another value.
-- Clone each new profile from the then-current admitted winner, change only
-  `--chunked-prefill-size`, and use ABBA with two fresh lifetimes per arm.
+- Keep each new profile cloned from the then-current admitted winner and vary
+  only `--chunked-prefill-size` within its prospective pair.
+- Do not infer a next chunk size from the completed 1K/2K or 2K/4K ratios.
+- Preserve two fresh lifetimes per arm, exact quality, and the same bounded
+  non-streaming request-wall rule if a future comparison is admitted.
 - Promotion contract: every exact oracle must pass. The sole primary is the
   candidate/control ratio of unweighted arm means for correct cold-`T0` 60K
   request wall; promote only at `<=0.95`. Require candidate/control

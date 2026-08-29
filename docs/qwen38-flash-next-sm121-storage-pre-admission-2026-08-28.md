@@ -353,18 +353,18 @@ target-only canary and its B0 cache-off observation now demonstrate those
 gates. That narrow admission result does not remove the ordinary-entrypoint
 tombstone or establish a general serving configuration.
 
-The next execution-gated step is now frozen in the separate
-[SM121 cache-policy timing protocol](qwen38-flash-next-sm121-cache-performance-protocol-2026-08-29.md).
-It retains the immutable image/model/tokenizer/profile pins, fresh-process
-quality and B0-derived admission, teardown checks, and scalar-only export. Its
-dedicated controller executes cold A/B/B/A in eight separate quality/timing
-lifetimes with 1,200-second admission deadlines. One complete campaign has now
-passed read-only audit with all 12 timing rows admitted and returned `retain_a`:
-the cache-on policy's two-replica mean later-turn request wall time was 2.808
-seconds versus 45.017 seconds for cache-off, while its full three-turn mean was
-37.151 seconds versus 85.718 seconds. That is a narrow request-wall cache-policy
-result for the exact pinned lane, not a general serving, TPS, TTFT, or agent
-speed claim.
+The subsequent [cache-policy timing](qwen38-flash-next-sm121-cache-performance-protocol-2026-08-29.md)
+and [chunked-prefill](qwen38-flash-next-sm121-chunked-prefill-protocol-2026-08-29.md)
+panels are now complete, independently audited current-runtime results. They
+retain cache-on A and then 2K followed by 4K chunked prefill for their exact
+bounded request-wall protocols; neither establishes general serving, TPS,
+TTFT, or agent speed.
+
+The next prospective prefill item is an admission-only 8K gate: one fresh
+exact-answer quality lifetime and one separate fresh cache-cold 60K `T0`
+lifetime. It records no timing, TPS, or comparative result; an admitted gate
+would still require a separately designed receipt and newly frozen 4K/8K
+campaign before any speed claim could be considered.
 
 The retired overlay and all historical TRT-LLM measurements remain excluded
 from this candidate. Passing this pre-admission alone does not license a

@@ -48,6 +48,7 @@ from .sglang_sm121_chunked_prefill_performance import (
     SM121_CHUNKED_PREFILL_PERFORMANCE_STATIC_EVENT,
     SM121_CHUNKED_PREFILL_PERFORMANCE_TIMED_TURNS,
     SM121_CHUNKED_PREFILL_PERFORMANCE_TURN_EVENT,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY,
     SM121ChunkedPrefillPerformanceError,
     derive_sm121_chunked_prefill_performance_turn_admission,
     is_sm121_chunked_prefill_performance_plan,
@@ -113,6 +114,10 @@ def create_sm121_chunked_prefill_performance_campaign(
             )
     except SM121ChunkedPrefillPerformanceError as error:
         raise RuntimeError("SM121 chunked-prefill admission is unavailable") from error
+    if study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY:
+        raise RuntimeError(
+            "SM121 chunked-prefill v3 requires a verified 8K admission receipt"
+        )
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     campaign_dir = results_root / f"{stamp}-{study.campaign_id}"
     campaign_dir.mkdir(parents=True, exist_ok=False)
@@ -1071,6 +1076,10 @@ def _load_campaign(
         raise base_runner.PreflightError(
             "SM121 chunked-prefill campaign contract is invalid"
         ) from error
+    if study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY:
+        raise base_runner.PreflightError(
+            "SM121 chunked-prefill v3 requires a verified 8K admission receipt"
+        )
     if (
         campaign.get("schema_version") != 1
         or campaign.get("campaign_id") != study.campaign_id

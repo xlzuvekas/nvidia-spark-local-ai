@@ -172,6 +172,8 @@ class ExecutionBlockerTests(unittest.TestCase):
             "qwen38-flash-next-nvfp4-sm121-triton-storage-chunked-prefill-performance-2k-sglang",
             "qwen38-flash-next-nvfp4-sm121-triton-storage-chunked-prefill-performance-2k-v2-sglang",
             "qwen38-flash-next-nvfp4-sm121-triton-storage-chunked-prefill-performance-4k-v2-sglang",
+            "qwen38-flash-next-nvfp4-sm121-triton-storage-chunked-prefill-performance-4k-v3-sglang",
+            "qwen38-flash-next-nvfp4-sm121-triton-storage-chunked-prefill-performance-8k-v3-sglang",
         ):
             with self.subTest(profile_id=profile_id):
                 profile = profiles[profile_id]

@@ -24,6 +24,7 @@ from .sglang_sm121_chunked_prefill_performance import (
     SM121_CHUNKED_PREFILL_PERFORMANCE_STATIC_EVENT,
     SM121_CHUNKED_PREFILL_PERFORMANCE_TIMED_TURNS,
     SM121_CHUNKED_PREFILL_PERFORMANCE_TURN_EVENT,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY,
     SM121ChunkedPrefillPerformanceError,
     score_sm121_chunked_prefill_performance_campaign,
     sm121_chunked_prefill_performance_arm,
@@ -109,6 +110,15 @@ def _study_from_campaign_id(value: object) -> ChunkedPrefillPerformanceStudy:
     if value != study.campaign_id:
         raise ChunkedPrefillEvidenceError("chunked-prefill campaign study is invalid")
     return study
+
+
+def _require_publication_admission(study: ChunkedPrefillPerformanceStudy) -> None:
+    """Keep the prospective 8K study out of every public evidence route."""
+
+    if study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY:
+        raise ChunkedPrefillEvidenceError(
+            "chunked-prefill v3 requires a verified 8K admission receipt"
+        )
 
 
 def _expected_chunk_size(study: ChunkedPrefillPerformanceStudy, arm: object) -> int:
@@ -491,6 +501,7 @@ def validate_source(campaign_dir: Path, results_root: Path) -> dict[str, Any] | 
     ) != integrity:
         raise ChunkedPrefillEvidenceError("chunked-prefill campaign integrity is invalid")
     study = _study_from_campaign_id(campaign.get("campaign_id"))
+    _require_publication_admission(study)
     if (
         campaign.get("schema_version") != 1
         or campaign.get("execution_mode") != study.execution_mode
@@ -737,6 +748,7 @@ def manifest_from_source(
         or not isinstance(study, ChunkedPrefillPerformanceStudy)
     ):
         raise ChunkedPrefillEvidenceError("chunked-prefill source projection is invalid")
+    _require_publication_admission(study)
     return {
         "schema_version": schema_version,
         "evidence_kind": EVIDENCE_KIND,
@@ -809,6 +821,7 @@ def verify_manifest(
     if type(protocol) is not dict:
         raise ChunkedPrefillEvidenceError("chunked-prefill protocol changed")
     study = _study_from_campaign_id(protocol.get("campaign_id"))
+    _require_publication_admission(study)
     if (
         manifest.get("schema_version") != schema_version
         or manifest.get("evidence_kind") != EVIDENCE_KIND

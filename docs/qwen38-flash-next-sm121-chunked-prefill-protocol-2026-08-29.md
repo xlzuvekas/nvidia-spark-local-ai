@@ -24,12 +24,17 @@ read-only audit reported zero errors. Its separate campaign identity,
 profiles, and evidence namespace keep it distinct from the completed 1K/2K
 evidence.
 
+The next 8,192-token candidate is only a prospective admission target. Its
+separate two-lifetime quality-plus-cold-`T0` gate is implemented and
+fail-closed, but has not produced an admission or timing record. It remains
+outside evidence and cannot select 8K or enable a v3 A/B/B/A campaign.
+
 ## Question
 
-On the current, cache-on SM121 native-NVMe Qwen3.8 Flash-Next stack, does
-raising `--chunked-prefill-size` from 1,024 to 2,048 reduce correct cache-cold
-60K request wall time enough to justify the setting for a single user's long
-context?
+The completed v1 and v2 panels retained 2,048 then 4,096 tokens for the exact
+cache-on/C1/no-thinking 60K static-history proxy. The open question is whether
+the exact 8,192-token profile can first pass a separate safety admission; only
+then could a newly frozen 4K/8K A/B/B/A request-wall comparison be considered.
 
 This is not a decode-TPS study. It does not test concurrency or claim an
 agentic coding benchmark. The present admitted baseline is chat-only with
@@ -102,7 +107,7 @@ prefill only for the current SM121/cache-on/C1/no-thinking 60K static-history
 proxy. It does not establish TTFT, decode TPS, concurrency, tool-calling, or
 agentic-coding performance.
 
-## Measurement protocol
+## Completed v1/v2 measurement protocol
 
 The dedicated controller will use a controller-private deterministic 60K
 static-history generator. It issues a cold `T0` request, then two fixed
@@ -130,9 +135,9 @@ Both versions use the existing non-streaming, exact-response adapter, so they
 measure request wall only. TTFT requires a separately admitted
 privacy-safe streaming adapter and is not inferred from request wall.
 
-## Decision rule
+## Completed v1/v2 decision rule
 
-The controller will freeze arithmetic means before execution:
+Both completed panels froze arithmetic means before execution:
 
 - promote B only when correct cache-cold-`T0` mean wall is at most `0.95 × A`;
 - reject B on an append-turn or full-`T0`–`T2` wall guardrail above
@@ -146,10 +151,25 @@ Each lifetime keeps the existing 1,200-second bound, 10 GiB MemAvailable
 floor, 512 MiB starting-swap ceiling, 512 MiB swap-growth ceiling, loopback
 endpoint, no-download rule, ownership cleanup, and benchmark lock.
 
-## Admission for a future campaign
+## Prospective v3 8K admission — no performance result
 
-Each controller requires an exact `chunked_prefill_size` server-info
-attestation for both arms and validates the current UnifiedRadix/lazy runtime
-identity. Run `audit-sm121-chunked-prefill-performance` before exporting a
-completed scalar result with `export-evidence`, then verify it. A generic
-`plan`, `run`, or matrix invocation remains rejected by execution admission.
+The 4,096-token setting remains the retained setting for this exact
+cache-on/C1/no-thinking 60K static-history proxy. The 8,192-token candidate
+has not been compared, retained, or promoted.
+
+Before a future 4K/8K A/B/B/A campaign can be frozen, the exact 8K profile
+must complete a standalone, non-resumable admission check: one fresh four-item
+exact-answer quality lifetime and one separate fresh cache-cold 60K `T0`
+lifetime. Each lifetime rechecks host preflight, retains the image/source and
+runtime chunk-size attestations, uses the existing timeout and cleanup rules,
+and is audited for strict lifecycle order and removal of ephemeral API-key
+files.
+
+The `T0` gate requires a correct no-thinking, non-streaming response, settled
+metrics, zero device/host/storage cache reuse, no eviction or retraction, and
+an exact private prompt-token identity check. It records no request-wall time,
+TPS, ratio, or performance decision and is not benchmark evidence. A later
+performance controller remains hard-blocked until a verified admission receipt
+is designed and bound; passing the gate would not select 8K, replace 4K, or
+establish TTFT, concurrency, tool, agentic-coding, or general-serving
+performance.

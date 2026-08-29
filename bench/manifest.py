@@ -63,6 +63,12 @@ from .sglang_sm121_chunked_prefill_performance import (
     validate_sm121_chunked_prefill_performance_candidate,
     validate_sm121_chunked_prefill_performance_suite,
 )
+from .sglang_sm121_chunked_prefill_admission import (
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_SUITE_ID,
+    SM121ChunkedPrefill8KAdmissionError,
+    is_sm121_chunked_prefill_8k_admission_profile,
+    validate_sm121_chunked_prefill_8k_admission_suite,
+)
 
 
 SCHEMA_VERSION = 1
@@ -1970,6 +1976,11 @@ def validate_suite(suite: SuiteSpec, *, context: str = "suite") -> None:
             validate_sm121_chunked_prefill_performance_suite(suite)
         except SM121ChunkedPrefillPerformanceError as error:
             raise ManifestError(f"{context}: {error}") from error
+    if suite.id == SM121_CHUNKED_PREFILL_8K_ADMISSION_SUITE_ID:
+        try:
+            validate_sm121_chunked_prefill_8k_admission_suite(suite)
+        except SM121ChunkedPrefill8KAdmissionError as error:
+            raise ManifestError(f"{context}: {error}") from error
     cache_cases = [case for case in suite.cases if case.kind == "cache"]
     cache_suite = suite.id == PREFIX_CACHE_SUITE_ID
     if cache_suite or cache_cases:
@@ -2123,8 +2134,18 @@ def validate_benchmark_selection(
         chunked_prefill_suite_study is not None
         and suite.id == chunked_prefill_suite_study.suite_id
     )
+    sm121_chunked_prefill_8k_admission_profile = (
+        is_sm121_chunked_prefill_8k_admission_profile(model)
+    )
+    sm121_chunked_prefill_8k_admission_suite = (
+        suite.id == SM121_CHUNKED_PREFILL_8K_ADMISSION_SUITE_ID
+    )
     if (
         sm121_chunked_prefill_performance_profile
+        and not (
+            sm121_chunked_prefill_8k_admission_profile
+            and sm121_chunked_prefill_8k_admission_suite
+        )
         and (
             not sm121_chunked_prefill_performance_suite
             or chunked_prefill_profile_study != chunked_prefill_suite_study
@@ -2146,6 +2167,14 @@ def validate_benchmark_selection(
         raise ManifestError(
             f"{context}: the {chunked_prefill_suite_study.suite_id!r} "
             "suite requires one of its exact chunked-prefill profiles"
+        )
+    if (
+        sm121_chunked_prefill_8k_admission_suite
+        and not sm121_chunked_prefill_8k_admission_profile
+    ):
+        raise ManifestError(
+            f"{context}: the {SM121_CHUNKED_PREFILL_8K_ADMISSION_SUITE_ID!r} "
+            "suite requires the exact prospective 8K profile"
         )
     ple_study_suite_profiles = _PLE_STUDY_PROFILE_IDS_BY_SUITE.get(suite.id)
     ple_study_profile_suites = _PLE_STUDY_SUITE_IDS_BY_PROFILE_ID.get(model_id)

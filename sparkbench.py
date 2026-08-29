@@ -72,6 +72,11 @@ from bench.sm121_chunked_prefill_runner import (
     create_sm121_chunked_prefill_performance_campaign,
     execute_sm121_chunked_prefill_performance_campaign,
 )
+from bench.sm121_chunked_prefill_admission_runner import (
+    audit_sm121_chunked_prefill_8k_admission,
+    create_sm121_chunked_prefill_8k_admission_plan,
+    execute_sm121_chunked_prefill_8k_admission,
+)
 from bench.sglang_sm121_cache_semantic import (
     SM121_CACHE_SEMANTIC_CACHE_OFF_PROFILE_ID,
     SM121_CACHE_SEMANTIC_CACHE_ON_PROFILE_ID,
@@ -85,6 +90,7 @@ from bench.sglang_sm121_chunked_prefill_performance import (
     SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_PROFILE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_PROFILE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_PROFILE_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_PROFILE_ID,
 )
 from bench.trtllm_direct import run_direct_trtllm
 
@@ -128,6 +134,15 @@ DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_V2_SUITE = (
     / "manifests"
     / "suites"
     / "qwen38_flash_next_sm121_triton_storage_chunked_prefill_performance_v2.toml"
+)
+DEFAULT_SM121_CHUNKED_PREFILL_8K_ADMISSION_SUITE = (
+    WORKSPACE
+    / "manifests"
+    / "suites"
+    / "qwen38_flash_next_sm121_triton_storage_chunked_prefill_8k_preflight.toml"
+)
+DEFAULT_SM121_CHUNKED_PREFILL_8K_ADMISSION_OUTPUT_ROOT = (
+    WORKSPACE / "logs" / "chunked-prefill-admissions"
 )
 DEFAULT_AUTORESEARCH_V2_CACHE_POLICY_CAMPAIGN = (
     WORKSPACE
@@ -560,6 +575,40 @@ def command_sm121_chunked_prefill_performance_v2(args: argparse.Namespace) -> in
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0 if summary["status"] == "complete" else 1
+
+
+def command_sm121_chunked_prefill_8k_preflight(args: argparse.Namespace) -> int:
+    """Run the non-evidence safety admission for the prospective 8K profile."""
+
+    models = load_models(args.models)
+    try:
+        model = models[SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_PROFILE_ID]
+    except KeyError as error:
+        raise ManifestError("SM121 8K admission requires the exact V3 8K profile") from error
+    suite = load_suite(args.suite)
+    run_dir = create_sm121_chunked_prefill_8k_admission_plan(
+        model=model,
+        suite=suite,
+        output_root=args.output_root,
+        models_path=args.models,
+        suite_path=args.suite,
+    )
+    print(f"Admission: {run_dir}")
+    summary = execute_sm121_chunked_prefill_8k_admission(
+        run_dir, workspace=WORKSPACE
+    )
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0 if summary["decision"] == "admitted" else 1
+
+
+def command_audit_sm121_chunked_prefill_8k_preflight(
+    args: argparse.Namespace,
+) -> int:
+    """Audit a terminal 8K preflight without starting an inference server."""
+
+    report = audit_sm121_chunked_prefill_8k_admission(args.run_dir)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["ok"] else 1
 
 
 def command_run(args: argparse.Namespace) -> int:
@@ -1043,6 +1092,25 @@ def build_parser() -> argparse.ArgumentParser:
         function=command_sm121_chunked_prefill_performance_v2
     )
 
+    chunked_prefill_8k_admission = subparsers.add_parser(
+        "sm121-chunked-prefill-8k-preflight",
+        help="run the non-evidence quality-plus-cold-T0 admission for prospective SM121 8K",
+    )
+    chunked_prefill_8k_admission.add_argument(
+        "--models", type=Path, default=DEFAULT_MODELS
+    )
+    chunked_prefill_8k_admission.add_argument(
+        "--suite", type=Path, default=DEFAULT_SM121_CHUNKED_PREFILL_8K_ADMISSION_SUITE
+    )
+    chunked_prefill_8k_admission.add_argument(
+        "--output-root",
+        type=Path,
+        default=DEFAULT_SM121_CHUNKED_PREFILL_8K_ADMISSION_OUTPUT_ROOT,
+    )
+    chunked_prefill_8k_admission.set_defaults(
+        function=command_sm121_chunked_prefill_8k_preflight
+    )
+
     run = subparsers.add_parser("run", aliases=["resume"], help="execute or resume a frozen plan")
     run.add_argument("run_dir", type=Path)
     run.add_argument("--allow-download", action="store_true")
@@ -1196,6 +1264,15 @@ def build_parser() -> argparse.ArgumentParser:
     chunked_prefill_performance_audit.add_argument("campaign_dir", type=Path)
     chunked_prefill_performance_audit.set_defaults(
         function=command_audit_sm121_chunked_prefill_performance
+    )
+
+    chunked_prefill_8k_admission_audit = subparsers.add_parser(
+        "audit-sm121-chunked-prefill-8k-preflight",
+        help="read-only audit of one terminal prospective SM121 8K preflight",
+    )
+    chunked_prefill_8k_admission_audit.add_argument("run_dir", type=Path)
+    chunked_prefill_8k_admission_audit.set_defaults(
+        function=command_audit_sm121_chunked_prefill_8k_preflight
     )
 
     export = subparsers.add_parser(

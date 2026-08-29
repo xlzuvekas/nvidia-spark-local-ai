@@ -16,10 +16,10 @@ quality checks, and the provenance needed to interpret each number.
 | What did the historical native SGLang Flash-Next path show on GB10? | [Measured NVFP4+MTP result, read-only NVMe PLE mechanics, exact pins, and long-context limit](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md) |
 | What did the first day of GB10 community work add? | [Primary-source review of the one-Spark vLLM mmap patch, upstream status, and dual-Spark SGLang report](docs/qwen38-flash-next-gb10-day-one-2026-08-27.md) |
 | What changed on day two for Flash-Next on GB10? | [SGLang's SM121 safety reversal, vLLM's new mmap PR and profiler evidence, and ranked reproduction targets](docs/qwen38-flash-next-gb10-day-two-delta-2026-08-28.md) |
-| What is ready for the replacement SGLang candidate's first admission run? | [SM121 Triton/storage pre-admission gates and the unexecuted target-only fresh-process quality/varied-context canary](docs/qwen38-flash-next-sm121-storage-pre-admission-2026-08-28.md) |
+| What has the replacement SGLang candidate actually passed? | [SM121 Triton/storage prerequisites, target-only quality and varied-context admission, and the remaining scope limits](docs/qwen38-flash-next-sm121-storage-pre-admission-2026-08-28.md) |
 | What did the admitted SM121 cache-policy timing show without leaking prompts or claiming TTFT? | [Two independent audited A/B/B/A fresh-lifetime results: retain cache-on A](docs/qwen38-flash-next-sm121-cache-performance-protocol-2026-08-29.md) |
 | How is the live SM121 product track now using an autoresearch-style loop safely? | [Current-runtime v2 registry: freeze one reviewed candidate, execute once, and derive retain/reject/inconclusive from audited scalar evidence](docs/qwen38-flash-next-sm121-autoresearch-v2-2026-08-29.md) |
-| What did the current-SM121 chunked-prefill studies show? | [Audited fresh-lifetime A/B/B/A results: retain 2K over 1K, then 4K over 2K for the 60K static-history proxy](docs/qwen38-flash-next-sm121-chunked-prefill-protocol-2026-08-29.md) |
+| What did the current-SM121 chunked-prefill studies show? | [Audited fresh-lifetime A/B/B/A results: retain 2K over 1K, then 4K over 2K; 8K remains an unmeasured admission target](docs/qwen38-flash-next-sm121-chunked-prefill-protocol-2026-08-29.md) |
 | How should the vLLM direct-PLE-mmap path be reproduced? | [Exact stacked source boundary, inferred Radix checkpoint, local readiness, admission, ABBA, long-context, and profiler plan](docs/qwen38-flash-next-vllm-mmap-reproduction-2026-08-28.md) |
 | What do matched PLE mapping/omission and NEXTN depths show? | [Replicated lazy-C8 depth results, semantic-ablation failures, and quality-clean exact-answer v2](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md) |
 | What happened to the single-user Qwen3.8-Flash-Next serving search? | [Frozen 14-cell, nine-case 64K protocol; admission expired without a measurement, and its retired runtime is now blocked at every execution ingress](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md) |
@@ -65,6 +65,9 @@ explains how to create and verify both files. The current refresh contains
   attestations, and the read-only audit all passed. This successive setting
   change remains request-wall evidence at C1 with thinking disabled—not TTFT,
   decode TPS, concurrency, tool calling, or an agentic-coding result.
+- The 8K chunked-prefill candidate remains prospective: its separate
+  quality-plus-cold-`T0` admission records no timing result and is excluded
+  from the measured ratios above.
 - In the historical, safety-superseded SM121 TRT-LLM mapped-PLE ABBA panel,
   NEXTN depth two beat depth one in all
   five cells across two independent lifetimes per arm. Mean D256 and fresh
@@ -280,7 +283,7 @@ geometries, slot counts, or validation states.
 - [Qwen3.8-Flash-Next SM121 native-storage pre-admission and first-run canary](docs/qwen38-flash-next-sm121-storage-pre-admission-2026-08-28.md)
 - [Qwen3.8-Flash-Next SM121 cache-policy timing protocol](docs/qwen38-flash-next-sm121-cache-performance-protocol-2026-08-29.md)
 - [Qwen3.8-Flash-Next SM121 autoresearch v2 registry](docs/qwen38-flash-next-sm121-autoresearch-v2-2026-08-29.md)
-- [Qwen3.8-Flash-Next SM121 1K/2K result and 2K/4K chunked-prefill follow-up](docs/qwen38-flash-next-sm121-chunked-prefill-protocol-2026-08-29.md)
+- [Qwen3.8-Flash-Next SM121 1K/2K result, 2K/4K follow-up, and prospective 8K admission](docs/qwen38-flash-next-sm121-chunked-prefill-protocol-2026-08-29.md)
 - [Qwen3.8-Flash-Next vLLM direct-mmap reproduction plan](docs/qwen38-flash-next-vllm-mmap-reproduction-2026-08-28.md)
 - [Qwen3.8-Flash-Next single-user autoresearch protocol](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md)
 - [Qwen3.8-Flash-Next single-user serving backlog](docs/qwen38-flash-next-single-user-next-experiments-2026-08-28.md)

@@ -174,6 +174,52 @@ SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_DESCRIPTION = (
     "may execute it."
 )
 
+# V3 is deliberately prospective until the standalone 8K admission gate has
+# passed.  Registering its immutable profiles and suite makes that gate test
+# the exact future B configuration, without freezing or running a scored
+# comparison campaign prematurely.
+SM121_CHUNKED_PREFILL_PERFORMANCE_V3_SUITE_ID = (
+    "qwen38-flash-next-sm121-triton-storage-chunked-prefill-performance-v3"
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CAMPAIGN_ID = (
+    "qwen38-flash-next-sm121-chunked-prefill-performance-v3"
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V3_EXECUTION_MODE = (
+    "sm121_storage_chunked_prefill_performance_abba_fresh_lifetimes_v3"
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_PROFILE_ID = (
+    "qwen38-flash-next-nvfp4-sm121-triton-storage-chunked-prefill-performance-4k-v3-sglang"
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_PROFILE_ID = (
+    "qwen38-flash-next-nvfp4-sm121-triton-storage-chunked-prefill-performance-8k-v3-sglang"
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CASE_ID = (
+    "sm121-chunked-prefill-60k-static-history-v3"
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V3_SERVED_NAME = (
+    "qwen38-flash-next-nvfp4-sm121-storage-chunked-prefill-performance-v3"
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_CHUNK_SIZE = 4_096
+SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_CHUNK_SIZE = 8_192
+SM121_CHUNKED_PREFILL_PERFORMANCE_V3_SUITE_DESCRIPTION = (
+    "Prospective fresh-lifetime A/B/B/A long-context prefill follow-up of the "
+    "current SM121 native-NVMe Qwen3.8 Flash-Next cache-on bundle. The 4K "
+    "control and 8K candidate differ only in chunked-prefill size; a separate "
+    "8K admission gate must pass before the dedicated controller freezes this "
+    "60K deterministic static-history proxy. It does not claim an agentic "
+    "coding result."
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_DESCRIPTION = (
+    "Prospective SM121 chunked-prefill performance v3 A: current cache-on "
+    "lazy-Mamba 4,096 token control. Only the dedicated A/B/B/A performance "
+    "controller may execute it after 8K admission."
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_DESCRIPTION = (
+    "Prospective SM121 chunked-prefill performance v3 B: current cache-on "
+    "lazy-Mamba 8,192 token candidate. Only the dedicated 8K admission or "
+    "post-admission A/B/B/A performance controller may execute it."
+)
+
 SM121_CHUNKED_PREFILL_PERFORMANCE_COMMON_ARGS = (
     "--served-model-name",
     SM121_CHUNKED_PREFILL_PERFORMANCE_SERVED_NAME,
@@ -309,6 +355,20 @@ SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_ARGS = _with_chunk_size(
     SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_CHUNK_SIZE,
     common_args=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_COMMON_ARGS,
 )
+SM121_CHUNKED_PREFILL_PERFORMANCE_V3_COMMON_ARGS = tuple(
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_SERVED_NAME
+    if value == SM121_CHUNKED_PREFILL_PERFORMANCE_SERVED_NAME
+    else value
+    for value in SM121_CHUNKED_PREFILL_PERFORMANCE_COMMON_ARGS
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_ARGS = _with_chunk_size(
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_CHUNK_SIZE,
+    common_args=SM121_CHUNKED_PREFILL_PERFORMANCE_V3_COMMON_ARGS,
+)
+SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_ARGS = _with_chunk_size(
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_CHUNK_SIZE,
+    common_args=SM121_CHUNKED_PREFILL_PERFORMANCE_V3_COMMON_ARGS,
+)
 
 
 class SM121ChunkedPrefillPerformanceError(ValueError):
@@ -367,9 +427,26 @@ SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY = ChunkedPrefillPerformanceStudy(
     control_args=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_ARGS,
     candidate_args=SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_ARGS,
 )
+SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY = ChunkedPrefillPerformanceStudy(
+    suite_id=SM121_CHUNKED_PREFILL_PERFORMANCE_V3_SUITE_ID,
+    campaign_id=SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CAMPAIGN_ID,
+    execution_mode=SM121_CHUNKED_PREFILL_PERFORMANCE_V3_EXECUTION_MODE,
+    control_profile_id=SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_PROFILE_ID,
+    candidate_profile_id=SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_PROFILE_ID,
+    control_chunk_size=SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_CHUNK_SIZE,
+    candidate_chunk_size=SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_CHUNK_SIZE,
+    timed_case_id=SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CASE_ID,
+    served_name=SM121_CHUNKED_PREFILL_PERFORMANCE_V3_SERVED_NAME,
+    suite_description=SM121_CHUNKED_PREFILL_PERFORMANCE_V3_SUITE_DESCRIPTION,
+    control_description=SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_DESCRIPTION,
+    candidate_description=SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_DESCRIPTION,
+    control_args=SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_ARGS,
+    candidate_args=SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_ARGS,
+)
 SM121_CHUNKED_PREFILL_PERFORMANCE_STUDIES = (
     SM121_CHUNKED_PREFILL_PERFORMANCE_V1_STUDY,
     SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY,
 )
 SM121_CHUNKED_PREFILL_PERFORMANCE_PROFILE_IDS = frozenset(
     profile_id

@@ -1,0 +1,27 @@
+schema_version = 1
+
+[suite]
+id = "qwen38-flash-next-sm121-triton-storage-chunked-prefill-8k-admission-v1"
+description = "Admission-only two-lifetime validation of the prospective 8K current-SM121 native-NVMe Qwen3.8 Flash-Next cache-on bundle. It proves exact quality and a cache-cold 60K T0 request can complete safely; it records no comparative timing result and does not claim agentic coding performance."
+
+[[cases]]
+id = "synthetic-exact-answer-v2"
+kind = "quality"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 512
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "sm121-chunked-prefill-60k-static-history-8k-admission-v1"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
