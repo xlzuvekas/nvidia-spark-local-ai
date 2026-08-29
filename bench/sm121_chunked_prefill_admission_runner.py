@@ -8,6 +8,7 @@ admission records.  It intentionally omits all timing observations.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import fcntl
 import json
 import math
@@ -54,6 +55,8 @@ from .sglang_sm121_chunked_prefill_admission import (
     derive_sm121_chunked_prefill_8k_admission_t0,
     validate_sm121_chunked_prefill_8k_admission_profile,
     validate_sm121_chunked_prefill_8k_admission_runtime_event,
+    sm121_chunked_prefill_8k_admission_receipt,
+    validate_sm121_chunked_prefill_8k_admission_receipt,
     validate_sm121_chunked_prefill_8k_admission_static_event,
     validate_sm121_chunked_prefill_8k_admission_suite,
     validate_sm121_chunked_prefill_8k_admission_summary,
@@ -77,6 +80,21 @@ from .telemetry import TelemetrySampler
 _FAILURE_MESSAGE = "SM121 chunked-prefill 8K admission request failed; details omitted"
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _ADMISSION_LOGS_ROOT = _REPOSITORY_ROOT / "logs"
+_ADMISSION_JSON_MAX_BYTES = 8 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class _AdmissionReceiptSnapshot:
+    """One stable private admission view used for a V3 receipt decision."""
+
+    plan: dict[str, Any]
+    suite: SimpleNamespace
+    summary: dict[str, Any]
+    events: tuple[dict[str, Any], ...]
+    server_topology_issues: tuple[str, ...]
+    audit_hash: str
+    root_identity: tuple[int, ...]
+    artifact_identities: tuple[tuple[str, tuple[int, ...]], ...]
 
 
 class SM121ChunkedPrefill8KAdmissionRequestError(RuntimeError):
@@ -184,6 +202,93 @@ def _owned_directory(path: Path) -> bool:
     return stat.S_ISDIR(metadata.st_mode) and metadata.st_uid == os.geteuid()
 
 
+def _admission_metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    """Return the stable fields needed to detect a same-path replacement."""
+
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _read_owned_admission_json(path: Path, *, context: str) -> dict[str, Any]:
+    """Read one immutable admission record without following a replacement link."""
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise base_runner.PreflightError(f"{context} requires no-follow support")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | nofollow)
+    except OSError as error:
+        raise base_runner.PreflightError(f"{context} is unavailable") from error
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_uid != os.geteuid()
+            or before.st_size < 0
+            or before.st_size > _ADMISSION_JSON_MAX_BYTES
+        ):
+            raise base_runner.PreflightError(f"{context} topology is invalid")
+        payload = bytearray()
+        while len(payload) < before.st_size:
+            chunk = os.pread(
+                descriptor,
+                min(65_536, before.st_size - len(payload)),
+                len(payload),
+            )
+            if not chunk:
+                raise base_runner.PreflightError(f"{context} changed while being read")
+            payload.extend(chunk)
+        after = os.fstat(descriptor)
+        if _admission_metadata_identity(before) != _admission_metadata_identity(after):
+            raise base_runner.PreflightError(f"{context} changed while being read")
+    finally:
+        os.close(descriptor)
+
+    def reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate JSON key")
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(
+            bytes(payload).decode("utf-8"), object_pairs_hook=reject_duplicate_pairs
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise base_runner.PreflightError(f"{context} is invalid") from error
+    if type(value) is not dict:
+        raise base_runner.PreflightError(f"{context} is invalid")
+    return value
+
+
+def _admission_run_identity(root: Path) -> tuple[int, ...]:
+    """Authenticate the private admission leaf before and after a snapshot."""
+
+    try:
+        metadata = root.lstat()
+    except OSError as error:
+        raise base_runner.PreflightError("8K admission run is unavailable") from error
+    if (
+        root.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise base_runner.PreflightError("8K admission run topology is invalid")
+    return _admission_metadata_identity(metadata)
+
+
 def _require_private_admission_output_root(
     output_root: Path, *, create: bool
 ) -> None:
@@ -267,6 +372,65 @@ def _require_safe_admission_artifacts(root: Path) -> None:
     _require_safe_admission_server_tree(root)
 
 
+def _admission_artifact_identities(
+    root: Path, *, names: tuple[str, ...]
+) -> tuple[tuple[str, tuple[int, ...]], ...]:
+    """Capture the direct records that must not be replaced during a receipt read."""
+
+    identities: list[tuple[str, tuple[int, ...]]] = []
+    for name in names:
+        path = root / name
+        try:
+            metadata = path.lstat()
+        except OSError as error:
+            raise base_runner.PreflightError(
+                "8K admission receipt inputs are unavailable"
+            ) from error
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+        ):
+            raise base_runner.PreflightError(
+                "8K admission receipt inputs are unavailable"
+            )
+        identities.append((name, _admission_metadata_identity(metadata)))
+    return tuple(identities)
+
+
+def _admission_server_topology_issues(root: Path) -> tuple[str, ...]:
+    """Snapshot terminal server cleanup state without traversing unsafe links."""
+
+    def lstat_or_missing(path: Path) -> os.stat_result | None:
+        try:
+            return path.lstat()
+        except FileNotFoundError:
+            return None
+
+    issues: list[str] = []
+    server_root = root / "server"
+    server_metadata = lstat_or_missing(server_root)
+    if server_metadata is None:
+        return ()
+    if stat.S_ISLNK(server_metadata.st_mode) or not stat.S_ISDIR(server_metadata.st_mode):
+        return ("server_topology",)
+    for fresh_lifetime in (1, 2):
+        lifetime_root = server_root / f"lifetime-{fresh_lifetime}"
+        lifetime_metadata = lstat_or_missing(lifetime_root)
+        if lifetime_metadata is None:
+            continue
+        if (
+            stat.S_ISLNK(lifetime_metadata.st_mode)
+            or not stat.S_ISDIR(lifetime_metadata.st_mode)
+        ):
+            issues.append("server_topology")
+            continue
+        api_key_metadata = lstat_or_missing(lifetime_root / "api-key")
+        if api_key_metadata is not None:
+            issues.append("api_key_residue")
+    return tuple(issues)
+
+
 def _require_fresh_admission_topology(root: Path) -> None:
     """Refuse pre-created write targets before telemetry or a server can start."""
 
@@ -348,8 +512,10 @@ def _load_sm121_chunked_prefill_8k_admission_plan(
     """Authenticate a direct, unpaired 8K admission plan before serving."""
 
     try:
-        plan = json.loads((run_dir / "plan.json").read_text())
-    except (OSError, json.JSONDecodeError) as error:
+        plan = _read_owned_admission_json(
+            run_dir / "plan.json", context="SM121 8K admission plan"
+        )
+    except base_runner.PreflightError as error:
         raise base_runner.PreflightError("SM121 8K admission plan is unavailable") from error
     if type(plan) is not dict or plan.get("schema_version") != 2:
         raise base_runner.PreflightError("SM121 8K admission plan schema is invalid")
@@ -1042,8 +1208,15 @@ def execute_sm121_chunked_prefill_8k_admission(
         return summary
 
 
-def audit_sm121_chunked_prefill_8k_admission(run_dir: Path) -> dict[str, Any]:
-    """Read one terminal 8K admission record without changing local state."""
+def _audit_sm121_chunked_prefill_8k_admission_snapshot(
+    *,
+    plan: dict[str, Any],
+    suite: SimpleNamespace,
+    events: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+    summary: dict[str, Any],
+    server_topology_issues: tuple[str, ...],
+) -> dict[str, Any]:
+    """Audit one already-read admission snapshot without touching its paths."""
 
     report: dict[str, Any] = {
         "schema_version": 1,
@@ -1056,46 +1229,6 @@ def audit_sm121_chunked_prefill_8k_admission(run_dir: Path) -> dict[str, Any]:
     def add(code: str, message: str) -> None:
         report["errors"].append({"code": code, "message": message})
 
-    try:
-        root = _admission_path(
-            run_dir,
-            require_existing=True,
-            allow_logs_root=False,
-            create_logs_root=False,
-        )
-        _require_private_admission_run_directory(root)
-        _require_admission_plan_inputs(root)
-        _require_private_admission_output_root(root.parent, create=False)
-    except (OSError, base_runner.PreflightError):
-        add("invalid_location", "8K admission run location is invalid")
-        report["error_count"] = len(report["errors"])
-        return report
-    events_path = root / "events.jsonl"
-    summary_path = root / "admission.json"
-    if not _owned_regular_file(events_path) or not _owned_regular_file(summary_path):
-        add("missing_record", "8K admission journal or summary is unavailable")
-        report["error_count"] = len(report["errors"])
-        return report
-    try:
-        plan, _model, suite = _load_sm121_chunked_prefill_8k_admission_plan(root)
-    except (OSError, ValueError, base_runner.PreflightError):
-        add("invalid_plan", "8K admission plan is invalid")
-        plan = None
-        suite = None
-    try:
-        events = Journal(events_path).strict_events()
-    except (OSError, ValueError):
-        add("invalid_journal", "8K admission journal is invalid")
-        events = []
-    try:
-        summary = json.loads(summary_path.read_text())
-        validate_sm121_chunked_prefill_8k_admission_summary(summary)
-    except (OSError, ValueError, json.JSONDecodeError, SM121ChunkedPrefill8KAdmissionError):
-        add("invalid_summary", "8K admission summary is invalid")
-        summary = None
-    if plan is None or suite is None or summary is None:
-        report["error_count"] = len(report["errors"])
-        return report
     quality_case, cold_t0_case = _case_pair(suite)
 
     def without_timestamp(event: object) -> dict[str, object] | None:
@@ -1341,18 +1474,13 @@ def audit_sm121_chunked_prefill_8k_admission(run_dir: Path) -> dict[str, Any]:
         "run_complete",
         "8K admission terminal completion is invalid",
     )
-    server_root = root / "server"
-    if server_root.is_symlink() or (server_root.exists() and not server_root.is_dir()):
-        add("server_topology", "8K admission server artifacts are invalid")
-    for fresh_lifetime in (1, 2):
-        lifetime_root = server_root / f"lifetime-{fresh_lifetime}"
-        api_key_path = lifetime_root / "api-key"
-        if lifetime_root.is_symlink() or (
-            lifetime_root.exists() and not lifetime_root.is_dir()
-        ):
+    for issue in server_topology_issues:
+        if issue == "server_topology":
             add("server_topology", "8K admission server artifacts are invalid")
-        if api_key_path.is_symlink() or api_key_path.exists():
+        elif issue == "api_key_residue":
             add("api_key_residue", "8K admission retained an ephemeral API key")
+        else:
+            add("server_topology", "8K admission server artifacts are invalid")
     if summary["status"] != "complete" or summary["decision"] != "admitted":
         add("summary_decision", "8K admission did not reach admission")
     if (
@@ -1367,3 +1495,191 @@ def audit_sm121_chunked_prefill_8k_admission(run_dir: Path) -> dict[str, Any]:
     report["error_count"] = len(report["errors"])
     report["ok"] = report["error_count"] == 0
     return report
+
+
+def audit_sm121_chunked_prefill_8k_admission(run_dir: Path) -> dict[str, Any]:
+    """Read one terminal 8K admission record without changing local state."""
+
+    report: dict[str, Any] = {
+        "schema_version": 1,
+        "admission_id": SM121_CHUNKED_PREFILL_8K_ADMISSION_ID,
+        "read_only": True,
+        "ok": False,
+        "errors": [],
+    }
+
+    def add(code: str, message: str) -> None:
+        report["errors"].append({"code": code, "message": message})
+
+    try:
+        root = _admission_path(
+            run_dir,
+            require_existing=True,
+            allow_logs_root=False,
+            create_logs_root=False,
+        )
+        _require_private_admission_run_directory(root)
+        _require_admission_plan_inputs(root)
+        _require_private_admission_output_root(root.parent, create=False)
+    except (OSError, base_runner.PreflightError):
+        add("invalid_location", "8K admission run location is invalid")
+        report["error_count"] = len(report["errors"])
+        return report
+    events_path = root / "events.jsonl"
+    summary_path = root / "admission.json"
+    if not _owned_regular_file(events_path) or not _owned_regular_file(summary_path):
+        add("missing_record", "8K admission journal or summary is unavailable")
+        report["error_count"] = len(report["errors"])
+        return report
+    try:
+        plan, _model, suite = _load_sm121_chunked_prefill_8k_admission_plan(root)
+    except (OSError, ValueError, base_runner.PreflightError):
+        add("invalid_plan", "8K admission plan is invalid")
+        plan = None
+        suite = None
+    try:
+        events = Journal(events_path).strict_events()
+    except (OSError, ValueError):
+        add("invalid_journal", "8K admission journal is invalid")
+        events = []
+    try:
+        summary = _read_owned_admission_json(
+            summary_path, context="SM121 8K admission summary"
+        )
+        validate_sm121_chunked_prefill_8k_admission_summary(summary)
+    except (base_runner.PreflightError, SM121ChunkedPrefill8KAdmissionError):
+        add("invalid_summary", "8K admission summary is invalid")
+        summary = None
+    if plan is None or suite is None or summary is None:
+        report["error_count"] = len(report["errors"])
+        return report
+    try:
+        server_topology_issues = _admission_server_topology_issues(root)
+    except OSError:
+        server_topology_issues = ("server_topology",)
+    return _audit_sm121_chunked_prefill_8k_admission_snapshot(
+        plan=plan,
+        suite=suite,
+        events=events,
+        summary=summary,
+        server_topology_issues=server_topology_issues,
+    )
+
+
+def _receipt_snapshot(
+    root: Path,
+) -> _AdmissionReceiptSnapshot:
+    """Read one strict, timestamp-free scalar snapshot for receipt issuance."""
+
+    artifact_names = ("plan.json", "inventory.json", "admission.json", "events.jsonl")
+    root_identity = _admission_run_identity(root)
+    _require_private_admission_run_directory(root)
+    _require_admission_plan_inputs(root)
+    _require_private_admission_output_root(root.parent, create=False)
+    artifact_identities = _admission_artifact_identities(root, names=artifact_names)
+    plan, _model, suite = _load_sm121_chunked_prefill_8k_admission_plan(root)
+    summary_path = root / "admission.json"
+    events_path = root / "events.jsonl"
+    summary = _read_owned_admission_json(
+        summary_path, context="8K admission receipt summary"
+    )
+    validate_sm121_chunked_prefill_8k_admission_summary(summary)
+    events = tuple(Journal(events_path).strict_events())
+    server_topology_issues = _admission_server_topology_issues(root)
+    terminal_journal = [
+        {key: value for key, value in event.items() if key != "timestamp"}
+        for event in events
+    ]
+    if (
+        _admission_run_identity(root) != root_identity
+        or _admission_artifact_identities(root, names=artifact_names)
+        != artifact_identities
+    ):
+        raise base_runner.PreflightError("8K admission receipt changed while being read")
+    audit_hash = content_hash(
+        {
+            "domain": "sm121-chunked-prefill-8k-admission-audit-v2",
+            "plan_integrity_hash": plan["integrity_hash"],
+            "summary_integrity_hash": summary["integrity_hash"],
+            "terminal_journal": terminal_journal,
+            "server_topology_issues": server_topology_issues,
+        },
+        64,
+    )
+    return _AdmissionReceiptSnapshot(
+        plan=plan,
+        suite=suite,
+        summary=summary,
+        events=events,
+        server_topology_issues=server_topology_issues,
+        audit_hash=audit_hash,
+        root_identity=root_identity,
+        artifact_identities=artifact_identities,
+    )
+
+
+def load_verified_sm121_chunked_prefill_8k_admission_receipt(
+    run_dir: Path,
+) -> dict[str, object]:
+    """Re-audit and project one private admission without retaining its path."""
+
+    try:
+        root = _admission_path(
+            run_dir,
+            require_existing=True,
+            allow_logs_root=False,
+            create_logs_root=False,
+        )
+        before = _receipt_snapshot(root)
+        report = _audit_sm121_chunked_prefill_8k_admission_snapshot(
+            plan=before.plan,
+            suite=before.suite,
+            events=before.events,
+            summary=before.summary,
+            server_topology_issues=before.server_topology_issues,
+        )
+        if report.get("ok") is not True:
+            raise base_runner.PreflightError("8K admission audit is invalid")
+        after = _receipt_snapshot(root)
+        if (
+            before.audit_hash != after.audit_hash
+            or before.root_identity != after.root_identity
+            or before.artifact_identities != after.artifact_identities
+        ):
+            raise base_runner.PreflightError("8K admission receipt changed during audit")
+        model = before.plan["model"]
+        resolved = before.plan["resolved"]
+        local_image = resolved.get("local_image")
+        if type(model) is not dict or type(local_image) is not dict:
+            raise base_runner.PreflightError("8K admission receipt inputs are invalid")
+        receipt = sm121_chunked_prefill_8k_admission_receipt(
+            before.summary,
+            admission_plan_integrity_hash=before.plan["integrity_hash"],
+            admission_model_contract_sha256=content_hash(
+                {
+                    "domain": "sm121-chunked-prefill-v3-candidate-model-v1",
+                    "value": model,
+                },
+                64,
+            ),
+            admission_local_image_contract_sha256=content_hash(
+                {
+                    "domain": "sm121-chunked-prefill-v3-local-image-v1",
+                    "value": local_image,
+                },
+                64,
+            ),
+            admission_audit_sha256=before.audit_hash,
+        )
+        validate_sm121_chunked_prefill_8k_admission_receipt(receipt)
+    except (
+        OSError,
+        ValueError,
+        json.JSONDecodeError,
+        base_runner.PreflightError,
+        SM121ChunkedPrefill8KAdmissionError,
+    ) as error:
+        raise base_runner.PreflightError(
+            "SM121 chunked-prefill V3 admission receipt is invalid"
+        ) from error
+    return receipt

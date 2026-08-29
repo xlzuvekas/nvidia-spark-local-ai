@@ -29,8 +29,14 @@ from .sglang_sm121_chunked_prefill_performance import (
     SM121_CHUNKED_PREFILL_PERFORMANCE_METRIC_FIELDS,
     SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_CASE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_ITEM_COUNT,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CAMPAIGN_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_CHUNK_SIZE,
     SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_PROFILE_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CASE_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_CHUNK_SIZE,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_PROFILE_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_EXECUTION_MODE,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_SUITE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY,
     SM121ChunkedPrefillPerformanceError,
     sm121_chunked_prefill_performance_study,
@@ -102,6 +108,42 @@ SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODES = frozenset(
         SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_REQUEST_CONTRACT,
         SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_TRANSPORT,
         SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_HTTP,
+    }
+)
+SM121_CHUNKED_PREFILL_8K_ADMISSION_RECEIPT_SCHEMA_VERSION = 1
+SM121_CHUNKED_PREFILL_8K_ADMISSION_RECEIPT_ID = (
+    "qwen38-flash-next-sm121-chunked-prefill-v3-receipt-v1"
+)
+_ADMISSION_RECEIPT_TARGET_FIELDS = frozenset(
+    {
+        "performance_campaign_id",
+        "performance_suite_id",
+        "performance_execution_mode",
+        "arm_order",
+        "control_profile_id",
+        "candidate_profile_id",
+        "control_chunk_size",
+        "candidate_chunk_size",
+        "performance_timed_case_id",
+        "performance_workload_contract_sha256",
+        "admission_id",
+        "admission_suite_id",
+        "admission_execution_mode",
+        "admission_timed_case_id",
+    }
+)
+_ADMISSION_RECEIPT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "receipt_id",
+        "target",
+        "target_contract_sha256",
+        "admission_plan_integrity_hash",
+        "admission_summary_integrity_hash",
+        "admission_model_contract_sha256",
+        "admission_local_image_contract_sha256",
+        "admission_audit_sha256",
+        "receipt_integrity_hash",
     }
 )
 
@@ -624,3 +666,189 @@ def validate_sm121_chunked_prefill_8k_admission_summary(summary: object) -> None
         not in SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODES
     ):
         raise SM121ChunkedPrefill8KAdmissionError("8K admission summary changed")
+
+
+def _receipt_hash(value: object, *, domain: str) -> str:
+    """Return a full domain-separated digest for scalar receipt material."""
+
+    return content_hash({"domain": domain, "value": value}, 64)
+
+
+def _require_receipt_hash(value: object, name: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise SM121ChunkedPrefill8KAdmissionError(f"8K admission {name} is invalid")
+    return value
+
+
+def _receipt_target() -> dict[str, object]:
+    """Return the immutable V3 and timing-free admission target contract."""
+
+    workload = {
+        "cold_input_min_tokens": SM121_CHUNKED_PREFILL_PERFORMANCE_COLD_INPUT_MIN_TOKENS,
+        "cold_input_max_tokens": SM121_CHUNKED_PREFILL_PERFORMANCE_COLD_INPUT_MAX_TOKENS,
+        "max_output_tokens": 32,
+        "temperature": 0.0,
+        "concurrency": 1,
+        "repetitions": 1,
+        "warmups": 0,
+        "prompt_repetitions": 0,
+        "max_turns": 1,
+        "streaming": False,
+        "thinking_disabled": True,
+        "quality_item_count": SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_ITEM_COUNT,
+        "fresh_lifetime_count": 2,
+    }
+    return {
+        "performance_campaign_id": SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CAMPAIGN_ID,
+        "performance_suite_id": SM121_CHUNKED_PREFILL_PERFORMANCE_V3_SUITE_ID,
+        "performance_execution_mode": SM121_CHUNKED_PREFILL_PERFORMANCE_V3_EXECUTION_MODE,
+        "arm_order": ["A", "B", "B", "A"],
+        "control_profile_id": SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_PROFILE_ID,
+        "candidate_profile_id": SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_PROFILE_ID,
+        "control_chunk_size": SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_CHUNK_SIZE,
+        "candidate_chunk_size": SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_CHUNK_SIZE,
+        "performance_timed_case_id": SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CASE_ID,
+        "performance_workload_contract_sha256": _receipt_hash(
+            workload,
+            domain="sm121-chunked-prefill-v3-performance-workload-v1",
+        ),
+        "admission_id": SM121_CHUNKED_PREFILL_8K_ADMISSION_ID,
+        "admission_suite_id": SM121_CHUNKED_PREFILL_8K_ADMISSION_SUITE_ID,
+        "admission_execution_mode": SM121_CHUNKED_PREFILL_8K_ADMISSION_EXECUTION_MODE,
+        "admission_timed_case_id": SM121_CHUNKED_PREFILL_8K_ADMISSION_TIMED_CASE_ID,
+    }
+
+
+def sm121_chunked_prefill_8k_admission_receipt(
+    summary: object,
+    *,
+    admission_plan_integrity_hash: object,
+    admission_model_contract_sha256: object,
+    admission_local_image_contract_sha256: object,
+    admission_audit_sha256: object,
+) -> dict[str, object]:
+    """Project one audited complete admission to a path-free V3 receipt.
+
+    All dynamic source material is reduced to full domain-separated hashes.
+    The receipt has no local path, timestamps, request identifiers, prompt
+    data, response data, token IDs, log content, or timing observation.
+    """
+
+    validate_sm121_chunked_prefill_8k_admission_summary(summary)
+    assert isinstance(summary, dict)
+    if (
+        summary["status"] != "complete"
+        or summary["decision"] != "admitted"
+        or summary["terminal_stage"] != "complete"
+        or summary["failure_code"] is not None
+        or summary["quality_admitted"] is not True
+        or summary["cold_t0_admitted"] is not True
+        or summary["quality_within_timeout"] is not True
+        or summary["cold_t0_within_timeout"] is not True
+        or summary["static_attestations"] != 2
+        or summary["runtime_attestations"] != 2
+    ):
+        raise SM121ChunkedPrefill8KAdmissionError("8K admission receipt is blocked")
+    target = _receipt_target()
+    receipt: dict[str, object] = {
+        "schema_version": SM121_CHUNKED_PREFILL_8K_ADMISSION_RECEIPT_SCHEMA_VERSION,
+        "receipt_id": SM121_CHUNKED_PREFILL_8K_ADMISSION_RECEIPT_ID,
+        "target": target,
+        "target_contract_sha256": _receipt_hash(
+            target, domain="sm121-chunked-prefill-v3-target-v1"
+        ),
+        "admission_plan_integrity_hash": _require_receipt_hash(
+            admission_plan_integrity_hash, "plan integrity"
+        ),
+        "admission_summary_integrity_hash": _require_receipt_hash(
+            summary["integrity_hash"], "summary integrity"
+        ),
+        "admission_model_contract_sha256": _require_receipt_hash(
+            admission_model_contract_sha256, "model contract"
+        ),
+        "admission_local_image_contract_sha256": _require_receipt_hash(
+            admission_local_image_contract_sha256, "local image contract"
+        ),
+        "admission_audit_sha256": _require_receipt_hash(
+            admission_audit_sha256, "audit proof"
+        ),
+    }
+    receipt["receipt_integrity_hash"] = _receipt_hash(
+        receipt, domain="sm121-chunked-prefill-v3-receipt-v1"
+    )
+    validate_sm121_chunked_prefill_8k_admission_receipt(receipt)
+    return receipt
+
+
+def validate_sm121_chunked_prefill_8k_admission_receipt(receipt: object) -> None:
+    """Require the immutable scalar receipt that admits only V3 execution."""
+
+    if type(receipt) is not dict or set(receipt) != _ADMISSION_RECEIPT_FIELDS:
+        raise SM121ChunkedPrefill8KAdmissionError("8K admission receipt fields are invalid")
+    target = receipt["target"]
+    if type(target) is not dict or set(target) != _ADMISSION_RECEIPT_TARGET_FIELDS:
+        raise SM121ChunkedPrefill8KAdmissionError("8K admission receipt target is invalid")
+    if target != _receipt_target() or receipt["target_contract_sha256"] != _receipt_hash(
+        target, domain="sm121-chunked-prefill-v3-target-v1"
+    ):
+        raise SM121ChunkedPrefill8KAdmissionError("8K admission receipt target changed")
+    expected = {
+        "schema_version": SM121_CHUNKED_PREFILL_8K_ADMISSION_RECEIPT_SCHEMA_VERSION,
+        "receipt_id": SM121_CHUNKED_PREFILL_8K_ADMISSION_RECEIPT_ID,
+    }
+    if any(receipt[field] != value for field, value in expected.items()):
+        raise SM121ChunkedPrefill8KAdmissionError("8K admission receipt changed")
+    for field in (
+        "target_contract_sha256",
+        "admission_plan_integrity_hash",
+        "admission_summary_integrity_hash",
+        "admission_model_contract_sha256",
+        "admission_local_image_contract_sha256",
+        "admission_audit_sha256",
+        "receipt_integrity_hash",
+    ):
+        _require_receipt_hash(receipt[field], field)
+    if receipt["receipt_integrity_hash"] != _receipt_hash(
+        {key: value for key, value in receipt.items() if key != "receipt_integrity_hash"},
+        domain="sm121-chunked-prefill-v3-receipt-v1",
+    ):
+        raise SM121ChunkedPrefill8KAdmissionError("8K admission receipt integrity is invalid")
+
+
+def validate_sm121_chunked_prefill_8k_admission_receipt_for_v3_candidate_plan(
+    receipt: object, candidate_plan: object
+) -> None:
+    """Bind the admission's exact 8K model and image to a frozen V3 B plan."""
+
+    validate_sm121_chunked_prefill_8k_admission_receipt(receipt)
+    if type(candidate_plan) is not dict:
+        raise SM121ChunkedPrefill8KAdmissionError("8K receipt candidate plan is invalid")
+    model = candidate_plan.get("model")
+    resolved = candidate_plan.get("resolved")
+    suite = candidate_plan.get("suite")
+    if type(model) is not dict or type(resolved) is not dict or type(suite) is not dict:
+        raise SM121ChunkedPrefill8KAdmissionError("8K receipt candidate plan is invalid")
+    local_image = resolved.get("local_image")
+    if type(local_image) is not dict:
+        raise SM121ChunkedPrefill8KAdmissionError("8K receipt local image is invalid")
+    try:
+        validate_sm121_chunked_prefill_performance_candidate(model)
+        if sm121_chunked_prefill_performance_study(model) != SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY:
+            raise SM121ChunkedPrefillPerformanceError("V3 candidate changed")
+    except SM121ChunkedPrefillPerformanceError as error:
+        raise SM121ChunkedPrefill8KAdmissionError("8K receipt candidate changed") from error
+    target = receipt["target"]
+    assert isinstance(target, dict)
+    if (
+        model.get("id") != target["candidate_profile_id"]
+        or suite.get("id") != target["performance_suite_id"]
+    ):
+        raise SM121ChunkedPrefill8KAdmissionError("8K receipt candidate changed")
+    if _receipt_hash(model, domain="sm121-chunked-prefill-v3-candidate-model-v1") != receipt[
+        "admission_model_contract_sha256"
+    ]:
+        raise SM121ChunkedPrefill8KAdmissionError("8K receipt model binding changed")
+    if _receipt_hash(
+        local_image, domain="sm121-chunked-prefill-v3-local-image-v1"
+    ) != receipt["admission_local_image_contract_sha256"]:
+        raise SM121ChunkedPrefill8KAdmissionError("8K receipt image binding changed")

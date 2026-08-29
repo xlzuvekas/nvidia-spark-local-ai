@@ -59,6 +59,7 @@ SM121_CHUNKED_PREFILL_PERFORMANCE_EXECUTION_MODE = (
 )
 SM121_CHUNKED_PREFILL_PERFORMANCE_SCHEMA_VERSION = 1
 SM121_CHUNKED_PREFILL_PERFORMANCE_PAIR_BINDING_SCHEMA_VERSION = 1
+SM121_CHUNKED_PREFILL_PERFORMANCE_V3_PAIR_BINDING_SCHEMA_VERSION = 2
 SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_PROFILE_ID = (
     "qwen38-flash-next-nvfp4-sm121-triton-storage-chunked-prefill-performance-1k-sglang"
 )
@@ -263,6 +264,7 @@ SM121_CHUNKED_PREFILL_PERFORMANCE_COMMON_ARGS = (
     "30000",
 )
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_FULL_HASH = re.compile(r"[0-9a-f]{64}\Z")
 _FINGERPRINT = re.compile(r"[0-9a-f]{16}\Z")
 _PAIR_BINDING_FIELDS = frozenset(
     {
@@ -280,6 +282,7 @@ _PAIR_BINDING_FIELDS = frozenset(
         "pair_binding_sha256",
     }
 )
+_V3_PAIR_BINDING_FIELDS = _PAIR_BINDING_FIELDS | {"admission_receipt_sha256"}
 _TURN_EVENT_FIELDS = frozenset(
     {
         "event",
@@ -874,14 +877,26 @@ def sm121_chunked_prefill_performance_pair_binding_sha256(
 def validate_sm121_chunked_prefill_performance_pair_binding(
     binding: object,
 ) -> None:
-    row = _require_exact_keys(binding, _PAIR_BINDING_FIELDS, "chunked-prefill binding")
+    if type(binding) is not dict:
+        raise SM121ChunkedPrefillPerformanceError("chunked-prefill binding fields are invalid")
     try:
-        study = sm121_chunked_prefill_performance_study(row["suite_id"])
+        study = sm121_chunked_prefill_performance_study(binding.get("suite_id"))
     except SM121ChunkedPrefillPerformanceError as error:
         raise SM121ChunkedPrefillPerformanceError(
             "chunked-prefill binding suite changed"
         ) from error
-    if row["schema_version"] != SM121_CHUNKED_PREFILL_PERFORMANCE_PAIR_BINDING_SCHEMA_VERSION:
+    expected_fields = (
+        _V3_PAIR_BINDING_FIELDS
+        if study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY
+        else _PAIR_BINDING_FIELDS
+    )
+    row = _require_exact_keys(binding, expected_fields, "chunked-prefill binding")
+    expected_schema = (
+        SM121_CHUNKED_PREFILL_PERFORMANCE_V3_PAIR_BINDING_SCHEMA_VERSION
+        if study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY
+        else SM121_CHUNKED_PREFILL_PERFORMANCE_PAIR_BINDING_SCHEMA_VERSION
+    )
+    if row["schema_version"] != expected_schema:
         raise SM121ChunkedPrefillPerformanceError(
             "chunked-prefill binding schema changed"
         )
@@ -910,6 +925,13 @@ def validate_sm121_chunked_prefill_performance_pair_binding(
     ):
         raise SM121ChunkedPrefillPerformanceError(
             "chunked-prefill workload binding changed"
+        )
+    if study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY and (
+        not isinstance(row["admission_receipt_sha256"], str)
+        or not _FULL_HASH.fullmatch(row["admission_receipt_sha256"])
+    ):
+        raise SM121ChunkedPrefillPerformanceError(
+            "chunked-prefill V3 admission binding is invalid"
         )
     if not isinstance(row["campaign_instance_sha256"], str) or not _SHA256.fullmatch(
         row["campaign_instance_sha256"]

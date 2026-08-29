@@ -12,6 +12,13 @@ from unittest.mock import patch
 from bench.journal import content_hash
 from bench.manifest import load_models, load_suite
 from bench.runner import PreflightError
+from bench.runner import create_plan
+from bench.sglang_sm121_chunked_prefill_admission import (
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_EXECUTION_MODE,
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_ID,
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_SUITE_ID,
+    sm121_chunked_prefill_8k_admission_receipt,
+)
 from bench.sglang_sm121_chunked_prefill_performance import (
     SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER,
     SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_PROFILE_ID,
@@ -23,6 +30,9 @@ from bench.sglang_sm121_chunked_prefill_performance import (
     SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_PROFILE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_PROFILE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_PROFILE_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_PROFILE_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY,
 )
 from bench.sglang_sm121_storage import (
     SM121_STORAGE_LOCAL_IMAGE_ID,
@@ -39,10 +49,12 @@ from bench.sm121_chunked_prefill_runner import (
 from sparkbench import (
     DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE,
     DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_V2_SUITE,
+    DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_V3_SUITE,
     build_parser,
     command_audit_sm121_chunked_prefill_performance,
     command_sm121_chunked_prefill_performance,
     command_sm121_chunked_prefill_performance_v2,
+    command_sm121_chunked_prefill_performance_v3,
 )
 from tests.test_sglang_sm121_chunked_prefill_performance import _lifetime
 
@@ -77,6 +89,19 @@ class SM121ChunkedPrefillRunnerTests(unittest.TestCase):
             / "qwen38_flash_next_sm121_triton_storage_chunked_prefill_performance_v2.toml"
         )
         self.v2_suite = load_suite(self.v2_suite_path)
+        self.v3_control_model = models[
+            SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_PROFILE_ID
+        ]
+        self.v3_candidate_model = models[
+            SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_PROFILE_ID
+        ]
+        self.v3_suite_path = (
+            self.repository
+            / "manifests"
+            / "suites"
+            / "qwen38_flash_next_sm121_triton_storage_chunked_prefill_performance_v3.toml"
+        )
+        self.v3_suite = load_suite(self.v3_suite_path)
 
     def test_cli_exposes_dedicated_non_resumable_campaign_and_audit(self) -> None:
         parser = build_parser()
@@ -88,6 +113,17 @@ class SM121ChunkedPrefillRunnerTests(unittest.TestCase):
         self.assertEqual(DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_V2_SUITE, v2_args.suite)
         self.assertEqual(command_sm121_chunked_prefill_performance_v2, v2_args.function)
         self.assertFalse(hasattr(v2_args, "allow_download"))
+        v3_args = parser.parse_args(
+            [
+                "sm121-chunked-prefill-performance-v3",
+                "--admission-run",
+                "private-admission",
+            ]
+        )
+        self.assertEqual(DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_V3_SUITE, v3_args.suite)
+        self.assertEqual(Path("private-admission"), v3_args.admission_run)
+        self.assertEqual(command_sm121_chunked_prefill_performance_v3, v3_args.function)
+        self.assertFalse(hasattr(v3_args, "allow_download"))
         audit_args = parser.parse_args(
             ["audit-sm121-chunked-prefill-performance", "synthetic-campaign"]
         )
@@ -95,6 +131,7 @@ class SM121ChunkedPrefillRunnerTests(unittest.TestCase):
         self.assertEqual(
             command_audit_sm121_chunked_prefill_performance, audit_args.function
         )
+        self.assertIsNone(audit_args.admission_run)
 
     def _freeze(self, root: Path) -> Path:
         with (
@@ -117,6 +154,69 @@ class SM121ChunkedPrefillRunnerTests(unittest.TestCase):
                 models_path=self.repository / "manifests" / "models.toml",
                 suite_path=self.suite_path,
             )
+
+    def _v3_receipt(self, root: Path, *, audit_hash: str = "a" * 64) -> dict[str, object]:
+        """Build a valid scalar receipt bound to the exact frozen V3 B model."""
+
+        with (
+            patch("bench.runner._image_digest", return_value=None),
+            patch(
+                "bench.runner._sm121_storage_image_identity",
+                return_value={
+                    "docker_image_id": SM121_STORAGE_LOCAL_IMAGE_ID,
+                    "platform": SM121_STORAGE_PLATFORM,
+                    "source_tree": SM121_STORAGE_SOURCE_TREE,
+                },
+            ),
+            patch("bench.runner._host_snapshot", return_value={"host": "fixture"}),
+        ):
+            plan_dir = create_plan(
+                model=self.v3_candidate_model,
+                suite=self.v3_suite,
+                results_root=root / f"receipt-plan-{audit_hash[:1]}",
+                models_path=self.repository / "manifests" / "models.toml",
+                suite_path=self.v3_suite_path,
+                allow_sm121_chunked_prefill_performance=True,
+                run_label="receipt-fixture",
+            )
+        plan = json.loads((plan_dir / "plan.json").read_text())
+        summary: dict[str, object] = {
+            "schema_version": 1,
+            "admission_id": SM121_CHUNKED_PREFILL_8K_ADMISSION_ID,
+            "execution_mode": SM121_CHUNKED_PREFILL_8K_ADMISSION_EXECUTION_MODE,
+            "status": "complete",
+            "decision": "admitted",
+            "terminal_stage": "complete",
+            "failure_code": None,
+            "profile_id": SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_PROFILE_ID,
+            "suite_id": SM121_CHUNKED_PREFILL_8K_ADMISSION_SUITE_ID,
+            "quality_admitted": True,
+            "cold_t0_admitted": True,
+            "quality_within_timeout": True,
+            "cold_t0_within_timeout": True,
+            "static_attestations": 2,
+            "runtime_attestations": 2,
+        }
+        summary["integrity_hash"] = content_hash(summary, 64)
+        return sm121_chunked_prefill_8k_admission_receipt(
+            summary,
+            admission_plan_integrity_hash=str(plan["integrity_hash"]),
+            admission_model_contract_sha256=content_hash(
+                {
+                    "domain": "sm121-chunked-prefill-v3-candidate-model-v1",
+                    "value": plan["model"],
+                },
+                64,
+            ),
+            admission_local_image_contract_sha256=content_hash(
+                {
+                    "domain": "sm121-chunked-prefill-v3-local-image-v1",
+                    "value": plan["resolved"]["local_image"],
+                },
+                64,
+            ),
+            admission_audit_sha256=audit_hash,
+        )
 
     def test_freeze_binds_four_unique_plans_and_rejects_nonce_tamper(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -187,6 +287,152 @@ class SM121ChunkedPrefillRunnerTests(unittest.TestCase):
             self.assertEqual([2048, 4096], campaign["pair_binding"]["chunked_prefill_sizes"])
             _campaign, study, _loaded = _load_campaign(campaign_dir)
             self.assertEqual(SM121_CHUNKED_PREFILL_PERFORMANCE_V2_STUDY, study)
+
+    def test_v3_freeze_and_execution_require_the_same_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(RuntimeError, "requires a verified 8K admission"):
+                create_sm121_chunked_prefill_performance_campaign(
+                    control_model=self.v3_control_model,
+                    candidate_model=self.v3_candidate_model,
+                    suite=self.v3_suite,
+                    results_root=root / "chunked-prefill-campaigns",
+                    models_path=self.repository / "manifests" / "models.toml",
+                    suite_path=self.v3_suite_path,
+                )
+            receipt = self._v3_receipt(root)
+            with (
+                patch(
+                    "bench.sm121_chunked_prefill_runner."
+                    "load_verified_sm121_chunked_prefill_8k_admission_receipt",
+                    return_value=receipt,
+                ),
+                patch("bench.sm121_chunked_prefill_runner._V3_LOGS_ROOT", root),
+                patch("bench.runner._image_digest", return_value=None),
+                patch(
+                    "bench.runner._sm121_storage_image_identity",
+                    return_value={
+                        "docker_image_id": SM121_STORAGE_LOCAL_IMAGE_ID,
+                        "platform": SM121_STORAGE_PLATFORM,
+                        "source_tree": SM121_STORAGE_SOURCE_TREE,
+                    },
+                ),
+                patch("bench.runner._host_snapshot", return_value={"host": "fixture"}),
+            ):
+                campaign_dir = create_sm121_chunked_prefill_performance_campaign(
+                    control_model=self.v3_control_model,
+                    candidate_model=self.v3_candidate_model,
+                    suite=self.v3_suite,
+                    results_root=root / "chunked-prefill-campaigns",
+                    models_path=self.repository / "manifests" / "models.toml",
+                    suite_path=self.v3_suite_path,
+                    admission_run_dir=Path("private-admission"),
+                )
+            campaign = json.loads((campaign_dir / "campaign.json").read_text())
+            self.assertEqual(receipt, campaign["v3_admission_receipt"])
+            self.assertEqual(
+                receipt["receipt_integrity_hash"],
+                campaign["pair_binding"]["admission_receipt_sha256"],
+            )
+            _campaign, study, _loaded = _load_campaign(campaign_dir)
+            self.assertEqual(SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY, study)
+            with self.assertRaisesRegex(PreflightError, "requires a verified 8K admission"):
+                execute_sm121_chunked_prefill_performance_campaign(
+                    campaign_dir, workspace=root / "workspace"
+                )
+            changed_receipt = self._v3_receipt(root, audit_hash="b" * 64)
+            with patch(
+                "bench.sm121_chunked_prefill_runner."
+                "load_verified_sm121_chunked_prefill_8k_admission_receipt",
+                return_value=changed_receipt,
+            ), patch(
+                "bench.sm121_chunked_prefill_runner._V3_LOGS_ROOT", root
+            ), patch("bench.sm121_chunked_prefill_runner.base_runner._preflight") as preflight:
+                with self.assertRaisesRegex(PreflightError, "admission receipt changed"):
+                    execute_sm121_chunked_prefill_performance_campaign(
+                        campaign_dir,
+                        workspace=root / "workspace",
+                        admission_run_dir=Path("private-admission"),
+                    )
+                preflight.assert_not_called()
+            with self.assertRaisesRegex(RuntimeError, "only valid for v3"):
+                create_sm121_chunked_prefill_performance_campaign(
+                    control_model=self.control_model,
+                    candidate_model=self.candidate_model,
+                    suite=self.suite,
+                    results_root=root / "other-campaigns",
+                    models_path=self.repository / "manifests" / "models.toml",
+                    suite_path=self.suite_path,
+                    admission_run_dir=Path("private-admission"),
+                )
+
+    def test_v3_rejects_uncontained_results_and_hardens_raw_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            receipt = self._v3_receipt(root)
+            common = (
+                patch(
+                    "bench.sm121_chunked_prefill_runner."
+                    "load_verified_sm121_chunked_prefill_8k_admission_receipt",
+                    return_value=receipt,
+                ),
+                patch("bench.runner._image_digest", return_value=None),
+                patch(
+                    "bench.runner._sm121_storage_image_identity",
+                    return_value={
+                        "docker_image_id": SM121_STORAGE_LOCAL_IMAGE_ID,
+                        "platform": SM121_STORAGE_PLATFORM,
+                        "source_tree": SM121_STORAGE_SOURCE_TREE,
+                    },
+                ),
+                patch("bench.runner._host_snapshot", return_value={"host": "fixture"}),
+            )
+            with common[0], common[1], common[2], common[3]:
+                with self.assertRaisesRegex(RuntimeError, "ignored private logs"):
+                    create_sm121_chunked_prefill_performance_campaign(
+                        control_model=self.v3_control_model,
+                        candidate_model=self.v3_candidate_model,
+                        suite=self.v3_suite,
+                        results_root=root / "uncontained",
+                        models_path=self.repository / "manifests" / "models.toml",
+                        suite_path=self.v3_suite_path,
+                        admission_run_dir=Path("private-admission"),
+                    )
+            private_logs = root / "logs"
+            with (
+                patch(
+                    "bench.sm121_chunked_prefill_runner."
+                    "load_verified_sm121_chunked_prefill_8k_admission_receipt",
+                    return_value=receipt,
+                ),
+                patch("bench.sm121_chunked_prefill_runner._V3_LOGS_ROOT", private_logs),
+                patch("bench.runner._image_digest", return_value=None),
+                patch(
+                    "bench.runner._sm121_storage_image_identity",
+                    return_value={
+                        "docker_image_id": SM121_STORAGE_LOCAL_IMAGE_ID,
+                        "platform": SM121_STORAGE_PLATFORM,
+                        "source_tree": SM121_STORAGE_SOURCE_TREE,
+                    },
+                ),
+                patch("bench.runner._host_snapshot", return_value={"host": "fixture"}),
+            ):
+                campaign = create_sm121_chunked_prefill_performance_campaign(
+                    control_model=self.v3_control_model,
+                    candidate_model=self.v3_candidate_model,
+                    suite=self.v3_suite,
+                    results_root=private_logs / "v3",
+                    models_path=self.repository / "manifests" / "models.toml",
+                    suite_path=self.v3_suite_path,
+                    admission_run_dir=Path("private-admission"),
+                )
+            self.assertEqual(0o700, campaign.stat().st_mode & 0o777)
+            self.assertEqual(0o700, (campaign / "runs").stat().st_mode & 0o777)
+            self.assertEqual(0o600, (campaign / "campaign.json").stat().st_mode & 0o777)
+            for run_dir in (campaign / "runs").iterdir():
+                self.assertEqual(0o700, run_dir.stat().st_mode & 0o777)
+                for artifact in run_dir.iterdir():
+                    self.assertEqual(0o600, artifact.stat().st_mode & 0o777)
 
     def test_v2_runtime_attestation_rejects_a_valid_but_wrong_study_chunk(self) -> None:
         observed = {

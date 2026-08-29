@@ -14,8 +14,10 @@ from datetime import datetime, timezone
 import fcntl
 import json
 import math
+import os
 from pathlib import Path
 import re
+import stat
 import time
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -24,6 +26,9 @@ import uuid
 from . import runner as base_runner
 from .host_safety import HostSafetyError, HostSafetyWatchdog
 from .journal import Journal, content_hash, utc_now, write_json
+from .sm121_chunked_prefill_admission_runner import (
+    load_verified_sm121_chunked_prefill_8k_admission_receipt,
+)
 from .runtime import (
     inspect_sm121_cache_source_digests,
     inspect_sm121_chunked_prefill_runtime_identity,
@@ -49,6 +54,7 @@ from .sglang_sm121_chunked_prefill_performance import (
     SM121_CHUNKED_PREFILL_PERFORMANCE_TIMED_TURNS,
     SM121_CHUNKED_PREFILL_PERFORMANCE_TURN_EVENT,
     SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_PAIR_BINDING_SCHEMA_VERSION,
     SM121ChunkedPrefillPerformanceError,
     derive_sm121_chunked_prefill_performance_turn_admission,
     is_sm121_chunked_prefill_performance_plan,
@@ -64,6 +70,11 @@ from .sglang_sm121_chunked_prefill_performance import (
     validate_sm121_chunked_prefill_performance_static_event,
     validate_sm121_chunked_prefill_performance_suite,
     validate_sm121_chunked_prefill_performance_turn_event,
+)
+from .sglang_sm121_chunked_prefill_admission import (
+    SM121ChunkedPrefill8KAdmissionError,
+    validate_sm121_chunked_prefill_8k_admission_receipt,
+    validate_sm121_chunked_prefill_8k_admission_receipt_for_v3_candidate_plan,
 )
 from .sglang_sm121_storage import (
     SM121_STORAGE_LOCAL_IMAGE_ID,
@@ -84,6 +95,8 @@ _EXPECTED_RESPONSES = (
     "CHUNKED-PREFILL-T1-29",
     "CHUNKED-PREFILL-T2-43",
 )
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+_V3_LOGS_ROOT = _REPOSITORY_ROOT / "logs"
 
 
 class SM121ChunkedPrefillPerformanceRequestError(RuntimeError):
@@ -91,6 +104,90 @@ class SM121ChunkedPrefillPerformanceRequestError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__(_FAILURE_MESSAGE)
+
+
+def _require_private_v3_directory(path: Path, *, create: bool) -> Path:
+    """Require V3 raw output under an owned private ignored logs subtree."""
+
+    logs_root = _V3_LOGS_ROOT
+    if logs_root.is_symlink():
+        raise RuntimeError("SM121 chunked-prefill V3 output topology is invalid")
+    if not logs_root.exists():
+        if not create:
+            raise RuntimeError("SM121 chunked-prefill V3 output is unavailable")
+        logs_root.mkdir(mode=0o700)
+        os.chmod(logs_root, 0o700)
+    if not logs_root.is_dir():
+        raise RuntimeError("SM121 chunked-prefill V3 output topology is invalid")
+    candidate = Path(os.path.abspath(os.fspath(path)))
+    try:
+        relative = candidate.relative_to(logs_root)
+    except ValueError as error:
+        raise RuntimeError(
+            "SM121 chunked-prefill V3 output must remain under ignored private logs"
+        ) from error
+    if candidate == logs_root:
+        raise RuntimeError("SM121 chunked-prefill V3 output location is invalid")
+    current = logs_root
+    for component in relative.parts:
+        current = current / component
+        if current.is_symlink():
+            raise RuntimeError("SM121 chunked-prefill V3 output topology is invalid")
+        if current.exists():
+            metadata = current.lstat()
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o700
+            ):
+                raise RuntimeError("SM121 chunked-prefill V3 output is not private")
+            continue
+        if not create:
+            raise RuntimeError("SM121 chunked-prefill V3 output is unavailable")
+        current.mkdir(mode=0o700)
+        os.chmod(current, 0o700)
+    return candidate
+
+
+def _require_private_v3_run_directory(run_dir: Path, *, harden: bool = True) -> None:
+    """Require or harden one V3 plan leaf and its direct raw plan files."""
+
+    metadata = run_dir.lstat()
+    if (
+        run_dir.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+    ):
+        raise RuntimeError("SM121 chunked-prefill V3 run topology is invalid")
+    if harden:
+        os.chmod(run_dir, 0o700)
+    _require_private_v3_directory(run_dir, create=False)
+    for child in run_dir.iterdir():
+        _require_private_v3_regular_file(child, harden=harden)
+
+
+def _require_private_v3_regular_file(path: Path, *, harden: bool = True) -> None:
+    """Require or harden one V3 raw file to owned, unlinked mode 0600."""
+
+    metadata = path.lstat()
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_nlink != 1
+    ):
+        raise RuntimeError("SM121 chunked-prefill V3 run topology is invalid")
+    if harden:
+        os.chmod(path, 0o600)
+    metadata = path.lstat()
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise RuntimeError("SM121 chunked-prefill V3 output is not private")
 
 
 def create_sm121_chunked_prefill_performance_campaign(
@@ -101,6 +198,7 @@ def create_sm121_chunked_prefill_performance_campaign(
     results_root: Path,
     models_path: Path,
     suite_path: Path,
+    admission_run_dir: Path | None = None,
 ) -> Path:
     """Freeze one non-resumable A/B/B/A chunk-size campaign without serving."""
 
@@ -114,32 +212,65 @@ def create_sm121_chunked_prefill_performance_campaign(
             )
     except SM121ChunkedPrefillPerformanceError as error:
         raise RuntimeError("SM121 chunked-prefill admission is unavailable") from error
+    admission_receipt: dict[str, object] | None = None
     if study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY:
-        raise RuntimeError(
-            "SM121 chunked-prefill v3 requires a verified 8K admission receipt"
-        )
+        if admission_run_dir is None:
+            raise RuntimeError(
+                "SM121 chunked-prefill v3 requires a verified 8K admission receipt"
+            )
+        try:
+            admission_receipt = (
+                load_verified_sm121_chunked_prefill_8k_admission_receipt(
+                    admission_run_dir
+                )
+            )
+            validate_sm121_chunked_prefill_8k_admission_receipt(admission_receipt)
+        except (base_runner.PreflightError, SM121ChunkedPrefill8KAdmissionError) as error:
+            raise RuntimeError(
+                "SM121 chunked-prefill v3 requires a verified 8K admission receipt"
+            ) from error
+    elif admission_run_dir is not None:
+        raise RuntimeError("SM121 chunked-prefill admission receipt is only valid for v3")
+    is_v3 = study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY
+    if is_v3:
+        results_root = _require_private_v3_directory(results_root, create=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     campaign_dir = results_root / f"{stamp}-{study.campaign_id}"
-    campaign_dir.mkdir(parents=True, exist_ok=False)
+    if is_v3:
+        campaign_dir.mkdir(mode=0o700)
+        _require_private_v3_directory(campaign_dir, create=False)
+    else:
+        campaign_dir.mkdir(parents=True, exist_ok=False)
     runs_root = campaign_dir / "runs"
+    if is_v3:
+        runs_root.mkdir(mode=0o700)
+        _require_private_v3_directory(runs_root, create=False)
     arm_models = {
         SM121_CHUNKED_PREFILL_PERFORMANCE_CONTROL_ARM: control_model,
         SM121_CHUNKED_PREFILL_PERFORMANCE_CANDIDATE_ARM: candidate_model,
     }
     run_dirs: list[Path] = []
     for ordinal, arm in enumerate(SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER, start=1):
-        run_dirs.append(
-            base_runner.create_plan(
-                model=arm_models[arm],
-                suite=suite,
-                results_root=runs_root,
-                models_path=models_path,
-                suite_path=suite_path,
-                allow_sm121_chunked_prefill_performance=True,
-                run_label=f"prefill-{ordinal}-{arm.lower()}",
-            )
+        run_dir = base_runner.create_plan(
+            model=arm_models[arm],
+            suite=suite,
+            results_root=runs_root,
+            models_path=models_path,
+            suite_path=suite_path,
+            allow_sm121_chunked_prefill_performance=True,
+            run_label=f"prefill-{ordinal}-{arm.lower()}",
         )
-    _bind_campaign_plans(run_dirs, study=study)
+        if is_v3:
+            _require_private_v3_run_directory(run_dir)
+        run_dirs.append(run_dir)
+    _bind_campaign_plans(
+        run_dirs,
+        study=study,
+        admission_receipt=admission_receipt,
+    )
+    if is_v3:
+        for run_dir in run_dirs:
+            _require_private_v3_run_directory(run_dir)
     plans = [json.loads((run_dir / "plan.json").read_text()) for run_dir in run_dirs]
     binding = plans[0].get("chunked_prefill_performance_pair")
     if not isinstance(binding, dict):
@@ -152,13 +283,20 @@ def create_sm121_chunked_prefill_performance_campaign(
         "pair_binding": binding,
         "run_directories": [run_dir.name for run_dir in run_dirs],
     }
+    if admission_receipt is not None:
+        campaign["v3_admission_receipt"] = admission_receipt
     campaign["integrity_hash"] = content_hash(campaign, 64)
     write_json(campaign_dir / "campaign.json", campaign)
+    if is_v3:
+        _require_private_v3_regular_file(campaign_dir / "campaign.json")
     return campaign_dir
 
 
 def _bind_campaign_plans(
-    run_dirs: list[Path], *, study: ChunkedPrefillPerformanceStudy
+    run_dirs: list[Path],
+    *,
+    study: ChunkedPrefillPerformanceStudy,
+    admission_receipt: dict[str, object] | None,
 ) -> None:
     """Bind four frozen plans to one opaque, scalar-only instance digest."""
 
@@ -192,6 +330,19 @@ def _bind_campaign_plans(
             raise RuntimeError("SM121 chunked-prefill fingerprint is invalid")
         plan["chunked_prefill_performance_ordinal"] = ordinal
         plans.append(plan)
+    if study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY:
+        if admission_receipt is None:
+            raise RuntimeError("SM121 chunked-prefill V3 admission receipt is unavailable")
+        try:
+            for plan in plans:
+                if sm121_chunked_prefill_performance_arm(plan["model"]) == "B":
+                    validate_sm121_chunked_prefill_8k_admission_receipt_for_v3_candidate_plan(
+                        admission_receipt, plan
+                    )
+        except SM121ChunkedPrefill8KAdmissionError as error:
+            raise RuntimeError("SM121 chunked-prefill V3 admission receipt is invalid") from error
+    elif admission_receipt is not None:
+        raise RuntimeError("SM121 chunked-prefill admission receipt is only valid for v3")
     try:
         instance = sm121_chunked_prefill_performance_pair_instance_sha256(
             [plan.get("run_nonce") for plan in plans]
@@ -199,7 +350,11 @@ def _bind_campaign_plans(
     except SM121ChunkedPrefillPerformanceError as error:
         raise RuntimeError("SM121 chunked-prefill plan nonce is invalid") from error
     binding: dict[str, object] = {
-        "schema_version": SM121_CHUNKED_PREFILL_PERFORMANCE_PAIR_BINDING_SCHEMA_VERSION,
+        "schema_version": (
+            SM121_CHUNKED_PREFILL_PERFORMANCE_V3_PAIR_BINDING_SCHEMA_VERSION
+            if study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY
+            else SM121_CHUNKED_PREFILL_PERFORMANCE_PAIR_BINDING_SCHEMA_VERSION
+        ),
         "suite_id": study.suite_id,
         "execution_mode": study.execution_mode,
         "arm_order": list(SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER),
@@ -217,6 +372,10 @@ def _bind_campaign_plans(
         "campaign_instance_sha256": instance,
         "plan_fingerprints": [str(plan["fingerprint"]) for plan in plans],
     }
+    if admission_receipt is not None:
+        binding["admission_receipt_sha256"] = admission_receipt[
+            "receipt_integrity_hash"
+        ]
     binding["pair_binding_sha256"] = (
         sm121_chunked_prefill_performance_pair_binding_sha256(binding)
     )
@@ -1053,7 +1212,7 @@ def _load_campaign(
         campaign = json.loads((root / "campaign.json").read_text())
     except (OSError, ValueError, json.JSONDecodeError) as error:
         raise base_runner.PreflightError("SM121 chunked-prefill campaign is unavailable") from error
-    expected_fields = {
+    base_fields = {
         "schema_version",
         "campaign_id",
         "created_at",
@@ -1062,7 +1221,18 @@ def _load_campaign(
         "run_directories",
         "integrity_hash",
     }
-    if type(campaign) is not dict or set(campaign) != expected_fields:
+    if type(campaign) is not dict:
+        raise base_runner.PreflightError("SM121 chunked-prefill campaign fields are invalid")
+    try:
+        study = sm121_chunked_prefill_performance_study(campaign.get("campaign_id"))
+    except SM121ChunkedPrefillPerformanceError as error:
+        raise base_runner.PreflightError(
+            "SM121 chunked-prefill campaign contract is invalid"
+        ) from error
+    expected_fields = set(base_fields)
+    if study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY:
+        expected_fields.add("v3_admission_receipt")
+    if set(campaign) != expected_fields:
         raise base_runner.PreflightError("SM121 chunked-prefill campaign fields are invalid")
     integrity = campaign.get("integrity_hash")
     if not isinstance(integrity, str) or content_hash(
@@ -1070,16 +1240,15 @@ def _load_campaign(
         len(integrity),
     ) != integrity:
         raise base_runner.PreflightError("SM121 chunked-prefill campaign integrity is invalid")
-    try:
-        study = sm121_chunked_prefill_performance_study(campaign.get("campaign_id"))
-    except SM121ChunkedPrefillPerformanceError as error:
-        raise base_runner.PreflightError(
-            "SM121 chunked-prefill campaign contract is invalid"
-        ) from error
     if study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY:
-        raise base_runner.PreflightError(
-            "SM121 chunked-prefill v3 requires a verified 8K admission receipt"
-        )
+        try:
+            validate_sm121_chunked_prefill_8k_admission_receipt(
+                campaign.get("v3_admission_receipt")
+            )
+        except SM121ChunkedPrefill8KAdmissionError as error:
+            raise base_runner.PreflightError(
+                "SM121 chunked-prefill v3 admission receipt is invalid"
+            ) from error
     if (
         campaign.get("schema_version") != 1
         or campaign.get("campaign_id") != study.campaign_id
@@ -1149,6 +1318,26 @@ def _load_campaign(
         != sm121_chunked_prefill_performance_pair_binding_sha256(binding)
     ):
         raise base_runner.PreflightError("SM121 chunked-prefill binding is invalid")
+    if study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY:
+        receipt = campaign.get("v3_admission_receipt")
+        if (
+            not isinstance(receipt, dict)
+            or binding.get("admission_receipt_sha256")
+            != receipt.get("receipt_integrity_hash")
+        ):
+            raise base_runner.PreflightError(
+                "SM121 chunked-prefill V3 admission binding is invalid"
+            )
+        try:
+            for _run_dir, plan, model, _suite in loaded:
+                if sm121_chunked_prefill_performance_arm(model) == "B":
+                    validate_sm121_chunked_prefill_8k_admission_receipt_for_v3_candidate_plan(
+                        receipt, plan
+                    )
+        except SM121ChunkedPrefill8KAdmissionError as error:
+            raise base_runner.PreflightError(
+                "SM121 chunked-prefill V3 admission binding is invalid"
+            ) from error
     return campaign, study, loaded
 
 
@@ -1309,20 +1498,13 @@ def _unstarted_lifetime(*, ordinal: int, arm: str) -> dict[str, Any]:
 
 
 def execute_sm121_chunked_prefill_performance_campaign(
-    campaign_dir: Path, *, workspace: Path
+    campaign_dir: Path,
+    *,
+    workspace: Path,
+    admission_run_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Run one frozen non-resumable A/B/B/A chunk-size measurement."""
 
-    campaign, study, loaded = _load_campaign(campaign_dir)
-    if (campaign_dir / "summary.json").exists():
-        raise base_runner.PreflightError(
-            "SM121 chunked-prefill campaign is terminal; freeze a new campaign"
-        )
-    for run_dir, _plan, _model, _suite in loaded:
-        if Journal(run_dir / "events.jsonl").events():
-            raise base_runner.PreflightError(
-                "SM121 chunked-prefill campaign is non-resumable; freeze a new campaign"
-            )
     lock_path = base_runner.results_lock_path(workspace)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("w") as lock:
@@ -1330,6 +1512,44 @@ def execute_sm121_chunked_prefill_performance_campaign(
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise RuntimeError("Another SparkBench run holds the benchmark lock") from error
+        campaign, study, loaded = _load_campaign(campaign_dir)
+        if study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY:
+            if admission_run_dir is None:
+                raise base_runner.PreflightError(
+                    "SM121 chunked-prefill v3 requires a verified 8K admission receipt"
+                )
+            try:
+                _require_private_v3_directory(campaign_dir, create=False)
+                _require_private_v3_directory(campaign_dir / "runs", create=False)
+                _require_private_v3_regular_file(
+                    campaign_dir / "campaign.json", harden=False
+                )
+                for run_dir, _plan, _model, _suite in loaded:
+                    _require_private_v3_run_directory(run_dir, harden=False)
+                current_receipt = load_verified_sm121_chunked_prefill_8k_admission_receipt(
+                    admission_run_dir
+                )
+            except (RuntimeError, base_runner.PreflightError) as error:
+                raise base_runner.PreflightError(
+                    "SM121 chunked-prefill v3 admission receipt is invalid"
+                ) from error
+            if current_receipt != campaign.get("v3_admission_receipt"):
+                raise base_runner.PreflightError(
+                    "SM121 chunked-prefill v3 admission receipt changed"
+                )
+        elif admission_run_dir is not None:
+            raise base_runner.PreflightError(
+                "SM121 chunked-prefill admission receipt is only valid for v3"
+            )
+        if (campaign_dir / "summary.json").exists():
+            raise base_runner.PreflightError(
+                "SM121 chunked-prefill campaign is terminal; freeze a new campaign"
+            )
+        for run_dir, _plan, _model, _suite in loaded:
+            if Journal(run_dir / "events.jsonl").events():
+                raise base_runner.PreflightError(
+                    "SM121 chunked-prefill campaign is non-resumable; freeze a new campaign"
+                )
         lifetimes: list[dict[str, Any]] = []
         reference_prompt_token_ids: tuple[tuple[int, ...], ...] | None = None
         terminal = False
@@ -1375,4 +1595,11 @@ def execute_sm121_chunked_prefill_performance_campaign(
         }
         summary["integrity_hash"] = content_hash(summary, 64)
         write_json(campaign_dir / "summary.json", summary)
+        if study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY:
+            try:
+                _require_private_v3_regular_file(campaign_dir / "summary.json")
+            except RuntimeError as error:
+                raise base_runner.PreflightError(
+                    "SM121 chunked-prefill V3 output is not private"
+                ) from error
         return summary

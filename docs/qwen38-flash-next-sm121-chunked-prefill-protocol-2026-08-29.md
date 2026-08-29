@@ -24,17 +24,17 @@ read-only audit reported zero errors. Its separate campaign identity,
 profiles, and evidence namespace keep it distinct from the completed 1K/2K
 evidence.
 
-The next 8,192-token candidate is only a prospective admission target. Its
-separate two-lifetime quality-plus-cold-`T0` gate is implemented and
-fail-closed, but has not produced an admission or timing record. It remains
-outside evidence and cannot select 8K or enable a v3 A/B/B/A campaign.
+The exact 8,192-token candidate passed its separate two-lifetime
+quality-plus-cold-`T0` gate in a private, timing-free admission. It remains
+outside public evidence and cannot itself select 8K. A local V3 A/B/B/A panel
+requires the re-audited matching receipt described below.
 
 ## Question
 
 The completed v1 and v2 panels retained 2,048 then 4,096 tokens for the exact
-cache-on/C1/no-thinking 60K static-history proxy. The open question is whether
-the exact 8,192-token profile can first pass a separate safety admission; only
-then could a newly frozen 4K/8K A/B/B/A request-wall comparison be considered.
+cache-on/C1/no-thinking 60K static-history proxy. The open question is the
+receipt-bound 4K/8K A/B/B/A request-wall comparison; the 8,192-token profile
+has separately passed safety admission but has no comparative timing result.
 
 This is not a decode-TPS study. It does not test concurrency or claim an
 agentic coding benchmark. The present admitted baseline is chat-only with
@@ -151,14 +151,14 @@ Each lifetime keeps the existing 1,200-second bound, 10 GiB MemAvailable
 floor, 512 MiB starting-swap ceiling, 512 MiB swap-growth ceiling, loopback
 endpoint, no-download rule, ownership cleanup, and benchmark lock.
 
-## Prospective v3 8K admission — no performance result
+## Receipt-bound v3 8K admission — no performance result
 
 The 4,096-token setting remains the retained setting for this exact
 cache-on/C1/no-thinking 60K static-history proxy. The 8,192-token candidate
-has not been compared, retained, or promoted.
+has passed its separate private safety admission, but has not been compared,
+retained, or promoted.
 
-Before a future 4K/8K A/B/B/A campaign can be frozen, the exact 8K profile
-must complete a standalone, non-resumable admission check: one fresh four-item
+The standalone, non-resumable admission check uses one fresh four-item
 exact-answer quality lifetime and one separate fresh cache-cold 60K `T0`
 lifetime. Each lifetime rechecks host preflight, retains the image/source and
 runtime chunk-size attestations, uses the existing timeout and cleanup rules,
@@ -168,8 +168,23 @@ files.
 The `T0` gate requires a correct no-thinking, non-streaming response, settled
 metrics, zero device/host/storage cache reuse, no eviction or retraction, and
 an exact private prompt-token identity check. It records no request-wall time,
-TPS, ratio, or performance decision and is not benchmark evidence. A later
-performance controller remains hard-blocked until a verified admission receipt
-is designed and bound; passing the gate would not select 8K, replace 4K, or
-establish TTFT, concurrency, tool, agentic-coding, or general-serving
-performance.
+TPS, ratio, or performance decision and is not benchmark evidence. The V3
+controller derives a path-free scalar receipt only from a complete audited
+admission, binds that receipt to the exact 4K/8K A/B/B/A plans, and re-audits
+the same private admission immediately before serving. Its raw campaign stays
+under an owned private ignored logs subtree; V3 is intentionally blocked from
+public evidence export.
+
+The controller can be invoked only with the private admission location supplied
+at runtime:
+
+```bash
+python3 sparkbench.py sm121-chunked-prefill-performance-v3 \
+  --admission-run <private-admission-run>
+python3 sparkbench.py audit-sm121-chunked-prefill-performance \
+  <private-v3-campaign> --admission-run <private-admission-run>
+```
+
+Passing admission authorizes only that local request-wall panel. It does not
+select 8K, replace 4K, establish TTFT, concurrency, TPS, tool, agentic-coding,
+or general-serving performance, and it does not authorize publication.

@@ -1340,12 +1340,13 @@ These are current-runtime product results, but not `autoresearch-v2` rounds;
 they must not be pooled with the v2 cache-policy child or used to imply a
 generic flag-search permission.
 
-A prospective 4K/8K v3 campaign is neither frozen nor measured. Its exact 8K
-candidate first requires a standalone quality-plus-cold-`T0` admission
-gate. That gate is non-evidence and records no timing; it cannot be pooled
-with v1/v2 or used to retain 8K. A later separately designed receipt and newly
-frozen A/B/B/A campaign would be required before making a request-wall
-comparison.
+The prospective 4K/8K v3 controller is receipt-bound and remains unmeasured.
+Its exact 8K candidate has passed a standalone private quality-plus-cold-`T0`
+admission gate. That gate is non-evidence and records no timing; it cannot be
+pooled with v1/v2 or used to retain 8K. A V3 campaign may run only from an
+ignored private logs subtree, after re-auditing the same admission and matching
+its scalar receipt to both B plans immediately before serving. Public V3
+evidence export remains denied pending a separate publication policy.
 
 ### Publishing sanitized evidence
 

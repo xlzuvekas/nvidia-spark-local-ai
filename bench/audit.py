@@ -54,6 +54,14 @@ from .sglang_sm121_cache_performance import (
     validate_sm121_cache_performance_turn_event,
 )
 from . import sm121_chunked_prefill_evidence as chunked_prefill_evidence
+from .sm121_chunked_prefill_admission_runner import (
+    load_verified_sm121_chunked_prefill_8k_admission_receipt,
+)
+from .sm121_chunked_prefill_runner import (
+    _require_private_v3_directory,
+    _require_private_v3_regular_file,
+)
+from . import runner as base_runner
 
 
 IssueAdder = Callable[..., None]
@@ -1862,6 +1870,8 @@ def audit_sm121_cache_performance_campaign(
 
 def audit_sm121_chunked_prefill_performance_campaign(
     campaign_dir: Path,
+    *,
+    admission_run_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Read-only validation of one SM121 chunk-size A/B/B/A campaign.
 
@@ -1888,7 +1898,24 @@ def audit_sm121_chunked_prefill_performance_campaign(
             or not results_root.is_dir()
         ):
             raise ValueError
-        source = chunked_prefill_evidence.validate_source(root, results_root)
+        if admission_run_dir is not None:
+            _require_private_v3_directory(root, create=False)
+            _require_private_v3_directory(root / "runs", create=False)
+            _require_private_v3_regular_file(root / "campaign.json", harden=False)
+            for run_dir in (root / "runs").iterdir():
+                _require_private_v3_directory(run_dir, create=False)
+        receipt = (
+            load_verified_sm121_chunked_prefill_8k_admission_receipt(
+                admission_run_dir
+            )
+            if admission_run_dir is not None
+            else None
+        )
+        source = chunked_prefill_evidence.validate_source(
+            root,
+            results_root,
+            local_v3_admission_receipt=receipt,
+        )
         if source is None:
             add_issue(
                 "campaign_not_terminal",
@@ -1909,9 +1936,11 @@ def audit_sm121_chunked_prefill_performance_campaign(
             )
     except (
         OSError,
+        RuntimeError,
         ValueError,
         KeyError,
         TypeError,
+        base_runner.PreflightError,
         chunked_prefill_evidence.ChunkedPrefillEvidenceError,
     ):
         add_issue(

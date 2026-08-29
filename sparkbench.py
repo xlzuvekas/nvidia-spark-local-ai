@@ -91,6 +91,7 @@ from bench.sglang_sm121_chunked_prefill_performance import (
     SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CANDIDATE_PROFILE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_V2_CONTROL_PROFILE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_PROFILE_ID,
+    SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_PROFILE_ID,
 )
 from bench.trtllm_direct import run_direct_trtllm
 
@@ -134,6 +135,15 @@ DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_V2_SUITE = (
     / "manifests"
     / "suites"
     / "qwen38_flash_next_sm121_triton_storage_chunked_prefill_performance_v2.toml"
+)
+DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_V3_SUITE = (
+    WORKSPACE
+    / "manifests"
+    / "suites"
+    / "qwen38_flash_next_sm121_triton_storage_chunked_prefill_performance_v3.toml"
+)
+DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_V3_RESULTS = (
+    WORKSPACE / "logs" / "chunked-prefill-v3-local"
 )
 DEFAULT_SM121_CHUNKED_PREFILL_8K_ADMISSION_SUITE = (
     WORKSPACE
@@ -577,6 +587,39 @@ def command_sm121_chunked_prefill_performance_v2(args: argparse.Namespace) -> in
     return 0 if summary["status"] == "complete" else 1
 
 
+def command_sm121_chunked_prefill_performance_v3(args: argparse.Namespace) -> int:
+    """Run V3 only after binding one separately audited 8K admission receipt."""
+
+    models = load_models(args.models)
+    try:
+        control_model = models[
+            SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_PROFILE_ID
+        ]
+        candidate_model = models[
+            SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_PROFILE_ID
+        ]
+    except KeyError as error:
+        raise ManifestError(
+            "SM121 chunked-prefill v3 campaign requires both exact 4K/8K profiles"
+        ) from error
+    suite = load_suite(args.suite)
+    campaign_dir = create_sm121_chunked_prefill_performance_campaign(
+        control_model=control_model,
+        candidate_model=candidate_model,
+        suite=suite,
+        results_root=args.results / "chunked-prefill-campaigns",
+        models_path=args.models,
+        suite_path=args.suite,
+        admission_run_dir=args.admission_run,
+    )
+    print(f"Campaign: {campaign_dir}")
+    summary = execute_sm121_chunked_prefill_performance_campaign(
+        campaign_dir, workspace=WORKSPACE, admission_run_dir=args.admission_run
+    )
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0 if summary["status"] == "complete" else 1
+
+
 def command_sm121_chunked_prefill_8k_preflight(args: argparse.Namespace) -> int:
     """Run the non-evidence safety admission for the prospective 8K profile."""
 
@@ -874,7 +917,10 @@ def command_audit_sm121_cache_policy_performance(args: argparse.Namespace) -> in
 def command_audit_sm121_chunked_prefill_performance(
     args: argparse.Namespace,
 ) -> int:
-    report = audit_sm121_chunked_prefill_performance_campaign(args.campaign_dir)
+    report = audit_sm121_chunked_prefill_performance_campaign(
+        args.campaign_dir,
+        admission_run_dir=args.admission_run,
+    )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["ok"] else 1
 
@@ -1092,6 +1138,29 @@ def build_parser() -> argparse.ArgumentParser:
         function=command_sm121_chunked_prefill_performance_v2
     )
 
+    chunked_prefill_performance_v3 = subparsers.add_parser(
+        "sm121-chunked-prefill-performance-v3",
+        help="run the receipt-bound fresh-lifetime SM121 4K/8K prefill A/B/B/A campaign",
+    )
+    chunked_prefill_performance_v3.add_argument(
+        "--models", type=Path, default=DEFAULT_MODELS
+    )
+    chunked_prefill_performance_v3.add_argument(
+        "--suite", type=Path, default=DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_V3_SUITE
+    )
+    chunked_prefill_performance_v3.add_argument(
+        "--results", type=Path, default=DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_V3_RESULTS
+    )
+    chunked_prefill_performance_v3.add_argument(
+        "--admission-run",
+        type=Path,
+        required=True,
+        help="private complete 8K admission run used only to derive a scalar receipt",
+    )
+    chunked_prefill_performance_v3.set_defaults(
+        function=command_sm121_chunked_prefill_performance_v3
+    )
+
     chunked_prefill_8k_admission = subparsers.add_parser(
         "sm121-chunked-prefill-8k-preflight",
         help="run the non-evidence quality-plus-cold-T0 admission for prospective SM121 8K",
@@ -1262,6 +1331,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="read-only verification of one SM121 chunk-size prefill campaign",
     )
     chunked_prefill_performance_audit.add_argument("campaign_dir", type=Path)
+    chunked_prefill_performance_audit.add_argument(
+        "--admission-run",
+        type=Path,
+        help="required only to audit a receipt-bound local V3 campaign",
+    )
     chunked_prefill_performance_audit.set_defaults(
         function=command_audit_sm121_chunked_prefill_performance
     )

@@ -40,6 +40,11 @@ from .sglang_sm121_chunked_prefill_performance import (
     validate_sm121_chunked_prefill_performance_suite,
     validate_sm121_chunked_prefill_performance_turn_event,
 )
+from .sglang_sm121_chunked_prefill_admission import (
+    SM121ChunkedPrefill8KAdmissionError,
+    validate_sm121_chunked_prefill_8k_admission_receipt,
+    validate_sm121_chunked_prefill_8k_admission_receipt_for_v3_candidate_plan,
+)
 from .sglang_sm121_storage import (
     SM121_STORAGE_LOCAL_IMAGE_ID,
     SM121_STORAGE_PLATFORM,
@@ -61,6 +66,7 @@ _CAMPAIGN_FIELDS = frozenset(
         "integrity_hash",
     }
 )
+_LOCAL_V3_CAMPAIGN_FIELDS = _CAMPAIGN_FIELDS | {"v3_admission_receipt"}
 _SUMMARY_FIELDS = frozenset(
     {
         "schema_version",
@@ -486,13 +492,42 @@ def _validate_attestation_topology(
         raise ChunkedPrefillEvidenceError("chunked-prefill attestation arm changed")
 
 
-def validate_source(campaign_dir: Path, results_root: Path) -> dict[str, Any] | None:
-    """Validate a nested source campaign before projecting any scalar data."""
+def validate_source(
+    campaign_dir: Path,
+    results_root: Path,
+    *,
+    local_v3_admission_receipt: object | None = None,
+) -> dict[str, Any] | None:
+    """Validate source scalars; V3 requires a fresh receipt for local audit."""
 
     root = results_root.resolve(strict=True)
     campaign_dir = _safe_resolve(campaign_dir, root)
     campaign = _load_json(campaign_dir / "campaign.json", root)
-    if type(campaign) is not dict or frozenset(campaign) != _CAMPAIGN_FIELDS:
+    if type(campaign) is not dict:
+        raise ChunkedPrefillEvidenceError("chunked-prefill campaign fields are invalid")
+    study = _study_from_campaign_id(campaign.get("campaign_id"))
+    if study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY:
+        if local_v3_admission_receipt is None:
+            _require_publication_admission(study)
+        try:
+            validate_sm121_chunked_prefill_8k_admission_receipt(
+                local_v3_admission_receipt
+            )
+        except SM121ChunkedPrefill8KAdmissionError as error:
+            raise ChunkedPrefillEvidenceError(
+                "chunked-prefill local V3 admission receipt is invalid"
+            ) from error
+        if (
+            frozenset(campaign) != _LOCAL_V3_CAMPAIGN_FIELDS
+            or campaign.get("v3_admission_receipt") != local_v3_admission_receipt
+        ):
+            raise ChunkedPrefillEvidenceError(
+                "chunked-prefill local V3 admission receipt changed"
+            )
+    elif (
+        local_v3_admission_receipt is not None
+        or frozenset(campaign) != _CAMPAIGN_FIELDS
+    ):
         raise ChunkedPrefillEvidenceError("chunked-prefill campaign fields are invalid")
     integrity = campaign.get("integrity_hash")
     if not isinstance(integrity, str) or content_hash(
@@ -500,8 +535,8 @@ def validate_source(campaign_dir: Path, results_root: Path) -> dict[str, Any] | 
         len(integrity),
     ) != integrity:
         raise ChunkedPrefillEvidenceError("chunked-prefill campaign integrity is invalid")
-    study = _study_from_campaign_id(campaign.get("campaign_id"))
-    _require_publication_admission(study)
+    if study != SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY:
+        _require_publication_admission(study)
     if (
         campaign.get("schema_version") != 1
         or campaign.get("execution_mode") != study.execution_mode
@@ -516,6 +551,15 @@ def validate_source(campaign_dir: Path, results_root: Path) -> dict[str, Any] | 
     assert isinstance(binding, dict)
     if binding.get("suite_id") != study.suite_id:
         raise ChunkedPrefillEvidenceError("chunked-prefill pair binding study changed")
+    if study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY:
+        assert isinstance(local_v3_admission_receipt, dict)
+        if (
+            binding.get("admission_receipt_sha256")
+            != local_v3_admission_receipt.get("receipt_integrity_hash")
+        ):
+            raise ChunkedPrefillEvidenceError(
+                "chunked-prefill local V3 admission binding changed"
+            )
     names = campaign.get("run_directories")
     if (
         type(names) is not list
@@ -589,6 +633,20 @@ def validate_source(campaign_dir: Path, results_root: Path) -> dict[str, Any] | 
                     "chunked-prefill journal event is invalid"
                 ) from error
         events_by_arm.append(events)
+    if study == SM121_CHUNKED_PREFILL_PERFORMANCE_V3_STUDY:
+        try:
+            assert isinstance(local_v3_admission_receipt, dict)
+            for plan, arm in zip(
+                plans, SM121_CHUNKED_PREFILL_PERFORMANCE_ARM_ORDER, strict=True
+            ):
+                if arm == "B":
+                    validate_sm121_chunked_prefill_8k_admission_receipt_for_v3_candidate_plan(
+                        local_v3_admission_receipt, plan
+                    )
+        except SM121ChunkedPrefill8KAdmissionError as error:
+            raise ChunkedPrefillEvidenceError(
+                "chunked-prefill local V3 admission binding changed"
+            ) from error
     try:
         instance = sm121_chunked_prefill_performance_pair_instance_sha256(
             [plan["run_nonce"] for plan in plans]

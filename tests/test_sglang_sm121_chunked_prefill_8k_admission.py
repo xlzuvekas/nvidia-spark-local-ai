@@ -12,10 +12,12 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from bench import sm121_chunked_prefill_admission_runner as admission_runner
 from bench.execution_admission import model_execution_blocker
 from bench.journal import content_hash
 from bench.manifest import load_models, load_suite
 from bench.runtime import RuntimeErrorWithContext
+from bench.runner import PreflightError
 from bench.sglang_sm121_cache_observability import (
     SM121_CACHE_OBSERVABILITY_CACHED_SERIES,
     SM121_CACHE_SOURCE_DIGESTS,
@@ -33,6 +35,7 @@ from bench.sglang_sm121_chunked_prefill_admission import (
     SM121ChunkedPrefill8KAdmissionError,
     derive_sm121_chunked_prefill_8k_admission_t0,
     validate_sm121_chunked_prefill_8k_admission_profile,
+    validate_sm121_chunked_prefill_8k_admission_receipt,
     validate_sm121_chunked_prefill_8k_admission_summary,
     validate_sm121_chunked_prefill_8k_admission_suite,
     validate_sm121_chunked_prefill_8k_admission_t0_event,
@@ -54,9 +57,11 @@ from bench.sm121_chunked_prefill_admission_runner import (
     audit_sm121_chunked_prefill_8k_admission,
     create_sm121_chunked_prefill_8k_admission_plan,
     execute_sm121_chunked_prefill_8k_admission,
+    load_verified_sm121_chunked_prefill_8k_admission_receipt,
 )
 from bench.sm121_chunked_prefill_runner import (
     create_sm121_chunked_prefill_performance_campaign,
+    execute_sm121_chunked_prefill_performance_campaign,
 )
 from sparkbench import (
     DEFAULT_SM121_CHUNKED_PREFILL_8K_ADMISSION_OUTPUT_ROOT,
@@ -324,6 +329,121 @@ class SM121ChunkedPrefill8KAdmissionTests(unittest.TestCase):
                     if path.is_file()
                 },
             )
+
+    def test_complete_audit_issues_a_path_free_scalar_v3_receipt(self) -> None:
+        (ROOT / "logs").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / "logs") as directory:
+            run_dir = self._freeze(Path(directory))
+            self._run_with_mocks(run_dir)
+            receipt = load_verified_sm121_chunked_prefill_8k_admission_receipt(run_dir)
+            validate_sm121_chunked_prefill_8k_admission_receipt(receipt)
+            self.assertEqual(10, len(receipt))
+            self.assertEqual(14, len(receipt["target"]))
+            forbidden = {
+                "path",
+                "run_dir",
+                "timestamp",
+                "prompt",
+                "response",
+                "token",
+                "request",
+                "wall",
+                "case_id",
+            }
+            self.assertFalse(forbidden & set(receipt))
+            self.assertFalse(forbidden & set(receipt["target"]))
+            self.assertNotIn(str(run_dir), json.dumps(receipt, sort_keys=True))
+
+            summary_path = run_dir / "admission.json"
+            summary = json.loads(summary_path.read_text())
+            summary["status"] = "partial"
+            summary["decision"] = "blocked"
+            summary["terminal_stage"] = "cold_t0_lifetime"
+            summary["failure_code"] = SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_GENERIC
+            summary["integrity_hash"] = content_hash(
+                {key: value for key, value in summary.items() if key != "integrity_hash"},
+                64,
+            )
+            summary_path.write_text(json.dumps(summary, sort_keys=True) + "\n")
+            with self.assertRaisesRegex(PreflightError, "admission receipt is invalid"):
+                load_verified_sm121_chunked_prefill_8k_admission_receipt(run_dir)
+
+    def test_receipt_rejects_a_lifecycle_mutation_during_audit(self) -> None:
+        (ROOT / "logs").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / "logs") as directory:
+            run_dir = self._freeze(Path(directory))
+            self._run_with_mocks(run_dir)
+            original_snapshot = admission_runner._receipt_snapshot
+            snapshot_calls = 0
+
+            def snapshot_then_mutate(path: Path) -> object:
+                nonlocal snapshot_calls
+                snapshot = original_snapshot(path)
+                snapshot_calls += 1
+                if snapshot_calls == 1:
+                    events_path = path / "events.jsonl"
+                    events = [
+                        json.loads(line) for line in events_path.read_text().splitlines()
+                    ]
+                    events[1]["unexpected_lifecycle_field"] = True
+                    events_path.write_text(
+                        "\n".join(json.dumps(event, sort_keys=True) for event in events)
+                        + "\n"
+                    )
+                return snapshot
+
+            with patch(
+                "bench.sm121_chunked_prefill_admission_runner."
+                "_receipt_snapshot",
+                side_effect=snapshot_then_mutate,
+            ), self.assertRaisesRegex(PreflightError, "admission receipt is invalid"):
+                load_verified_sm121_chunked_prefill_8k_admission_receipt(run_dir)
+
+    def test_complete_admission_receipt_binds_a_v3_freeze(self) -> None:
+        (ROOT / "logs").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / "logs") as directory:
+            root = Path(directory)
+            run_dir = self._freeze(root / "admission")
+            self._run_with_mocks(run_dir)
+            receipt = load_verified_sm121_chunked_prefill_8k_admission_receipt(run_dir)
+            with (
+                patch("bench.runner._image_digest", return_value=None),
+                patch(
+                    "bench.runner._sm121_storage_image_identity",
+                    return_value={
+                        "docker_image_id": SM121_STORAGE_LOCAL_IMAGE_ID,
+                        "platform": SM121_STORAGE_PLATFORM,
+                        "source_tree": SM121_STORAGE_SOURCE_TREE,
+                    },
+                ),
+                patch("bench.runner._host_snapshot", return_value={"host": "fixture"}),
+            ):
+                campaign = create_sm121_chunked_prefill_performance_campaign(
+                    control_model=self.control,
+                    candidate_model=self.model,
+                    suite=self.v3_suite,
+                    results_root=root / "v3",
+                    models_path=MODELS,
+                    suite_path=V3_SUITE_PATH,
+                    admission_run_dir=run_dir,
+                )
+            campaign_data = json.loads((campaign / "campaign.json").read_text())
+            self.assertEqual(receipt, campaign_data["v3_admission_receipt"])
+            self.assertEqual(
+                receipt["receipt_integrity_hash"],
+                campaign_data["pair_binding"]["admission_receipt_sha256"],
+            )
+            with patch(
+                "bench.sm121_chunked_prefill_runner._execute_arm",
+                side_effect=RuntimeError("synthetic execution boundary"),
+            ) as execute_arm:
+                with self.assertRaisesRegex(RuntimeError, "synthetic execution boundary"):
+                    execute_sm121_chunked_prefill_performance_campaign(
+                        campaign,
+                        workspace=ROOT,
+                        admission_run_dir=run_dir,
+                    )
+            execute_arm.assert_called_once()
 
     def test_quality_failure_blocks_cold_t0_and_terminal_audit(self) -> None:
         (ROOT / "logs").mkdir(exist_ok=True)
