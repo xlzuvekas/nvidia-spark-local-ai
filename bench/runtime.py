@@ -1500,17 +1500,10 @@ _SM121_CACHE_GUARDRAIL_SAMPLES = {
     "sglang:evicted_tokens_total": "evicted_tokens",
     "sglang:num_retracted_requests_total": "retracted_requests",
 }
-_SM121_CACHE_GUARDRAIL_TYPE_FAMILIES = {
-    "sglang:evicted_tokens_total": "sglang:evicted_tokens_total",
-    "sglang:num_retracted_requests_total": "sglang:num_retracted_requests_total",
+_SM121_CACHE_GUARDRAIL_FAMILY_PREFIXES = {
+    "sglang:evicted_tokens_total": "sglang:evicted_tokens",
+    "sglang:num_retracted_requests_total": "sglang:num_retracted_requests",
 }
-_SM121_CACHE_GUARDRAIL_TYPE_ALIASES = frozenset(
-    {
-        *_SM121_CACHE_GUARDRAIL_TYPE_FAMILIES,
-        "sglang:evicted_tokens",
-        "sglang:num_retracted_requests",
-    }
-)
 _SM121_CACHE_CACHE_ON_EVICTION_LABELS = {"cache_type": "UnifiedRadixCache"}
 
 
@@ -1829,7 +1822,10 @@ def _sm121_cache_labels(raw: str | None) -> dict[str, str] | None:
         if match.start() != position:
             return None
         position = match.end()
-        labels[match.group("name")] = match.group("value")
+        name = match.group("name")
+        if name in labels:
+            return None
+        labels[name] = match.group("value")
     return labels if position == len(raw) else None
 
 
@@ -1849,13 +1845,13 @@ def snapshot_sm121_cache_observability_metrics(
     """Read a scalar-only cache metrics snapshot, failing closed on gaps.
 
     The paired semantic canary has a narrower, source-pinned interpretation of
-    its two guardrail counters.  In the cache-off arm, ``ChunkCache`` does not
-    register the eviction family and a zero retraction counter has no labelled
-    child sample.  In the cache-on arm, both counter families are registered,
-    while either zero counter may have no labelled child.  The exact
-    declarations and label vectors remain mandatory; only those verified zero
-    omissions count as available.  The older B0 caller keeps its sample-only
-    interpretation by passing no arm.
+    its two guardrail counters.  Its Prometheus multiprocess endpoint does not
+    expose any part of a labelled counter family until a child is materialized.
+    B's ``ChunkCache`` cannot materialize eviction metrics at all; A's unified
+    cache and both arms' scheduler only materialize these families on positive
+    activity.  A completely absent family is therefore the verified zero form
+    for this exact image, while a partial family stays unavailable.  The older
+    B0 caller keeps its sample-only interpretation by passing no arm.
     """
 
     snapshot = _sm121_cache_metric_defaults()
@@ -1903,15 +1899,10 @@ def snapshot_sm121_cache_observability_metrics(
         "host": False,
         "storage": False,
     }
-    guardrail_sample_seen = {
-        "sglang:evicted_tokens_total": False,
-        "sglang:num_retracted_requests_total": False,
+    guardrail_families = {
+        name: {"help": False, "type": False, "sample": False, "seen": False}
+        for name in _SM121_CACHE_GUARDRAIL_SAMPLES
     }
-    guardrail_type_seen = {
-        "sglang:evicted_tokens_total": False,
-        "sglang:num_retracted_requests_total": False,
-    }
-    eviction_family_observed = False
     base_labels: dict[str, str] | None = None
 
     def bind_base_labels(candidate: dict[str, str]) -> bool:
@@ -1923,40 +1914,81 @@ def snapshot_sm121_cache_observability_metrics(
             return True
         return base_labels == candidate
 
+    def guardrail_family_for_name(name: str) -> str | None:
+        """Return the canonical family for a relevant exact-image metric name."""
+
+        for family, prefix in _SM121_CACHE_GUARDRAIL_FAMILY_PREFIXES.items():
+            if name.startswith(prefix):
+                return family
+        return None
+
+    def relevant_guardrail_line(line: str, marker: str) -> bool:
+        candidate = line.lstrip()
+        return any(
+            candidate.startswith(marker + prefix)
+            for prefix in _SM121_CACHE_GUARDRAIL_FAMILY_PREFIXES.values()
+        )
+
+    def materialized_guardrail_family_is_valid(family: str) -> bool:
+        state = guardrail_families[family]
+        return bool(state["help"] and state["type"] and state["sample"])
+
     malformed = False
     for line in text.splitlines():
-        if line.startswith(("# HELP sglang:evicted_tokens", "sglang:evicted_tokens")):
-            eviction_family_observed = True
+        if line.startswith("# HELP "):
+            help_match = re.fullmatch(
+                r"# HELP (?P<name>sglang:[A-Za-z0-9_:]+) .+", line
+            )
+            if help_match is None:
+                if relevant_guardrail_line(line, "# HELP "):
+                    malformed = True
+                continue
+            help_name = help_match.group("name")
+            family = guardrail_family_for_name(help_name)
+            if family is None:
+                continue
+            state = guardrail_families[family]
+            if help_name != family or state["seen"] or state["help"]:
+                malformed = True
+                continue
+            state["seen"] = True
+            state["help"] = True
+            continue
         if line.startswith("# TYPE "):
             type_match = _SM121_CACHE_METRIC_TYPE_RE.fullmatch(line)
             if type_match is None:
-                if any(
-                    line.startswith(f"# TYPE {name}")
-                    for name in (
-                        *_SM121_CACHE_GUARDRAIL_TYPE_ALIASES,
-                        *SM121_CACHE_GUARDRAIL_SAMPLES,
-                    )
-                ):
+                if relevant_guardrail_line(line, "# TYPE "):
                     malformed = True
                 continue
             type_name = type_match.group("name")
-            sample_name = _SM121_CACHE_GUARDRAIL_TYPE_FAMILIES.get(type_name)
-            if sample_name is None:
-                if type_name in _SM121_CACHE_GUARDRAIL_TYPE_ALIASES:
-                    malformed = True
+            family = guardrail_family_for_name(type_name)
+            if family is None:
                 continue
+            state = guardrail_families[family]
             if (
-                type_match.group("metric_type") != "counter"
-                or guardrail_type_seen[sample_name]
+                type_name != family
+                or type_match.group("metric_type") != "counter"
+                or not state["help"]
+                or state["type"]
             ):
                 malformed = True
                 continue
-            guardrail_type_seen[sample_name] = True
+            state["seen"] = True
+            state["type"] = True
             continue
         match = _SM121_CACHE_METRIC_LINE_RE.fullmatch(line)
         if match is None:
+            if any(
+                relevant_guardrail_line(line, marker)
+                for marker in ("", "# HELP ", "# TYPE ")
+            ):
+                malformed = True
             continue
         name = match.group("name")
+        family = guardrail_family_for_name(name)
+        if family is not None and name != family:
+            malformed = True
+            continue
         if name not in {
             "sglang:prefill_effective_tokens_total",
             "sglang:cached_tokens_total",
@@ -2014,7 +2046,11 @@ def snapshot_sm121_cache_observability_metrics(
             snapshot[f"cached_{source_kind}_series_present"] = True
             cached_seen[source_kind] = True
         elif name in _SM121_CACHE_GUARDRAIL_SAMPLES:
-            if guardrail_sample_seen[name]:
+            state = guardrail_families[name]
+            if state["sample"] or (
+                semantic_arm is not None
+                and (not state["help"] or not state["type"])
+            ):
                 malformed = True
                 continue
             if name == "sglang:evicted_tokens_total":
@@ -2031,8 +2067,12 @@ def snapshot_sm121_cache_observability_metrics(
             elif not bind_base_labels(labels):
                 malformed = True
                 continue
+            if semantic_arm is not None and value == 0:
+                malformed = True
+                continue
             snapshot[_SM121_CACHE_GUARDRAIL_SAMPLES[name]] = value
-            guardrail_sample_seen[name] = True
+            state["seen"] = True
+            state["sample"] = True
         else:
             if not bind_base_labels(labels):
                 malformed = True
@@ -2047,20 +2087,31 @@ def snapshot_sm121_cache_observability_metrics(
         gauge_seen.values()
     )
     if semantic_arm == SM121_CACHE_SEMANTIC_CACHE_OFF_ARM:
+        eviction = guardrail_families["sglang:evicted_tokens_total"]
+        retraction = guardrail_families["sglang:num_retracted_requests_total"]
         snapshot["guardrail_metrics_available"] = (
-            not malformed
-            and guardrail_type_seen["sglang:num_retracted_requests_total"]
-            and not guardrail_type_seen["sglang:evicted_tokens_total"]
-            and not guardrail_sample_seen["sglang:evicted_tokens_total"]
-            and not eviction_family_observed
+            snapshot["available"] is True
+            and not malformed
+            and eviction["seen"] is False
+            and (
+                retraction["seen"] is False
+                or materialized_guardrail_family_is_valid(
+                    "sglang:num_retracted_requests_total"
+                )
+            )
         )
     elif semantic_arm == SM121_CACHE_SEMANTIC_CACHE_ON_ARM:
-        snapshot["guardrail_metrics_available"] = not malformed and all(
-            guardrail_type_seen.values()
+        snapshot["guardrail_metrics_available"] = snapshot["available"] is True and (
+            not malformed
+            and all(
+                state["seen"] is False
+                or materialized_guardrail_family_is_valid(family)
+                for family, state in guardrail_families.items()
+            )
         )
     else:
         snapshot["guardrail_metrics_available"] = not malformed and all(
-            guardrail_sample_seen.values()
+            state["sample"] for state in guardrail_families.values()
         )
     return snapshot
 

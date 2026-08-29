@@ -452,6 +452,23 @@ class SM121CacheSemanticContractTests(unittest.TestCase):
         with self.assertRaises(SM121CacheSemanticError):
             validate_sm121_cache_semantic_turn_event(tampered)
 
+    def test_nonzero_guardrail_baseline_is_not_admitted(self) -> None:
+        for metric in ("evicted_tokens", "retracted_requests"):
+            with self.subTest(metric=metric):
+                event = _turn_event(SM121_CACHE_SEMANTIC_CACHE_ON_ARM, "T1")
+                event[f"before_{metric}"] = 3
+                event[f"after_{metric}"] = 3
+                event[f"delta_{metric}"] = 0
+                admitted, basis = derive_sm121_cache_semantic_turn_admission(event)
+                self.assertEqual((admitted, basis), (False, "guardrail_activity"))
+                event["semantic_turn_admitted"] = admitted
+                event["semantic_turn_basis"] = basis
+                validate_sm121_cache_semantic_turn_event(event)
+                self.assertIn(
+                    "semantic_cache_guardrail",
+                    {issue["code"] for issue in sm121_cache_semantic_turn_issues(event)},
+                )
+
     def test_lifecycle_accepts_b_and_a_and_preserves_partial_semantics(self) -> None:
         self.assertEqual(
             expected_sm121_cache_semantic_event_counts()["request_complete"], 7

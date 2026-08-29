@@ -263,30 +263,34 @@ The first frozen B/A execution took that authorized terminal-partial path. B
 completed its isolated quality lifetime and all three semantic turns, then
 teardown and lifecycle audit completed cleanly. Its cache/detail observations
 and ordinary native counters were settled, but its source-attested `ChunkCache`
-did not register an eviction family at all and its scheduler retraction counter
-had no labeled child sample. The audit therefore marked each turn non-admitted
-for unavailable guardrails and the controller left A entirely untouched. This
-is an observability finding only: it establishes neither cache behavior nor a
-cache-on comparison.
+did not register an eviction family at all and the multiprocess endpoint did
+not expose its zero scheduler-retraction family. The audit therefore marked
+each turn non-admitted for unavailable guardrails and the controller left A
+entirely untouched. This is an observability finding only: it establishes
+neither cache behavior nor a cache-on comparison.
 
-The correction is deliberately narrower than treating an absent metric as
-zero. A read-only, no-network, no-GPU probe of the pinned local image confirmed
-the exact `# TYPE sglang:..._total counter` declarations used by its Prometheus
-client; the source-tree and metrics-collector digests remain bound by the
-existing static attestation. The semantic parser now accepts zero by omission
-only under this source-pinned arm-specific contract:
+The correction is deliberately narrower than treating an arbitrary absent
+metric as zero. Read-only, no-network, no-GPU probes of the pinned image
+confirmed that its HTTP endpoint uses Prometheus multiprocess collection: a
+labeled counter produces no `HELP`, `TYPE`, or sample family until its label
+child is materialized. The source-tree and metrics-collector digests remain
+bound by the existing static attestation. With independently present and
+settled native cache counters, the semantic parser now accepts complete family
+omission only under this source-pinned arm-specific contract:
 
-1. B requires exactly one declared
-   `# TYPE sglang:num_retracted_requests_total counter`, no eviction declaration
-   or sample, and the already-validated `ChunkCache` runtime identity. Its
-   absent retraction child is the only accepted zero-by-omission case.
-2. A requires exactly one declared counter type for both eviction and
-   retraction. Either zero child may be absent; if an eviction child is
-   materialized it must be exactly `{cache_type="UnifiedRadixCache"}`, while a
-   retraction child must use the frozen scheduler label vector.
+1. B requires its already-validated `ChunkCache` runtime identity and a
+   completely absent eviction family. Its retraction family may be completely
+   absent, or it may be a complete valid materialized counter family.
+2. A permits complete omission or a complete valid materialized counter family
+   for both eviction and retraction. A materialized eviction child must be
+   exactly `{cache_type="UnifiedRadixCache"}`; a materialized retraction child
+   must use the frozen scheduler label vector.
 
-Wrong or duplicate types, an unexpected B eviction family, duplicate children,
-wrong labels, or a missing required declaration remain unavailable and terminal
+A materialized guardrail counter is positive for this exact source path and is
+subsequently rejected by the turn guardrail, including a nonzero settled
+baseline whose before/after delta is zero. HELP-only,
+TYPE-only, sample-only, duplicate, alias, wrong-type, wrong-label, unexpected
+B-eviction, or otherwise partial families remain unavailable and terminal
 `partial`. The original B-only scalar partial is retained as evidence; the
 corrected parser does not reinterpret it as a cache result.
 

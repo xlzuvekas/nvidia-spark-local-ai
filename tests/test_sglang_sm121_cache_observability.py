@@ -283,6 +283,8 @@ def _metric_exposition(
     bad_source: bool = False,
     guardrails: bool = False,
     scheduler_labels: bool = False,
+    guardrail_eviction_help: bool = False,
+    guardrail_retraction_help: bool = False,
     guardrail_eviction_type: str | None = None,
     guardrail_retraction_type: str | None = None,
     guardrail_eviction_sample: int | None = None,
@@ -319,10 +321,16 @@ def _metric_exposition(
             f'sglang:cached_tokens_total{labels(f"cache_source=\"{source}\"")} {cached_total}'
         )
     if guardrails:
+        guardrail_eviction_help = True
+        guardrail_retraction_help = True
         guardrail_eviction_type = "counter"
         guardrail_retraction_type = "counter"
         guardrail_eviction_sample = 0
         guardrail_retraction_sample = 0
+    if guardrail_eviction_help:
+        lines.append("# HELP sglang:evicted_tokens_total synthetic counter")
+    if guardrail_retraction_help:
+        lines.append("# HELP sglang:num_retracted_requests_total synthetic counter")
     if guardrail_eviction_type is not None:
         lines.append(f"# TYPE sglang:evicted_tokens_total {guardrail_eviction_type}")
     if guardrail_retraction_type is not None:
@@ -597,8 +605,13 @@ class SM121CacheObservabilityRuntimeTests(unittest.TestCase):
                 _metric_exposition(
                     cached_total=32_768,
                     cached_source="device",
-                    guardrails=True,
                     scheduler_labels=True,
+                    guardrail_eviction_help=True,
+                    guardrail_retraction_help=True,
+                    guardrail_eviction_type="counter",
+                    guardrail_retraction_type="counter",
+                    guardrail_eviction_sample=7,
+                    guardrail_retraction_sample=3,
                 ).encode("utf-8")
             ),
         ):
@@ -609,8 +622,8 @@ class SM121CacheObservabilityRuntimeTests(unittest.TestCase):
         self.assertTrue(snapshot["guardrail_metrics_available"])
         self.assertEqual(snapshot["cached_device_tokens"], 32_768)
         self.assertTrue(snapshot["cached_device_series_present"])
-        self.assertEqual(snapshot["evicted_tokens"], 0)
-        self.assertEqual(snapshot["retracted_requests"], 0)
+        self.assertEqual(snapshot["evicted_tokens"], 7)
+        self.assertEqual(snapshot["retracted_requests"], 3)
 
         with patch(
             "bench.runtime.urllib.request.urlopen",
@@ -641,10 +654,7 @@ class SM121CacheObservabilityRuntimeTests(unittest.TestCase):
                 )
 
         cache_off_zero = snapshot(
-            _metric_exposition(
-                scheduler_labels=True,
-                guardrail_retraction_type="counter",
-            ),
+            _metric_exposition(scheduler_labels=True),
             SM121_CACHE_SEMANTIC_CACHE_OFF_ARM,
         )
         self.assertTrue(cache_off_zero["available"])
@@ -653,42 +663,71 @@ class SM121CacheObservabilityRuntimeTests(unittest.TestCase):
         self.assertEqual(cache_off_zero["retracted_requests"], 0)
 
         cache_on_zero = snapshot(
-            _metric_exposition(
-                scheduler_labels=True,
-                guardrail_eviction_type="counter",
-                guardrail_retraction_type="counter",
-            ),
+            _metric_exposition(scheduler_labels=True),
             SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
         )
         self.assertTrue(cache_on_zero["available"])
         self.assertTrue(cache_on_zero["guardrail_metrics_available"])
 
-        cache_on_materialized = snapshot(
+        cache_on_eviction = snapshot(
             _metric_exposition(
                 scheduler_labels=True,
+                guardrail_eviction_help=True,
                 guardrail_eviction_type="counter",
-                guardrail_retraction_type="counter",
                 guardrail_eviction_sample=7,
+            ),
+            SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
+        )
+        self.assertTrue(cache_on_eviction["guardrail_metrics_available"])
+        self.assertEqual(cache_on_eviction["evicted_tokens"], 7)
+        self.assertEqual(cache_on_eviction["retracted_requests"], 0)
+
+        cache_on_retraction = snapshot(
+            _metric_exposition(
+                scheduler_labels=True,
+                guardrail_retraction_help=True,
+                guardrail_retraction_type="counter",
                 guardrail_retraction_sample=3,
             ),
             SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
         )
-        self.assertTrue(cache_on_materialized["guardrail_metrics_available"])
-        self.assertEqual(cache_on_materialized["evicted_tokens"], 7)
-        self.assertEqual(cache_on_materialized["retracted_requests"], 3)
+        self.assertTrue(cache_on_retraction["guardrail_metrics_available"])
+        self.assertEqual(cache_on_retraction["evicted_tokens"], 0)
+        self.assertEqual(cache_on_retraction["retracted_requests"], 3)
+
+        cache_off_retraction = snapshot(
+            _metric_exposition(
+                scheduler_labels=True,
+                guardrail_retraction_help=True,
+                guardrail_retraction_type="counter",
+                guardrail_retraction_sample=3,
+            ),
+            SM121_CACHE_SEMANTIC_CACHE_OFF_ARM,
+        )
+        self.assertTrue(cache_off_retraction["guardrail_metrics_available"])
+        self.assertEqual(cache_off_retraction["retracted_requests"], 3)
 
         bad_cases = (
             (
                 "cache_off_eviction_family_present",
                 _metric_exposition(
                     scheduler_labels=True,
+                    guardrail_eviction_help=True,
                     guardrail_eviction_type="counter",
-                    guardrail_retraction_type="counter",
+                    guardrail_eviction_sample=7,
                 ),
                 SM121_CACHE_SEMANTIC_CACHE_OFF_ARM,
             ),
             (
-                "cache_on_eviction_family_missing",
+                "cache_on_help_only",
+                _metric_exposition(
+                    scheduler_labels=True,
+                    guardrail_eviction_help=True,
+                ),
+                SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
+            ),
+            (
+                "cache_on_type_only",
                 _metric_exposition(
                     scheduler_labels=True,
                     guardrail_retraction_type="counter",
@@ -696,20 +735,20 @@ class SM121CacheObservabilityRuntimeTests(unittest.TestCase):
                 SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
             ),
             (
-                "cache_off_truncated_eviction_family",
+                "cache_on_sample_only",
                 _metric_exposition(
                     scheduler_labels=True,
-                    guardrail_retraction_type="counter",
-                )
-                + "# HELP sglang:evicted_tokens_total eviction counter\n",
-                SM121_CACHE_SEMANTIC_CACHE_OFF_ARM,
+                    guardrail_retraction_sample=3,
+                ),
+                SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
             ),
             (
                 "wrong_counter_type",
                 _metric_exposition(
                     scheduler_labels=True,
+                    guardrail_eviction_help=True,
                     guardrail_eviction_type="gauge",
-                    guardrail_retraction_type="counter",
+                    guardrail_eviction_sample=7,
                 ),
                 SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
             ),
@@ -717,10 +756,20 @@ class SM121CacheObservabilityRuntimeTests(unittest.TestCase):
                 "wrong_eviction_labels",
                 _metric_exposition(
                     scheduler_labels=True,
+                    guardrail_eviction_help=True,
                     guardrail_eviction_type="counter",
-                    guardrail_retraction_type="counter",
-                    guardrail_eviction_sample=0,
+                    guardrail_eviction_sample=7,
                     guardrail_eviction_bad_labels=True,
+                ),
+                SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
+            ),
+            (
+                "zero_materialized_counter",
+                _metric_exposition(
+                    scheduler_labels=True,
+                    guardrail_eviction_help=True,
+                    guardrail_eviction_type="counter",
+                    guardrail_eviction_sample=0,
                 ),
                 SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
             ),
@@ -734,8 +783,9 @@ class SM121CacheObservabilityRuntimeTests(unittest.TestCase):
         duplicate_type = (
             _metric_exposition(
                 scheduler_labels=True,
+                guardrail_eviction_help=True,
                 guardrail_eviction_type="counter",
-                guardrail_retraction_type="counter",
+                guardrail_eviction_sample=7,
             )
             + "# TYPE sglang:evicted_tokens_total counter\n"
         )
@@ -744,15 +794,85 @@ class SM121CacheObservabilityRuntimeTests(unittest.TestCase):
                 "guardrail_metrics_available"
             ]
         )
-        stem_alias = (
+        duplicate_help = (
             _metric_exposition(
                 scheduler_labels=True,
-                guardrail_retraction_type="counter",
+                guardrail_eviction_help=True,
+                guardrail_eviction_type="counter",
+                guardrail_eviction_sample=7,
             )
+            + "# HELP sglang:evicted_tokens_total synthetic counter\n"
+        )
+        self.assertFalse(
+            snapshot(duplicate_help, SM121_CACHE_SEMANTIC_CACHE_ON_ARM)[
+                "guardrail_metrics_available"
+            ]
+        )
+        duplicate_sample = (
+            _metric_exposition(
+                scheduler_labels=True,
+                guardrail_eviction_help=True,
+                guardrail_eviction_type="counter",
+                guardrail_eviction_sample=7,
+            )
+            + "sglang:evicted_tokens_total{cache_type=\"UnifiedRadixCache\"} 8\n"
+        )
+        self.assertFalse(
+            snapshot(duplicate_sample, SM121_CACHE_SEMANTIC_CACHE_ON_ARM)[
+                "guardrail_metrics_available"
+            ]
+        )
+        sample_before_type = (
+            _metric_exposition(
+                scheduler_labels=True,
+                guardrail_eviction_help=True,
+                guardrail_eviction_sample=7,
+            )
+            + "# TYPE sglang:evicted_tokens_total counter\n"
+        )
+        self.assertFalse(
+            snapshot(sample_before_type, SM121_CACHE_SEMANTIC_CACHE_ON_ARM)[
+                "guardrail_metrics_available"
+            ]
+        )
+        leading_type = (
+            _metric_exposition(scheduler_labels=True)
+            + " # TYPE sglang:evicted_tokens_total counter\n"
+        )
+        self.assertFalse(
+            snapshot(leading_type, SM121_CACHE_SEMANTIC_CACHE_ON_ARM)[
+                "guardrail_metrics_available"
+            ]
+        )
+        stem_alias = (
+            _metric_exposition(scheduler_labels=True)
             + "# TYPE sglang:evicted_tokens counter\n"
         )
         self.assertFalse(
             snapshot(stem_alias, SM121_CACHE_SEMANTIC_CACHE_ON_ARM)[
+                "guardrail_metrics_available"
+            ]
+        )
+        duplicate_label = (
+            _metric_exposition(
+                scheduler_labels=True,
+                guardrail_eviction_help=True,
+                guardrail_eviction_type="counter",
+            )
+            + "sglang:evicted_tokens_total{cache_type=\"UnifiedRadixCache\","
+            "cache_type=\"UnifiedRadixCache\"} 7\n"
+        )
+        self.assertFalse(
+            snapshot(duplicate_label, SM121_CACHE_SEMANTIC_CACHE_ON_ARM)[
+                "guardrail_metrics_available"
+            ]
+        )
+        created_series = (
+            _metric_exposition(scheduler_labels=True)
+            + "sglang:evicted_tokens_created{cache_type=\"UnifiedRadixCache\"} 7\n"
+        )
+        self.assertFalse(
+            snapshot(created_series, SM121_CACHE_SEMANTIC_CACHE_ON_ARM)[
                 "guardrail_metrics_available"
             ]
         )

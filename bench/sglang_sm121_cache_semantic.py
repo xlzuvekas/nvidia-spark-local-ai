@@ -941,10 +941,22 @@ def _semantic_turn_policy_issues(
         "prefill_storage_hit_tokens",
         "cached_host_tokens",
         "cached_storage_tokens",
-        "evicted_tokens",
-        "retracted_requests",
     ):
         if int(event[f"delta_{metric}"]) != 0:
+            issue(
+                "semantic_cache_guardrail",
+                "Semantic turn observed host/storage cache or guardrail activity",
+            )
+            break
+    # These are monotonic guardrail counters.  A fresh semantic-server
+    # lifetime must start at zero, so a materialized positive value is itself
+    # disqualifying even when it predates the first settled snapshot and its
+    # before/after delta happens to be zero.
+    for metric in ("evicted_tokens", "retracted_requests"):
+        if any(
+            int(event[f"{prefix}_{metric}"]) != 0
+            for prefix in ("before", "after", "delta")
+        ):
             issue(
                 "semantic_cache_guardrail",
                 "Semantic turn observed host/storage cache or guardrail activity",
