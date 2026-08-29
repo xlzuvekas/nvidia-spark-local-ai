@@ -94,12 +94,12 @@ case was a one-shot prompt, while its agent cases used small histories; neither
 measured repeated long-prefix work across tool turns.
 
 The tracked [cache-policy reducer](../bench/sglang_cache_policy_protocol.py)
-and its [contract tests](../tests/test_sglang_cache_policy_protocol.py) freeze
-the provisional A/B/B/A topology, scalar observation schema, and diagnostic
-threshold math. They are deliberately draft-only: the reducer cannot admit a
-measurement or select an arm, and no cache-policy run is authorized until its
-listed runtime, zero-hit canary, native cache/residency, workload-identity, and
-correctness contracts have been independently frozen and admitted.
+and its [contract tests](../tests/test_sglang_cache_policy_protocol.py) remain
+the historical product-backlog draft. The executable lane is now the separate,
+frozen [SM121 cache-policy timing protocol](qwen38-flash-next-sm121-cache-performance-protocol-2026-08-29.md):
+it has not run, but it has a dedicated controller, audit, scalar evidence
+contract, and no-resume policy. Its `--results` value is the parent root and
+the controller creates `cache-policy-campaigns/` below it.
 
 - Bundle A: the newly admitted C1 baseline, default Radix behavior, and requested
   `extra_buffer_lazy`; require startup `impl=UnifiedRadixCache` with hybrid SSM.
@@ -118,10 +118,10 @@ correctness contracts have been independently frozen and admitted.
 - Promotion contract: strict correctness is mandatory. The sole speed primary
   is the ratio of unweighted arm means for lifetime-level T1+T2 resident wall.
   Promote B only if `B/A <=0.95`; retain A if `A/B <=0.95`; otherwise call the
-  speed result inconclusive. Require the selected bundle's unweighted-mean
-  later-turn TTFT and full T0--T2 wall each to remain `<=1.05x` the other
-  bundle. Decode TPS and T0 cold wall are separate diagnostics, never averaged
-  into the primary.
+  speed result inconclusive. The executable protocol measures request wall
+  only: it deliberately publishes no TTFT, decode TPS, throughput, or
+  agent-speed value. Its selected bundle must keep unweighted-mean full T0--T2
+  request wall `<=1.05x` the other bundle.
 - Identity gate: render with the same pinned tokenizer, template, tools,
   serialization, reasoning policy, sampling and output cap. Compute
   domain-separated token-ID digests from volatile

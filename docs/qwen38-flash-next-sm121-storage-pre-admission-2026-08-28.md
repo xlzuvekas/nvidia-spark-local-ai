@@ -353,13 +353,13 @@ target-only canary and its B0 cache-off observation now demonstrate those
 gates. That narrow admission result does not remove the ordinary-entrypoint
 tombstone or establish a general serving configuration.
 
-Before any performance comparison or cache experiment, the next protocol must:
-
-1. pin the immutable image, model, tokenizer, revision, and serving profile;
-2. retain the fresh-process quality, varied-token, and B0 zero-hit checks as
-   admission gates;
-3. verify teardown and scalar-only evidence export; then
-4. run a cold A/B/B/A cache-policy experiment in separate process lifetimes.
+The next execution-gated step is now frozen in the separate
+[SM121 cache-policy timing protocol](qwen38-flash-next-sm121-cache-performance-protocol-2026-08-29.md).
+It retains the immutable image/model/tokenizer/profile pins, fresh-process
+quality and B0-derived admission, teardown checks, and scalar-only export. Its
+dedicated controller executes cold A/B/B/A in eight separate quality/timing
+lifetimes with 1,200-second admission deadlines and remains unexecuted at this
+writing.
 
 The retired overlay and all historical TRT-LLM measurements remain excluded
 from this candidate. Passing this pre-admission does not license a speed claim

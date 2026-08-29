@@ -47,6 +47,14 @@ from .sglang_sm121_cache_semantic import (
     validate_sm121_cache_semantic_candidate,
     validate_sm121_cache_semantic_suite,
 )
+from .sglang_sm121_cache_performance import (
+    SM121_CACHE_PERFORMANCE_PROFILE_IDS,
+    SM121_CACHE_PERFORMANCE_SUITE_ID,
+    SM121CachePerformanceError,
+    is_sm121_cache_performance_candidate,
+    validate_sm121_cache_performance_candidate,
+    validate_sm121_cache_performance_suite,
+)
 
 
 SCHEMA_VERSION = 1
@@ -1673,9 +1681,15 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
         try:
             if is_sm121_cache_semantic_candidate(model):
                 validate_sm121_cache_semantic_candidate(model)
+            elif is_sm121_cache_performance_candidate(model):
+                validate_sm121_cache_performance_candidate(model)
             else:
                 validate_sm121_storage_candidate(model)
-        except (SM121StorageCandidateError, SM121CacheSemanticError) as error:
+        except (
+            SM121StorageCandidateError,
+            SM121CacheSemanticError,
+            SM121CachePerformanceError,
+        ) as error:
             raise ManifestError(f"{context}: {error}") from error
     if model.image_digest and not _DIGEST_PATTERN.fullmatch(model.image_digest):
         raise ManifestError(f"{context}.image_digest must be a sha256 digest")
@@ -1926,6 +1940,11 @@ def validate_suite(suite: SuiteSpec, *, context: str = "suite") -> None:
             validate_sm121_cache_semantic_suite(suite)
         except SM121CacheSemanticError as error:
             raise ManifestError(f"{context}: {error}") from error
+    if suite.id == SM121_CACHE_PERFORMANCE_SUITE_ID:
+        try:
+            validate_sm121_cache_performance_suite(suite)
+        except SM121CachePerformanceError as error:
+            raise ManifestError(f"{context}: {error}") from error
     cache_cases = [case for case in suite.cases if case.kind == "cache"]
     cache_suite = suite.id == PREFIX_CACHE_SUITE_ID
     if cache_suite or cache_cases:
@@ -2047,6 +2066,18 @@ def validate_benchmark_selection(
         raise ManifestError(
             f"{context}: the {_SM121_CACHE_SEMANTIC_SUITE_ID!r} suite requires "
             "one of its exact paired cache-policy profiles"
+        )
+    sm121_cache_performance_profile = model_id in SM121_CACHE_PERFORMANCE_PROFILE_IDS
+    sm121_cache_performance_suite = suite.id == SM121_CACHE_PERFORMANCE_SUITE_ID
+    if sm121_cache_performance_profile and not sm121_cache_performance_suite:
+        raise ManifestError(
+            f"{context}: the {model.id!r} profile requires "
+            f"the {SM121_CACHE_PERFORMANCE_SUITE_ID!r} suite"
+        )
+    if sm121_cache_performance_suite and not sm121_cache_performance_profile:
+        raise ManifestError(
+            f"{context}: the {SM121_CACHE_PERFORMANCE_SUITE_ID!r} suite requires "
+            "one of its exact paired cache-policy performance profiles"
         )
     ple_study_suite_profiles = _PLE_STUDY_PROFILE_IDS_BY_SUITE.get(suite.id)
     ple_study_profile_suites = _PLE_STUDY_SUITE_IDS_BY_PROFILE_ID.get(model_id)

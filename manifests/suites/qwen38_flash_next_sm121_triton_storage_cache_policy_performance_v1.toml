@@ -1,0 +1,27 @@
+schema_version = 1
+
+[suite]
+id = "qwen38-flash-next-sm121-triton-storage-cache-policy-performance-v1"
+description = "Frozen fresh-lifetime A/B/B/A wall-time study of the exact SM121 native-NVMe Qwen3.8 Flash-Next cache-policy bundle. Each arm has a separate quality lifetime and a cold T0 plus append-only T1/T2 timing lifetime; only the dedicated controller may execute it."
+
+[[cases]]
+id = "synthetic-exact-answer-v2"
+kind = "quality"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 512
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "sm121-cache-policy-shared-prefix-performance-v1"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 32
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0

@@ -48,6 +48,12 @@ from .sglang_sm121_cache_semantic import (
     is_sm121_cache_semantic_candidate,
     validate_sm121_cache_semantic_candidate,
 )
+from .sglang_sm121_cache_performance import (
+    SM121_CACHE_PERFORMANCE_EXECUTION_MODE,
+    SM121CachePerformanceError,
+    is_sm121_cache_performance_candidate,
+    validate_sm121_cache_performance_candidate,
+)
 from .sglang_sm121_cache_observability import (
     SM121_CACHE_RUNTIME_ATTESTATION_EVENT,
     SM121_CACHE_RUNTIME_EXPECTED,
@@ -1234,9 +1240,12 @@ def _start_sglang_sm121_storage(
     """Start the dedicated native-NVMe PLE canary with narrow containment."""
 
     semantic_candidate = is_sm121_cache_semantic_candidate(model)
+    performance_candidate = is_sm121_cache_performance_candidate(model)
     authorized = (
         getattr(model, "cache_semantic_canary_authorized", False) is True
         if semantic_candidate
+        else getattr(model, "cache_performance_authorized", False) is True
+        if performance_candidate
         else getattr(model, "storage_canary_authorized", False) is True
     )
     if not authorized:
@@ -1246,9 +1255,15 @@ def _start_sglang_sm121_storage(
     try:
         if semantic_candidate:
             validate_sm121_cache_semantic_candidate(model)
+        elif performance_candidate:
+            validate_sm121_cache_performance_candidate(model)
         else:
             validate_sm121_storage_candidate(model)
-    except (SM121StorageCandidateError, SM121CacheSemanticError) as error:
+    except (
+        SM121StorageCandidateError,
+        SM121CacheSemanticError,
+        SM121CachePerformanceError,
+    ) as error:
         raise RuntimeErrorWithContext(str(error)) from error
     if abort_check is not None:
         abort_check()
@@ -1389,7 +1404,7 @@ def _start_sglang_sm121_storage(
     server.native_provenance = {
         "candidate_id": (
             str(getattr(model, "id", ""))
-            if semantic_candidate
+            if semantic_candidate or performance_candidate
             else SM121_STORAGE_CANDIDATE_ID
         ),
         "candidate_source_tree": SM121_STORAGE_SOURCE_TREE,
@@ -1410,6 +1425,8 @@ def _start_sglang_sm121_storage(
         "benchmark_scope": (
             SM121_CACHE_SEMANTIC_EXECUTION_MODE
             if semantic_candidate
+            else SM121_CACHE_PERFORMANCE_EXECUTION_MODE
+            if performance_candidate
             else "sm121_storage_pre_admission_canary"
         ),
         "model_acquisition": "disabled_exact_read_only_snapshot",
@@ -2360,6 +2377,7 @@ def request_sm121_cache_semantic_turn(
     messages: list[dict[str, str]],
     expected_response: str,
     max_tokens: int,
+    timeout_s: float = 900.0,
 ) -> dict[str, Any]:
     """Issue one non-streaming semantic-cache request without retaining text.
 
@@ -2391,6 +2409,13 @@ def request_sm121_cache_semantic_turn(
         or not 1 <= max_tokens <= 128
     ):
         raise RuntimeErrorWithContext("SM121 semantic-cache output cap is invalid")
+    if (
+        isinstance(timeout_s, bool)
+        or not isinstance(timeout_s, (int, float))
+        or not math.isfinite(float(timeout_s))
+        or not 0 < float(timeout_s) <= 900
+    ):
+        raise RuntimeErrorWithContext("SM121 semantic-cache request timeout is invalid")
     if not isinstance(messages, list) or not 1 <= len(messages) <= 16:
         raise RuntimeErrorWithContext("SM121 semantic-cache messages are invalid")
     for message in messages:
@@ -2425,7 +2450,7 @@ def request_sm121_cache_semantic_turn(
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=900) as response:
+        with urllib.request.urlopen(request, timeout=float(timeout_s)) as response:
             raw = response.read(4_194_305)
     except urllib.error.HTTPError as error:
         error.close()
@@ -2870,10 +2895,14 @@ def start_sglang(
     cache_semantic_canary_authorized = (
         getattr(model, "cache_semantic_canary_authorized", False) is True
     )
+    cache_performance_authorized = (
+        getattr(model, "cache_performance_authorized", False) is True
+    )
     blocker = model_execution_blocker(
         model,
         allow_sm121_storage_canary=storage_canary_authorized,
         allow_sm121_cache_semantic_canary=cache_semantic_canary_authorized,
+        allow_sm121_cache_performance=cache_performance_authorized,
     )
     if blocker is not None:
         raise RuntimeErrorWithContext(blocker)
@@ -2908,7 +2937,11 @@ def start_sglang(
     target_repository, container_snapshot = _exact_sglang_snapshot(
         hf_cache, source=source, revision=revision, role="target"
     )
-    if is_sm121_cache_semantic_candidate(model) or is_sm121_storage_candidate(model):
+    if (
+        is_sm121_cache_semantic_candidate(model)
+        or is_sm121_cache_performance_candidate(model)
+        or is_sm121_storage_candidate(model)
+    ):
         return _start_sglang_sm121_storage(
             model,
             workspace=workspace,

@@ -150,6 +150,33 @@ from .sglang_sm121_cache_semantic import (
     validate_sm121_cache_semantic_suite,
     validate_sm121_cache_semantic_turn_event,
 )
+from .sglang_sm121_cache_performance import (
+    SM121_CACHE_PERFORMANCE_ARM_ORDER,
+    SM121_CACHE_PERFORMANCE_CASE_ID,
+    SM121_CACHE_PERFORMANCE_CAMPAIGN_ID,
+    SM121_CACHE_PERFORMANCE_CELL_TIMEOUT_S,
+    SM121_CACHE_PERFORMANCE_EXECUTION_MODE,
+    SM121_CACHE_PERFORMANCE_PREREQUISITE_BUNDLE_SHA256S,
+    SM121_CACHE_PERFORMANCE_QUALITY_CASE_ID,
+    SM121_CACHE_PERFORMANCE_QUALITY_ITEM_COUNT,
+    SM121_CACHE_PERFORMANCE_RUNTIME_EVENT,
+    SM121_CACHE_PERFORMANCE_STATIC_EVENT,
+    SM121_CACHE_PERFORMANCE_SUITE_ID,
+    SM121_CACHE_PERFORMANCE_TIMED_TURNS,
+    SM121_CACHE_PERFORMANCE_TURN_EVENT,
+    SM121CachePerformanceError,
+    score_sm121_cache_performance_campaign,
+    sm121_cache_performance_arm,
+    sm121_cache_performance_pair_binding_sha256,
+    sm121_cache_performance_pair_instance_sha256,
+    validate_sm121_cache_performance_candidate,
+    validate_sm121_cache_performance_pair_binding,
+    validate_sm121_cache_performance_runtime_event,
+    validate_sm121_cache_performance_static_event,
+    validate_sm121_cache_performance_suite,
+    validate_sm121_cache_performance_lifetimes,
+    validate_sm121_cache_performance_turn_event,
+)
 
 
 SCHEMA_VERSION = "sparkbench-evidence-v1"
@@ -165,6 +192,8 @@ HARBOR_REPLICATE_COUNT = 2
 LOOP_EVIDENCE_KIND = "rlm_halo_loop_campaign"
 LOOP_RESULT_ROOTS = ("loop-campaigns", "loop-smoke-plans", "loop-smokes")
 AUTORESEARCH_RESULT_ROOT = "autoresearch"
+SM121_CACHE_PERFORMANCE_RESULT_ROOT = "cache-policy-campaigns"
+SM121_CACHE_PERFORMANCE_EVIDENCE_KIND = "sm121_cache_policy_performance"
 AUTORESEARCH_EVIDENCE_KIND = "autoresearch_campaign"
 AUTORESEARCH_CAMPAIGN_SCHEMA_VERSION = 3
 AUTORESEARCH_CAMPAIGN_SCHEMA_VERSIONS = frozenset({2, 3})
@@ -16549,6 +16578,17 @@ def _verify_simple_bundle(
     if primary.get("evidence_kind") != entry["evidence_kind"]:
         raise EvidenceError(f"{category} kind mismatch: {identity}")
     if category == "campaigns" and (
+        entry.get("evidence_kind") == SM121_CACHE_PERFORMANCE_EVIDENCE_KIND
+        or primary.get("evidence_kind") == SM121_CACHE_PERFORMANCE_EVIDENCE_KIND
+    ):
+        if (
+            entry.get("evidence_kind") != SM121_CACHE_PERFORMANCE_EVIDENCE_KIND
+            or primary.get("evidence_kind") != SM121_CACHE_PERFORMANCE_EVIDENCE_KIND
+        ):
+            raise EvidenceError("SM121 cache-performance evidence kind changed")
+        _verify_sm121_cache_performance_bundle(root, directory, entry, primary)
+        return
+    if category == "campaigns" and (
         entry.get("evidence_kind") == AUTORESEARCH_EVIDENCE_KIND
         or primary.get("evidence_kind") == AUTORESEARCH_EVIDENCE_KIND
     ):
@@ -16611,6 +16651,174 @@ def _verify_simple_bundle(
             or telemetry["capture_count"] != len(telemetry["captures"])
         ):
             raise EvidenceError(f"campaign telemetry count mismatch: {identity}")
+
+
+def _verify_sm121_cache_performance_bundle(
+    root: Path, directory: Path, entry: dict[str, Any], manifest: dict[str, Any]
+) -> None:
+    """Revalidate the exact scalar A/B/B/A performance publication bundle."""
+
+    if {path.name for path in directory.iterdir()} != {
+        "checksums.json",
+        "manifest.json",
+    }:
+        raise EvidenceError("SM121 cache-performance bundle file set changed")
+    expected = {
+        "schema_version",
+        "evidence_kind",
+        "campaign_id",
+        "protocol",
+        "binding",
+        "status",
+        "decision",
+        "completed_arms",
+        "lifetimes",
+        "score",
+        "static_attestations",
+        "runtime_attestations",
+        "quality_attestations",
+        "sanitization",
+    }
+    if frozenset(manifest) != expected:
+        raise EvidenceError("SM121 cache-performance manifest fields changed")
+    if (
+        manifest.get("schema_version") != SCHEMA_VERSION
+        or manifest.get("evidence_kind") != SM121_CACHE_PERFORMANCE_EVIDENCE_KIND
+        or manifest.get("campaign_id") != entry.get("campaign_id")
+        or not isinstance(manifest.get("campaign_id"), str)
+        or not manifest["campaign_id"].startswith(
+            SM121_CACHE_PERFORMANCE_CAMPAIGN_ID + "-"
+        )
+    ):
+        raise EvidenceError("SM121 cache-performance manifest identity changed")
+    protocol = manifest.get("protocol")
+    expected_protocol = {
+        "campaign_id": SM121_CACHE_PERFORMANCE_CAMPAIGN_ID,
+        "suite_id": SM121_CACHE_PERFORMANCE_SUITE_ID,
+        "execution_mode": SM121_CACHE_PERFORMANCE_EXECUTION_MODE,
+        "arm_order": list(SM121_CACHE_PERFORMANCE_ARM_ORDER),
+        "cell_timeout_s": SM121_CACHE_PERFORMANCE_CELL_TIMEOUT_S,
+        "quality_item_count": SM121_CACHE_PERFORMANCE_QUALITY_ITEM_COUNT,
+        "timed_turns": list(SM121_CACHE_PERFORMANCE_TIMED_TURNS),
+        "measurement": "non_streaming_request_wall_s_only",
+        "ttft": None,
+    }
+    if protocol != expected_protocol:
+        raise EvidenceError("SM121 cache-performance protocol changed")
+    binding = manifest.get("binding")
+    if (
+        type(binding) is not dict
+        or set(binding)
+        != {
+            "campaign_instance_sha256",
+            "pair_binding_sha256",
+            "prerequisite_bundle_sha256s",
+        }
+        or not isinstance(binding["campaign_instance_sha256"], str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", binding["campaign_instance_sha256"])
+        is None
+        or not isinstance(binding["pair_binding_sha256"], str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", binding["pair_binding_sha256"])
+        is None
+        or binding["prerequisite_bundle_sha256s"]
+        != list(SM121_CACHE_PERFORMANCE_PREREQUISITE_BUNDLE_SHA256S)
+    ):
+        raise EvidenceError("SM121 cache-performance public binding changed")
+    if not manifest["campaign_id"].endswith(
+        binding["campaign_instance_sha256"].removeprefix("sha256:")[:12]
+    ):
+        raise EvidenceError("SM121 cache-performance public instance changed")
+    verify_sm121_cache_performance_prerequisites(root, already_verified=True)
+    lifetimes = manifest.get("lifetimes")
+    try:
+        score = score_sm121_cache_performance_campaign(lifetimes)
+        lifetime_rows = validate_sm121_cache_performance_lifetimes(lifetimes)
+    except SM121CachePerformanceError as error:
+        raise EvidenceError("SM121 cache-performance public score is invalid") from error
+    if (
+        manifest.get("status") != score.status
+        or manifest.get("decision") != score.decision
+        or manifest.get("score") != score.to_mapping()
+        or manifest.get("completed_arms")
+        != sum(
+            1
+            for lifetime in lifetimes
+            if isinstance(lifetime, dict)
+            and lifetime.get("quality_admitted") is True
+            and lifetime.get("timed_admitted") is True
+            and lifetime.get("within_timeout") is True
+        )
+    ):
+        raise EvidenceError("SM121 cache-performance public reduction changed")
+    static = manifest.get("static_attestations")
+    runtime = manifest.get("runtime_attestations")
+    if not isinstance(static, list) or not isinstance(runtime, list):
+        raise EvidenceError("SM121 cache-performance public attestations are invalid")
+    try:
+        for event in static:
+            if not isinstance(event, dict) or "timestamp" in event:
+                raise SM121CachePerformanceError("public static timestamp changed")
+            validate_sm121_cache_performance_static_event(event)
+        for event in runtime:
+            if not isinstance(event, dict) or "timestamp" in event:
+                raise SM121CachePerformanceError("public runtime timestamp changed")
+            validate_sm121_cache_performance_runtime_event(event)
+    except SM121CachePerformanceError as error:
+        raise EvidenceError("SM121 cache-performance public attestation changed") from error
+    _validate_sm121_cache_performance_attestation_topology(
+        lifetimes=lifetime_rows,
+        static_events=static,
+        runtime_events=runtime,
+    )
+    quality = manifest.get("quality_attestations")
+    if not isinstance(quality, list):
+        raise EvidenceError("SM121 cache-performance public quality attestations are invalid")
+    expected_quality_count = sum(
+        1 for lifetime in lifetime_rows if lifetime["quality_admitted"] is True
+    )
+    if len(quality) != expected_quality_count:
+        raise EvidenceError("SM121 cache-performance public quality count changed")
+    quality_index = 0
+    for ordinal, (lifetime, arm) in enumerate(
+        zip(lifetime_rows, SM121_CACHE_PERFORMANCE_ARM_ORDER, strict=True), start=1
+    ):
+        if lifetime["quality_admitted"] is not True:
+            continue
+        event = quality[quality_index]
+        quality_index += 1
+        if (
+            type(event) is not dict
+            or set(event)
+            != {
+                "arm",
+                "quality_lifetime_ordinal",
+                "case_id",
+                "quality_admitted",
+                "item_count",
+            }
+            or (
+                event.get("arm"),
+                event.get("quality_lifetime_ordinal"),
+                event.get("quality_admitted"),
+            )
+            != (arm, ordinal * 2 - 1, True)
+            or not isinstance(event.get("case_id"), str)
+            or re.fullmatch(
+                rf"{re.escape(SM121_CACHE_PERFORMANCE_QUALITY_CASE_ID)}--[0-9a-f]{{12}}",
+                event["case_id"],
+            )
+            is None
+            or event.get("item_count")
+            != SM121_CACHE_PERFORMANCE_QUALITY_ITEM_COUNT
+        ):
+            raise EvidenceError("SM121 cache-performance public quality attestation changed")
+    if manifest.get("sanitization") != {
+        "free_form_text_included": False,
+        "payloads_included": False,
+        "policy": SANITIZATION_POLICY,
+        "raw_identifiers_included": False,
+    }:
+        raise EvidenceError("SM121 cache-performance sanitization changed")
 
 
 def _validate_sm121_cache_semantic_published_pairs(
@@ -16870,6 +17078,33 @@ def verify_evidence(root: Path) -> dict[str, Any]:
         raise EvidenceError("evidence checksums do not match materialized files")
     _verify_evidence_topology(root)
     return {"files": len(files), "size_bytes": total, "status": "verified"}
+
+
+def verify_sm121_cache_performance_prerequisites(
+    evidence_root: Path, *, already_verified: bool = False
+) -> None:
+    """Require the exact verified scalar bundles that admit the ABBA lane.
+
+    The frozen campaign binding names these hashes, but that declaration alone
+    is not proof that the requisite evidence remains present.  Check the
+    complete verified index as well, so planning, audit, export, and later
+    artifact verification all reject a pruned but self-consistent corpus.
+    """
+
+    root = Path(evidence_root)
+    if not already_verified:
+        verify_evidence(root)
+    root = root.resolve(strict=True)
+    index = _load_json(root / "index.json", root)
+    if not isinstance(index, dict) or not isinstance(index.get("runs"), list):
+        raise EvidenceError("cache-performance prerequisite evidence index is invalid")
+    observed = {
+        row.get("bundle_sha256")
+        for row in index["runs"]
+        if isinstance(row, dict) and isinstance(row.get("bundle_sha256"), str)
+    }
+    if not set(SM121_CACHE_PERFORMANCE_PREREQUISITE_BUNDLE_SHA256S) <= observed:
+        raise EvidenceError("cache-performance prerequisite evidence is absent")
 
 
 def _git_bytes(repo_root: Path, *arguments: str) -> bytes:
@@ -18278,6 +18513,676 @@ def _export_autoresearch_campaign(
     }
 
 
+_SM121_CACHE_PERFORMANCE_CAMPAIGN_FIELDS = frozenset(
+    {
+        "schema_version",
+        "campaign_id",
+        "created_at",
+        "execution_mode",
+        "prerequisite_bundle_sha256s",
+        "pair_binding",
+        "run_directories",
+        "integrity_hash",
+    }
+)
+_SM121_CACHE_PERFORMANCE_SUMMARY_FIELDS = frozenset(
+    {
+        "schema_version",
+        "campaign_id",
+        "execution_mode",
+        "pair_binding_sha256",
+        "status",
+        "decision",
+        "completed_arms",
+        "lifetimes",
+        "score",
+        "integrity_hash",
+    }
+)
+_SM121_CACHE_PERFORMANCE_SAFE_EVENT_NAMES = frozenset(
+    {
+        "run_start",
+        "measurement_started",
+        "measurement_complete",
+        "run_complete",
+        "run_aborted",
+        "host_safety_breach",
+        "host_safety_interrupt_failed",
+        "server_ready",
+        "server_stopped",
+        "sm121_cache_performance_lifetime_complete",
+        "sm121_cache_performance_quality_case_start",
+        "sm121_cache_performance_quality_case_complete",
+        "sm121_cache_performance_timed_case_start",
+        "sm121_cache_performance_timed_case_complete",
+        SM121_CACHE_PERFORMANCE_STATIC_EVENT,
+        SM121_CACHE_PERFORMANCE_RUNTIME_EVENT,
+        SM121_CACHE_PERFORMANCE_TURN_EVENT,
+    }
+)
+
+
+def _sm121_cache_performance_campaign_dirs(results_root: Path) -> list[Path]:
+    """Return direct campaign directories without treating nested plans as runs."""
+
+    root = results_root / SM121_CACHE_PERFORMANCE_RESULT_ROOT
+    if not root.exists():
+        return []
+    if root.is_symlink() or not root.is_dir():
+        raise EvidenceError("SM121 cache-performance result root is invalid")
+    campaigns: list[Path] = []
+    for child in sorted(root.iterdir()):
+        if (
+            child.is_symlink()
+            or not child.is_dir()
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", child.name)
+            is None
+        ):
+            raise EvidenceError("SM121 cache-performance campaign directory is invalid")
+        if not (child / "campaign.json").is_file():
+            raise EvidenceError("SM121 cache-performance campaign is incomplete")
+        campaigns.append(child)
+    return campaigns
+
+
+def _sm121_cache_performance_event_without_timestamp(
+    event: dict[str, Any]
+) -> dict[str, Any]:
+    """Return a validated scalar event without its wall-clock identifier."""
+
+    return {key: value for key, value in event.items() if key != "timestamp"}
+
+
+def _validate_sm121_cache_performance_attestation_topology(
+    *,
+    lifetimes: Sequence[dict[str, object]],
+    static_events: Sequence[dict[str, Any]],
+    runtime_events: Sequence[dict[str, Any]],
+) -> None:
+    """Bind scalar attestations to each campaign arm's two server lifetimes."""
+
+    seen_static = 0
+    seen_runtime = 0
+    for campaign_ordinal, (lifetime, arm) in enumerate(
+        zip(lifetimes, SM121_CACHE_PERFORMANCE_ARM_ORDER, strict=True), start=1
+    ):
+        quality_ordinal = campaign_ordinal * 2 - 1
+        timed_ordinal = campaign_ordinal * 2
+        expected_ordinals = [quality_ordinal, timed_ordinal]
+        arm_static = [
+            event
+            for event in static_events
+            if event.get("arm") == arm
+            and event.get("lifetime_ordinal") in expected_ordinals
+        ]
+        arm_runtime = [
+            event
+            for event in runtime_events
+            if event.get("arm") == arm
+            and event.get("lifetime_ordinal") in expected_ordinals
+        ]
+        seen_static += len(arm_static)
+        seen_runtime += len(arm_runtime)
+        static_ordinals = [event["lifetime_ordinal"] for event in arm_static]
+        runtime_ordinals = [event["lifetime_ordinal"] for event in arm_runtime]
+        if (
+            static_ordinals != expected_ordinals[: len(static_ordinals)]
+            or runtime_ordinals != expected_ordinals[: len(runtime_ordinals)]
+            or any(ordinal not in static_ordinals for ordinal in runtime_ordinals)
+        ):
+            raise EvidenceError("SM121 cache-performance attestation topology changed")
+        if (
+            lifetime["quality_admitted"] is True
+            and lifetime["timed_admitted"] is True
+            and lifetime["within_timeout"] is True
+        ):
+            if (
+                static_ordinals != expected_ordinals
+                or runtime_ordinals != expected_ordinals
+            ):
+                raise EvidenceError(
+                    "SM121 cache-performance completed attestation count changed"
+                )
+    if seen_static != len(static_events) or seen_runtime != len(runtime_events):
+        raise EvidenceError("SM121 cache-performance attestation arm changed")
+
+
+def _sm121_cache_performance_quality_attestation(
+    *,
+    events: Sequence[dict[str, Any]],
+    arm: str,
+    campaign_ordinal: int,
+    quality_case_id: str,
+) -> dict[str, object]:
+    """Validate and project the quality-clean lifetime for one admitted arm."""
+
+    quality_ordinal = campaign_ordinal * 2 - 1
+
+    def matching(name: str) -> list[dict[str, Any]]:
+        return [event for event in events if event.get("event") == name]
+
+    ready = [
+        event
+        for event in matching("server_ready")
+        if event.get("lifetime_ordinal") == quality_ordinal
+    ]
+    if len(ready) != 1 or (
+        ready[0].get("backend"),
+        ready[0].get("phase"),
+        ready[0].get("first_inference_is_case"),
+        ready[0].get("case_id"),
+    ) != ("sglang", "quality", True, quality_case_id):
+        raise EvidenceError("SM121 cache-performance quality server changed")
+    stopped = [
+        event
+        for event in matching("server_stopped")
+        if event.get("lifetime_ordinal") == quality_ordinal
+    ]
+    if len(stopped) != 1 or stopped[0].get("backend") != "sglang":
+        raise EvidenceError("SM121 cache-performance quality stop changed")
+    lifecycle = [
+        event
+        for event in matching("sm121_cache_performance_lifetime_complete")
+        if event.get("lifetime_ordinal") == quality_ordinal
+    ]
+    if len(lifecycle) != 1 or (
+        lifecycle[0].get("arm"),
+        lifecycle[0].get("phase"),
+        lifecycle[0].get("within_timeout"),
+        lifecycle[0].get("admitted"),
+    ) != (arm, "quality", True, True) or type(
+        lifecycle[0].get("lifetime_wall_s")
+    ) not in {int, float} or lifecycle[0]["lifetime_wall_s"] <= 0 or not math.isfinite(
+        float(lifecycle[0]["lifetime_wall_s"])
+    ):
+        raise EvidenceError("SM121 cache-performance quality lifetime changed")
+    starts = matching("sm121_cache_performance_quality_case_start")
+    completed = matching("sm121_cache_performance_quality_case_complete")
+    if len(starts) != 1 or len(completed) != 1 or (
+        starts[0].get("arm"),
+        starts[0].get("lifetime_ordinal"),
+        starts[0].get("case_id"),
+    ) != (arm, quality_ordinal, quality_case_id) or (
+        completed[0].get("arm"),
+        completed[0].get("lifetime_ordinal"),
+        completed[0].get("case_id"),
+        completed[0].get("quality_admitted"),
+    ) != (arm, quality_ordinal, quality_case_id, True) or type(
+        completed[0].get("item_count")
+    ) is not int or completed[0]["item_count"] != SM121_CACHE_PERFORMANCE_QUALITY_ITEM_COUNT:
+        raise EvidenceError("SM121 cache-performance quality lifecycle changed")
+    return {
+        "arm": arm,
+        "quality_lifetime_ordinal": quality_ordinal,
+        "case_id": quality_case_id,
+        "quality_admitted": True,
+        "item_count": completed[0]["item_count"],
+    }
+
+
+def _validate_sm121_cache_performance_completed_lifecycle(
+    *,
+    events: Sequence[dict[str, Any]],
+    arm: str,
+    campaign_ordinal: int,
+    quality_case_id: str,
+    timed_case_id: str,
+) -> None:
+    """Require both fresh server lifetimes for a fully admitted campaign arm."""
+
+    quality_ordinal = campaign_ordinal * 2 - 1
+    timed_ordinal = campaign_ordinal * 2
+
+    def matching(name: str) -> list[dict[str, Any]]:
+        return [event for event in events if event.get("event") == name]
+
+    static = matching(SM121_CACHE_PERFORMANCE_STATIC_EVENT)
+    runtime = matching(SM121_CACHE_PERFORMANCE_RUNTIME_EVENT)
+    if [event.get("lifetime_ordinal") for event in static] != [
+        quality_ordinal,
+        timed_ordinal,
+    ] or [event.get("lifetime_ordinal") for event in runtime] != [
+        quality_ordinal,
+        timed_ordinal,
+    ]:
+        raise EvidenceError("SM121 cache-performance completed attestation topology changed")
+    ready = matching("server_ready")
+    if len(ready) != 2 or any(
+        event.get("backend") != "sglang"
+        or event.get("first_inference_is_case") is not True
+        for event in ready
+    ) or [
+        (event.get("lifetime_ordinal"), event.get("phase"), event.get("case_id"))
+        for event in ready
+    ] != [
+        (quality_ordinal, "quality", quality_case_id),
+        (timed_ordinal, "timed", timed_case_id),
+    ]:
+        raise EvidenceError("SM121 cache-performance server lifetime topology changed")
+    stopped = matching("server_stopped")
+    if len(stopped) != 2 or any(
+        event.get("backend") != "sglang" for event in stopped
+    ) or [event.get("lifetime_ordinal") for event in stopped] != [
+        quality_ordinal,
+        timed_ordinal,
+    ]:
+        raise EvidenceError("SM121 cache-performance server stop topology changed")
+    lifecycle = matching("sm121_cache_performance_lifetime_complete")
+    if len(lifecycle) != 2 or [
+        (
+            event.get("arm"),
+            event.get("lifetime_ordinal"),
+            event.get("phase"),
+            event.get("within_timeout"),
+            event.get("admitted"),
+        )
+        for event in lifecycle
+    ] != [
+        (arm, quality_ordinal, "quality", True, True),
+        (arm, timed_ordinal, "timed", True, True),
+    ] or any(
+        type(event.get("lifetime_wall_s")) not in {int, float}
+        or event["lifetime_wall_s"] <= 0
+        or not math.isfinite(float(event["lifetime_wall_s"]))
+        for event in lifecycle
+    ):
+        raise EvidenceError("SM121 cache-performance lifetime admission changed")
+    quality_start = matching("sm121_cache_performance_quality_case_start")
+    quality_complete = matching("sm121_cache_performance_quality_case_complete")
+    if len(quality_start) != 1 or len(quality_complete) != 1 or (
+        quality_start[0].get("arm"),
+        quality_start[0].get("lifetime_ordinal"),
+        quality_start[0].get("case_id"),
+    ) != (arm, quality_ordinal, quality_case_id) or (
+        quality_complete[0].get("arm"),
+        quality_complete[0].get("lifetime_ordinal"),
+        quality_complete[0].get("case_id"),
+        quality_complete[0].get("quality_admitted"),
+    ) != (arm, quality_ordinal, quality_case_id, True) or type(
+        quality_complete[0].get("item_count")
+    ) is not int or quality_complete[0]["item_count"] != SM121_CACHE_PERFORMANCE_QUALITY_ITEM_COUNT:
+        raise EvidenceError("SM121 cache-performance quality lifecycle changed")
+    timed_start = matching("sm121_cache_performance_timed_case_start")
+    timed_complete = matching("sm121_cache_performance_timed_case_complete")
+    if len(timed_start) != 1 or len(timed_complete) != 1 or (
+        timed_start[0].get("arm"),
+        timed_start[0].get("lifetime_ordinal"),
+        timed_start[0].get("case_id"),
+    ) != (arm, timed_ordinal, timed_case_id) or (
+        timed_complete[0].get("arm"),
+        timed_complete[0].get("lifetime_ordinal"),
+        timed_complete[0].get("case_id"),
+        timed_complete[0].get("timed_admitted"),
+    ) != (arm, timed_ordinal, timed_case_id, True):
+        raise EvidenceError("SM121 cache-performance timing lifecycle changed")
+    if (
+        len(matching("run_start")) != 1
+        or len(matching("measurement_started")) != 1
+        or len(matching("measurement_complete")) != 1
+        or len(matching("run_complete")) != 1
+        or matching("run_aborted")
+    ):
+        raise EvidenceError("SM121 cache-performance arm terminal lifecycle changed")
+
+
+def _validate_sm121_cache_performance_source(
+    campaign_dir: Path, results_root: Path
+) -> dict[str, Any] | None:
+    """Validate an entire nested campaign before projecting any scalar evidence.
+
+    A frozen campaign without a terminal summary is intentionally retained as
+    ignored provenance but produces no evidence bundle.  Any started campaign
+    must instead be terminal, topology-complete, and fully reconcilable.
+    """
+
+    campaign = _load_json(campaign_dir / "campaign.json", results_root)
+    if not isinstance(campaign, dict) or frozenset(campaign) != _SM121_CACHE_PERFORMANCE_CAMPAIGN_FIELDS:
+        raise EvidenceError("SM121 cache-performance campaign fields are invalid")
+    integrity = campaign.get("integrity_hash")
+    if not isinstance(integrity, str) or content_hash(
+        {key: value for key, value in campaign.items() if key != "integrity_hash"},
+        len(integrity),
+    ) != integrity:
+        raise EvidenceError("SM121 cache-performance campaign integrity is invalid")
+    if (
+        campaign.get("schema_version") != 1
+        or campaign.get("campaign_id") != SM121_CACHE_PERFORMANCE_CAMPAIGN_ID
+        or campaign.get("execution_mode") != SM121_CACHE_PERFORMANCE_EXECUTION_MODE
+        or not isinstance(campaign.get("created_at"), str)
+        or campaign.get("prerequisite_bundle_sha256s")
+        != list(SM121_CACHE_PERFORMANCE_PREREQUISITE_BUNDLE_SHA256S)
+    ):
+        raise EvidenceError("SM121 cache-performance campaign contract is invalid")
+    binding = campaign.get("pair_binding")
+    try:
+        validate_sm121_cache_performance_pair_binding(binding)
+    except SM121CachePerformanceError as error:
+        raise EvidenceError("SM121 cache-performance pair binding is invalid") from error
+    if not isinstance(binding, dict):
+        raise EvidenceError("SM121 cache-performance pair binding is invalid")
+    names = campaign.get("run_directories")
+    if (
+        type(names) is not list
+        or len(names) != len(SM121_CACHE_PERFORMANCE_ARM_ORDER)
+        or len(set(names)) != len(names)
+        or any(
+            not isinstance(name, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", name) is None
+            for name in names
+        )
+    ):
+        raise EvidenceError("SM121 cache-performance run topology is invalid")
+    runs_root = campaign_dir / "runs"
+    if runs_root.is_symlink() or not runs_root.is_dir():
+        raise EvidenceError("SM121 cache-performance run root is invalid")
+    plans: list[dict[str, Any]] = []
+    events_by_arm: list[list[dict[str, Any]]] = []
+    case_ids_by_arm: list[tuple[str, str]] = []
+    static_events: list[dict[str, Any]] = []
+    runtime_events: list[dict[str, Any]] = []
+    for ordinal, (name, expected_arm) in enumerate(
+        zip(names, SM121_CACHE_PERFORMANCE_ARM_ORDER, strict=True), start=1
+    ):
+        run_dir = runs_root / name
+        if run_dir.is_symlink() or not run_dir.is_dir() or run_dir.parent != runs_root:
+            raise EvidenceError("SM121 cache-performance run directory is invalid")
+        plan = _load_json(run_dir / "plan.json", results_root)
+        if not isinstance(plan, dict):
+            raise EvidenceError("SM121 cache-performance plan is invalid")
+        model = plan.get("model")
+        suite = plan.get("suite")
+        resolved = plan.get("resolved")
+        if (
+            not isinstance(model, dict)
+            or not isinstance(suite, dict)
+            or not isinstance(resolved, dict)
+            or not isinstance(suite.get("cases"), list)
+        ):
+            raise EvidenceError("SM121 cache-performance plan core fields are invalid")
+        try:
+            validate_sm121_cache_performance_candidate(model)
+            validate_sm121_cache_performance_suite(suite)
+            if sm121_cache_performance_arm(model) != expected_arm:
+                raise SM121CachePerformanceError("cache-performance arm changed")
+        except SM121CachePerformanceError as error:
+            raise EvidenceError("SM121 cache-performance plan contract is invalid") from error
+        cases = suite["cases"]
+        if any(type(case) is not dict for case in cases):
+            raise EvidenceError("SM121 cache-performance plan cases are invalid")
+        for case in cases:
+            case_id = case.get("case_id")
+            case_name = case.get("id")
+            if not isinstance(case_name, str) or not isinstance(case_id, str) or re.fullmatch(
+                rf"{re.escape(case_name)}--[0-9a-f]{{12}}", case_id
+            ) is None:
+                raise EvidenceError("SM121 cache-performance case identity is invalid")
+        case_ids = {case["id"]: case["case_id"] for case in cases}
+        quality_case_id = case_ids.get(SM121_CACHE_PERFORMANCE_QUALITY_CASE_ID)
+        timed_case_id = case_ids.get(SM121_CACHE_PERFORMANCE_CASE_ID)
+        if not isinstance(quality_case_id, str) or not isinstance(timed_case_id, str):
+            raise EvidenceError("SM121 cache-performance case topology is invalid")
+        case_ids_by_arm.append((quality_case_id, timed_case_id))
+        suite_without_case_ids = {
+            **suite,
+            "cases": [
+                {key: value for key, value in case.items() if key != "case_id"}
+                for case in cases
+            ],
+        }
+        if plan.get("fingerprint") != content_hash(
+            {"model": model, "suite": suite_without_case_ids, "resolved": resolved}
+        ):
+            raise EvidenceError("SM121 cache-performance plan fingerprint is invalid")
+        plan_integrity = plan.get("integrity_hash")
+        if not isinstance(plan_integrity, str) or content_hash(
+            {key: value for key, value in plan.items() if key != "integrity_hash"},
+            len(plan_integrity),
+        ) != plan_integrity:
+            raise EvidenceError("SM121 cache-performance plan integrity is invalid")
+        if (
+            plan.get("cache_performance_ordinal") != ordinal
+            or plan.get("cache_performance_pair") != binding
+            or not isinstance(plan.get("run_nonce"), str)
+            or re.fullmatch(r"[0-9a-f]{32}", plan["run_nonce"]) is None
+        ):
+            raise EvidenceError("SM121 cache-performance plan binding is invalid")
+        plans.append(plan)
+        events_path = run_dir / "events.jsonl"
+        events = (
+            _load_json_lines(events_path, results_root)
+            if events_path.is_file()
+            else []
+        )
+        if any(event.get("event") not in _SM121_CACHE_PERFORMANCE_SAFE_EVENT_NAMES for event in events):
+            raise EvidenceError("SM121 cache-performance journal contains an unexpected event")
+        for event in events:
+            try:
+                if event.get("event") == SM121_CACHE_PERFORMANCE_STATIC_EVENT:
+                    validate_sm121_cache_performance_static_event(event)
+                    static_events.append(_sm121_cache_performance_event_without_timestamp(event))
+                elif event.get("event") == SM121_CACHE_PERFORMANCE_RUNTIME_EVENT:
+                    validate_sm121_cache_performance_runtime_event(event)
+                    runtime_events.append(_sm121_cache_performance_event_without_timestamp(event))
+                elif event.get("event") == SM121_CACHE_PERFORMANCE_TURN_EVENT:
+                    validate_sm121_cache_performance_turn_event(event)
+            except SM121CachePerformanceError as error:
+                raise EvidenceError("SM121 cache-performance journal event is invalid") from error
+        events_by_arm.append(events)
+    try:
+        instance = sm121_cache_performance_pair_instance_sha256(
+            [plan["run_nonce"] for plan in plans]
+        )
+    except SM121CachePerformanceError as error:
+        raise EvidenceError("SM121 cache-performance nonce binding is invalid") from error
+    fingerprints = [plan.get("fingerprint") for plan in plans]
+    if (
+        binding.get("campaign_instance_sha256") != instance
+        or binding.get("plan_fingerprints") != fingerprints
+        or binding.get("pair_binding_sha256")
+        != sm121_cache_performance_pair_binding_sha256(binding)
+    ):
+        raise EvidenceError("SM121 cache-performance pair binding moved")
+    summary_path = campaign_dir / "summary.json"
+    has_events = any(events for events in events_by_arm)
+    if not summary_path.is_file():
+        if has_events:
+            raise EvidenceError("SM121 cache-performance started campaign lacks summary")
+        return None
+    summary = _load_json(summary_path, results_root)
+    if not isinstance(summary, dict) or frozenset(summary) != _SM121_CACHE_PERFORMANCE_SUMMARY_FIELDS:
+        raise EvidenceError("SM121 cache-performance summary fields are invalid")
+    summary_integrity = summary.get("integrity_hash")
+    if not isinstance(summary_integrity, str) or content_hash(
+        {key: value for key, value in summary.items() if key != "integrity_hash"},
+        len(summary_integrity),
+    ) != summary_integrity:
+        raise EvidenceError("SM121 cache-performance summary integrity is invalid")
+    if (
+        summary.get("schema_version") != 1
+        or summary.get("campaign_id") != SM121_CACHE_PERFORMANCE_CAMPAIGN_ID
+        or summary.get("execution_mode") != SM121_CACHE_PERFORMANCE_EXECUTION_MODE
+        or summary.get("pair_binding_sha256") != binding["pair_binding_sha256"]
+        or summary.get("status") not in {"complete", "partial"}
+        or not isinstance(summary.get("lifetimes"), list)
+    ):
+        raise EvidenceError("SM121 cache-performance summary contract is invalid")
+    try:
+        score = score_sm121_cache_performance_campaign(summary["lifetimes"])
+    except SM121CachePerformanceError as error:
+        raise EvidenceError("SM121 cache-performance summary score is invalid") from error
+    if (
+        summary.get("status") != score.status
+        or summary.get("decision") != score.decision
+        or summary.get("score") != score.to_mapping()
+        or summary.get("completed_arms")
+        != sum(
+            1
+            for lifetime in summary["lifetimes"]
+            if isinstance(lifetime, dict)
+            and lifetime.get("quality_admitted") is True
+            and lifetime.get("timed_admitted") is True
+            and lifetime.get("within_timeout") is True
+        )
+    ):
+        raise EvidenceError("SM121 cache-performance summary reduction changed")
+    if len(summary["lifetimes"]) != len(SM121_CACHE_PERFORMANCE_ARM_ORDER):
+        raise EvidenceError("SM121 cache-performance summary topology is invalid")
+    try:
+        lifetime_rows = validate_sm121_cache_performance_lifetimes(
+            summary["lifetimes"]
+        )
+    except SM121CachePerformanceError as error:
+        raise EvidenceError("SM121 cache-performance summary lifetime is invalid") from error
+    _validate_sm121_cache_performance_attestation_topology(
+        lifetimes=lifetime_rows,
+        static_events=static_events,
+        runtime_events=runtime_events,
+    )
+    quality_attestations: list[dict[str, object]] = []
+    terminal = False
+    for ordinal, (lifetime, events, case_ids) in enumerate(
+        zip(lifetime_rows, events_by_arm, case_ids_by_arm, strict=True), start=1
+    ):
+        completed = (
+            lifetime["quality_admitted"] is True
+            and lifetime["timed_admitted"] is True
+            and lifetime["within_timeout"] is True
+        )
+        if terminal:
+            if events or completed:
+                raise EvidenceError("SM121 cache-performance continued after terminal arm")
+            continue
+        turns = [
+            _sm121_cache_performance_event_without_timestamp(event)
+            for event in events
+            if event.get("event") == SM121_CACHE_PERFORMANCE_TURN_EVENT
+        ]
+        if lifetime["turns"] != turns or any(
+            event.get("arm") != SM121_CACHE_PERFORMANCE_ARM_ORDER[ordinal - 1]
+            or event.get("lifetime_ordinal") != ordinal * 2
+            for event in turns
+        ):
+            raise EvidenceError("SM121 cache-performance turn journal changed")
+        if not completed:
+            terminal = True
+            if lifetime["quality_admitted"] is True:
+                quality_attestations.append(
+                    _sm121_cache_performance_quality_attestation(
+                        events=events,
+                        arm=SM121_CACHE_PERFORMANCE_ARM_ORDER[ordinal - 1],
+                        campaign_ordinal=ordinal,
+                        quality_case_id=case_ids[0],
+                    )
+                )
+            continue
+        if (
+            len(turns) != len(SM121_CACHE_PERFORMANCE_TIMED_TURNS)
+            or lifetime.get("turns") != turns
+            or sum(
+                event.get("event") == SM121_CACHE_PERFORMANCE_STATIC_EVENT
+                for event in events
+            )
+            != 2
+            or sum(
+                event.get("event") == SM121_CACHE_PERFORMANCE_RUNTIME_EVENT
+                for event in events
+            )
+            != 2
+            or not any(event.get("event") == "run_complete" for event in events)
+            or any(event.get("event") == "run_aborted" for event in events)
+        ):
+            raise EvidenceError("SM121 cache-performance completed arm lifecycle is invalid")
+        quality_attestations.append(
+            _sm121_cache_performance_quality_attestation(
+                events=events,
+                arm=SM121_CACHE_PERFORMANCE_ARM_ORDER[ordinal - 1],
+                campaign_ordinal=ordinal,
+                quality_case_id=case_ids[0],
+            )
+        )
+        _validate_sm121_cache_performance_completed_lifecycle(
+            events=events,
+            arm=SM121_CACHE_PERFORMANCE_ARM_ORDER[ordinal - 1],
+            campaign_ordinal=ordinal,
+            quality_case_id=case_ids[0],
+            timed_case_id=case_ids[1],
+        )
+    if not terminal and summary["status"] != "complete":
+        raise EvidenceError("SM121 cache-performance terminal status changed")
+    if terminal and summary["status"] != "partial":
+        raise EvidenceError("SM121 cache-performance partial status changed")
+    return {
+        "binding": binding,
+        "summary": summary,
+        "static_events": static_events,
+        "runtime_events": runtime_events,
+        "quality_attestations": quality_attestations,
+    }
+
+
+def _export_sm121_cache_performance_campaign(
+    campaign_dir: Path, results_root: Path, output_root: Path
+) -> dict[str, Any] | None:
+    source = _validate_sm121_cache_performance_source(campaign_dir, results_root)
+    if source is None:
+        return None
+    binding = source["binding"]
+    summary = source["summary"]
+    instance = binding["campaign_instance_sha256"]
+    evidence_id = (
+        f"{SM121_CACHE_PERFORMANCE_CAMPAIGN_ID}-"
+        f"{instance.removeprefix('sha256:')[:12]}"
+    )
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "evidence_kind": SM121_CACHE_PERFORMANCE_EVIDENCE_KIND,
+        "campaign_id": evidence_id,
+        "protocol": {
+            "campaign_id": SM121_CACHE_PERFORMANCE_CAMPAIGN_ID,
+            "suite_id": SM121_CACHE_PERFORMANCE_SUITE_ID,
+            "execution_mode": SM121_CACHE_PERFORMANCE_EXECUTION_MODE,
+            "arm_order": list(SM121_CACHE_PERFORMANCE_ARM_ORDER),
+            "cell_timeout_s": SM121_CACHE_PERFORMANCE_CELL_TIMEOUT_S,
+            "quality_item_count": SM121_CACHE_PERFORMANCE_QUALITY_ITEM_COUNT,
+            "timed_turns": list(SM121_CACHE_PERFORMANCE_TIMED_TURNS),
+            "measurement": "non_streaming_request_wall_s_only",
+            "ttft": None,
+        },
+        "binding": {
+            "campaign_instance_sha256": instance,
+            "pair_binding_sha256": binding["pair_binding_sha256"],
+            "prerequisite_bundle_sha256s": list(
+                SM121_CACHE_PERFORMANCE_PREREQUISITE_BUNDLE_SHA256S
+            ),
+        },
+        "status": summary["status"],
+        "decision": summary["decision"],
+        "completed_arms": summary["completed_arms"],
+        "lifetimes": summary["lifetimes"],
+        "score": summary["score"],
+        "static_attestations": source["static_events"],
+        "runtime_attestations": source["runtime_events"],
+        "quality_attestations": source["quality_attestations"],
+        "sanitization": {
+            "free_form_text_included": False,
+            "payloads_included": False,
+            "policy": SANITIZATION_POLICY,
+            "raw_identifiers_included": False,
+        },
+    }
+    relative = Path("campaigns") / evidence_id
+    bundle_hash, _ = _write_bundle(
+        output_root, relative, {"manifest.json": manifest}
+    )
+    return {
+        "bundle_sha256": bundle_hash,
+        "campaign_id": evidence_id,
+        "evidence_kind": SM121_CACHE_PERFORMANCE_EVIDENCE_KIND,
+        "file": str(relative / "manifest.json"),
+        "status": manifest["status"],
+    }
+
+
 def _export_evidence_locked(
     *,
     results_root: Path,
@@ -18332,6 +19237,10 @@ def _export_evidence_locked(
         runs: list[dict[str, Any]] = []
         loop_campaign_dirs = _loop_campaign_dirs(results_root)
         loop_campaign_paths = {path for _, path in loop_campaign_dirs}
+        cache_performance_campaigns = _sm121_cache_performance_campaign_dirs(
+            results_root
+        )
+        cache_performance_paths = set(cache_performance_campaigns)
         autoresearch_runs, autoresearch_campaigns = _autoresearch_sources(
             results_root,
             locked_topology=locked_autoresearch_topology,
@@ -18343,6 +19252,9 @@ def _export_evidence_locked(
                 for path in results_root.rglob("plan.json")
                 if not any(
                     ancestor in loop_campaign_paths for ancestor in path.parents
+                )
+                and not any(
+                    ancestor in cache_performance_paths for ancestor in path.parents
                 )
                 and autoresearch_root not in path.parents
             }
@@ -18381,6 +19293,8 @@ def _export_evidence_locked(
             recognized_top.add("runtime-overlays")
         if autoresearch_runs or autoresearch_campaigns:
             recognized_top.add(AUTORESEARCH_RESULT_ROOT)
+        if cache_performance_campaigns:
+            recognized_top.add(SM121_CACHE_PERFORMANCE_RESULT_ROOT)
         published_run_ids = [run_dir.name for run_dir in run_dirs] + [
             run_id for _, run_id in autoresearch_runs
         ]
@@ -18452,6 +19366,16 @@ def _export_evidence_locked(
         campaigns.extend(
             _export_autoresearch_campaign(snapshot, temporary)
             for snapshot in autoresearch_campaigns
+        )
+        campaigns.extend(
+            exported
+            for campaign in cache_performance_campaigns
+            if (
+                exported := _export_sm121_cache_performance_campaign(
+                    campaign, results_root, temporary
+                )
+            )
+            is not None
         )
         existing_harbor = output_target / "campaigns" / HARBOR_CAMPAIGN_ID
         if harbor_results:

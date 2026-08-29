@@ -39,6 +39,20 @@ from .sglang_sm121_cache_semantic import (
     validate_sm121_cache_semantic_candidate,
     validate_sm121_cache_semantic_suite,
 )
+from .sglang_sm121_cache_performance import (
+    SM121_CACHE_PERFORMANCE_ARM_ORDER,
+    SM121_CACHE_PERFORMANCE_CAMPAIGN_ID,
+    SM121_CACHE_PERFORMANCE_EXECUTION_MODE,
+    SM121_CACHE_PERFORMANCE_RUNTIME_EVENT,
+    SM121_CACHE_PERFORMANCE_STATIC_EVENT,
+    SM121_CACHE_PERFORMANCE_TIMED_TURNS,
+    SM121_CACHE_PERFORMANCE_TURN_EVENT,
+    SM121CachePerformanceError,
+    score_sm121_cache_performance_campaign,
+    validate_sm121_cache_performance_runtime_event,
+    validate_sm121_cache_performance_static_event,
+    validate_sm121_cache_performance_turn_event,
+)
 
 
 IssueAdder = Callable[..., None]
@@ -1780,6 +1794,68 @@ def audit_sm121_cache_semantic_pair(
 
     report["error_count"] = len(report["errors"])
     report["ok"] = not report["errors"]
+    return report
+
+
+def audit_sm121_cache_performance_campaign(
+    campaign_dir: Path, *, evidence_root: Path
+) -> dict[str, Any]:
+    """Read-only verification of one frozen SM121 A/B/B/A timing campaign.
+
+    The source validator is shared with the scalar exporter so audit and
+    publication cannot disagree about fresh-lifetime topology, score reduction,
+    or which fields are safe to retain.  It never opens server logs, prompts,
+    completions, token IDs, request identifiers, or credentials.
+    """
+
+    report: dict[str, Any] = {
+        "schema_version": 1,
+        "read_only": True,
+        "campaign_id": SM121_CACHE_PERFORMANCE_CAMPAIGN_ID,
+        "ok": False,
+        "errors": [],
+    }
+
+    def add_issue(code: str, message: str) -> None:
+        report["errors"].append({"code": code, "message": message})
+
+    try:
+        root = campaign_dir.resolve(strict=True)
+        results_root = root.parent.parent
+        if root.parent.name != "cache-policy-campaigns" or not results_root.is_dir():
+            raise ValueError
+        from .evidence import (
+            EvidenceError,
+            _validate_sm121_cache_performance_source,
+            verify_sm121_cache_performance_prerequisites,
+        )
+
+        verify_sm121_cache_performance_prerequisites(evidence_root)
+        source = _validate_sm121_cache_performance_source(root, results_root)
+        if source is None:
+            add_issue(
+                "campaign_not_terminal",
+                "frozen cache-performance campaign has not reached a terminal summary",
+            )
+        else:
+            summary = source["summary"]
+            report.update(
+                {
+                    "status": summary["status"],
+                    "decision": summary["decision"],
+                    "completed_arms": summary["completed_arms"],
+                    "score": summary["score"],
+                    "static_attestation_count": len(source["static_events"]),
+                    "runtime_attestation_count": len(source["runtime_events"]),
+                }
+            )
+    except (OSError, ValueError, KeyError, TypeError, EvidenceError):
+        add_issue(
+            "campaign_contract_invalid",
+            "cache-performance campaign does not meet the frozen scalar contract",
+        )
+    report["error_count"] = len(report["errors"])
+    report["ok"] = report["error_count"] == 0
     return report
 
 

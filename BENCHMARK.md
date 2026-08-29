@@ -1278,6 +1278,29 @@ also local-only because they hold weights, caches, media, and runtime output.
 Exact raw run IDs may be cited in a report for local traceability, but the path
 name is not itself public evidence.
 
+### SM121 cache-policy performance lane
+
+The semantic cache pair and timing comparison are separate claims. The
+dedicated `sm121-cache-policy-performance` command is the only execution path
+for the admitted SM121 Triton/storage cache-policy profiles. It freezes a
+non-resumable A/B/B/A campaign beneath `<results>/cache-policy-campaigns/` and
+requires verified target, B0, and paired-semantic scalar evidence before both
+freezing and execution. Each arm gets an isolated four-item exact-answer
+quality server and a separate timed server, for eight fresh lifetimes with
+1,200-second admission deadlines. An observed expiry is rejected and triggers
+owned-server interruption before diagnostic cleanup.
+
+Timed observations contain only non-streaming request wall time for cold T0 and
+append-only T1/T2. They do not contain or claim TTFT, decode TPS, aggregate
+throughput, energy, or agent speed. A result may retain a policy only with an
+unrounded at-least-5% later-turn wall-time improvement and a no-more-than-5%
+full-sequence wall-time regression. Any failure is terminal `partial` and
+`not_evaluated`; it cannot be resumed. See the
+[operational protocol](docs/qwen38-flash-next-sm121-cache-performance-protocol-2026-08-29.md)
+for the exact profiles, source/evidence binding, audit command, and privacy
+boundary. This lane is frozen but unexecuted, so it provides no performance
+conclusion yet.
+
 ### Publishing sanitized evidence
 
 An evidence export creates a deterministic tracked archive without copying raw

@@ -4573,3 +4573,114 @@ args = [
   "--host", "0.0.0.0",
   "--port", "30000",
 ]
+
+[[models]]
+id = "qwen38-flash-next-nvfp4-sm121-triton-storage-cache-performance-on-sglang"
+description = "SM121 cache-policy performance A: UnifiedRadixCache with lazy Mamba state. Only the dedicated A/B/B/A performance controller may execute it."
+support_status = "exploratory"
+backend = "sglang"
+source = "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+revision = "7b719225242aacd3dbd3f9407468c2ee9a9d2594"
+weight_file_count = 206
+weight_size_bytes = 135195303851
+served_name = "qwen38-flash-next-nvfp4-sm121-storage-cache-policy-performance"
+tasks = ["chat"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "moe+qsa+gdn"
+quantization = "nvfp4+ple-fp8-nvme-io-uring"
+lifecycle = "docker"
+image = "local/sglang:sm121-storage-274ee330-runtime"
+local_image_id = "sha256:b14c39fb7cb2e0b82f2f8cae1e115a55f2bb69b5ec6fd7ccc4099b219d1096b0"
+cache_dir = "user"
+max_context = 65536
+native_context = 262144
+startup_timeout_s = 1200
+estimated_ram_gib = 101.0
+host_safety_min_memavailable_gib = 10
+host_safety_max_swap_growth_mib = 512
+host_safety_max_starting_swap_mib = 512
+endpoint = "http://127.0.0.1:30000/v1"
+sglang_storage_mode = "qwen4_ple_nvme_io_uring"
+sglang_ple_nvme_queue_depth = 512
+sglang_ple_nvme_max_batch_pages = 4096
+sglang_ple_nvme_cache_pages = 0
+args = [
+  "--served-model-name", "qwen38-flash-next-nvfp4-sm121-storage-cache-policy-performance",
+  "--tp-size", "1",
+  "--attention-backend", "triton",
+  "--moe-runner-backend", "flashinfer_cutlass",
+  "--quantization", "modelopt_fp4",
+  "--load-format", "auto",
+  "--no-ple-offload-embedding",
+  "--weight-loader-drop-cache-after-load",
+  "--language-only",
+  "--mamba-radix-cache-strategy", "extra_buffer_lazy",
+  "--max-mamba-cache-size", "4",
+  "--page-size", "64",
+  "--mem-fraction-static", "0.85",
+  "--max-total-tokens", "65536",
+  "--context-length", "65536",
+  "--chunked-prefill-size", "1024",
+  "--max-running-requests", "1",
+  "--cuda-graph-backend-decode", "disabled",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--enable-metrics",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]
+
+[[models]]
+id = "qwen38-flash-next-nvfp4-sm121-triton-storage-cache-performance-off-sglang"
+description = "SM121 cache-policy performance B: ChunkCache cache-off control. Only the dedicated A/B/B/A performance controller may execute it."
+support_status = "exploratory"
+backend = "sglang"
+source = "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+revision = "7b719225242aacd3dbd3f9407468c2ee9a9d2594"
+weight_file_count = 206
+weight_size_bytes = 135195303851
+served_name = "qwen38-flash-next-nvfp4-sm121-storage-cache-policy-performance"
+tasks = ["chat"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":false}}'
+architecture = "moe+qsa+gdn"
+quantization = "nvfp4+ple-fp8-nvme-io-uring"
+lifecycle = "docker"
+image = "local/sglang:sm121-storage-274ee330-runtime"
+local_image_id = "sha256:b14c39fb7cb2e0b82f2f8cae1e115a55f2bb69b5ec6fd7ccc4099b219d1096b0"
+cache_dir = "user"
+max_context = 65536
+native_context = 262144
+startup_timeout_s = 1200
+estimated_ram_gib = 101.0
+host_safety_min_memavailable_gib = 10
+host_safety_max_swap_growth_mib = 512
+host_safety_max_starting_swap_mib = 512
+endpoint = "http://127.0.0.1:30000/v1"
+sglang_storage_mode = "qwen4_ple_nvme_io_uring"
+sglang_ple_nvme_queue_depth = 512
+sglang_ple_nvme_max_batch_pages = 4096
+sglang_ple_nvme_cache_pages = 0
+args = [
+  "--served-model-name", "qwen38-flash-next-nvfp4-sm121-storage-cache-policy-performance",
+  "--tp-size", "1",
+  "--attention-backend", "triton",
+  "--moe-runner-backend", "flashinfer_cutlass",
+  "--quantization", "modelopt_fp4",
+  "--load-format", "auto",
+  "--no-ple-offload-embedding",
+  "--weight-loader-drop-cache-after-load",
+  "--language-only",
+  "--mamba-radix-cache-strategy", "extra_buffer_lazy",
+  "--max-mamba-cache-size", "4",
+  "--disable-radix-cache",
+  "--page-size", "64",
+  "--mem-fraction-static", "0.85",
+  "--max-total-tokens", "65536",
+  "--context-length", "65536",
+  "--chunked-prefill-size", "1024",
+  "--max-running-requests", "1",
+  "--cuda-graph-backend-decode", "disabled",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--enable-metrics",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]

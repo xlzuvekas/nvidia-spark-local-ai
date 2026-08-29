@@ -157,6 +157,42 @@ from .sglang_sm121_cache_semantic import (
     validate_sm121_cache_semantic_suite,
     validate_sm121_cache_semantic_turn_event,
 )
+from .sglang_sm121_cache_performance import (
+    SM121_CACHE_PERFORMANCE_ARM_ORDER,
+    SM121_CACHE_PERFORMANCE_CAMPAIGN_ID,
+    SM121_CACHE_PERFORMANCE_CACHE_OFF_PROFILE_ID,
+    SM121_CACHE_PERFORMANCE_CACHE_ON_PROFILE_ID,
+    SM121_CACHE_PERFORMANCE_CASE_ID,
+    SM121_CACHE_PERFORMANCE_CELL_TIMEOUT_S,
+    SM121_CACHE_PERFORMANCE_COLD_INPUT_MAX_TOKENS,
+    SM121_CACHE_PERFORMANCE_COLD_INPUT_MIN_TOKENS,
+    SM121_CACHE_PERFORMANCE_EXECUTION_MODE,
+    SM121_CACHE_PERFORMANCE_METRIC_FIELDS,
+    SM121_CACHE_PERFORMANCE_PAIR_BINDING_SCHEMA_VERSION,
+    SM121_CACHE_PERFORMANCE_PREREQUISITE_BUNDLE_SHA256S,
+    SM121_CACHE_PERFORMANCE_QUALITY_CASE_ID,
+    SM121_CACHE_PERFORMANCE_QUALITY_ITEM_COUNT,
+    SM121_CACHE_PERFORMANCE_RUNTIME_EVENT,
+    SM121_CACHE_PERFORMANCE_STATIC_EVENT,
+    SM121_CACHE_PERFORMANCE_SUITE_ID,
+    SM121_CACHE_PERFORMANCE_TIMED_TURNS,
+    SM121_CACHE_PERFORMANCE_TURN_EVENT,
+    SM121CachePerformanceError,
+    derive_sm121_cache_performance_turn_admission,
+    is_sm121_cache_performance_candidate,
+    is_sm121_cache_performance_plan,
+    score_sm121_cache_performance_campaign,
+    sm121_cache_performance_arm,
+    sm121_cache_performance_pair_binding_sha256,
+    sm121_cache_performance_pair_instance_sha256,
+    validate_sm121_cache_performance_candidate,
+    validate_sm121_cache_performance_pair,
+    validate_sm121_cache_performance_pair_binding,
+    validate_sm121_cache_performance_runtime_event,
+    validate_sm121_cache_performance_static_event,
+    validate_sm121_cache_performance_suite,
+    validate_sm121_cache_performance_turn_event,
+)
 from .sglang_sm121_cache_observability import (
     SM121_CACHE_OBSERVABILITY_CACHED_SERIES,
     SM121_CACHE_OBSERVABILITY_EXECUTION_MODE,
@@ -195,6 +231,9 @@ _SM121_CACHE_OBSERVABILITY_FAILURE_MESSAGE = (
 )
 _SM121_CACHE_SEMANTIC_FAILURE_MESSAGE = (
     "SM121 cache-policy semantic request failed; details omitted"
+)
+_SM121_CACHE_PERFORMANCE_FAILURE_MESSAGE = (
+    "SM121 cache-policy performance request failed; details omitted"
 )
 # These are synthetic fixed protocol strings, kept private to the executor.
 # They are never written to journals, reports, or evidence. The repeated
@@ -242,6 +281,13 @@ class SM121CacheSemanticRequestError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__(_SM121_CACHE_SEMANTIC_FAILURE_MESSAGE)
+
+
+class SM121CachePerformanceRequestError(RuntimeError):
+    """A public-safe failure for the cache-policy performance probe."""
+
+    def __init__(self) -> None:
+        super().__init__(_SM121_CACHE_PERFORMANCE_FAILURE_MESSAGE)
 
 
 class PrefixCacheError(RuntimeError):
@@ -339,13 +385,21 @@ def create_plan(
     suite_path: Path,
     allow_sm121_storage_canary: bool = False,
     allow_sm121_cache_semantic_canary: bool = False,
+    allow_sm121_cache_performance: bool = False,
+    run_label: str | None = None,
 ) -> Path:
     semantic_candidate = is_sm121_cache_semantic_candidate(model)
-    storage_candidate = is_sm121_storage_candidate(model) and not semantic_candidate
+    performance_candidate = is_sm121_cache_performance_candidate(model)
+    storage_candidate = (
+        is_sm121_storage_candidate(model)
+        and not semantic_candidate
+        and not performance_candidate
+    )
     blocker = model_execution_blocker(
         model,
         allow_sm121_storage_canary=allow_sm121_storage_canary,
         allow_sm121_cache_semantic_canary=allow_sm121_cache_semantic_canary,
+        allow_sm121_cache_performance=allow_sm121_cache_performance,
     )
     if blocker is not None:
         raise RuntimeError(blocker)
@@ -365,6 +419,11 @@ def create_plan(
         try:
             validate_sm121_cache_semantic_candidate(model)
         except SM121CacheSemanticError as error:
+            raise RuntimeError(str(error)) from error
+    elif performance_candidate:
+        try:
+            validate_sm121_cache_performance_candidate(model)
+        except SM121CachePerformanceError as error:
             raise RuntimeError(str(error)) from error
     elif storage_candidate:
         try:
@@ -387,7 +446,7 @@ def create_plan(
         for case in suite_data["cases"]
     ]
     resolved_image = _image_digest(model.image)
-    if storage_candidate or semantic_candidate:
+    if storage_candidate or semantic_candidate or performance_candidate:
         local_image = _sm121_storage_image_identity(model)
         resolved: dict[str, Any] = {
             "image_digest": resolved_image,
@@ -408,8 +467,11 @@ def create_plan(
     fingerprint = content_hash(
         {"model": model_data, "suite": suite_data, "resolved": resolved}
     )
+    if run_label is not None and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", run_label) is None:
+        raise RuntimeError("Frozen run label is invalid")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = results_root / f"{stamp}-{model.id}-{suite.id}-{fingerprint[:8]}"
+    label_suffix = f"-{run_label}" if run_label is not None else ""
+    run_dir = results_root / f"{stamp}-{model.id}-{suite.id}-{fingerprint[:8]}{label_suffix}"
     run_dir.mkdir(parents=True, exist_ok=False)
     plan = {
         "schema_version": 2,
@@ -3963,6 +4025,1323 @@ def execute_sm121_cache_semantic_canary(
             "cache_on": cache_on_summary,
             "cache_on_started": True,
         }
+
+
+def create_sm121_cache_performance_campaign(
+    *,
+    cache_on_model: Any,
+    cache_off_model: Any,
+    suite: Any,
+    results_root: Path,
+    models_path: Path,
+    suite_path: Path,
+    evidence_root: Path,
+) -> Path:
+    """Freeze one fresh, non-resumable A/B/B/A cache-performance campaign.
+
+    The campaign is intentionally separate from normal plans and from the
+    semantic B-then-A lane.  It does not start a server.  Four plan nonces are
+    committed only through one opaque instance digest; neither nonce is
+    exported and no prompt material is ever written here.
+    """
+
+    try:
+        validate_sm121_cache_performance_pair(cache_on_model, cache_off_model)
+        validate_sm121_cache_performance_suite(suite)
+        _validate_sm121_cache_performance_prerequisites(evidence_root)
+    except SM121CachePerformanceError as error:
+        raise RuntimeError("SM121 cache-performance admission is unavailable") from error
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    campaign_dir = results_root / (
+        f"{stamp}-qwen38-flash-next-sm121-cache-policy-performance-v1"
+    )
+    campaign_dir.mkdir(parents=True, exist_ok=False)
+    runs_root = campaign_dir / "runs"
+    arm_models = {
+        "A": cache_on_model,
+        "B": cache_off_model,
+    }
+    run_dirs: list[Path] = []
+    try:
+        for ordinal, arm in enumerate(SM121_CACHE_PERFORMANCE_ARM_ORDER, start=1):
+            run_dirs.append(
+                create_plan(
+                    model=arm_models[arm],
+                    suite=suite,
+                    results_root=runs_root,
+                    models_path=models_path,
+                    suite_path=suite_path,
+                    allow_sm121_cache_performance=True,
+                    run_label=f"performance-{ordinal}-{arm.lower()}",
+                )
+            )
+        _bind_sm121_cache_performance_campaign_plans(run_dirs)
+        plans = [json.loads((run_dir / "plan.json").read_text()) for run_dir in run_dirs]
+        binding = plans[0].get("cache_performance_pair")
+        if not isinstance(binding, dict):
+            raise RuntimeError("SM121 cache-performance plan binding is unavailable")
+        campaign = {
+            "schema_version": 1,
+            "campaign_id": SM121_CACHE_PERFORMANCE_CAMPAIGN_ID,
+            "created_at": utc_now(),
+            "execution_mode": SM121_CACHE_PERFORMANCE_EXECUTION_MODE,
+            "prerequisite_bundle_sha256s": list(
+                SM121_CACHE_PERFORMANCE_PREREQUISITE_BUNDLE_SHA256S
+            ),
+            "pair_binding": binding,
+            "run_directories": [run_dir.name for run_dir in run_dirs],
+        }
+        campaign["integrity_hash"] = content_hash(campaign, 64)
+        write_json(campaign_dir / "campaign.json", campaign)
+    except BaseException:
+        # The root is deliberately retained as ignored raw provenance.  It has
+        # no execution side effect and a later evidence export will reject an
+        # incomplete topology rather than treating it as a measurement.
+        raise
+    return campaign_dir
+
+
+def _validate_sm121_cache_performance_prerequisites(evidence_root: Path) -> None:
+    """Require the exact prior scalar capability evidence before planning."""
+
+    # An index row by itself is not evidence: verify its checksums, topology,
+    # scalar schemas, and required bundle-hash containment before accepting an
+    # opaque prerequisite commitment.
+    from .evidence import EvidenceError, verify_sm121_cache_performance_prerequisites
+
+    try:
+        verify_sm121_cache_performance_prerequisites(evidence_root)
+    except (OSError, EvidenceError) as error:
+        raise SM121CachePerformanceError(
+            "cache-performance prerequisite evidence is unverifiable"
+        ) from error
+
+
+def _bind_sm121_cache_performance_campaign_plans(run_dirs: list[Path]) -> None:
+    """Bind four frozen A/B/B/A plans with a scalar-only commitment."""
+
+    if len(run_dirs) != len(SM121_CACHE_PERFORMANCE_ARM_ORDER):
+        raise RuntimeError("SM121 cache-performance plan count is invalid")
+    plans: list[dict[str, Any]] = []
+    for ordinal, (run_dir, arm) in enumerate(
+        zip(run_dirs, SM121_CACHE_PERFORMANCE_ARM_ORDER, strict=True), start=1
+    ):
+        try:
+            plan = json.loads((run_dir / "plan.json").read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError("SM121 cache-performance plan is unreadable") from error
+        if type(plan) is not dict:
+            raise RuntimeError("SM121 cache-performance plan is invalid")
+        model = plan.get("model")
+        suite = plan.get("suite")
+        if type(model) is not dict or type(suite) is not dict:
+            raise RuntimeError("SM121 cache-performance plan is invalid")
+        try:
+            if sm121_cache_performance_arm(model) != arm:
+                raise SM121CachePerformanceError("cache-performance plan arm changed")
+            validate_sm121_cache_performance_candidate(model)
+            validate_sm121_cache_performance_suite(_namespace(suite))
+        except SM121CachePerformanceError as error:
+            raise RuntimeError("SM121 cache-performance plan is invalid") from error
+        if not isinstance(plan.get("fingerprint"), str) or re.fullmatch(
+            r"[0-9a-f]{16}", plan["fingerprint"]
+        ) is None:
+            raise RuntimeError("SM121 cache-performance fingerprint is invalid")
+        plan["cache_performance_ordinal"] = ordinal
+        plans.append(plan)
+    try:
+        instance = sm121_cache_performance_pair_instance_sha256(
+            [plan.get("run_nonce") for plan in plans]
+        )
+    except SM121CachePerformanceError as error:
+        raise RuntimeError("SM121 cache-performance plan nonce is invalid") from error
+    binding: dict[str, object] = {
+        "schema_version": SM121_CACHE_PERFORMANCE_PAIR_BINDING_SCHEMA_VERSION,
+        "suite_id": SM121_CACHE_PERFORMANCE_SUITE_ID,
+        "execution_mode": SM121_CACHE_PERFORMANCE_EXECUTION_MODE,
+        "arm_order": list(SM121_CACHE_PERFORMANCE_ARM_ORDER),
+        "profile_ids": [
+            SM121_CACHE_PERFORMANCE_CACHE_ON_PROFILE_ID,
+            SM121_CACHE_PERFORMANCE_CACHE_OFF_PROFILE_ID,
+        ],
+        "quality_case_id": SM121_CACHE_PERFORMANCE_QUALITY_CASE_ID,
+        "timed_case_id": SM121_CACHE_PERFORMANCE_CASE_ID,
+        "cell_timeout_s": SM121_CACHE_PERFORMANCE_CELL_TIMEOUT_S,
+        "campaign_instance_sha256": instance,
+        "plan_fingerprints": [str(plan["fingerprint"]) for plan in plans],
+    }
+    binding["pair_binding_sha256"] = sm121_cache_performance_pair_binding_sha256(
+        binding
+    )
+    try:
+        validate_sm121_cache_performance_pair_binding(binding)
+    except SM121CachePerformanceError as error:
+        raise RuntimeError("SM121 cache-performance pair binding is invalid") from error
+    for run_dir, plan in zip(run_dirs, plans, strict=True):
+        plan["cache_performance_pair"] = binding
+        plan["integrity_hash"] = content_hash(
+            {key: value for key, value in plan.items() if key != "integrity_hash"},
+            64,
+        )
+        write_json(run_dir / "plan.json", plan)
+
+
+def _load_sm121_cache_performance_plan(
+    run_dir: Path,
+) -> tuple[dict[str, Any], SimpleNamespace, SimpleNamespace]:
+    """Load one frozen performance arm without accepting generic plans."""
+
+    try:
+        plan = json.loads((run_dir / "plan.json").read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise PreflightError("SM121 cache-performance plan is unavailable") from error
+    if type(plan) is not dict or plan.get("schema_version") != 2:
+        raise PreflightError("SM121 cache-performance plan schema is invalid")
+    model_data = plan.get("model")
+    suite_data = plan.get("suite")
+    resolved = plan.get("resolved")
+    if type(model_data) is not dict or type(suite_data) is not dict or type(resolved) is not dict:
+        raise PreflightError("SM121 cache-performance plan core fields are invalid")
+    integrity = plan.get("integrity_hash")
+    if not isinstance(integrity, str) or content_hash(
+        {key: value for key, value in plan.items() if key != "integrity_hash"},
+        len(integrity),
+    ) != integrity:
+        raise PreflightError("SM121 cache-performance plan integrity is invalid")
+    cases = suite_data.get("cases")
+    if not isinstance(cases, list) or any(type(case) is not dict for case in cases):
+        raise PreflightError("SM121 cache-performance plan cases are invalid")
+    suite_without_case_ids = {
+        **suite_data,
+        "cases": [
+            {key: value for key, value in case.items() if key != "case_id"}
+            for case in cases
+        ],
+    }
+    expected_fingerprint = content_hash(
+        {"model": model_data, "suite": suite_without_case_ids, "resolved": resolved}
+    )
+    if plan.get("fingerprint") != expected_fingerprint:
+        raise PreflightError("SM121 cache-performance plan fingerprint is invalid")
+    protocol_digest = suite_data.get("protocol_digest")
+    for case in cases:
+        case_without_id = {key: value for key, value in case.items() if key != "case_id"}
+        expected_case_id = _canonical_case(
+            model_data, case_without_id, protocol_digest=protocol_digest
+        )["case_id"]
+        if case.get("case_id") != expected_case_id:
+            raise PreflightError("SM121 cache-performance case identity is invalid")
+    model = _namespace(model_data)
+    suite = _namespace(suite_data)
+    try:
+        if not is_sm121_cache_performance_plan(model, suite):
+            raise SM121CachePerformanceError("cache-performance selector is invalid")
+        validate_sm121_cache_performance_candidate(model)
+        validate_sm121_cache_performance_suite(suite)
+    except SM121CachePerformanceError as error:
+        raise PreflightError("SM121 cache-performance plan contract is invalid") from error
+    local_image = resolved.get("local_image")
+    if (
+        type(local_image) is not dict
+        or set(local_image) != {"docker_image_id", "platform", "source_tree"}
+        or local_image.get("docker_image_id") != SM121_STORAGE_LOCAL_IMAGE_ID
+        or local_image.get("platform") != SM121_STORAGE_PLATFORM
+        or local_image.get("source_tree") != SM121_STORAGE_SOURCE_TREE
+    ):
+        raise PreflightError("SM121 cache-performance local image changed")
+    binding = plan.get("cache_performance_pair")
+    try:
+        validate_sm121_cache_performance_pair_binding(binding)
+    except SM121CachePerformanceError as error:
+        raise PreflightError("SM121 cache-performance pair binding is invalid") from error
+    ordinal = plan.get("cache_performance_ordinal")
+    if type(ordinal) is not int or not 1 <= ordinal <= len(SM121_CACHE_PERFORMANCE_ARM_ORDER):
+        raise PreflightError("SM121 cache-performance plan ordinal is invalid")
+    if sm121_cache_performance_arm(model) != SM121_CACHE_PERFORMANCE_ARM_ORDER[ordinal - 1]:
+        raise PreflightError("SM121 cache-performance plan arm is invalid")
+    fingerprints = binding.get("plan_fingerprints") if isinstance(binding, dict) else None
+    if not isinstance(fingerprints, list) or fingerprints[ordinal - 1] != plan.get("fingerprint"):
+        raise PreflightError("SM121 cache-performance plan binding moved")
+    run_nonce = plan.get("run_nonce")
+    if not isinstance(run_nonce, str) or re.fullmatch(r"[0-9a-f]{32}", run_nonce) is None:
+        raise PreflightError("SM121 cache-performance run nonce is invalid")
+    model.resolved_local_image_id = local_image["docker_image_id"]
+    model.run_identity = f"{plan['fingerprint']}-{run_nonce}"
+    model.cache_performance_authorized = True
+    model.cache_performance_pair = binding
+    return plan, model, suite
+
+
+def _sm121_cache_performance_case_ids(
+    suite: SimpleNamespace,
+) -> tuple[SimpleNamespace, SimpleNamespace]:
+    """Return the exact quality and timed cases from one frozen arm plan."""
+
+    cases = list(getattr(suite, "cases", ()))
+    if len(cases) != 2:
+        raise PreflightError("SM121 cache-performance cases are invalid")
+    quality, timed = cases
+    if (
+        str(getattr(quality, "id", ""))
+        != SM121_CACHE_PERFORMANCE_QUALITY_CASE_ID
+        or str(getattr(timed, "id", "")) != SM121_CACHE_PERFORMANCE_CASE_ID
+        or not isinstance(getattr(quality, "case_id", None), str)
+        or not isinstance(getattr(timed, "case_id", None), str)
+    ):
+        raise PreflightError("SM121 cache-performance cases are invalid")
+    return quality, timed
+
+
+def _sm121_cache_performance_static_event(
+    *, model: SimpleNamespace, arm: str, lifetime_ordinal: int
+) -> dict[str, Any]:
+    """Attest a fresh lifetime to reviewed source semantics without source text."""
+
+    event = {
+        "event": SM121_CACHE_PERFORMANCE_STATIC_EVENT,
+        "arm": arm,
+        "lifetime_ordinal": lifetime_ordinal,
+        "candidate_source_tree": SM121_STORAGE_SOURCE_TREE,
+        **inspect_sm121_cache_source_digests(model),
+        **SM121_CACHE_SEMANTIC_STATIC_ASSERTIONS,
+    }
+    try:
+        validate_sm121_cache_performance_static_event(event)
+    except SM121CachePerformanceError as error:
+        raise SM121CachePerformanceRequestError() from error
+    return event
+
+
+def _sm121_cache_performance_runtime_event(
+    *, server: Any, arm: str, lifetime_ordinal: int
+) -> dict[str, Any]:
+    """Record only the resolved cache identity for one fresh lifetime."""
+
+    event = {
+        "event": SM121_CACHE_PERFORMANCE_RUNTIME_EVENT,
+        "arm": arm,
+        "lifetime_ordinal": lifetime_ordinal,
+        **inspect_sm121_cache_runtime_identity(server),
+    }
+    try:
+        validate_sm121_cache_performance_runtime_event(event)
+    except SM121CachePerformanceError as error:
+        raise SM121CachePerformanceRequestError() from error
+    return event
+
+
+def _sm121_cache_performance_remaining_s(deadline: float) -> float:
+    """Return bounded remaining lifetime budget or fail before another action."""
+
+    remaining_s = deadline - time.monotonic()
+    if not math.isfinite(remaining_s) or remaining_s <= 0:
+        raise SM121CachePerformanceRequestError()
+    return remaining_s
+
+
+def _sm121_cache_performance_abort_check(
+    *, watchdog: HostSafetyWatchdog | None, deadline: float
+) -> None:
+    if watchdog is not None:
+        watchdog.raise_if_tripped()
+    _sm121_cache_performance_remaining_s(deadline)
+
+
+def _sm121_cache_performance_interrupt_terminal_server(
+    *, server: Any, deadline: float, terminal_error: BaseException | None
+) -> None:
+    """Stop owned GPU work before slow diagnostic cleanup after a terminal cell.
+
+    The 1,200-second value is an admission deadline: any work that reaches it
+    is rejected even if log collection or container removal takes longer. On
+    an observed expiry (or another terminal error), stop the exact owned
+    SGLang container before collecting logs so failed work cannot continue on
+    the GPU during diagnostic cleanup. ``ManagedServer.interrupt_owned`` is
+    idempotent and ``stop`` below still removes the owned container.
+    """
+
+    if terminal_error is not None or time.monotonic() >= deadline:
+        server.interrupt_owned()
+
+
+def _sm121_cache_performance_turn_event(
+    *,
+    case: SimpleNamespace,
+    arm: str,
+    lifetime_ordinal: int,
+    turn: str,
+    result: dict[str, Any],
+    request_wall_s: float,
+    before: dict[str, Any],
+    before_polls: int,
+    before_settled: bool,
+    after: dict[str, Any],
+    after_polls: int,
+    after_settled: bool,
+    append_only_prompt_identity_verified: bool,
+    cross_lifetime_prompt_identity_verified: bool,
+    shared_prefix_tokens: int,
+) -> dict[str, Any]:
+    """Project one timed request into scalar-only validated evidence."""
+
+    event: dict[str, Any] = {
+        "event": SM121_CACHE_PERFORMANCE_TURN_EVENT,
+        "arm": arm,
+        "lifetime_ordinal": lifetime_ordinal,
+        "case_id": case.case_id,
+        "protocol_case_id": SM121_CACHE_PERFORMANCE_CASE_ID,
+        "turn": turn,
+        "cache_details_requested": True,
+        "prompt_token_ids_requested": True,
+        "streaming": False,
+        "thinking_disabled": True,
+        "prompt_tokens": result["prompt_tokens"],
+        "completion_tokens": result["completion_tokens"],
+        "reasoning_tokens": result["reasoning_tokens"],
+        "shared_prefix_tokens": shared_prefix_tokens,
+        "append_only_prompt_identity_verified": append_only_prompt_identity_verified,
+        "cross_lifetime_prompt_identity_verified": (
+            cross_lifetime_prompt_identity_verified
+        ),
+        "response_detail_state": result["response_detail_state"],
+        "usage_detail_state": result["usage_detail_state"],
+        "response_device_cached_tokens": result["response_device_cached_tokens"],
+        "response_host_cached_tokens": result["response_host_cached_tokens"],
+        "response_storage_cached_tokens": result["response_storage_cached_tokens"],
+        "usage_cached_tokens": result["usage_cached_tokens"],
+        "metrics_available": bool(
+            before.get("available") is True and after.get("available") is True
+        ),
+        "guardrail_metrics_available": bool(
+            before.get("guardrail_metrics_available") is True
+            and after.get("guardrail_metrics_available") is True
+        ),
+        "metrics_before_polls": before_polls,
+        "metrics_after_polls": after_polls,
+        "metrics_before_settled": before_settled,
+        "metrics_after_settled": after_settled,
+        "request_wall_s": request_wall_s,
+    }
+    for prefix, snapshot in (("before", before), ("after", after)):
+        for metric in SM121_CACHE_PERFORMANCE_METRIC_FIELDS:
+            event[f"{prefix}_{metric}"] = snapshot[metric]
+        for source in SM121_CACHE_OBSERVABILITY_CACHED_SERIES:
+            event[f"{prefix}_cached_{source}_series_present"] = snapshot[
+                f"cached_{source}_series_present"
+            ]
+    for metric in SM121_CACHE_PERFORMANCE_METRIC_FIELDS:
+        event[f"delta_{metric}"] = event[f"after_{metric}"] - event[
+            f"before_{metric}"
+        ]
+    try:
+        admitted, basis = derive_sm121_cache_performance_turn_admission(event)
+    except (KeyError, TypeError, ValueError, SM121CachePerformanceError) as error:
+        raise SM121CachePerformanceRequestError() from error
+    event["timed_turn_admitted"] = admitted
+    event["timed_turn_basis"] = basis
+    try:
+        validate_sm121_cache_performance_turn_event(event)
+    except SM121CachePerformanceError as error:
+        raise SM121CachePerformanceRequestError() from error
+    return event
+
+
+def _sm121_cache_performance_timed_turn_prefix_from_journal(
+    *, journal: Journal, arm: str, campaign_ordinal: int
+) -> list[dict[str, Any]]:
+    """Recover only a validated scalar timed prefix after a terminal failure.
+
+    The timed worker journals a turn before it can observe a failed admission
+    or teardown.  Its exception path cannot return private prompt IDs, so the
+    outer campaign arm rebuilds the public summary prefix from those already
+    durable scalar events.  Any malformed or out-of-order record is omitted;
+    the raw journal will then fail the later source audit rather than leaking
+    an unchecked field into a partial summary.
+    """
+
+    events = [
+        event
+        for event in journal.events()
+        if event.get("event") == SM121_CACHE_PERFORMANCE_TURN_EVENT
+    ]
+    if len(events) > len(SM121_CACHE_PERFORMANCE_TIMED_TURNS):
+        return []
+    prefix: list[dict[str, Any]] = []
+    for index, (expected_turn, raw) in enumerate(
+        zip(SM121_CACHE_PERFORMANCE_TIMED_TURNS, events, strict=False)
+    ):
+        scalar = {key: value for key, value in raw.items() if key != "timestamp"}
+        try:
+            validate_sm121_cache_performance_turn_event(scalar)
+        except SM121CachePerformanceError:
+            return []
+        if (
+            scalar["arm"] != arm
+            or scalar["lifetime_ordinal"] != campaign_ordinal * 2
+            or scalar["turn"] != expected_turn
+            or (
+                index + 1 < len(events)
+                and scalar["timed_turn_admitted"] is not True
+            )
+        ):
+            return []
+        prefix.append(scalar)
+    return prefix
+
+
+def _execute_sm121_cache_performance_quality_case(
+    *,
+    server: Any,
+    model: SimpleNamespace,
+    case: SimpleNamespace,
+    journal: Journal,
+    arm: str,
+    lifetime_ordinal: int,
+    watchdog: HostSafetyWatchdog | None,
+    deadline: float,
+) -> None:
+    """Run the exact quality gate without retaining responses or request IDs."""
+
+    if len(_QUALITY_ITEMS) != SM121_CACHE_PERFORMANCE_QUALITY_ITEM_COUNT:
+        raise PreflightError("SM121 cache-performance quality item count changed")
+    journal.append(
+        {
+            "event": "sm121_cache_performance_quality_case_start",
+            "arm": arm,
+            "lifetime_ordinal": lifetime_ordinal,
+            "case_id": case.case_id,
+        }
+    )
+    try:
+        for index, item in enumerate(_QUALITY_ITEMS):
+            _sm121_cache_performance_abort_check(watchdog=watchdog, deadline=deadline)
+            request = _quality_request_arguments(
+                server=server,
+                model=model,
+                case=case,
+                item=item,
+                request_id=uuid.uuid4().hex,
+                prompt_tag=f"cache-performance-{index}",
+            )
+            request["timeout_s"] = min(
+                900.0, _sm121_cache_performance_remaining_s(deadline)
+            )
+            result = stream_chat_request(**request)
+            validation = _validate_quality_item(item, result)
+            if validation.get("passed") is not True:
+                raise SM121StorageQualityGateError()
+            _sm121_cache_performance_abort_check(watchdog=watchdog, deadline=deadline)
+    except (HostSafetyError, SM121StorageQualityGateError, SM121CachePerformanceRequestError):
+        raise
+    except BaseException:
+        raise SM121CachePerformanceRequestError() from None
+    journal.append(
+        {
+            "event": "sm121_cache_performance_quality_case_complete",
+            "arm": arm,
+            "lifetime_ordinal": lifetime_ordinal,
+            "case_id": case.case_id,
+            "quality_admitted": True,
+            "item_count": len(_QUALITY_ITEMS),
+        }
+    )
+
+
+def _execute_sm121_cache_performance_quality_lifetime(
+    *,
+    run_dir: Path,
+    workspace: Path,
+    model: SimpleNamespace,
+    arm: str,
+    lifetime_ordinal: int,
+    case: SimpleNamespace,
+    journal: Journal,
+    telemetry: TelemetrySampler,
+) -> float:
+    """Run the isolated quality gate and return its start-to-teardown wall time."""
+
+    started = time.monotonic()
+    deadline = started + SM121_CACHE_PERFORMANCE_CELL_TIMEOUT_S
+    server = None
+    watchdog: HostSafetyWatchdog | None = None
+    terminal_error: BaseException | None = None
+    cleanup_error: BaseException | None = None
+    try:
+        _sm121_cache_performance_remaining_s(deadline)
+        journal.append(
+            _sm121_cache_performance_static_event(
+                model=model, arm=arm, lifetime_ordinal=lifetime_ordinal
+            )
+        )
+        watchdog = _host_safety_watchdog(model)
+        if watchdog is not None:
+            watchdog.start()
+        telemetry.set_phase(f"cache_performance_quality_start:{lifetime_ordinal}")
+        callbacks: dict[str, Any] = {
+            "abort_check": lambda: _sm121_cache_performance_abort_check(
+                watchdog=watchdog, deadline=deadline
+            )
+        }
+        if watchdog is not None:
+            callbacks["on_server_created"] = (
+                lambda created_server: watchdog.register_abort_callback(
+                    created_server.interrupt_owned
+                )
+            )
+        server = start_server(
+            model,
+            workspace=workspace,
+            allow_download=False,
+            server_log_path=(
+                run_dir
+                / "server"
+                / f"lifetime-{lifetime_ordinal}"
+                / "server.log"
+            ),
+            **callbacks,
+        )
+        _sm121_cache_performance_abort_check(watchdog=watchdog, deadline=deadline)
+        journal.append(
+            _sm121_cache_performance_runtime_event(
+                server=server, arm=arm, lifetime_ordinal=lifetime_ordinal
+            )
+        )
+        journal.append(
+            {
+                "event": "server_ready",
+                "backend": server.backend,
+                "lifetime_ordinal": lifetime_ordinal,
+                "phase": "quality",
+                "first_inference_is_case": True,
+                "case_id": case.case_id,
+            }
+        )
+        telemetry.set_phase(f"cache_performance_quality_case:{lifetime_ordinal}")
+        _execute_sm121_cache_performance_quality_case(
+            server=server,
+            model=model,
+            case=case,
+            journal=journal,
+            arm=arm,
+            lifetime_ordinal=lifetime_ordinal,
+            watchdog=watchdog,
+            deadline=deadline,
+        )
+        _sm121_cache_performance_abort_check(watchdog=watchdog, deadline=deadline)
+    except BaseException as error:
+        terminal_error = (
+            watchdog.failure if watchdog is not None and watchdog.failure else error
+        )
+    finally:
+        telemetry.set_phase(f"cache_performance_quality_stop:{lifetime_ordinal}")
+        if server is not None:
+            if watchdog is not None and watchdog.tripped:
+                try:
+                    _retry_host_safety_interrupt_if_needed(server, watchdog)
+                    _record_host_safety_interrupt_failure(
+                        journal, watchdog, stage="cache_performance_quality"
+                    )
+                except BaseException as error:
+                    cleanup_error = error
+            try:
+                _sm121_cache_performance_interrupt_terminal_server(
+                    server=server,
+                    deadline=deadline,
+                    terminal_error=terminal_error,
+                )
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+            try:
+                save_server_logs(
+                    server,
+                    run_dir
+                    / "server"
+                    / f"lifetime-{lifetime_ordinal}"
+                    / "server.log",
+                )
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+            try:
+                server.stop()
+                journal.append(
+                    {
+                        "event": "server_stopped",
+                        "backend": server.backend,
+                        "lifetime_ordinal": lifetime_ordinal,
+                    }
+                )
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+                try:
+                    server.interrupt_owned()
+                    server.stop()
+                    journal.append(
+                        {
+                            "event": "server_stopped",
+                            "backend": server.backend,
+                            "lifetime_ordinal": lifetime_ordinal,
+                        }
+                    )
+                except BaseException:
+                    pass
+        if watchdog is not None:
+            watchdog.stop()
+            if terminal_error is None:
+                try:
+                    watchdog.raise_if_tripped()
+                except BaseException as error:
+                    terminal_error = error
+        if cleanup_error is not None and terminal_error is None:
+            terminal_error = cleanup_error
+    elapsed_s = time.monotonic() - started
+    within_timeout = elapsed_s <= SM121_CACHE_PERFORMANCE_CELL_TIMEOUT_S
+    journal.append(
+        {
+            "event": "sm121_cache_performance_lifetime_complete",
+            "arm": arm,
+            "lifetime_ordinal": lifetime_ordinal,
+            "phase": "quality",
+            "lifetime_wall_s": elapsed_s,
+            "within_timeout": within_timeout,
+            "admitted": terminal_error is None and within_timeout,
+        }
+    )
+    if terminal_error is not None:
+        if isinstance(
+            terminal_error,
+            (
+                HostSafetyError,
+                SM121StorageQualityGateError,
+                SM121CachePerformanceRequestError,
+            ),
+        ):
+            raise terminal_error
+        raise SM121CachePerformanceRequestError() from None
+    if not within_timeout:
+        raise SM121CachePerformanceRequestError()
+    return elapsed_s
+
+
+def _execute_sm121_cache_performance_timed_lifetime(
+    *,
+    run_dir: Path,
+    workspace: Path,
+    model: SimpleNamespace,
+    arm: str,
+    lifetime_ordinal: int,
+    case: SimpleNamespace,
+    journal: Journal,
+    telemetry: TelemetrySampler,
+    reference_prompt_token_ids: tuple[tuple[int, ...], ...] | None,
+) -> tuple[tuple[dict[str, Any], ...], tuple[tuple[int, ...], ...], float]:
+    """Run cold T0 plus append-only T1/T2 in one fresh timed lifetime.
+
+    Token IDs are retained only until the next A/B/B/A lifetime is checked;
+    journal records contain only the resulting boolean identity attestations.
+    """
+
+    started = time.monotonic()
+    deadline = started + SM121_CACHE_PERFORMANCE_CELL_TIMEOUT_S
+    server = None
+    watchdog: HostSafetyWatchdog | None = None
+    terminal_error: BaseException | None = None
+    cleanup_error: BaseException | None = None
+    private_turn_ids: list[tuple[int, ...]] = []
+    turn_events: list[dict[str, Any]] = []
+    try:
+        _sm121_cache_performance_remaining_s(deadline)
+        journal.append(
+            _sm121_cache_performance_static_event(
+                model=model, arm=arm, lifetime_ordinal=lifetime_ordinal
+            )
+        )
+        watchdog = _host_safety_watchdog(model)
+        if watchdog is not None:
+            watchdog.start()
+        telemetry.set_phase(f"cache_performance_timed_start:{lifetime_ordinal}")
+        callbacks: dict[str, Any] = {
+            "abort_check": lambda: _sm121_cache_performance_abort_check(
+                watchdog=watchdog, deadline=deadline
+            )
+        }
+        if watchdog is not None:
+            callbacks["on_server_created"] = (
+                lambda created_server: watchdog.register_abort_callback(
+                    created_server.interrupt_owned
+                )
+            )
+        server = start_server(
+            model,
+            workspace=workspace,
+            allow_download=False,
+            server_log_path=(
+                run_dir
+                / "server"
+                / f"lifetime-{lifetime_ordinal}"
+                / "server.log"
+            ),
+            **callbacks,
+        )
+        _sm121_cache_performance_abort_check(watchdog=watchdog, deadline=deadline)
+        journal.append(
+            _sm121_cache_performance_runtime_event(
+                server=server, arm=arm, lifetime_ordinal=lifetime_ordinal
+            )
+        )
+        journal.append(
+            {
+                "event": "server_ready",
+                "backend": server.backend,
+                "lifetime_ordinal": lifetime_ordinal,
+                "phase": "timed",
+                "first_inference_is_case": True,
+                "case_id": case.case_id,
+            }
+        )
+        journal.append(
+            {
+                "event": "sm121_cache_performance_timed_case_start",
+                "arm": arm,
+                "lifetime_ordinal": lifetime_ordinal,
+                "case_id": case.case_id,
+            }
+        )
+        telemetry.set_phase(f"cache_performance_timed_case:{lifetime_ordinal}")
+        for index, (turn, messages, expected_response) in enumerate(
+            zip(
+                SM121_CACHE_PERFORMANCE_TIMED_TURNS,
+                _sm121_cache_semantic_messages(),
+                _SM121_CACHE_SEMANTIC_EXPECTED_RESPONSES,
+                strict=True,
+            )
+        ):
+            _sm121_cache_performance_abort_check(watchdog=watchdog, deadline=deadline)
+            before_timeout_s = min(
+                45.0, _sm121_cache_performance_remaining_s(deadline)
+            )
+            before, _ignored_before_wait_s, before_polls, before_settled = (
+                settle_sm121_cache_observability_metrics(
+                    server,
+                    timeout_s=before_timeout_s,
+                    poll_interval_s=min(1.0, max(0.001, before_timeout_s / 4)),
+                    semantic_arm=arm,
+                )
+            )
+            _sm121_cache_performance_abort_check(watchdog=watchdog, deadline=deadline)
+            request_started = time.perf_counter()
+            result = request_sm121_cache_semantic_turn(
+                server,
+                served_name=model.served_name,
+                messages=messages,
+                expected_response=expected_response,
+                max_tokens=int(case.max_output_tokens),
+                timeout_s=min(
+                    900.0, _sm121_cache_performance_remaining_s(deadline)
+                ),
+            )
+            request_wall_s = time.perf_counter() - request_started
+            _sm121_cache_performance_abort_check(watchdog=watchdog, deadline=deadline)
+            after_timeout_s = min(
+                45.0, _sm121_cache_performance_remaining_s(deadline)
+            )
+            after, _ignored_after_wait_s, after_polls, after_settled = (
+                settle_sm121_cache_observability_metrics(
+                    server,
+                    timeout_s=after_timeout_s,
+                    poll_interval_s=min(1.0, max(0.001, after_timeout_s / 4)),
+                    semantic_arm=arm,
+                )
+            )
+            _sm121_cache_performance_abort_check(watchdog=watchdog, deadline=deadline)
+            prompt_token_ids = result.pop("private_prompt_token_ids", None)
+            if (
+                not isinstance(prompt_token_ids, tuple)
+                or not prompt_token_ids
+                or any(type(token) is not int or token < 0 for token in prompt_token_ids)
+            ):
+                raise SM121CachePerformanceRequestError()
+            if index == 0:
+                shared_prefix_tokens = 0
+                append_verified = True
+            else:
+                shared_prefix_tokens = _sm121_cache_semantic_common_prefix_tokens(
+                    private_turn_ids[-1], prompt_token_ids
+                )
+                append_verified = (
+                    shared_prefix_tokens
+                    >= SM121_CACHE_PERFORMANCE_COLD_INPUT_MIN_TOKENS
+                )
+            if reference_prompt_token_ids is None:
+                if lifetime_ordinal != 2 or arm != "A":
+                    raise SM121CachePerformanceRequestError()
+                cross_lifetime_verified = True
+            else:
+                if prompt_token_ids != reference_prompt_token_ids[index]:
+                    raise SM121CachePerformanceRequestError()
+                cross_lifetime_verified = True
+            event = _sm121_cache_performance_turn_event(
+                case=case,
+                arm=arm,
+                lifetime_ordinal=lifetime_ordinal,
+                turn=turn,
+                result=result,
+                request_wall_s=request_wall_s,
+                before=before,
+                before_polls=before_polls,
+                before_settled=before_settled,
+                after=after,
+                after_polls=after_polls,
+                after_settled=after_settled,
+                append_only_prompt_identity_verified=append_verified,
+                cross_lifetime_prompt_identity_verified=cross_lifetime_verified,
+                shared_prefix_tokens=shared_prefix_tokens,
+            )
+            journal.append(event)
+            if event["timed_turn_admitted"] is not True:
+                raise SM121CachePerformanceRequestError()
+            turn_events.append(event)
+            private_turn_ids.append(prompt_token_ids)
+        journal.append(
+            {
+                "event": "sm121_cache_performance_timed_case_complete",
+                "arm": arm,
+                "lifetime_ordinal": lifetime_ordinal,
+                "case_id": case.case_id,
+                "timed_admitted": True,
+            }
+        )
+        _sm121_cache_performance_abort_check(watchdog=watchdog, deadline=deadline)
+    except BaseException as error:
+        terminal_error = (
+            watchdog.failure if watchdog is not None and watchdog.failure else error
+        )
+    finally:
+        telemetry.set_phase(f"cache_performance_timed_stop:{lifetime_ordinal}")
+        if server is not None:
+            if watchdog is not None and watchdog.tripped:
+                try:
+                    _retry_host_safety_interrupt_if_needed(server, watchdog)
+                    _record_host_safety_interrupt_failure(
+                        journal, watchdog, stage="cache_performance_timed"
+                    )
+                except BaseException as error:
+                    cleanup_error = error
+            try:
+                _sm121_cache_performance_interrupt_terminal_server(
+                    server=server,
+                    deadline=deadline,
+                    terminal_error=terminal_error,
+                )
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+            try:
+                save_server_logs(
+                    server,
+                    run_dir
+                    / "server"
+                    / f"lifetime-{lifetime_ordinal}"
+                    / "server.log",
+                )
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+            try:
+                server.stop()
+                journal.append(
+                    {
+                        "event": "server_stopped",
+                        "backend": server.backend,
+                        "lifetime_ordinal": lifetime_ordinal,
+                    }
+                )
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+                try:
+                    server.interrupt_owned()
+                    server.stop()
+                    journal.append(
+                        {
+                            "event": "server_stopped",
+                            "backend": server.backend,
+                            "lifetime_ordinal": lifetime_ordinal,
+                        }
+                    )
+                except BaseException:
+                    pass
+        if watchdog is not None:
+            watchdog.stop()
+            if terminal_error is None:
+                try:
+                    watchdog.raise_if_tripped()
+                except BaseException as error:
+                    terminal_error = error
+        if cleanup_error is not None and terminal_error is None:
+            terminal_error = cleanup_error
+    elapsed_s = time.monotonic() - started
+    within_timeout = elapsed_s <= SM121_CACHE_PERFORMANCE_CELL_TIMEOUT_S
+    journal.append(
+        {
+            "event": "sm121_cache_performance_lifetime_complete",
+            "arm": arm,
+            "lifetime_ordinal": lifetime_ordinal,
+            "phase": "timed",
+            "lifetime_wall_s": elapsed_s,
+            "within_timeout": within_timeout,
+            "admitted": terminal_error is None and within_timeout,
+        }
+    )
+    if terminal_error is not None:
+        if isinstance(terminal_error, (HostSafetyError, SM121CachePerformanceRequestError)):
+            raise terminal_error
+        raise SM121CachePerformanceRequestError() from None
+    if not within_timeout:
+        raise SM121CachePerformanceRequestError()
+    return tuple(turn_events), tuple(private_turn_ids), elapsed_s
+
+
+def _load_sm121_cache_performance_campaign(
+    campaign_dir: Path, *, evidence_root: Path
+) -> tuple[
+    dict[str, Any],
+    list[tuple[Path, dict[str, Any], SimpleNamespace, SimpleNamespace]],
+]:
+    """Authenticate a frozen A/B/B/A topology before any server can start."""
+
+    try:
+        root = campaign_dir.resolve(strict=True)
+        campaign = json.loads((root / "campaign.json").read_text())
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise PreflightError("SM121 cache-performance campaign is unavailable") from error
+    expected_fields = {
+        "schema_version",
+        "campaign_id",
+        "created_at",
+        "execution_mode",
+        "prerequisite_bundle_sha256s",
+        "pair_binding",
+        "run_directories",
+        "integrity_hash",
+    }
+    if type(campaign) is not dict or set(campaign) != expected_fields:
+        raise PreflightError("SM121 cache-performance campaign fields are invalid")
+    integrity = campaign.get("integrity_hash")
+    if not isinstance(integrity, str) or content_hash(
+        {key: value for key, value in campaign.items() if key != "integrity_hash"},
+        len(integrity),
+    ) != integrity:
+        raise PreflightError("SM121 cache-performance campaign integrity is invalid")
+    if (
+        campaign.get("schema_version") != 1
+        or campaign.get("campaign_id") != SM121_CACHE_PERFORMANCE_CAMPAIGN_ID
+        or campaign.get("execution_mode") != SM121_CACHE_PERFORMANCE_EXECUTION_MODE
+        or not isinstance(campaign.get("created_at"), str)
+        or campaign.get("prerequisite_bundle_sha256s")
+        != list(SM121_CACHE_PERFORMANCE_PREREQUISITE_BUNDLE_SHA256S)
+    ):
+        raise PreflightError("SM121 cache-performance campaign contract is invalid")
+    binding = campaign.get("pair_binding")
+    try:
+        validate_sm121_cache_performance_pair_binding(binding)
+        _validate_sm121_cache_performance_prerequisites(evidence_root)
+    except SM121CachePerformanceError as error:
+        raise PreflightError("SM121 cache-performance admission is unavailable") from error
+    if not isinstance(binding, dict):
+        raise PreflightError("SM121 cache-performance pair binding is invalid")
+    names = campaign.get("run_directories")
+    if (
+        type(names) is not list
+        or len(names) != len(SM121_CACHE_PERFORMANCE_ARM_ORDER)
+        or len(set(names)) != len(names)
+        or any(
+            not isinstance(name, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", name) is None
+            for name in names
+        )
+    ):
+        raise PreflightError("SM121 cache-performance run topology is invalid")
+    runs_root = (root / "runs").resolve(strict=True)
+    try:
+        runs_root.relative_to(root)
+    except ValueError as error:
+        raise PreflightError("SM121 cache-performance runs escape campaign") from error
+    loaded: list[tuple[Path, dict[str, Any], SimpleNamespace, SimpleNamespace]] = []
+    for ordinal, (name, expected_arm) in enumerate(
+        zip(names, SM121_CACHE_PERFORMANCE_ARM_ORDER, strict=True), start=1
+    ):
+        run_dir = runs_root / str(name)
+        try:
+            resolved_run_dir = run_dir.resolve(strict=True)
+            resolved_run_dir.relative_to(runs_root)
+        except (OSError, ValueError) as error:
+            raise PreflightError("SM121 cache-performance run directory is invalid") from error
+        if resolved_run_dir.parent != runs_root or run_dir.is_symlink():
+            raise PreflightError("SM121 cache-performance run directory is invalid")
+        plan, model, suite = _load_sm121_cache_performance_plan(resolved_run_dir)
+        if (
+            plan.get("cache_performance_ordinal") != ordinal
+            or sm121_cache_performance_arm(model) != expected_arm
+            or plan.get("cache_performance_pair") != binding
+        ):
+            raise PreflightError("SM121 cache-performance run binding moved")
+        loaded.append((resolved_run_dir, plan, model, suite))
+    fingerprints = [plan["fingerprint"] for _path, plan, _model, _suite in loaded]
+    nonces = [plan["run_nonce"] for _path, plan, _model, _suite in loaded]
+    try:
+        instance = sm121_cache_performance_pair_instance_sha256(nonces)
+    except SM121CachePerformanceError as error:
+        raise PreflightError("SM121 cache-performance run nonce is invalid") from error
+    if (
+        binding.get("campaign_instance_sha256") != instance
+        or binding.get("plan_fingerprints") != fingerprints
+        or binding.get("pair_binding_sha256")
+        != sm121_cache_performance_pair_binding_sha256(binding)
+    ):
+        raise PreflightError("SM121 cache-performance binding is invalid")
+    return campaign, loaded
+
+
+def _execute_sm121_cache_performance_arm(
+    *,
+    run_dir: Path,
+    plan: dict[str, Any],
+    model: SimpleNamespace,
+    suite: SimpleNamespace,
+    campaign_ordinal: int,
+    workspace: Path,
+    reference_prompt_token_ids: tuple[tuple[int, ...], ...] | None,
+) -> tuple[dict[str, Any], tuple[tuple[int, ...], ...] | None, bool]:
+    """Execute one frozen A/B/B/A arm as two clean server lifetimes."""
+
+    journal = Journal(run_dir / "events.jsonl")
+    if journal.events():
+        raise PreflightError(
+            "SM121 cache-performance campaign is non-resumable; freeze a new campaign"
+        )
+    arm = sm121_cache_performance_arm(model)
+    quality_case, timed_case = _sm121_cache_performance_case_ids(suite)
+    if set(quality_case.requires) - set(model.tasks) or set(timed_case.requires) - set(
+        model.tasks
+    ):
+        raise PreflightError("SM121 cache-performance case capabilities are invalid")
+    if (
+        SM121_CACHE_PERFORMANCE_COLD_INPUT_MAX_TOKENS
+        + int(timed_case.max_output_tokens)
+        + 1_024
+        > int(model.max_context)
+    ):
+        raise PreflightError("SM121 cache-performance context admission is insufficient")
+    binding = getattr(model, "cache_performance_pair", None)
+    if not isinstance(binding, dict):
+        raise PreflightError("SM121 cache-performance pair binding is unavailable")
+    journal.append(
+        {
+            "event": "run_start",
+            "execution_mode": SM121_CACHE_PERFORMANCE_EXECUTION_MODE,
+            "arm": arm,
+            "campaign_ordinal": campaign_ordinal,
+            "plan_fingerprint": str(plan["fingerprint"]),
+            "cache_performance_pair_binding_sha256": binding[
+                "pair_binding_sha256"
+            ],
+        }
+    )
+    journal.append({"event": "measurement_started"})
+    telemetry = TelemetrySampler(run_dir / "telemetry.jsonl")
+    quality_admitted = False
+    timed_admitted = False
+    within_timeout = False
+    turns: list[dict[str, Any]] = []
+    next_reference = reference_prompt_token_ids
+    stage = "preflight"
+    try:
+        _preflight(model)
+        stage = "quality_lifetime"
+        quality_elapsed_s = _execute_sm121_cache_performance_quality_lifetime(
+            run_dir=run_dir,
+            workspace=workspace,
+            model=model,
+            arm=arm,
+            lifetime_ordinal=campaign_ordinal * 2 - 1,
+            case=quality_case,
+            journal=journal,
+            telemetry=telemetry,
+        )
+        quality_admitted = True
+        stage = "timed_lifetime"
+        turns_tuple, private_ids, timed_elapsed_s = (
+            _execute_sm121_cache_performance_timed_lifetime(
+                run_dir=run_dir,
+                workspace=workspace,
+                model=model,
+                arm=arm,
+                lifetime_ordinal=campaign_ordinal * 2,
+                case=timed_case,
+                journal=journal,
+                telemetry=telemetry,
+                reference_prompt_token_ids=reference_prompt_token_ids,
+            )
+        )
+        turns = list(turns_tuple)
+        timed_admitted = all(
+            event["timed_turn_admitted"] is True for event in turns
+        )
+        if not timed_admitted or len(private_ids) != len(SM121_CACHE_PERFORMANCE_TIMED_TURNS):
+            raise SM121CachePerformanceRequestError()
+        if reference_prompt_token_ids is None:
+            next_reference = private_ids
+        within_timeout = (
+            quality_elapsed_s <= SM121_CACHE_PERFORMANCE_CELL_TIMEOUT_S
+            and timed_elapsed_s <= SM121_CACHE_PERFORMANCE_CELL_TIMEOUT_S
+        )
+        if not within_timeout:
+            raise SM121CachePerformanceRequestError()
+    except BaseException as error:
+        if isinstance(
+            error,
+            (
+                HostSafetyError,
+                PreflightError,
+                SM121StorageQualityGateError,
+                SM121CachePerformanceRequestError,
+            ),
+        ):
+            safe_error = error
+        else:
+            safe_error = SM121CachePerformanceRequestError()
+        if isinstance(safe_error, HostSafetyError):
+            _record_host_safety_breach(journal, safe_error, stage=stage)
+        if stage == "timed_lifetime":
+            turns = _sm121_cache_performance_timed_turn_prefix_from_journal(
+                journal=journal,
+                arm=arm,
+                campaign_ordinal=campaign_ordinal,
+            )
+        _record_run_aborted(journal, safe_error, stage=stage)
+        return (
+            {
+                "ordinal": campaign_ordinal,
+                "arm": arm,
+                "quality_admitted": quality_admitted,
+                "timed_admitted": False,
+                "within_timeout": within_timeout,
+                "turns": turns,
+            },
+            next_reference,
+            False,
+        )
+    finally:
+        # This controller uses phase tracking only; no telemetry file is
+        # started because scalar cache events are the sole retained evidence.
+        telemetry.stop()
+    journal.append({"event": "measurement_complete"})
+    journal.append({"event": "run_complete", "status": "completed"})
+    return (
+        {
+            "ordinal": campaign_ordinal,
+            "arm": arm,
+            "quality_admitted": quality_admitted,
+            "timed_admitted": timed_admitted,
+            "within_timeout": within_timeout,
+            "turns": turns,
+        },
+        next_reference,
+        True,
+    )
+
+
+def _sm121_cache_performance_unstarted_lifetime(
+    *, ordinal: int, arm: str
+) -> dict[str, Any]:
+    """Represent an intentionally unstarted arm after a terminal predecessor."""
+
+    return {
+        "ordinal": ordinal,
+        "arm": arm,
+        "quality_admitted": False,
+        "timed_admitted": False,
+        "within_timeout": False,
+        "turns": [],
+    }
+
+
+def execute_sm121_cache_performance_campaign(
+    campaign_dir: Path, *, workspace: Path, evidence_root: Path
+) -> dict[str, Any]:
+    """Run one non-resumable fresh-lifetime A/B/B/A wall-time campaign."""
+
+    campaign, loaded = _load_sm121_cache_performance_campaign(
+        campaign_dir, evidence_root=evidence_root
+    )
+    if (campaign_dir / "summary.json").exists():
+        raise PreflightError(
+            "SM121 cache-performance campaign is terminal; freeze a new campaign"
+        )
+    for run_dir, _plan, _model, _suite in loaded:
+        if Journal(run_dir / "events.jsonl").events():
+            raise PreflightError(
+                "SM121 cache-performance campaign is non-resumable; freeze a new campaign"
+            )
+    lock_path = results_lock_path(workspace)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError("Another SparkBench run holds the benchmark lock") from error
+        lifetimes: list[dict[str, Any]] = []
+        reference_prompt_token_ids: tuple[tuple[int, ...], ...] | None = None
+        terminal = False
+        for ordinal, (run_dir, plan, model, suite) in enumerate(loaded, start=1):
+            arm = SM121_CACHE_PERFORMANCE_ARM_ORDER[ordinal - 1]
+            if terminal:
+                lifetimes.append(
+                    _sm121_cache_performance_unstarted_lifetime(
+                        ordinal=ordinal, arm=arm
+                    )
+                )
+                continue
+            lifetime, reference_prompt_token_ids, completed = (
+                _execute_sm121_cache_performance_arm(
+                    run_dir=run_dir,
+                    plan=plan,
+                    model=model,
+                    suite=suite,
+                    campaign_ordinal=ordinal,
+                    workspace=workspace,
+                    reference_prompt_token_ids=reference_prompt_token_ids,
+                )
+            )
+            lifetimes.append(lifetime)
+            terminal = not completed
+        try:
+            score = score_sm121_cache_performance_campaign(lifetimes)
+        except SM121CachePerformanceError as error:
+            raise PreflightError("SM121 cache-performance score is invalid") from error
+        summary = {
+            "schema_version": 1,
+            "campaign_id": SM121_CACHE_PERFORMANCE_CAMPAIGN_ID,
+            "execution_mode": SM121_CACHE_PERFORMANCE_EXECUTION_MODE,
+            "pair_binding_sha256": campaign["pair_binding"]["pair_binding_sha256"],
+            "status": score.status,
+            "decision": score.decision,
+            "completed_arms": sum(
+                1
+                for lifetime in lifetimes
+                if lifetime["quality_admitted"] is True
+                and lifetime["timed_admitted"] is True
+                and lifetime["within_timeout"] is True
+            ),
+            "lifetimes": lifetimes,
+            "score": score.to_mapping(),
+        }
+        summary["integrity_hash"] = content_hash(summary, 64)
+        write_json(campaign_dir / "summary.json", summary)
+        return summary
 
 
 def _recover_pending_lifecycle(

@@ -21,6 +21,7 @@ from bench.audit import (
     audit_matrix,
     audit_sm121_cache_observability_run,
     audit_sm121_cache_semantic_pair,
+    audit_sm121_cache_performance_campaign,
     audit_sm121_storage_canary_run,
 )
 from bench.autoresearch_campaign import (
@@ -52,15 +53,21 @@ from bench.runner import (
     create_plan,
     create_sm121_cache_observability_plan,
     create_sm121_cache_semantic_pair_plans,
+    create_sm121_cache_performance_campaign,
     create_sm121_storage_canary_plan,
     execute_plan,
     execute_sm121_cache_observability_canary,
     execute_sm121_cache_semantic_canary,
+    execute_sm121_cache_performance_campaign,
     execute_sm121_storage_canary,
 )
 from bench.sglang_sm121_cache_semantic import (
     SM121_CACHE_SEMANTIC_CACHE_OFF_PROFILE_ID,
     SM121_CACHE_SEMANTIC_CACHE_ON_PROFILE_ID,
+)
+from bench.sglang_sm121_cache_performance import (
+    SM121_CACHE_PERFORMANCE_CACHE_OFF_PROFILE_ID,
+    SM121_CACHE_PERFORMANCE_CACHE_ON_PROFILE_ID,
 )
 from bench.trtllm_direct import run_direct_trtllm
 
@@ -86,6 +93,12 @@ DEFAULT_SM121_CACHE_SEMANTIC_SUITE = (
     / "manifests"
     / "suites"
     / "qwen38_flash_next_sm121_triton_storage_cache_policy_semantic_canary.toml"
+)
+DEFAULT_SM121_CACHE_PERFORMANCE_SUITE = (
+    WORKSPACE
+    / "manifests"
+    / "suites"
+    / "qwen38_flash_next_sm121_triton_storage_cache_policy_performance_v1.toml"
 )
 DEFAULT_EVIDENCE = WORKSPACE / "evidence"
 DEFAULT_RESULTS = WORKSPACE / "results"
@@ -380,6 +393,37 @@ def command_sm121_cache_policy_semantic_canary(args: argparse.Namespace) -> int:
     return 0 if summary["status"] == "complete" else 1
 
 
+def command_sm121_cache_policy_performance(args: argparse.Namespace) -> int:
+    """Freeze and execute the only authorized SM121 cache A/B/B/A timing lane."""
+
+    models = load_models(args.models)
+    try:
+        cache_on_model = models[SM121_CACHE_PERFORMANCE_CACHE_ON_PROFILE_ID]
+        cache_off_model = models[SM121_CACHE_PERFORMANCE_CACHE_OFF_PROFILE_ID]
+    except KeyError as error:
+        raise ManifestError(
+            "SM121 cache-performance campaign requires both exact A/B profiles"
+        ) from error
+    suite = load_suite(args.suite)
+    campaign_dir = create_sm121_cache_performance_campaign(
+        cache_on_model=cache_on_model,
+        cache_off_model=cache_off_model,
+        suite=suite,
+        results_root=args.results / "cache-policy-campaigns",
+        models_path=args.models,
+        suite_path=args.suite,
+        evidence_root=args.evidence,
+    )
+    print(f"Campaign: {campaign_dir}")
+    summary = execute_sm121_cache_performance_campaign(
+        campaign_dir,
+        workspace=WORKSPACE,
+        evidence_root=args.evidence,
+    )
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0 if summary["status"] == "complete" else 1
+
+
 def command_run(args: argparse.Namespace) -> int:
     summary = execute_plan(
         args.run_dir,
@@ -632,6 +676,14 @@ def command_audit_sm121_cache_policy_semantic(args: argparse.Namespace) -> int:
     return 0 if report["ok"] else 1
 
 
+def command_audit_sm121_cache_policy_performance(args: argparse.Namespace) -> int:
+    report = audit_sm121_cache_performance_campaign(
+        args.campaign_dir, evidence_root=args.evidence
+    )
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["ok"] else 1
+
+
 def command_export_evidence(args: argparse.Namespace) -> int:
     report = export_evidence(
         results_root=args.results,
@@ -756,6 +808,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--results", type=Path, default=WORKSPACE / "results"
     )
     cache_semantic.set_defaults(function=command_sm121_cache_policy_semantic_canary)
+
+    cache_performance = subparsers.add_parser(
+        "sm121-cache-policy-performance",
+        help="run the frozen fresh-lifetime SM121 cache A/B/B/A wall-time campaign",
+    )
+    cache_performance.add_argument("--models", type=Path, default=DEFAULT_MODELS)
+    cache_performance.add_argument(
+        "--suite", type=Path, default=DEFAULT_SM121_CACHE_PERFORMANCE_SUITE
+    )
+    cache_performance.add_argument(
+        "--results", type=Path, default=WORKSPACE / "results"
+    )
+    cache_performance.add_argument("--evidence", type=Path, default=DEFAULT_EVIDENCE)
+    cache_performance.set_defaults(function=command_sm121_cache_policy_performance)
 
     run = subparsers.add_parser("run", aliases=["resume"], help="execute or resume a frozen plan")
     run.add_argument("run_dir", type=Path)
@@ -889,6 +955,18 @@ def build_parser() -> argparse.ArgumentParser:
     cache_semantic_audit.add_argument("cache_on_run_dir", type=Path)
     cache_semantic_audit.set_defaults(
         function=command_audit_sm121_cache_policy_semantic
+    )
+
+    cache_performance_audit = subparsers.add_parser(
+        "audit-sm121-cache-policy-performance",
+        help="read-only verification of one SM121 cache A/B/B/A campaign",
+    )
+    cache_performance_audit.add_argument("campaign_dir", type=Path)
+    cache_performance_audit.add_argument(
+        "--evidence", type=Path, default=DEFAULT_EVIDENCE
+    )
+    cache_performance_audit.set_defaults(
+        function=command_audit_sm121_cache_policy_performance
     )
 
     export = subparsers.add_parser(
