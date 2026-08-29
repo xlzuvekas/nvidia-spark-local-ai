@@ -95,6 +95,27 @@ class SM121CacheSemanticRuntimeTests(unittest.TestCase):
                     max_tokens=16,
                 )
 
+    def test_semantic_turn_accepts_source_omitted_storage_detail(self) -> None:
+        payload = _payload()
+        payload["sglext"] = {"cached_tokens_details": {"device": 2, "host": 0}}
+        with mock.patch.object(
+            runtime.urllib.request,
+            "urlopen",
+            return_value=_Response(payload),
+        ):
+            result = runtime.request_sm121_cache_semantic_turn(
+                _server(),
+                served_name="synthetic-model",
+                messages=[{"role": "user", "content": "synthetic prompt"}],
+                expected_response="SYNTHETIC-ANSWER",
+                max_tokens=16,
+            )
+
+        self.assertEqual(result["response_detail_state"], "nonzero_details")
+        self.assertEqual(result["response_device_cached_tokens"], 2)
+        self.assertEqual(result["response_host_cached_tokens"], 0)
+        self.assertEqual(result["response_storage_cached_tokens"], 0)
+
     def test_runtime_identity_uses_resolved_cache_fields(self) -> None:
         startup = (
             "Tree cache initialized: source=default impl=UnifiedRadixCache "

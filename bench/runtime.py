@@ -2175,7 +2175,8 @@ def _sm121_cache_response_detail_observation(
     if (
         not isinstance(details, dict)
         or set(details) - {"device", "host", "storage", "storage_backend"}
-        or not {"device", "host", "storage"}.issubset(details)
+        or not {"device", "host"}.issubset(details)
+        or ("storage_backend" in details and "storage" not in details)
     ):
         return "unexpected", None, None, None
     try:
@@ -2186,7 +2187,7 @@ def _sm121_cache_response_detail_observation(
             details["host"], "response host cached tokens"
         )
         storage = _sm121_cache_exact_json_count(
-            details["storage"], "response storage cached tokens"
+            details.get("storage", 0), "response storage cached tokens"
         )
     except RuntimeErrorWithContext:
         return "unexpected", None, None, None
