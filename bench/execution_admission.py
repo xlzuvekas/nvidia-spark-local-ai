@@ -8,6 +8,9 @@ from typing import Any
 from .sglang_sm121_storage import is_sm121_storage_candidate
 from .sglang_sm121_cache_semantic import is_sm121_cache_semantic_candidate
 from .sglang_sm121_cache_performance import is_sm121_cache_performance_candidate
+from .sglang_sm121_chunked_prefill_performance import (
+    is_sm121_chunked_prefill_performance_candidate,
+)
 
 
 RETIRED_SGLANG_SOURCE_OVERLAY_DIGESTS = frozenset(
@@ -34,6 +37,10 @@ _SM121_CACHE_PERFORMANCE_MESSAGE = (
     "This SM121 cache-policy performance profile requires the dedicated "
     "sm121-cache-policy-performance command"
 )
+_SM121_CHUNKED_PREFILL_PERFORMANCE_MESSAGE = (
+    "This SM121 chunked-prefill performance profile requires the dedicated "
+    "sm121-chunked-prefill-performance command"
+)
 
 
 def _field(value: Any, name: str) -> Any:
@@ -48,11 +55,15 @@ def model_execution_blocker(
     allow_sm121_storage_canary: bool = False,
     allow_sm121_cache_semantic_canary: bool = False,
     allow_sm121_cache_performance: bool = False,
+    allow_sm121_chunked_prefill_performance: bool = False,
 ) -> str | None:
     """Return a stable blocker when a model contains a retired artifact."""
 
     semantic_candidate = is_sm121_cache_semantic_candidate(model)
     performance_candidate = is_sm121_cache_performance_candidate(model)
+    chunked_prefill_candidate = is_sm121_chunked_prefill_performance_candidate(
+        model
+    )
     if (
         semantic_candidate
         and not allow_sm121_cache_semantic_canary
@@ -64,9 +75,15 @@ def model_execution_blocker(
     ):
         return _SM121_CACHE_PERFORMANCE_MESSAGE
     if (
+        chunked_prefill_candidate
+        and not allow_sm121_chunked_prefill_performance
+    ):
+        return _SM121_CHUNKED_PREFILL_PERFORMANCE_MESSAGE
+    if (
         is_sm121_storage_candidate(model)
         and not semantic_candidate
         and not performance_candidate
+        and not chunked_prefill_candidate
         and not allow_sm121_storage_canary
     ):
         return _SM121_STORAGE_CANARY_MESSAGE

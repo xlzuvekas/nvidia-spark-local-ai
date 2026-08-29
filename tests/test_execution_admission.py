@@ -165,6 +165,25 @@ def _write_frozen_runner_plan(run_dir: Path) -> Path:
 
 
 class ExecutionBlockerTests(unittest.TestCase):
+    def test_chunked_prefill_profiles_require_their_dedicated_executor(self) -> None:
+        profiles = load_models(ROOT / "manifests" / "models.toml")
+        for profile_id in (
+            "qwen38-flash-next-nvfp4-sm121-triton-storage-chunked-prefill-performance-1k-sglang",
+            "qwen38-flash-next-nvfp4-sm121-triton-storage-chunked-prefill-performance-2k-sglang",
+        ):
+            with self.subTest(profile_id=profile_id):
+                profile = profiles[profile_id]
+                self.assertIn(
+                    "chunked-prefill performance profile",
+                    model_execution_blocker(profile) or "",
+                )
+                self.assertIsNone(
+                    model_execution_blocker(
+                        profile,
+                        allow_sm121_chunked_prefill_performance=True,
+                    )
+                )
+
     def test_cache_performance_profiles_require_their_dedicated_executor(self) -> None:
         profiles = load_models(ROOT / "manifests" / "models.toml")
         for profile_id in (

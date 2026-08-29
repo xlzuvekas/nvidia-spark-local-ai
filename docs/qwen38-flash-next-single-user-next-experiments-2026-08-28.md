@@ -327,6 +327,13 @@ The stopped campaign produced no 1,024/2,048 result. First refreeze that pair on
 the newly admitted runtime. Propose another value only after the new pair
 completes validly:
 
+The current-runtime profile/suite preflight for that first pair is now tracked
+in the [SM121 1K/2K chunked-prefill protocol](qwen38-flash-next-sm121-chunked-prefill-protocol-2026-08-29.md).
+It intentionally remains execution-blocked until its independent controller,
+runtime chunk-size attestation, auditor, and scalar-only exporter exist. Its
+scope is a long-context static-history proxy, not the still-unadmitted
+agentic-coding harness.
+
 - If 2,048 wins, compare the promoted champion with 4,096.
 - If 2,048 loses, compare 1,024 with 512.
 - If the 1,024/2,048 pair is inconclusive, stop; do not propose another value.

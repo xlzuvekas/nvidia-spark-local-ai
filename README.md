@@ -19,6 +19,7 @@ quality checks, and the provenance needed to interpret each number.
 | What is ready for the replacement SGLang candidate's first admission run? | [SM121 Triton/storage pre-admission gates and the unexecuted target-only fresh-process quality/varied-context canary](docs/qwen38-flash-next-sm121-storage-pre-admission-2026-08-28.md) |
 | What did the admitted SM121 cache-policy timing show without leaking prompts or claiming TTFT? | [Two independent audited A/B/B/A fresh-lifetime results: retain cache-on A](docs/qwen38-flash-next-sm121-cache-performance-protocol-2026-08-29.md) |
 | How is the live SM121 product track now using an autoresearch-style loop safely? | [Current-runtime v2 registry: freeze one reviewed candidate, execute once, and derive retain/reject/inconclusive from audited scalar evidence](docs/qwen38-flash-next-sm121-autoresearch-v2-2026-08-29.md) |
+| What is the next safe 60K prefill optimization test? | [Execution-blocked current-SM121 1K/2K chunked-prefill contract; a long-context proxy, not an agentic claim](docs/qwen38-flash-next-sm121-chunked-prefill-protocol-2026-08-29.md) |
 | How should the vLLM direct-PLE-mmap path be reproduced? | [Exact stacked source boundary, inferred Radix checkpoint, local readiness, admission, ABBA, long-context, and profiler plan](docs/qwen38-flash-next-vllm-mmap-reproduction-2026-08-28.md) |
 | What do matched PLE mapping/omission and NEXTN depths show? | [Replicated lazy-C8 depth results, semantic-ablation failures, and quality-clean exact-answer v2](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md) |
 | What happened to the single-user Qwen3.8-Flash-Next serving search? | [Frozen 14-cell, nine-case 64K protocol; admission expired without a measurement, and its retired runtime is now blocked at every execution ingress](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md) |
@@ -45,7 +46,7 @@ data. Its [human-readable map](evidence/README.md) and
 aborted, and nonterminal attempts without publishing raw payloads. The
 [evidence publication section](BENCHMARK.md#publishing-sanitized-evidence)
 explains how to create and verify both files. The current refresh contains
-1,969 files covering 309 run bundles and 21 campaign bundles.
+2,025 files covering 318 run bundles and 26 campaign bundles.
 
 ## What the results say
 
@@ -264,6 +265,7 @@ geometries, slot counts, or validation states.
 - [Qwen3.8-Flash-Next SM121 native-storage pre-admission and first-run canary](docs/qwen38-flash-next-sm121-storage-pre-admission-2026-08-28.md)
 - [Qwen3.8-Flash-Next SM121 cache-policy timing protocol](docs/qwen38-flash-next-sm121-cache-performance-protocol-2026-08-29.md)
 - [Qwen3.8-Flash-Next SM121 autoresearch v2 registry](docs/qwen38-flash-next-sm121-autoresearch-v2-2026-08-29.md)
+- [Qwen3.8-Flash-Next SM121 1K/2K chunked-prefill protocol](docs/qwen38-flash-next-sm121-chunked-prefill-protocol-2026-08-29.md)
 - [Qwen3.8-Flash-Next vLLM direct-mmap reproduction plan](docs/qwen38-flash-next-vllm-mmap-reproduction-2026-08-28.md)
 - [Qwen3.8-Flash-Next single-user autoresearch protocol](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md)
 - [Qwen3.8-Flash-Next single-user serving backlog](docs/qwen38-flash-next-single-user-next-experiments-2026-08-28.md)
