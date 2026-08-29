@@ -155,7 +155,7 @@ the two ordered fresh lifetimes, scalar runtime provenance immediately before
 each ready event, no primer, and terminal cleanup before scalar evidence can
 be exported.
 
-## Cache-off B0 observability — pending execution
+## Cache-off B0 observability — completed
 
 The next lane is deliberately smaller than a cache A/B: it does **not** enable
 Radix, select a cache policy, reuse a prefix, compare wall time, or report TPS.
@@ -191,7 +191,28 @@ unsettled metrics, failed quality item, extra lifecycle event, or cleanup
 failure fails closed. The runner always attempts to stop its owned server even
 if log capture or watchdog cleanup itself fails.
 
-Run this pending B0 check only through its dedicated entry point:
+The first B0 execution reached that clean terminal `partial` state because the
+metric reader did not initially account for SGLang's stable scheduler label
+vector. It was a measurement-parser diagnostic, not a cache-hit observation:
+the response detail was omitted, usage detail was null, and no native counter
+could yet be admitted. That scalar-only partial record is retained so the
+correction is auditable.
+
+After normalizing the shared scheduler labels and rerunning from a new server
+lifetime, the B0 canary completed. All four quality items passed. The server
+returned the reviewed omitted response detail and null usage detail; two
+identical native metric snapshots were observed on each side of the direct
+request. The input-prefill counter advanced by 64 tokens while every device,
+host, storage, and fallback-total cache-hit counter changed by zero. The
+runtime attestation selected `ChunkCache` with Radix disabled, and the scalar
+record was admitted as a zero-hit observation.
+
+This establishes only the cache-disabled baseline: the direct request did not
+use a recorded cache tier under the reviewed runtime. It does **not** measure a
+cache-on policy, cache benefit, wall time, throughput, or a reusable-prefix
+effect.
+
+Reproduce the B0 check only through its dedicated entry point:
 
 ```bash
 python3 sparkbench.py sm121-cache-observability-canary \
@@ -211,16 +232,17 @@ the B0 bundle.
 The runtime-attestation schema intentionally accepts only an `admitted` record
 when all of the following are true: retired-overlay rejection, storage import,
 io_uring, PLE row comparison, SM121 Triton, quality, and long-context. The
-first target-only canary has now demonstrated all of those gates. That narrow
-admission result does not remove the ordinary-entrypoint tombstone or establish
-a general serving configuration.
+target-only canary and its B0 cache-off observation now demonstrate those
+gates. That narrow admission result does not remove the ordinary-entrypoint
+tombstone or establish a general serving configuration.
 
 Before any performance comparison or cache experiment, the next protocol must:
 
 1. pin the immutable image, model, tokenizer, revision, and serving profile;
-2. retain the fresh-process quality and varied-token checks as admission gates;
+2. retain the fresh-process quality, varied-token, and B0 zero-hit checks as
+   admission gates;
 3. verify teardown and scalar-only evidence export; then
-4. run a cold A/B/B/A cache policy experiment in separate process lifetimes.
+4. run a cold A/B/B/A cache-policy experiment in separate process lifetimes.
 
 The retired overlay and all historical TRT-LLM measurements remain excluded
 from this candidate. Passing this pre-admission does not license a speed claim
