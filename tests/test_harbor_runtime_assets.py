@@ -12,6 +12,7 @@ from bench.harbor_runtime_assets import (
     RuntimeAssetError,
     TREE_PROTOCOL,
     _same_inode,
+    inspect_normalized_tree,
     stage_immutable_asset,
     verify_admitted_file,
     verify_admitted_symlink,
@@ -73,6 +74,12 @@ class HarborRuntimeAssetTests(unittest.TestCase):
             parent.chmod(0o700)
             root = self._tree(parent)
             digest, entries, files, links, size = _canonical_fixture_digest(root)
+            inspected = inspect_normalized_tree(root, repo_root=Path.cwd())
+            self.assertEqual(inspected.digest, digest)
+            self.assertEqual(inspected.entries, entries)
+            self.assertEqual(inspected.files, files)
+            self.assertEqual(inspected.links, links)
+            self.assertEqual(inspected.size_bytes, size)
             admission = verify_normalized_tree(
                 root,
                 repo_root=Path.cwd(),

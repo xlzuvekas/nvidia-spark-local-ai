@@ -292,41 +292,16 @@ def _tree_records(
     yield from visit(root_fd, PurePosixPath(), root_identity)
 
 
-def verify_normalized_tree(
-    path: Path,
-    *,
-    repo_root: Path,
-    expected_digest: str,
-    expected_size_bytes: int,
-    expected_entries: int | None = None,
-    expected_files: int | None = None,
-    expected_links: int | None = None,
-) -> TreeAdmission:
-    """Hash one exact external tree through fd-relative, no-follow reads."""
+def inspect_normalized_tree(path: Path, *, repo_root: Path) -> TreeAdmission:
+    """Hash one normalized external tree without treating it as admitted.
 
-    digest_pin = expected_digest.removeprefix("sha256:")
-    count_pins = (expected_entries, expected_files, expected_links)
-    if (
-        len(digest_pin) != 64
-        or any(character not in "0123456789abcdef" for character in digest_pin)
-        or not 0 < expected_size_bytes <= MAX_TREE_BYTES
-        or any(
-            value is not None
-            and (isinstance(value, bool) or not isinstance(value, int) or value < 0)
-            for value in count_pins
-        )
-        or expected_entries is not None
-        and not 0 < expected_entries <= MAX_TREE_ENTRIES
-        or expected_files is not None
-        and not 0 < expected_files <= (expected_entries or MAX_TREE_ENTRIES)
-        or expected_links is not None
-        and not 0 <= expected_links <= (expected_entries or MAX_TREE_ENTRIES)
-        or expected_entries is not None
-        and expected_files is not None
-        and expected_links is not None
-        and expected_files + expected_links > expected_entries
-    ):
-        raise RuntimeAssetError("Runtime tree pin is invalid")
+    Callers that create a new immutable tree need a safe way to obtain its
+    scalar identity before a later policy pins it.  This remains the same
+    fd-relative, no-follow traversal used by ``verify_normalized_tree``; it
+    deliberately does not loosen any ownership, mode, size, or containment
+    rule.
+    """
+
     resolved = _validate_external_components(path, repo_root=repo_root)
     flags = (
         os.O_RDONLY
@@ -377,7 +352,7 @@ def verify_normalized_tree(
         raise RuntimeAssetError("Runtime tree contains duplicate canonical paths")
     for _path_bytes, record, _file_count, _link_count, _size in records:
         digest.update(record)
-    admission = TreeAdmission(
+    return TreeAdmission(
         protocol=TREE_PROTOCOL,
         digest=digest.hexdigest(),
         entries=entries,
@@ -386,6 +361,44 @@ def verify_normalized_tree(
         size_bytes=size_bytes,
         resolved_path=resolved,
     )
+
+
+def verify_normalized_tree(
+    path: Path,
+    *,
+    repo_root: Path,
+    expected_digest: str,
+    expected_size_bytes: int,
+    expected_entries: int | None = None,
+    expected_files: int | None = None,
+    expected_links: int | None = None,
+) -> TreeAdmission:
+    """Hash one exact external tree through fd-relative, no-follow reads."""
+
+    digest_pin = expected_digest.removeprefix("sha256:")
+    count_pins = (expected_entries, expected_files, expected_links)
+    if (
+        len(digest_pin) != 64
+        or any(character not in "0123456789abcdef" for character in digest_pin)
+        or not 0 < expected_size_bytes <= MAX_TREE_BYTES
+        or any(
+            value is not None
+            and (isinstance(value, bool) or not isinstance(value, int) or value < 0)
+            for value in count_pins
+        )
+        or expected_entries is not None
+        and not 0 < expected_entries <= MAX_TREE_ENTRIES
+        or expected_files is not None
+        and not 0 < expected_files <= (expected_entries or MAX_TREE_ENTRIES)
+        or expected_links is not None
+        and not 0 <= expected_links <= (expected_entries or MAX_TREE_ENTRIES)
+        or expected_entries is not None
+        and expected_files is not None
+        and expected_links is not None
+        and expected_files + expected_links > expected_entries
+    ):
+        raise RuntimeAssetError("Runtime tree pin is invalid")
+    admission = inspect_normalized_tree(path, repo_root=repo_root)
     if (
         admission.digest != digest_pin
         or admission.size_bytes != expected_size_bytes

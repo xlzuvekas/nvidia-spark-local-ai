@@ -60,6 +60,7 @@ from bench.pi_core_prefix import (
     audit_pi_core_cache,
     freeze_pinned_pi_core_lock,
     load_frozen_pi_core_lock,
+    materialize_pi_core_prefix,
     write_new_frozen_pi_core_lock,
 )
 from bench.prefix_cache_protocol import PREFIX_CACHE_SUITE_ID
@@ -525,6 +526,20 @@ def command_pi_core_closure_audit(args: argparse.Namespace) -> int:
         summary, cache_sha512_root=args.cache_sha512_content_store
     )
     print(json.dumps(audit.scalar(), indent=2, sort_keys=True))
+    return 0
+
+
+def command_pi_core_prefix_materialize(args: argparse.Namespace) -> int:
+    """Build the offline Pi-core prefix from exact locally cached tarballs."""
+
+    summary = load_frozen_pi_core_lock(DEFAULT_PI_CORE_CLOSURE_LOCK)
+    result = materialize_pi_core_prefix(
+        summary,
+        cache_sha512_root=args.cache_sha512_content_store,
+        prefix_parent=args.prefix_parent,
+        repo_root=WORKSPACE,
+    )
+    print(json.dumps(result.scalar(), indent=2, sort_keys=True))
     return 0
 
 
@@ -1192,6 +1207,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="npm content-v2 SHA-512 blob root to audit read-only",
     )
     pi_core_closure_audit.set_defaults(function=command_pi_core_closure_audit)
+
+    pi_core_prefix_materialize = subparsers.add_parser(
+        "pi-core-prefix-materialize",
+        help=(
+            "build a scripts-disabled Pi-core prefix directly from the local cache; "
+            "does not invoke npm, Node, Pi, containers, or inference"
+        ),
+    )
+    pi_core_prefix_materialize.add_argument(
+        "--prefix-parent",
+        type=Path,
+        required=True,
+        help=(
+            "existing external owner-private mode-0700 directory for the new "
+            "deterministic prefix"
+        ),
+    )
+    pi_core_prefix_materialize.add_argument(
+        "--cache-sha512-content-store",
+        type=Path,
+        default=DEFAULT_NPM_SHA512_CONTENT_STORE,
+        help="npm content-v2 SHA-512 blob root to copy and verify",
+    )
+    pi_core_prefix_materialize.set_defaults(
+        function=command_pi_core_prefix_materialize
+    )
 
     cache_observability = subparsers.add_parser(
         "sm121-cache-observability-canary",

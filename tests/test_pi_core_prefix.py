@@ -4,9 +4,12 @@ import base64
 from contextlib import contextmanager
 import copy
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import stat
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -65,6 +68,49 @@ def _entry(
         value["name"] = "synthetic-" + label
         value["license"] = "UNLICENSED"
     return value, payload
+
+
+def _package_tarball(
+    *,
+    name: str,
+    version: str,
+    root: str = "package",
+    files: dict[str, bytes] | None = None,
+    duplicate_files: tuple[tuple[str, bytes], ...] = (),
+    manifest_extra: dict[str, object] | None = None,
+    symlink_name: str | None = None,
+) -> bytes:
+    """Build a synthetic PAX npm archive without invoking any npm tooling."""
+
+    manifest: dict[str, object] = {"name": name, "version": version}
+    if manifest_extra is not None:
+        manifest.update(manifest_extra)
+    entries = {
+        "package.json": _canonical_json_bytes(manifest),
+        **(files or {"index.js": b"export const synthetic = true;\n"}),
+    }
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
+        directory = tarfile.TarInfo(root + "/")
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o755
+        archive.addfile(directory)
+        for relative, content in entries.items():
+            member = tarfile.TarInfo(root + "/" + relative)
+            member.mode = 0o644
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+        for relative, content in duplicate_files:
+            member = tarfile.TarInfo(root + "/" + relative)
+            member.mode = 0o644
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+        if symlink_name is not None:
+            link = tarfile.TarInfo(root + "/" + symlink_name)
+            link.type = tarfile.SYMTYPE
+            link.linkname = "outside"
+            archive.addfile(link)
+    return payload.getvalue()
 
 
 def _source_document(packages: dict[str, object]) -> dict[str, object]:
@@ -548,6 +594,250 @@ class PiCorePrefixTests(unittest.TestCase):
                 with self.assertRaisesRegex(prefix.PiCorePrefixError, "destination is unsafe"):
                     prefix.write_new_frozen_pi_core_lock(target, summary)
             self.assertFalse(target.exists())
+
+    def _materializer_packages(
+        self,
+        *,
+        alias_manifest_name: str = "string-width",
+        required_symlink: bool = False,
+        duplicate_core_content: bytes = b"export const core = true;\n",
+    ) -> tuple[dict[str, object], dict[str, bytes], tuple[str, ...]]:
+        core_path = "node_modules/" + prefix.PI_AGENT_CORE_PACKAGE
+        ai_path = "node_modules/" + prefix.PI_AI_PACKAGE
+        alias_path = "node_modules/string-width-cjs"
+        core, _ = _entry(
+            "materializer-agent-core",
+            version=prefix.PI_CORE_VERSION,
+            dependencies={prefix.PI_AI_PACKAGE: "^0.57.1"},
+        )
+        ai, _ = _entry(
+            "materializer-pi-ai",
+            version=prefix.PI_CORE_VERSION,
+            dependencies={
+                "required": "^1.0.0",
+                "string-width-cjs": "npm:string-width@^4.2.0",
+            },
+            optional_dependencies={"optional": "^1.0.0"},
+        )
+        required, _ = _entry("materializer-required", has_install_script=True)
+        optional, _ = _entry("materializer-optional", optional=True)
+        alias, _ = _entry("materializer-alias", version="4.2.3")
+        packages: dict[str, object] = {
+            core_path: core,
+            ai_path: ai,
+            "node_modules/required": required,
+            "node_modules/optional": optional,
+            alias_path: alias,
+        }
+        archives = {
+            core_path: _package_tarball(
+                name=prefix.PI_AGENT_CORE_PACKAGE,
+                version=prefix.PI_CORE_VERSION,
+                files={
+                    "dist/./index.js": b"export const core = true;\n",
+                    "pax/" + "x" * 120 + ".js": b"export const pax = true;\n",
+                },
+                duplicate_files=(("dist/index.js", duplicate_core_content),),
+            ),
+            ai_path: _package_tarball(
+                name=prefix.PI_AI_PACKAGE,
+                version=prefix.PI_CORE_VERSION,
+            ),
+            "node_modules/required": _package_tarball(
+                name="required",
+                version="1.0.0",
+                root="node",
+                manifest_extra={"scripts": {"postinstall": "must-not-run"}},
+                symlink_name="forbidden-link" if required_symlink else None,
+            ),
+            "node_modules/optional": _package_tarball(
+                name="optional", version="1.0.0", root="retry"
+            ),
+            alias_path: _package_tarball(
+                name=alias_manifest_name,
+                version="4.2.3",
+            ),
+        }
+        payloads: dict[str, bytes] = {}
+        for package_path, archive in archives.items():
+            entry = packages[package_path]
+            self.assertIsInstance(entry, dict)
+            entry["integrity"] = _integrity(archive)
+            payloads[str(entry["integrity"])] = archive
+        return packages, payloads, tuple(packages)
+
+    def _materialize(
+        self,
+        directory: Path,
+        packages: dict[str, object],
+        payloads: dict[str, bytes],
+        selected_paths: tuple[str, ...],
+    ) -> tuple[prefix.PiCorePrefixMaterialization, Path, bytes]:
+        summary, source_bytes = self._freeze(directory, packages, selected_paths)
+        cache_root = directory / "content-v2" / "sha512"
+        cache_root.parent.mkdir(mode=0o700)
+        self._write_cache(cache_root, payloads)
+        prefix_parent = directory / "prefix-parent"
+        prefix_parent.mkdir(mode=0o700)
+        os.chmod(prefix_parent, 0o700)
+        with self._patched_contract(source_bytes, packages, selected_paths):
+            result = prefix.materialize_pi_core_prefix(
+                summary,
+                cache_sha512_root=cache_root,
+                prefix_parent=prefix_parent,
+                repo_root=Path.cwd(),
+            )
+        return result, prefix_parent, source_bytes
+
+    def test_materializer_builds_a_normalized_alias_aware_prefix(self) -> None:
+        packages, payloads, selected_paths = self._materializer_packages()
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            result, prefix_parent, _source_bytes = self._materialize(
+                directory, packages, payloads, selected_paths
+            )
+            tree = result.resolved_path
+            self.assertEqual(tree.parent, prefix_parent)
+            self.assertEqual(tree.name, prefix.PI_CORE_PREFIX_DIRECTORY_NAME)
+            self.assertTrue(
+                (tree / "node_modules" / prefix.PI_AGENT_CORE_PACKAGE / "dist/index.js").is_file()
+            )
+            self.assertTrue(
+                (tree / "node_modules/string-width-cjs/package.json").is_file()
+            )
+            self.assertFalse((tree / ".artifacts").exists())
+            self.assertTrue(result.tree_digest.startswith("sha256:"))
+            self.assertGreater(result.tree_size_bytes, 0)
+            self.assertEqual(result.scalar()["status"], "materialized")
+            self.assertNotIn(str(directory), json.dumps(result.scalar(), sort_keys=True))
+            directory_count = 0
+            file_count = 0
+            for root, directories, files in os.walk(tree):
+                self.assertEqual(stat.S_IMODE(os.stat(root).st_mode), 0o555)
+                directory_count += len(directories)
+                file_count += len(files)
+                for name in directories:
+                    self.assertEqual(
+                        stat.S_IMODE(os.stat(Path(root) / name).st_mode), 0o555
+                    )
+                for name in files:
+                    self.assertEqual(
+                        stat.S_IMODE(os.stat(Path(root) / name).st_mode), 0o444
+                    )
+            self.assertEqual(result.tree_entries, directory_count + file_count)
+            self.assertEqual(result.tree_files, file_count)
+
+    def test_materializer_never_overwrites_an_existing_prefix(self) -> None:
+        packages, payloads, selected_paths = self._materializer_packages()
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self._materialize(directory, packages, payloads, selected_paths)
+            summary, source_bytes = self._freeze(directory, packages, selected_paths)
+            cache_root = directory / "content-v2" / "sha512"
+            prefix_parent = directory / "prefix-parent"
+            with self._patched_contract(source_bytes, packages, selected_paths):
+                with self.assertRaisesRegex(prefix.PiCorePrefixError, "already exists"):
+                    prefix.materialize_pi_core_prefix(
+                        summary,
+                        cache_sha512_root=cache_root,
+                        prefix_parent=prefix_parent,
+                        repo_root=Path.cwd(),
+                    )
+
+    def test_materializer_rejects_symlink_members_without_publishing(self) -> None:
+        packages, payloads, selected_paths = self._materializer_packages(
+            required_symlink=True
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            summary, source_bytes = self._freeze(directory, packages, selected_paths)
+            cache_root = directory / "content-v2" / "sha512"
+            cache_root.parent.mkdir(mode=0o700)
+            self._write_cache(cache_root, payloads)
+            prefix_parent = directory / "prefix-parent"
+            prefix_parent.mkdir(mode=0o700)
+            os.chmod(prefix_parent, 0o700)
+            with self._patched_contract(source_bytes, packages, selected_paths):
+                with self.assertRaisesRegex(prefix.PiCorePrefixError, "unsupported member"):
+                    prefix.materialize_pi_core_prefix(
+                        summary,
+                        cache_sha512_root=cache_root,
+                        prefix_parent=prefix_parent,
+                        repo_root=Path.cwd(),
+                    )
+            self.assertFalse(
+                (prefix_parent / prefix.PI_CORE_PREFIX_DIRECTORY_NAME).exists()
+            )
+            self.assertEqual(list(prefix_parent.iterdir()), [])
+
+    def test_materializer_rejects_an_alias_manifest_identity_mismatch(self) -> None:
+        packages, payloads, selected_paths = self._materializer_packages(
+            alias_manifest_name="unexpected-string-width"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            summary, source_bytes = self._freeze(directory, packages, selected_paths)
+            cache_root = directory / "content-v2" / "sha512"
+            cache_root.parent.mkdir(mode=0o700)
+            self._write_cache(cache_root, payloads)
+            prefix_parent = directory / "prefix-parent"
+            prefix_parent.mkdir(mode=0o700)
+            os.chmod(prefix_parent, 0o700)
+            with self._patched_contract(source_bytes, packages, selected_paths):
+                with self.assertRaisesRegex(prefix.PiCorePrefixError, "manifest identity"):
+                    prefix.materialize_pi_core_prefix(
+                        summary,
+                        cache_sha512_root=cache_root,
+                        prefix_parent=prefix_parent,
+                        repo_root=Path.cwd(),
+                    )
+            self.assertFalse(
+                (prefix_parent / prefix.PI_CORE_PREFIX_DIRECTORY_NAME).exists()
+            )
+            self.assertEqual(list(prefix_parent.iterdir()), [])
+
+    def test_materializer_rejects_conflicting_effective_duplicate_files(self) -> None:
+        packages, payloads, selected_paths = self._materializer_packages(
+            duplicate_core_content=b"export const core = false;\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            summary, source_bytes = self._freeze(directory, packages, selected_paths)
+            cache_root = directory / "content-v2" / "sha512"
+            cache_root.parent.mkdir(mode=0o700)
+            self._write_cache(cache_root, payloads)
+            prefix_parent = directory / "prefix-parent"
+            prefix_parent.mkdir(mode=0o700)
+            os.chmod(prefix_parent, 0o700)
+            with self._patched_contract(source_bytes, packages, selected_paths):
+                with self.assertRaisesRegex(
+                    prefix.PiCorePrefixError, "duplicate archive file conflicts"
+                ):
+                    prefix.materialize_pi_core_prefix(
+                        summary,
+                        cache_sha512_root=cache_root,
+                        prefix_parent=prefix_parent,
+                        repo_root=Path.cwd(),
+                    )
+            self.assertEqual(list(prefix_parent.iterdir()), [])
+
+    def test_no_replace_publish_refuses_an_empty_concurrent_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            source = parent / "source"
+            destination = parent / "destination"
+            source.mkdir()
+            destination.mkdir()
+            descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with self.assertRaisesRegex(prefix.PiCorePrefixError, "already exists"):
+                    prefix._rename_directory_no_replace(
+                        descriptor, source.name, destination.name
+                    )
+            finally:
+                os.close(descriptor)
+            self.assertTrue(source.is_dir())
+            self.assertTrue(destination.is_dir())
 
 
 if __name__ == "__main__":

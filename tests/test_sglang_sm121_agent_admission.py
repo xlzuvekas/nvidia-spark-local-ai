@@ -29,6 +29,7 @@ from bench.sglang_sm121_agent_admission import (
     SM121_AGENT_ADMISSION_STATIC_PROBE_ID,
     SM121_AGENT_ADMISSION_STATIC_PROBE_SCHEMA_VERSION,
     SM121AgentAdmissionError,
+    _STATIC_PROBE_SCRIPT,
     is_sm121_agent_admission_candidate,
     probe_sm121_agent_parser_static_preflight,
     validate_sm121_agent_admission_profile,
@@ -169,24 +170,45 @@ class SM121AgentAdmissionTests(unittest.TestCase):
             ],
         )
         launch = runner.call_args_list[1].args[0]
-        self.assertEqual(launch[:4], ["docker", "run", "--rm", "--pull=never"])
         self.assertEqual(
-            launch[launch.index("--name") + 1],
-            "sparkbench-sm121-agent-parser-" + "a" * 32,
+            launch,
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--pull=never",
+                "--name",
+                "sparkbench-sm121-agent-parser-" + "a" * 32,
+                "--label",
+                "io.sparkbench.sm121-agent-parser-preflight=" + "a" * 32,
+                "--runtime",
+                "runc",
+                "--network",
+                "none",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--pids-limit",
+                "64",
+                "--memory",
+                "2g",
+                "--tmpfs",
+                "/tmp:rw,nosuid,nodev,noexec,size=64m",
+                "--env",
+                "HOME=/tmp",
+                "--env",
+                "XDG_CACHE_HOME=/tmp",
+                "--env",
+                "PYTHONDONTWRITEBYTECODE=1",
+                "--entrypoint",
+                "python3",
+                SM121_STORAGE_LOCAL_IMAGE_ID,
+                "-c",
+                _STATIC_PROBE_SCRIPT,
+            ],
         )
-        self.assertEqual(
-            launch[launch.index("--label") + 1],
-            "io.sparkbench.sm121-agent-parser-preflight=" + "a" * 32,
-        )
-        self.assertEqual(launch[launch.index("--runtime") + 1], "runc")
-        self.assertEqual(launch[launch.index("--network") + 1], "none")
-        self.assertIn("--read-only", launch)
-        self.assertEqual(launch[launch.index("--cap-drop") + 1], "ALL")
-        self.assertEqual(
-            launch[launch.index("--security-opt") + 1], "no-new-privileges"
-        )
-        self.assertIn(SM121_STORAGE_LOCAL_IMAGE_ID, launch)
-        self.assertNotIn(SM121_STORAGE_LOCAL_IMAGE_TAG, launch)
         for forbidden_flag in (
             "--gpus",
             "--device",

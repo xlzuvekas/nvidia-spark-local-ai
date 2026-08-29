@@ -13,18 +13,30 @@ import sparkbench
 class PiCorePrefixCliTests(unittest.TestCase):
     """CLI contracts that never touch a lockfile or npm content store."""
 
-    def test_parser_registers_the_two_non_execution_closure_commands(self) -> None:
+    def test_parser_registers_the_offline_closure_commands(self) -> None:
         source_lock = Path("synthetic-candidate.package-lock.json")
         freeze = sparkbench.build_parser().parse_args(
             ["pi-core-closure-freeze", "--source-lock", str(source_lock)]
         )
         audit = sparkbench.build_parser().parse_args(["pi-core-closure-audit"])
+        prefix_parent = Path("/synthetic/private-prefix-parent")
+        materialize = sparkbench.build_parser().parse_args(
+            ["pi-core-prefix-materialize", "--prefix-parent", str(prefix_parent)]
+        )
 
         self.assertIs(freeze.function, sparkbench.command_pi_core_closure_freeze)
         self.assertEqual(freeze.source_lock, source_lock)
         self.assertIs(audit.function, sparkbench.command_pi_core_closure_audit)
         self.assertEqual(
             audit.cache_sha512_content_store,
+            sparkbench.DEFAULT_NPM_SHA512_CONTENT_STORE,
+        )
+        self.assertIs(
+            materialize.function, sparkbench.command_pi_core_prefix_materialize
+        )
+        self.assertEqual(materialize.prefix_parent, prefix_parent)
+        self.assertEqual(
+            materialize.cache_sha512_content_store,
             sparkbench.DEFAULT_NPM_SHA512_CONTENT_STORE,
         )
 
@@ -163,6 +175,61 @@ class PiCorePrefixCliTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue()), expected)
         self.assertNotIn(str(cache_root), output.getvalue())
         self.assertNotIn(str(sparkbench.DEFAULT_PI_CORE_CLOSURE_LOCK), output.getvalue())
+
+    def test_materialize_uses_the_fixed_closure_and_prints_only_scalars(self) -> None:
+        cache_root = Path("synthetic-cache")
+        prefix_parent = Path("/synthetic/private-prefix-parent")
+        args = sparkbench.build_parser().parse_args(
+            [
+                "pi-core-prefix-materialize",
+                "--prefix-parent",
+                str(prefix_parent),
+                "--cache-sha512-content-store",
+                str(cache_root),
+            ]
+        )
+        summary = Mock()
+        expected = {
+            "protocol": "synthetic-pi-prefix-v1",
+            "status": "materialized",
+            "frozen_lock_sha256": "sha256:" + "d" * 64,
+            "package_count": 4,
+            "artifact_count": 3,
+            "artifact_size_bytes": 1234,
+            "tree_digest": "sha256:" + "e" * 64,
+            "tree_entries": 12,
+            "tree_files": 8,
+            "tree_size_bytes": 5678,
+            "prefix_directory_name": "synthetic-prefix",
+        }
+        result = Mock()
+        result.scalar.return_value = expected
+        output = io.StringIO()
+        with (
+            patch("sparkbench.freeze_pinned_pi_core_lock") as freeze,
+            patch("sparkbench.write_new_frozen_pi_core_lock") as write,
+            patch("sparkbench.audit_pi_core_cache") as audit,
+            patch("sparkbench.load_frozen_pi_core_lock", return_value=summary) as load,
+            patch("sparkbench.materialize_pi_core_prefix", return_value=result) as materialize,
+            redirect_stdout(output),
+        ):
+            status = args.function(args)
+
+        self.assertEqual(status, 0)
+        load.assert_called_once_with(sparkbench.DEFAULT_PI_CORE_CLOSURE_LOCK)
+        materialize.assert_called_once_with(
+            summary,
+            cache_sha512_root=cache_root,
+            prefix_parent=prefix_parent,
+            repo_root=sparkbench.WORKSPACE,
+        )
+        result.scalar.assert_called_once_with()
+        freeze.assert_not_called()
+        write.assert_not_called()
+        audit.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue()), expected)
+        self.assertNotIn(str(cache_root), output.getvalue())
+        self.assertNotIn(str(prefix_parent), output.getvalue())
 
 
 if __name__ == "__main__":

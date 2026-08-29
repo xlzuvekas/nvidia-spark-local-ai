@@ -16,6 +16,7 @@ quality checks, and the provenance needed to interpret each number.
 | What did the historical native SGLang Flash-Next path show on GB10? | [Measured NVFP4+MTP result, read-only NVMe PLE mechanics, exact pins, and long-context limit](docs/qwen38-flash-next-native-mtp-optimization-2026-08-26.md) |
 | What did the first day of GB10 community work add? | [Primary-source review of the one-Spark vLLM mmap patch, upstream status, and dual-Spark SGLang report](docs/qwen38-flash-next-gb10-day-one-2026-08-27.md) |
 | What changed on day two for Flash-Next on GB10? | [SGLang's SM121 safety reversal, vLLM's new mmap PR and profiler evidence, and ranked reproduction targets](docs/qwen38-flash-next-gb10-day-two-delta-2026-08-28.md) |
+| What does upstream currently qualify for Flash-Next on GB10? | [Official/upstream qualification: model artifacts, open SGLang/vLLM support, and why NVFP4 Spark remains experimental](docs/qwen38-flash-next-official-support-qualification-2026-08-29.md) |
 | What has the replacement SGLang candidate actually passed? | [SM121 Triton/storage prerequisites, target-only quality and varied-context admission, and the remaining scope limits](docs/qwen38-flash-next-sm121-storage-pre-admission-2026-08-28.md) |
 | What did the admitted SM121 cache-policy timing show without leaking prompts or claiming TTFT? | [Two independent audited A/B/B/A fresh-lifetime results: retain cache-on A](docs/qwen38-flash-next-sm121-cache-performance-protocol-2026-08-29.md) |
 | How is the live SM121 product track now using an autoresearch-style loop safely? | [Current-runtime v2 registry: freeze one reviewed candidate, execute once, and derive retain/reject/inconclusive from audited scalar evidence](docs/qwen38-flash-next-sm121-autoresearch-v2-2026-08-29.md) |
@@ -26,7 +27,7 @@ quality checks, and the provenance needed to interpret each number.
 | What should the next single-user Flash-Next experiments test? | [Ranked cache/state, fan-out, MTP, CUDA-graph, chunk-size, and streaming protocols, plus source rejection of continuous decode and adaptive NEXTN](docs/qwen38-flash-next-single-user-next-experiments-2026-08-28.md) |
 | What is limiting single-user Flash-Next TPS on Spark? | [Evidence-backed target-pass, batching, MTP, PLE, startup, and profiler analysis](docs/qwen38-flash-next-tps-bottleneck-2026-08-28.md) |
 | How should Pi and richer cowork tasks be benchmarked locally? | [Pinned Pi-in-Harbor adapter and deterministic cowork-core-v1 plan](docs/pi-cowork-harness-plan-2026-08-28.md) |
-| What has been safely established for a future Pi-core wrapper? | [Offline 222-record source closure and 207-artifact cache audit; no prefix, runtime, or benchmark](docs/pi-core-source-closure-2026-08-29.md) |
+| What has been safely established for a future Pi-core wrapper? | [Offline 222-record source closure/cache audit and reverified temporary scripts-disabled materialization; no retained runtime or benchmark](docs/pi-core-source-closure-2026-08-29.md) |
 | Can the current SM121 image even support the needed Qwen reasoning/tool parsers? | [Static image-local parser preflight: `qwen3` and `qwen3_coder` are present; live agent admission remains pending](docs/qwen38-flash-next-sm121-agent-admission-preflight-2026-08-29.md) |
 | What does native llama.cpp prompt-KV reuse change for Qwen3.6? | [Prefix-cache controls: 8K and 32K shared-prefix cold/warm observations](docs/qwen36-prefix-cache-results-2026-08-18.md) |
 | How did Qwen3-Coder-Next fare on terminal coding tasks? | [Harbor/Terminal-Bench-derived results: Qwen Code versus OpenCode](docs/harbor-terminal-results-2026-08-18.md) |
@@ -284,6 +285,7 @@ geometries, slot counts, or validation states.
 - [RLM and HALO overnight campaign protocol](docs/rlm-halo-overnight-2026-08-25.md)
 - [Qwen3.8-Flash-Next GB10 day-one literature review](docs/qwen38-flash-next-gb10-day-one-2026-08-27.md)
 - [Qwen3.8-Flash-Next GB10 day-two literature delta](docs/qwen38-flash-next-gb10-day-two-delta-2026-08-28.md)
+- [Qwen3.8-Flash-Next upstream qualification on GB10](docs/qwen38-flash-next-official-support-qualification-2026-08-29.md)
 - [Qwen3.8-Flash-Next SM121 native-storage pre-admission and first-run canary](docs/qwen38-flash-next-sm121-storage-pre-admission-2026-08-28.md)
 - [Qwen3.8-Flash-Next SM121 cache-policy timing protocol](docs/qwen38-flash-next-sm121-cache-performance-protocol-2026-08-29.md)
 - [Qwen3.8-Flash-Next SM121 autoresearch v2 registry](docs/qwen38-flash-next-sm121-autoresearch-v2-2026-08-29.md)

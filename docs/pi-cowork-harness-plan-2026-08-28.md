@@ -30,9 +30,12 @@ image-local static parser preflight. The exact image imports `qwen3` reasoning
 and `qwen3_coder` tool parsers without starting a server, mounting host
 weights, loading a model, or using a GPU. See the [preflight record](qwen38-flash-next-sm121-agent-admission-preflight-2026-08-29.md).
 
-There is still no checked-in Pi package lock or normalized prefix, core wrapper,
-Pi/cowork manifest, runner, C2 scheduler, validator, or evidence exporter. The
-current generic agentic and historical Harbor paths deliberately enforce
+There is now a checked-in minimal frozen source closure and a tested,
+scripts-disabled direct-materialization command. A temporary real-closure
+materialization smoke was independently reverified and removed; there is no
+retained normalized prefix, static core wrapper, Pi/cowork manifest, runner,
+C2 scheduler, validator, or evidence exporter. The current generic agentic
+and historical Harbor paths deliberately enforce
 different C1-only topologies; reuse their isolation and oracle patterns, but do
 not widen their schemas in place to admit Pi.
 
@@ -61,14 +64,14 @@ the dependency surface ambiguous.
 
 After the fixed cutoff and retirement of the superseded runtime:
 
-1. Create an owner-private, normalized, read-only Pi 0.57.1 prefix from a
-   separately admitted, hash-locked artifact set. The top-level tarball and a
-   dependency-complete installed tree are available, but the full transitive
-   tarball cache closure has not been proven.
-2. Verify every exact lockfile integrity against locally staged content and
-   perform a credential-free offline materialization. Stage any missing
-   artifacts outside the measured lifecycle; never install or resolve packages
-   during a measured run.
+1. Create an owner-private, normalized, read-only Pi 0.57.1 prefix from the
+   separately admitted, hash-locked artifact set. The full 222-record closure
+   and one temporary scripts-disabled smoke have been verified, but no retained
+   campaign prefix exists.
+2. Re-verify every exact lockfile integrity against locally staged content and
+   perform a credential-free offline materialization for the retained prefix.
+   Stage any missing artifacts outside the measured lifecycle; never install or
+   resolve packages during a measured run.
 3. Freeze every transitive lock entry, the full tree digest, regular-file count
    and bytes, entrypoint digest, Node binary/tree digests, wrapper digest,
    literal system-prompt digest, tool-schema digest, and payload-policy digest.
