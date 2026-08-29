@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .sglang_sm121_storage import is_sm121_storage_candidate
+from .sglang_sm121_agent_admission import is_sm121_agent_admission_candidate
 from .sglang_sm121_cache_semantic import is_sm121_cache_semantic_candidate
 from .sglang_sm121_cache_performance import is_sm121_cache_performance_candidate
 from .sglang_sm121_chunked_prefill_performance import (
@@ -41,6 +42,10 @@ _SM121_CHUNKED_PREFILL_PERFORMANCE_MESSAGE = (
     "This SM121 chunked-prefill performance profile requires the dedicated "
     "sm121-chunked-prefill-performance command"
 )
+_SM121_AGENT_ADMISSION_MESSAGE = (
+    "This SM121 low-thinking/tool profile is prospective and requires the "
+    "dedicated parser/tool admission controller"
+)
 
 
 def _field(value: Any, name: str) -> Any:
@@ -64,6 +69,8 @@ def model_execution_blocker(
     chunked_prefill_candidate = is_sm121_chunked_prefill_performance_candidate(
         model
     )
+    if is_sm121_agent_admission_candidate(model):
+        return _SM121_AGENT_ADMISSION_MESSAGE
     if (
         semantic_candidate
         and not allow_sm121_cache_semantic_canary

@@ -34,6 +34,12 @@ from .sglang_sm121_storage import (
     validate_sm121_storage_candidate,
     validate_sm121_storage_suite,
 )
+from .sglang_sm121_agent_admission import (
+    SM121_AGENT_ADMISSION_PROFILE_ID,
+    SM121AgentAdmissionError,
+    is_sm121_agent_admission_candidate,
+    validate_sm121_agent_admission_profile,
+)
 from .sglang_sm121_cache_observability import (
     SM121_CACHE_OBSERVABILITY_SUITE_ID,
     SM121CacheObservabilityError,
@@ -1693,7 +1699,9 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
                 f"{context}.sglang_storage_mode is supported only for sglang"
             )
         try:
-            if is_sm121_cache_semantic_candidate(model):
+            if is_sm121_agent_admission_candidate(model):
+                validate_sm121_agent_admission_profile(model)
+            elif is_sm121_cache_semantic_candidate(model):
                 validate_sm121_cache_semantic_candidate(model)
             elif is_sm121_cache_performance_candidate(model):
                 validate_sm121_cache_performance_candidate(model)
@@ -1703,6 +1711,7 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
                 validate_sm121_storage_candidate(model)
         except (
             SM121StorageCandidateError,
+            SM121AgentAdmissionError,
             SM121CacheSemanticError,
             SM121CachePerformanceError,
             SM121ChunkedPrefillPerformanceError,
@@ -2078,6 +2087,14 @@ def validate_benchmark_selection(
         raise ManifestError(
             f"{context}: the {_FLASH_NEXT_AGENT64K_SUITE_ID!r} suite requires "
             "one of its exact dedicated agent64k profiles"
+        )
+    sm121_agent_admission_profile = (
+        model_id == SM121_AGENT_ADMISSION_PROFILE_ID
+    )
+    if sm121_agent_admission_profile:
+        raise ManifestError(
+            f"{context}: the {SM121_AGENT_ADMISSION_PROFILE_ID!r} profile is "
+            "tombstoned pending its dedicated parser/tool admission controller"
         )
     sm121_storage_profile = model_id == _SM121_STORAGE_PROFILE_ID
     sm121_storage_suite = suite.id in _SM121_STORAGE_SUITE_IDS

@@ -94,6 +94,12 @@ from bench.sglang_sm121_chunked_prefill_performance import (
     SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_PROFILE_ID,
     SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CONTROL_PROFILE_ID,
 )
+from bench.sglang_sm121_agent_admission import (
+    SM121_AGENT_ADMISSION_PROFILE_ID,
+    probe_sm121_agent_parser_static_preflight,
+    validate_sm121_agent_admission_profile,
+    validate_sm121_agent_parser_static_probe,
+)
 from bench.trtllm_direct import run_direct_trtllm
 
 
@@ -447,6 +453,24 @@ def command_sm121_storage_canary(args: argparse.Namespace) -> int:
     summary = execute_sm121_storage_canary(run_dir, workspace=WORKSPACE)
     print(json.dumps(summary, indent=2))
     return 0 if summary["status"] == "complete" else 1
+
+
+def command_sm121_agent_parser_preflight(args: argparse.Namespace) -> int:
+    """Validate the current image's required Qwen parser registries only."""
+
+    models = load_models(args.models)
+    try:
+        model = models[SM121_AGENT_ADMISSION_PROFILE_ID]
+    except KeyError as error:
+        raise ManifestError(
+            "SM121 agent parser preflight requires the exact prospective profile"
+        ) from error
+    validate_sm121_agent_admission_profile(model)
+    probe = validate_sm121_agent_parser_static_probe(
+        probe_sm121_agent_parser_static_preflight(model)
+    )
+    print(json.dumps(probe, indent=2, sort_keys=True))
+    return 0
 
 
 def command_sm121_cache_observability_canary(args: argparse.Namespace) -> int:
@@ -1073,6 +1097,16 @@ def build_parser() -> argparse.ArgumentParser:
     add_selection(storage_canary)
     storage_canary.set_defaults(suite=DEFAULT_SM121_STORAGE_CANARY_SUITE)
     storage_canary.set_defaults(function=command_sm121_storage_canary)
+
+    agent_parser_preflight = subparsers.add_parser(
+        "sm121-agent-parser-preflight",
+        help=(
+            "verify the pinned SM121 image imports Qwen reasoning/tool parsers "
+            "without starting inference"
+        ),
+    )
+    agent_parser_preflight.add_argument("--models", type=Path, default=DEFAULT_MODELS)
+    agent_parser_preflight.set_defaults(function=command_sm121_agent_parser_preflight)
 
     cache_observability = subparsers.add_parser(
         "sm121-cache-observability-canary",

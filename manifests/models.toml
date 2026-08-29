@@ -4464,6 +4464,63 @@ args = [
 ]
 
 [[models]]
+id = "qwen38-flash-next-nvfp4-sm121-triton-storage-agent-admission-sglang"
+description = "Prospective C1 Qwen3.8 Flash-Next NVFP4 Pi/cowork admission profile on the current SM121 Triton/io_uring storage runtime. It is tombstoned until a dedicated parser, quality, tool-loop, long-context, cache, and host-safety admission controller is implemented."
+support_status = "exploratory"
+backend = "sglang"
+source = "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+revision = "7b719225242aacd3dbd3f9407468c2ee9a9d2594"
+weight_file_count = 206
+weight_size_bytes = 135195303851
+served_name = "qwen38-flash-next-nvfp4-sm121-storage-agent-admission"
+tasks = ["chat", "json", "thinking", "tools"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":true,"reasoning_effort":"low"}}'
+architecture = "moe+qsa+gdn"
+quantization = "nvfp4+ple-fp8-nvme-io-uring"
+lifecycle = "docker"
+image = "local/sglang:sm121-storage-274ee330-runtime"
+local_image_id = "sha256:b14c39fb7cb2e0b82f2f8cae1e115a55f2bb69b5ec6fd7ccc4099b219d1096b0"
+cache_dir = "user"
+max_context = 65536
+native_context = 262144
+startup_timeout_s = 1200
+estimated_ram_gib = 101.0
+host_safety_min_memavailable_gib = 14
+host_safety_max_swap_growth_mib = 64
+host_safety_max_starting_swap_mib = 64
+endpoint = "http://127.0.0.1:30000/v1"
+sglang_storage_mode = "qwen4_ple_nvme_io_uring"
+sglang_ple_nvme_queue_depth = 512
+sglang_ple_nvme_max_batch_pages = 4096
+sglang_ple_nvme_cache_pages = 0
+args = [
+  "--served-model-name", "qwen38-flash-next-nvfp4-sm121-storage-agent-admission",
+  "--tp-size", "1",
+  "--attention-backend", "triton",
+  "--moe-runner-backend", "flashinfer_cutlass",
+  "--quantization", "modelopt_fp4",
+  "--load-format", "auto",
+  "--no-ple-offload-embedding",
+  "--weight-loader-drop-cache-after-load",
+  "--language-only",
+  "--mamba-radix-cache-strategy", "extra_buffer_lazy",
+  "--max-mamba-cache-size", "4",
+  "--page-size", "64",
+  "--mem-fraction-static", "0.85",
+  "--max-total-tokens", "65536",
+  "--context-length", "65536",
+  "--chunked-prefill-size", "4096",
+  "--max-running-requests", "1",
+  "--cuda-graph-backend-decode", "disabled",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--enable-metrics",
+  "--reasoning-parser", "qwen3",
+  "--tool-call-parser", "qwen3_coder",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]
+
+[[models]]
 id = "qwen38-flash-next-nvfp4-sm121-triton-storage-cache-policy-off-sglang"
 description = "Paired SM121 cache-policy semantic canary B: cache-off control. Only the dedicated B-then-A semantic canary may execute this profile."
 support_status = "exploratory"

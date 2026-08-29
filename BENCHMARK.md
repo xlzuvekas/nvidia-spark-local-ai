@@ -1356,6 +1356,31 @@ ignored private logs subtree, after re-auditing the same admission and matching
 its scalar receipt to both B plans immediately before serving. Public V3
 evidence export remains denied pending a separate publication policy.
 
+### Current-SM121 agent parser preflight
+
+The current public SM121 storage profiles are chat-only/no-thinking and cannot
+support a Pi/cowork or tool-use claim. Before defining a new agent admission,
+the tombstoned
+`qwen38-flash-next-nvfp4-sm121-triton-storage-agent-admission-sglang` profile
+checks the only image-local prerequisite that can be established without
+serving:
+
+```bash
+python3 sparkbench.py sm121-agent-parser-preflight
+```
+
+The command verifies the exact local image identity, then imports the Qwen
+`qwen3` reasoning and `qwen3_coder` tool-call registries from an ephemeral
+no-network, read-only, no-GPU container. It uses no host weight mount or model
+loading, opens no port, emits or persists no timing metric, and writes no
+result directory. A passing preflight is not a model startup, quality, tool,
+long-context, cache, throughput, or agent result; it only clears a static
+prerequisite for a separately implemented fresh-C1 admission controller. That
+controller must still bind the final low-effort payload, parser initialization,
+exact tool-loop semantics, long-context fit, cache isolation, and stricter
+host-safety gates before any Pi/cowork workload can run. See the
+[agent-admission preflight record](docs/qwen38-flash-next-sm121-agent-admission-preflight-2026-08-29.md).
+
 ### Publishing sanitized evidence
 
 An evidence export creates a deterministic tracked archive without copying raw

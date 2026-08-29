@@ -23,13 +23,18 @@ pins, but require distinct campaign IDs and evidence bundles. Never pool coding
 capability, cowork capability, and scheduling results.
 
 At the frozen 84-file executable boundary
-`33170881721d0dce0f4466495110b336a7451fcd1635c5667f7fc5f722f7599f`, Pi is
-design-only. There is no
-checked-in Pi package lock or normalized prefix, core wrapper, Pi/cowork
-manifest, runner, C2 scheduler, validator, or evidence exporter. The current
-generic agentic and historical Harbor paths deliberately enforce different
-C1-only topologies; reuse their isolation and oracle patterns, but do not widen
-their schemas in place to admit Pi.
+`33170881721d0dce0f4466495110b336a7451fcd1635c5667f7fc5f722f7599f`, Pi was
+design-only. The 2026-08-29 follow-up adds one narrow prerequisite, not a Pi
+benchmark: the tombstoned current-SM121 low-thinking/tool profile and an
+image-local static parser preflight. The exact image imports `qwen3` reasoning
+and `qwen3_coder` tool parsers without starting a server, mounting host
+weights, loading a model, or using a GPU. See the [preflight record](qwen38-flash-next-sm121-agent-admission-preflight-2026-08-29.md).
+
+There is still no checked-in Pi package lock or normalized prefix, core wrapper,
+Pi/cowork manifest, runner, C2 scheduler, validator, or evidence exporter. The
+current generic agentic and historical Harbor paths deliberately enforce
+different C1-only topologies; reuse their isolation and oracle patterns, but do
+not widen their schemas in place to admit Pi.
 
 ## Local Pi availability
 

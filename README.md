@@ -26,6 +26,7 @@ quality checks, and the provenance needed to interpret each number.
 | What should the next single-user Flash-Next experiments test? | [Ranked cache/state, fan-out, MTP, CUDA-graph, chunk-size, and streaming protocols, plus source rejection of continuous decode and adaptive NEXTN](docs/qwen38-flash-next-single-user-next-experiments-2026-08-28.md) |
 | What is limiting single-user Flash-Next TPS on Spark? | [Evidence-backed target-pass, batching, MTP, PLE, startup, and profiler analysis](docs/qwen38-flash-next-tps-bottleneck-2026-08-28.md) |
 | How should Pi and richer cowork tasks be benchmarked locally? | [Pinned Pi-in-Harbor adapter and deterministic cowork-core-v1 plan](docs/pi-cowork-harness-plan-2026-08-28.md) |
+| Can the current SM121 image even support the needed Qwen reasoning/tool parsers? | [Static image-local parser preflight: `qwen3` and `qwen3_coder` are present; live agent admission remains pending](docs/qwen38-flash-next-sm121-agent-admission-preflight-2026-08-29.md) |
 | What does native llama.cpp prompt-KV reuse change for Qwen3.6? | [Prefix-cache controls: 8K and 32K shared-prefix cold/warm observations](docs/qwen36-prefix-cache-results-2026-08-18.md) |
 | How did Qwen3-Coder-Next fare on terminal coding tasks? | [Harbor/Terminal-Bench-derived results: Qwen Code versus OpenCode](docs/harbor-terminal-results-2026-08-18.md) |
 | How are offline coding-agent harnesses compared? | [Qwen3-Coder-Next Harbor campaign protocol](BENCHMARK.md#harbor-terminal-coding-agent-campaign) |
@@ -290,6 +291,7 @@ geometries, slot counts, or validation states.
 - [Qwen3.8-Flash-Next single-user serving backlog](docs/qwen38-flash-next-single-user-next-experiments-2026-08-28.md)
 - [Qwen3.8-Flash-Next TPS bottleneck analysis](docs/qwen38-flash-next-tps-bottleneck-2026-08-28.md)
 - [Pinned Pi and cowork harness plan](docs/pi-cowork-harness-plan-2026-08-28.md)
+- [Qwen3.8-Flash-Next current-SM121 Pi/cowork agent-admission parser preflight](docs/qwen38-flash-next-sm121-agent-admission-preflight-2026-08-29.md)
 - [Autoresearch controller hardening and campaign-evidence record](docs/autoresearch-controller-hardening-2026-08-28.md)
 - [Nemotron diffusion direct-run guide](docs/nemotron-diffusion-direct.md)
 - [Experimental NInfer SM121a patch and reproduction notes](patches/ninfer/README.md)

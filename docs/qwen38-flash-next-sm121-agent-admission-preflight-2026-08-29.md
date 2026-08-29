@@ -1,0 +1,67 @@
+# Current-SM121 Pi/cowork agent-admission preflight — 2026-08-29
+
+## Result
+
+The exact current SM121 storage image has passed a **static parser-registry
+preflight** for the prospective C1 Pi/cowork profile. The image-local Python
+imports expose both required entries:
+
+- Qwen reasoning parser: `qwen3`;
+- Qwen Coder tool-call parser: `qwen3_coder`.
+
+The check is intentionally not a server or model admission. It starts an
+ephemeral no-network, read-only Docker process with no model mount, no GPU
+request, no published port, no host weight mount or model loading, and no
+inference request. It returns only the exact local image/source identity and
+two booleans. It emits or persists no timing metric, prompt, completion,
+reasoning, tool payload, or result directory.
+
+Run it with:
+
+```bash
+python3 sparkbench.py sm121-agent-parser-preflight
+```
+
+The checked image is `local/sglang:sm121-storage-274ee330-runtime`, local ID
+`sha256:b14c39fb7cb2e0b82f2f8cae1e115a55f2bb69b5ec6fd7ccc4099b219d1096b0`,
+and source tree `274ee330db7ea9653807b868c0fb8693d50ed7b2`.
+
+## What changed
+
+`qwen38-flash-next-nvfp4-sm121-triton-storage-agent-admission-sglang` is now
+an exact, **tombstoned** prospective profile. It preserves the public retained
+current-SM121 C1 geometry: 64K context, Triton attention,
+`flashinfer_cutlass`, NVFP4, io_uring PLE, lazy Mamba state, 4K chunked
+prefill, one running request, and disabled CUDA graphs. Its only intended
+serving deltas are:
+
+- `tasks = ["chat", "json", "thinking", "tools"]`;
+- `{"chat_template_kwargs":{"enable_thinking":true,"reasoning_effort":"low"}}`;
+- `--reasoning-parser qwen3`; and
+- `--tool-call-parser qwen3_coder`.
+
+The prospective profile also intentionally tightens its future host-safety
+admission gates to 14 GiB `MemAvailable` and 64 MiB starting/growth swap.
+
+It explicitly does not import retired QSA/TRT-LLM overlays, MTP, mmap, or the
+vLLM-only `--enable-auto-tool-choice` flag. Generic plan, benchmark, and matrix
+paths reject the profile until a dedicated controller exists.
+
+## What remains before an agent result
+
+The parser check only removes one static uncertainty. A new dedicated agent
+admission must still prove, in fresh C1 lifetimes:
+
+1. parser initialization and exact low-effort payload after client/provider
+   transformation;
+2. exact-answer quality, strict tool-call semantics, and bounded tool-error
+   recovery;
+3. rendered low-thinking-plus-tools long-context fit and cache-zero-first-turn
+   semantics; and
+4. the stronger 14 GiB available-memory and 64 MiB starting/growth swap gates.
+
+Only after those gates can the offline Pi-core wrapper be admitted. Its default
+transport cannot be used as-is because it retries requests; the wrapper needs
+a pinned custom no-retry transport. A successful future agent admission would
+still not establish coding/cowork speed: it is only the prerequisite for
+separately frozen fresh-lifetime Pi coding and cowork measurements.
