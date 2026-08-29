@@ -329,10 +329,12 @@ current-runtime successors did complete: independent audited panels retained
 request-wall proxy. Their exact profiles, lifecycle, and scalar evidence are
 recorded in the [SM121 chunked-prefill protocol](qwen38-flash-next-sm121-chunked-prefill-protocol-2026-08-29.md).
 
-The next 4K/8K question remains prospective. Before any comparison, the exact
-8K profile must pass a standalone, non-timing quality-plus-cold-`T0` admission
-gate. That check does not retain 8K or establish agentic-coding performance;
-any later comparison needs a separately designed receipt and a newly frozen
+The receipt-bound 4K/8K question has completed locally after the exact 8K
+profile passed its standalone, non-timing quality-plus-cold-`T0` admission.
+Its V3 result remains intentionally outside public evidence and did not create
+a new promoted setting, so it must not be reinterpreted as an agentic-coding
+result or added to the public 1K/2K and 2K/4K ratios. Any later chunk-size
+candidate still needs a separately designed receipt and newly frozen
 fresh-lifetime A/B/B/A campaign.
 
 - Keep each new profile cloned from the then-current admitted winner and vary

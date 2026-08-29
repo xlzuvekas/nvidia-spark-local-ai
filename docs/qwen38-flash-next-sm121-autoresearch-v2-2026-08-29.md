@@ -169,6 +169,7 @@ extension needs a separately reviewed chunked-prefill runner adapter and a new
 one-axis candidate. It must not reuse a completed campaign or authorize
 arbitrary serving flags.
 
-The prospective 8K admission gate and any future v3 prefill panel are separate
-dedicated work, not retrospective v2 rounds or authorization for an arbitrary
-flag search.
+The separate 8K admission and receipt-bound V3 prefill panel have completed
+locally, but V3 remains intentionally outside public evidence and did not
+change the separately evidenced 4K setting. They remain dedicated work, not
+retrospective v2 rounds or authorization for an arbitrary flag search.

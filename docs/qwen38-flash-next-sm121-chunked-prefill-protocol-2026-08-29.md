@@ -25,16 +25,18 @@ profiles, and evidence namespace keep it distinct from the completed 1K/2K
 evidence.
 
 The exact 8,192-token candidate passed its separate two-lifetime
-quality-plus-cold-`T0` gate in a private, timing-free admission. It remains
-outside public evidence and cannot itself select 8K. A local V3 A/B/B/A panel
-requires the re-audited matching receipt described below.
+quality-plus-cold-`T0` gate in a private, timing-free admission. The matching
+receipt-bound local V3 A/B/B/A panel has since reached a complete terminal
+state with a zero-error read-only audit. Its raw campaign and scalar result
+remain intentionally outside public evidence, however, and it does not change
+the separately evidenced 4K setting. No V3 timing or ratio is published here.
 
 ## Question
 
 The completed v1 and v2 panels retained 2,048 then 4,096 tokens for the exact
-cache-on/C1/no-thinking 60K static-history proxy. The open question is the
-receipt-bound 4K/8K A/B/B/A request-wall comparison; the 8,192-token profile
-has separately passed safety admission but has no comparative timing result.
+cache-on/C1/no-thinking 60K static-history proxy. The receipt-bound 4K/8K
+comparison has completed locally, but its result remains excluded from public
+evidence under the V3 policy and did not create a new promoted setting.
 
 This is not a decode-TPS study. It does not test concurrency or claim an
 agentic coding benchmark. The present admitted baseline is chat-only with
@@ -151,12 +153,13 @@ Each lifetime keeps the existing 1,200-second bound, 10 GiB MemAvailable
 floor, 512 MiB starting-swap ceiling, 512 MiB swap-growth ceiling, loopback
 endpoint, no-download rule, ownership cleanup, and benchmark lock.
 
-## Receipt-bound v3 8K admission — no performance result
+## Receipt-bound v3 8K admission and local execution — no public performance result
 
-The 4,096-token setting remains the retained setting for this exact
-cache-on/C1/no-thinking 60K static-history proxy. The 8,192-token candidate
-has passed its separate private safety admission, but has not been compared,
-retained, or promoted.
+The 4,096-token setting remains the separately evidenced retained setting for
+this exact cache-on/C1/no-thinking 60K static-history proxy. The 8,192-token
+candidate passed its separate private safety admission and the receipt-bound
+local V3 comparison completed, but the V3 policy excludes its performance
+result from public evidence. It did not promote 8K or alter the 4K setting.
 
 The standalone, non-resumable admission check uses one fresh four-item
 exact-answer quality lifetime and one separate fresh cache-cold 60K `T0`
