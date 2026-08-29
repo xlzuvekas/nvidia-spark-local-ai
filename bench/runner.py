@@ -4513,7 +4513,7 @@ def _execute_sm121_cache_performance_quality_case(
         }
     )
     try:
-        for index, item in enumerate(_QUALITY_ITEMS):
+        for item in _QUALITY_ITEMS:
             _sm121_cache_performance_abort_check(watchdog=watchdog, deadline=deadline)
             request = _quality_request_arguments(
                 server=server,
@@ -4521,7 +4521,11 @@ def _execute_sm121_cache_performance_quality_case(
                 case=case,
                 item=item,
                 request_id=uuid.uuid4().hex,
-                prompt_tag=f"cache-performance-{index}",
+                # Preserve the exact v2 prompt variant already admitted by
+                # the paired semantic canary. The item ID still distinguishes
+                # all four quality questions; this tag is not a benchmark arm
+                # or timing variable.
+                prompt_tag="r0",
             )
             request["timeout_s"] = min(
                 900.0, _sm121_cache_performance_remaining_s(deadline)

@@ -9,12 +9,13 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from bench.journal import content_hash
+from bench.journal import Journal, content_hash
 from bench.manifest import load_models, load_suite
 from bench.runner import (
     PreflightError,
     SM121CachePerformanceRequestError,
     _execute_sm121_cache_performance_arm,
+    _execute_sm121_cache_performance_quality_case,
     _load_sm121_cache_performance_campaign,
     _sm121_cache_performance_interrupt_terminal_server,
     create_sm121_cache_performance_campaign,
@@ -251,6 +252,39 @@ class SM121CachePerformanceRunnerTests(unittest.TestCase):
             terminal_error=SM121CachePerformanceRequestError(),
         )
         self.assertEqual(2, server.interrupt_owned.call_count)
+
+    def test_quality_gate_reuses_the_admitted_v2_prompt_variant(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            prompt_tags: list[str] = []
+            answers = iter(("83", "no", "silver", "9"))
+
+            def request_arguments(**kwargs: object) -> dict[str, object]:
+                prompt_tags.append(str(kwargs["prompt_tag"]))
+                return {}
+
+            with (
+                patch(
+                    "bench.runner._quality_request_arguments",
+                    side_effect=request_arguments,
+                ),
+                patch(
+                    "bench.runner.stream_chat_request",
+                    side_effect=lambda **_kwargs: SimpleNamespace(
+                        content="FINAL: " + next(answers)
+                    ),
+                ),
+            ):
+                _execute_sm121_cache_performance_quality_case(
+                    server=SimpleNamespace(),
+                    model=SimpleNamespace(),
+                    case=SimpleNamespace(case_id="quality-case"),
+                    journal=Journal(Path(directory) / "events.jsonl"),
+                    arm="A",
+                    lifetime_ordinal=1,
+                    watchdog=None,
+                    deadline=1_000_000_000_000.0,
+                )
+            self.assertEqual(["r0"] * 4, prompt_tags)
 
     def test_terminal_timed_prefix_is_recovered_without_private_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
