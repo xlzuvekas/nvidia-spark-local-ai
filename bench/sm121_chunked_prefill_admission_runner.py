@@ -24,6 +24,7 @@ from . import runner as base_runner
 from .host_safety import HostSafetyError, HostSafetyWatchdog
 from .journal import Journal, content_hash, write_json
 from .runtime import (
+    RuntimeErrorWithContext,
     inspect_sm121_cache_source_digests,
     inspect_sm121_chunked_prefill_runtime_identity,
     recover_owned_sglang,
@@ -35,6 +36,14 @@ from .sglang_sm121_cache_semantic import SM121_CACHE_SEMANTIC_STATIC_ASSERTIONS
 from .sglang_sm121_chunked_prefill_admission import (
     SM121_CHUNKED_PREFILL_8K_ADMISSION_CELL_TIMEOUT_S,
     SM121_CHUNKED_PREFILL_8K_ADMISSION_EXECUTION_MODE,
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_EXACT_RESPONSE,
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_HTTP,
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_PROMPT_IDS,
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_REQUEST_CONTRACT,
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_RESPONSE_CONTRACT,
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_TRANSPORT,
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_GENERIC,
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODES,
     SM121_CHUNKED_PREFILL_8K_ADMISSION_ID,
     SM121_CHUNKED_PREFILL_8K_ADMISSION_RUNTIME_EVENT,
     SM121_CHUNKED_PREFILL_8K_ADMISSION_STATIC_EVENT,
@@ -73,8 +82,40 @@ _ADMISSION_LOGS_ROOT = _REPOSITORY_ROOT / "logs"
 class SM121ChunkedPrefill8KAdmissionRequestError(RuntimeError):
     """Public-safe terminal failure for the singleton admission controller."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        failure_code: str = SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_GENERIC,
+    ) -> None:
+        if (
+            not isinstance(failure_code, str)
+            or failure_code not in SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODES
+        ):
+            failure_code = SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_GENERIC
+        self.failure_code = failure_code
         super().__init__(_FAILURE_MESSAGE)
+
+
+def _cold_semantic_failure_code(error: RuntimeErrorWithContext) -> str:
+    """Project known runtime failures to scalar-only admission diagnostics."""
+
+    detail = str(error)
+    if detail == "SM121 semantic-cache response failed validation":
+        return SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_EXACT_RESPONSE
+    if detail == "SM121 semantic-cache prompt token count disagrees" or detail.startswith(
+        "SM121 semantic-cache prompt IDs "
+    ):
+        return SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_PROMPT_IDS
+    if detail == "SM121 semantic-cache request was rejected":
+        return SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_HTTP
+    if detail == "SM121 semantic-cache request failed":
+        return SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_TRANSPORT
+    if detail.startswith("SM121 semantic-cache response ") or detail.startswith(
+        "SM121 cache response "
+    ):
+        return SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_RESPONSE_CONTRACT
+    if detail.startswith("SM121 semantic-cache "):
+        return SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_REQUEST_CONTRACT
+    return SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_GENERIC
 
 
 def _admission_path(
@@ -670,7 +711,9 @@ def _t0_event(
         or not prompt_ids
         or any(type(token) is not int or token < 0 for token in prompt_ids)
     ):
-        raise SM121ChunkedPrefill8KAdmissionRequestError()
+        raise SM121ChunkedPrefill8KAdmissionRequestError(
+            SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_PROMPT_IDS
+        )
     event: dict[str, Any] = {
         "event": SM121_CHUNKED_PREFILL_8K_ADMISSION_T0_EVENT,
         "fresh_lifetime": 2,
@@ -757,14 +800,19 @@ def _run_cold_t0_case(
         )
     )
     _abort_check(watchdog=watchdog, deadline=deadline)
-    result = request_sm121_cache_semantic_turn(
-        server,
-        served_name=model.served_name,
-        messages=_messages()[0],
-        expected_response=_EXPECTED_RESPONSES[0],
-        max_tokens=int(case.max_output_tokens),
-        timeout_s=min(900.0, _remaining_s(deadline)),
-    )
+    try:
+        result = request_sm121_cache_semantic_turn(
+            server,
+            served_name=model.served_name,
+            messages=_messages()[0],
+            expected_response=_EXPECTED_RESPONSES[0],
+            max_tokens=int(case.max_output_tokens),
+            timeout_s=min(900.0, _remaining_s(deadline)),
+        )
+    except RuntimeErrorWithContext as error:
+        raise SM121ChunkedPrefill8KAdmissionRequestError(
+            _cold_semantic_failure_code(error)
+        ) from None
     _abort_check(watchdog=watchdog, deadline=deadline)
     after_timeout = min(45.0, _remaining_s(deadline))
     after, _wait, after_polls, after_settled = (
@@ -808,6 +856,7 @@ def _summary(
     static_attestations: int,
     runtime_attestations: int,
     terminal_stage: str,
+    failure_code: str,
 ) -> dict[str, Any]:
     complete = (
         quality_admitted
@@ -824,6 +873,7 @@ def _summary(
         "status": "complete" if complete else "partial",
         "decision": "admitted" if complete else "blocked",
         "terminal_stage": "complete" if complete else terminal_stage,
+        "failure_code": None if complete else failure_code,
         "profile_id": SM121_CHUNKED_PREFILL_PERFORMANCE_V3_CANDIDATE_PROFILE_ID,
         "suite_id": SM121_CHUNKED_PREFILL_8K_ADMISSION_SUITE_ID,
         "quality_admitted": quality_admitted,
@@ -902,6 +952,7 @@ def execute_sm121_chunked_prefill_8k_admission(
         quality_within_timeout = False
         cold_t0_within_timeout = False
         terminal_stage = "preflight"
+        failure_code = SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_GENERIC
         try:
             terminal_stage = "quality_lifetime"
             _run_lifetime(
@@ -948,23 +999,16 @@ def execute_sm121_chunked_prefill_8k_admission(
             cold_t0_admitted = True
             cold_t0_within_timeout = True
         except BaseException as error:
-            safe_error: BaseException
             if isinstance(error, HostSafetyError):
-                safe_error = error
                 base_runner._record_host_safety_breach(
                     journal, error, stage=terminal_stage
                 )
-            elif isinstance(
-                error,
-                (
-                    base_runner.PreflightError,
-                    base_runner.SM121StorageQualityGateError,
-                    SM121ChunkedPrefill8KAdmissionRequestError,
-                ),
-            ):
-                safe_error = error
-            else:
-                safe_error = SM121ChunkedPrefill8KAdmissionRequestError()
+            safe_error = (
+                error
+                if isinstance(error, SM121ChunkedPrefill8KAdmissionRequestError)
+                else SM121ChunkedPrefill8KAdmissionRequestError()
+            )
+            failure_code = safe_error.failure_code
             base_runner._record_run_aborted(journal, safe_error, stage=terminal_stage)
         finally:
             telemetry.stop()
@@ -985,6 +1029,7 @@ def execute_sm121_chunked_prefill_8k_admission(
                 if event.get("event") == SM121_CHUNKED_PREFILL_8K_ADMISSION_RUNTIME_EVENT
             ),
             terminal_stage=terminal_stage,
+            failure_code=failure_code,
         )
         journal.append(
             {

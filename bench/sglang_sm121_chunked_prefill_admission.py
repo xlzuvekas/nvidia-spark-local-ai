@@ -76,6 +76,34 @@ SM121_CHUNKED_PREFILL_8K_ADMISSION_LIFETIME_PHASES = {
 SM121_CHUNKED_PREFILL_8K_ADMISSION_RUNTIME_EXPECTED = dict(
     SM121_CACHE_SEMANTIC_RUNTIME_EXPECTED["A"]
 )
+SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_GENERIC = "admission_failure"
+SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_EXACT_RESPONSE = (
+    "cold_exact_response"
+)
+SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_PROMPT_IDS = (
+    "cold_prompt_ids"
+)
+SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_RESPONSE_CONTRACT = (
+    "cold_response_contract"
+)
+SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_REQUEST_CONTRACT = (
+    "cold_request_contract"
+)
+SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_TRANSPORT = (
+    "cold_transport"
+)
+SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_HTTP = "cold_http"
+SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODES = frozenset(
+    {
+        SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_GENERIC,
+        SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_EXACT_RESPONSE,
+        SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_PROMPT_IDS,
+        SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_RESPONSE_CONTRACT,
+        SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_REQUEST_CONTRACT,
+        SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_TRANSPORT,
+        SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_HTTP,
+    }
+)
 
 
 class SM121ChunkedPrefill8KAdmissionError(ValueError):
@@ -272,6 +300,7 @@ _SUMMARY_FIELDS = frozenset(
         "status",
         "decision",
         "terminal_stage",
+        "failure_code",
         "profile_id",
         "suite_id",
         "quality_admitted",
@@ -582,6 +611,7 @@ def validate_sm121_chunked_prefill_8k_admission_summary(summary: object) -> None
             summary["status"] != "complete"
             or summary["decision"] != "admitted"
             or summary["terminal_stage"] != "complete"
+            or summary["failure_code"] is not None
         ):
             raise SM121ChunkedPrefill8KAdmissionError("8K admission summary changed")
     elif (
@@ -589,5 +619,8 @@ def validate_sm121_chunked_prefill_8k_admission_summary(summary: object) -> None
         or summary["decision"] != "blocked"
         or summary["terminal_stage"]
         not in {"preflight", "quality_lifetime", "cold_t0_lifetime"}
+        or not isinstance(summary["failure_code"], str)
+        or summary["failure_code"]
+        not in SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODES
     ):
         raise SM121ChunkedPrefill8KAdmissionError("8K admission summary changed")

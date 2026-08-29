@@ -13,18 +13,27 @@ import unittest
 from unittest.mock import Mock, patch
 
 from bench.execution_admission import model_execution_blocker
+from bench.journal import content_hash
 from bench.manifest import load_models, load_suite
+from bench.runtime import RuntimeErrorWithContext
 from bench.sglang_sm121_cache_observability import (
     SM121_CACHE_OBSERVABILITY_CACHED_SERIES,
     SM121_CACHE_SOURCE_DIGESTS,
 )
 from bench.sglang_sm121_cache_semantic import SM121_CACHE_SEMANTIC_STATIC_ASSERTIONS
 from bench.sglang_sm121_chunked_prefill_admission import (
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_EXACT_RESPONSE,
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_HTTP,
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_PROMPT_IDS,
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_RESPONSE_CONTRACT,
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_TRANSPORT,
+    SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_GENERIC,
     SM121_CHUNKED_PREFILL_8K_ADMISSION_RUNTIME_EXPECTED,
     SM121_CHUNKED_PREFILL_8K_ADMISSION_TIMED_CASE_ID,
     SM121ChunkedPrefill8KAdmissionError,
     derive_sm121_chunked_prefill_8k_admission_t0,
     validate_sm121_chunked_prefill_8k_admission_profile,
+    validate_sm121_chunked_prefill_8k_admission_summary,
     validate_sm121_chunked_prefill_8k_admission_suite,
     validate_sm121_chunked_prefill_8k_admission_t0_event,
 )
@@ -146,6 +155,7 @@ class SM121ChunkedPrefill8KAdmissionTests(unittest.TestCase):
         *,
         quality_passed: bool = True,
         cold_result: dict[str, object] | None = None,
+        cold_error: BaseException | None = None,
         preflight_side_effect: object = None,
     ) -> tuple[dict[str, object], int, int]:
         servers = [
@@ -197,6 +207,7 @@ class SM121ChunkedPrefill8KAdmissionTests(unittest.TestCase):
             patch(
                 "bench.sm121_chunked_prefill_admission_runner.request_sm121_cache_semantic_turn",
                 return_value=cold_result or _result(),
+                side_effect=cold_error,
             ),
             patch(
                 "bench.sm121_chunked_prefill_runner._messages",
@@ -290,6 +301,7 @@ class SM121ChunkedPrefill8KAdmissionTests(unittest.TestCase):
             summary, starts, preflights = self._run_with_mocks(run_dir)
             self.assertEqual("complete", summary["status"])
             self.assertEqual("admitted", summary["decision"])
+            self.assertIsNone(summary["failure_code"])
             self.assertEqual(2, summary["static_attestations"])
             self.assertEqual(2, summary["runtime_attestations"])
             self.assertEqual(2, starts)
@@ -326,6 +338,97 @@ class SM121ChunkedPrefill8KAdmissionTests(unittest.TestCase):
             self.assertEqual(1, starts)
             self.assertEqual(1, preflights)
             self.assertFalse(audit_sm121_chunked_prefill_8k_admission(run_dir)["ok"])
+
+    def test_partial_failure_codes_are_allowlisted(self) -> None:
+        (ROOT / "logs").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / "logs") as directory:
+            run_dir = self._freeze(Path(directory))
+            summary, _starts, _preflights = self._run_with_mocks(
+                run_dir, quality_passed=False
+            )
+            self.assertEqual(
+                SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_GENERIC,
+                summary["failure_code"],
+            )
+            invalid = dict(summary)
+            invalid["failure_code"] = "untrusted_runtime_text"
+            invalid["integrity_hash"] = content_hash(
+                {
+                    key: value
+                    for key, value in invalid.items()
+                    if key != "integrity_hash"
+                },
+                64,
+            )
+            with self.assertRaises(SM121ChunkedPrefill8KAdmissionError):
+                validate_sm121_chunked_prefill_8k_admission_summary(invalid)
+
+    def test_cold_runtime_failures_are_safely_classified(self) -> None:
+        failures = (
+            (
+                "exact-response",
+                "SM121 semantic-cache response failed validation",
+                SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_EXACT_RESPONSE,
+            ),
+            (
+                "prompt-ids",
+                "SM121 semantic-cache prompt IDs are unavailable",
+                SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_PROMPT_IDS,
+            ),
+            (
+                "response-contract",
+                "SM121 semantic-cache response lacks required scalars",
+                SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_RESPONSE_CONTRACT,
+            ),
+            (
+                "transport",
+                "SM121 semantic-cache request failed",
+                SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_TRANSPORT,
+            ),
+            (
+                "http",
+                "SM121 semantic-cache request was rejected",
+                SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_COLD_HTTP,
+            ),
+            (
+                "unknown",
+                "synthetic untrusted runtime detail",
+                SM121_CHUNKED_PREFILL_8K_ADMISSION_FAILURE_CODE_GENERIC,
+            ),
+        )
+        (ROOT / "logs").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / "logs") as directory:
+            for name, raw_detail, expected_code in failures:
+                with self.subTest(name=name):
+                    run_dir = self._freeze(Path(directory) / name)
+                    summary, starts, preflights = self._run_with_mocks(
+                        run_dir,
+                        cold_error=RuntimeErrorWithContext(raw_detail),
+                    )
+                    self.assertEqual("partial", summary["status"])
+                    self.assertEqual(expected_code, summary["failure_code"])
+                    self.assertEqual(2, starts)
+                    self.assertEqual(2, preflights)
+                    events = [
+                        json.loads(line)
+                        for line in (run_dir / "events.jsonl").read_text().splitlines()
+                    ]
+                    aborted = [
+                        event
+                        for event in events
+                        if event.get("event") == "run_aborted"
+                    ]
+                    self.assertEqual(1, len(aborted))
+                    self.assertEqual(
+                        "SM121ChunkedPrefill8KAdmissionRequestError",
+                        aborted[0]["error_type"],
+                    )
+                    self.assertEqual(
+                        "SM121 chunked-prefill 8K admission request failed; "
+                        "details omitted",
+                        aborted[0]["error"],
+                    )
+                    self.assertNotIn(raw_detail, json.dumps(aborted[0]))
 
     def test_unexpected_cache_detail_state_blocks_cold_t0_execution(self) -> None:
         (ROOT / "logs").mkdir(exist_ok=True)
