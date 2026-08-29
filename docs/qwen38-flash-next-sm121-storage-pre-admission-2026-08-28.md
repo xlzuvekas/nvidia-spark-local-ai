@@ -312,6 +312,16 @@ requires their shared model/engine values to agree, and still rejects unknown,
 duplicated, or mismatched labels. The partial remains an honest record and is
 not recast as a cache-on result; a new fresh pair is required for admission.
 
+The following fresh pair completed with a clean read-only paired audit. Both
+quality lifetimes scored all four exact-answer items correctly. B admitted T0,
+T1, and T2 with zero device, host, storage, eviction, and retraction deltas.
+A admitted a zero-hit T0, then device-only T1 and T2 hits of 40,960 and 41,024
+tokens respectively. Each positive A detail reconciled exactly with both the
+native device-prefill and device cached-token deltas; host/storage, eviction,
+and retraction remained zero, and every before/after native snapshot settled.
+This admits semantic cache behavior for the exact candidate and fixed
+workload, but makes no wall-time, latency, TPS, energy, or cache-benefit claim.
+
 Run and inspect the pair only through the dedicated commands:
 
 ```bash
