@@ -29,6 +29,7 @@ import unicodedata
 
 from . import autoresearch as autoresearch_module
 from . import autoresearch_campaign as autoresearch_campaign_module
+from . import autoresearch_v2 as autoresearch_v2_module
 from .annotations import (
     measurement_annotations,
     normalize_startup_safety_gate,
@@ -192,6 +193,7 @@ HARBOR_REPLICATE_COUNT = 2
 LOOP_EVIDENCE_KIND = "rlm_halo_loop_campaign"
 LOOP_RESULT_ROOTS = ("loop-campaigns", "loop-smoke-plans", "loop-smokes")
 AUTORESEARCH_RESULT_ROOT = "autoresearch"
+AUTORESEARCH_V2_RESULT_ROOT = autoresearch_v2_module.AUTORESEARCH_V2_RESULT_ROOT
 SM121_CACHE_PERFORMANCE_RESULT_ROOT = "cache-policy-campaigns"
 SM121_CACHE_PERFORMANCE_EVIDENCE_KIND = "sm121_cache_policy_performance"
 AUTORESEARCH_EVIDENCE_KIND = "autoresearch_campaign"
@@ -220,6 +222,10 @@ _AUTORESEARCH_FAILURE_REASONS = frozenset(
     reason for reason in _AUTORESEARCH_TERMINAL_REASONS if reason != "completed"
 )
 _AutoresearchSourceTopology = tuple[
+    tuple[int, int] | None,
+    tuple[tuple[Path, tuple[int, int]], ...],
+]
+_AutoresearchV2SourceTopology = tuple[
     tuple[int, int] | None,
     tuple[tuple[Path, tuple[int, int]], ...],
 ]
@@ -539,6 +545,10 @@ _RUN_ID_RE = re.compile(r"20[0-9]{6}T[0-9]{6,12}Z-[A-Za-z0-9_.-]+\Z")
 _AUTORESEARCH_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 _AUTORESEARCH_PATH_COMPONENT_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,255}\Z"
+)
+_AUTORESEARCH_V2_DIRECTORY_RE = re.compile(
+    rf"20[0-9]{{6}}T[0-9]{{6}}Z-"
+    rf"{re.escape(autoresearch_v2_module.AUTORESEARCH_V2_CAMPAIGN_ID)}\Z"
 )
 _AUTORESEARCH_CAMPAIGN_V2_FIELDS = frozenset(
     {
@@ -18125,6 +18135,206 @@ def _validate_autoresearch_source_topology(
     return tuple(resolved)
 
 
+def _autoresearch_v2_real_directory(path: Path, *, name: str) -> Path:
+    """Require one real v2 controller directory without following links."""
+
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise EvidenceError(f"autoresearch-v2 {name} is missing") from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise EvidenceError(f"autoresearch-v2 {name} must be a real directory")
+    return path.resolve(strict=True)
+
+
+def _hold_autoresearch_v2_source_topology(
+    results_root: Path,
+) -> _AutoresearchV2SourceTopology:
+    """Snapshot the ignored v2 controller tree under the global results lock."""
+
+    root = results_root / AUTORESEARCH_V2_RESULT_ROOT
+    try:
+        root_metadata = root.lstat()
+    except FileNotFoundError:
+        return None, ()
+    except OSError as error:
+        raise EvidenceError("autoresearch-v2 results root is unreadable") from error
+    root = _autoresearch_v2_real_directory(root, name="results root")
+    children = sorted(root.iterdir())
+    if not children:
+        raise EvidenceError("autoresearch-v2 results root must contain a round")
+    rounds: list[tuple[Path, tuple[int, int]]] = []
+    for round_dir in children:
+        if _AUTORESEARCH_V2_DIRECTORY_RE.fullmatch(round_dir.name) is None:
+            raise EvidenceError("unsafe autoresearch-v2 round directory name")
+        round_dir = _autoresearch_v2_real_directory(round_dir, name="round directory")
+        metadata = round_dir.lstat()
+        rounds.append((round_dir, (metadata.st_dev, metadata.st_ino)))
+    return (root_metadata.st_dev, root_metadata.st_ino), tuple(rounds)
+
+
+def _validate_autoresearch_v2_source_topology(
+    results_root: Path,
+    topology: _AutoresearchV2SourceTopology,
+    cache_performance_campaigns: Sequence[Path],
+) -> tuple[Path, ...]:
+    """Validate ignored v2 controller provenance without exporting its payloads.
+
+    A v2 controller is only metadata around the independently validated child
+    cache-policy campaign.  It is deliberately never projected into the
+    scalar evidence corpus.  The accepted raw states are intentionally narrow:
+    an empty pre-plan directory, a frozen round with an unstarted child, or a
+    terminal round with a terminal child.
+    """
+
+    root_identity, locked_rounds = topology
+    root = results_root / AUTORESEARCH_V2_RESULT_ROOT
+    if root_identity is None:
+        try:
+            root.lstat()
+        except FileNotFoundError:
+            return ()
+        except OSError as error:
+            raise EvidenceError("autoresearch-v2 results root is unreadable") from error
+        raise EvidenceError("autoresearch-v2 results root appeared during export")
+    root = _autoresearch_v2_real_directory(root, name="results root")
+    root_metadata = root.lstat()
+    if (root_metadata.st_dev, root_metadata.st_ino) != root_identity:
+        raise EvidenceError("autoresearch-v2 results root changed during export")
+    current_rounds = sorted(root.iterdir())
+    expected_names = [path.name for path, _identity in locked_rounds]
+    if [path.name for path in current_rounds] != expected_names:
+        raise EvidenceError("autoresearch-v2 round set changed during export")
+    resolved_rounds: list[Path] = []
+    child_campaigns = {campaign.name: campaign for campaign in cache_performance_campaigns}
+    claimed_children: set[str] = set()
+    for current, (expected_path, expected_identity) in zip(
+        current_rounds, locked_rounds, strict=True
+    ):
+        if _AUTORESEARCH_V2_DIRECTORY_RE.fullmatch(current.name) is None:
+            raise EvidenceError("unsafe autoresearch-v2 round directory name")
+        round_dir = _autoresearch_v2_real_directory(current, name="round directory")
+        metadata = round_dir.lstat()
+        if (
+            round_dir != expected_path
+            or (metadata.st_dev, metadata.st_ino) != expected_identity
+        ):
+            raise EvidenceError("autoresearch-v2 round identity changed during export")
+        entries = {entry.name: entry for entry in round_dir.iterdir()}
+        if not entries:
+            # The controller creates its directory before planning the child.
+            # Retain this pre-inference planner failure as ignored provenance.
+            resolved_rounds.append(round_dir)
+            continue
+        terminal = set(entries) == {"round.json", "events.jsonl", "summary.json"}
+        frozen = set(entries) == {"round.json"}
+        if not terminal and not frozen:
+            raise EvidenceError("autoresearch-v2 round topology is invalid")
+        for name, entry in entries.items():
+            entry_metadata = entry.lstat()
+            if stat.S_ISLNK(entry_metadata.st_mode) or not stat.S_ISREG(
+                entry_metadata.st_mode
+            ):
+                raise EvidenceError(
+                    f"autoresearch-v2 round control is invalid: {name}"
+                )
+        payload = _load_json(round_dir / "round.json", results_root)
+        try:
+            payload = autoresearch_v2_module._validate_hashed_payload(
+                payload,
+                fields=autoresearch_v2_module._ROUND_FIELDS,
+                name="round",
+            )
+            autoresearch_v2_module._validate_round_definition(payload)
+        except (TypeError, ValueError) as error:
+            raise EvidenceError("autoresearch-v2 round contract is invalid") from error
+        child_name = payload["child_campaign_directory"]
+        if not isinstance(child_name, str):
+            raise EvidenceError("autoresearch-v2 child campaign name is invalid")
+        child = child_campaigns.get(child_name)
+        if child is None or child_name in claimed_children:
+            raise EvidenceError("autoresearch-v2 child campaign binding is invalid")
+        claimed_children.add(child_name)
+        campaign = _load_json(child / "campaign.json", results_root)
+        if not isinstance(campaign, dict) or not isinstance(campaign.get("pair_binding"), dict):
+            raise EvidenceError("autoresearch-v2 child campaign is invalid")
+        if (
+            campaign.get("campaign_id") != payload["child_campaign_id"]
+            or campaign.get("integrity_hash")
+            != payload["child_campaign_integrity_hash"]
+            or campaign["pair_binding"].get("pair_binding_sha256")
+            != payload["child_pair_binding_sha256"]
+            or campaign.get("prerequisite_bundle_sha256s")
+            != payload["child_prerequisite_bundle_sha256s"]
+        ):
+            raise EvidenceError("autoresearch-v2 child campaign binding changed")
+        child_source = _validate_sm121_cache_performance_source(child, results_root)
+        if frozen:
+            if child_source is not None:
+                raise EvidenceError("frozen autoresearch-v2 child is unexpectedly terminal")
+            resolved_rounds.append(round_dir)
+            continue
+        if child_source is None:
+            raise EvidenceError("terminal autoresearch-v2 child is not terminal")
+        saved = _load_json(round_dir / "summary.json", results_root)
+        try:
+            saved = autoresearch_v2_module._validate_hashed_payload(
+                saved,
+                fields=autoresearch_v2_module._SUMMARY_FIELDS,
+                name="summary",
+            )
+            expected = autoresearch_v2_module._summary_payload(
+                payload,
+                child_summary=child_source["summary"],
+                audit={"ok": True},
+            )
+            autoresearch_v2_module._validate_events(
+                round_dir, payload, terminal=True
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise EvidenceError("autoresearch-v2 terminal state is invalid") from error
+        if saved != expected:
+            raise EvidenceError("autoresearch-v2 summary does not match its child")
+        events = _load_json_lines(round_dir / "events.jsonl", results_root)
+        expected_events = [
+            {
+                "event": "autoresearch_v2_round_started",
+                "campaign_id": payload["campaign_id"],
+                "execution_mode": payload["execution_mode"],
+                "definition_sha256": payload["definition_sha256"],
+                "child_pair_binding_sha256": payload[
+                    "child_pair_binding_sha256"
+                ],
+            },
+            {
+                "event": "autoresearch_v2_round_scored",
+                "campaign_id": payload["campaign_id"],
+                "child_pair_binding_sha256": payload[
+                    "child_pair_binding_sha256"
+                ],
+                "status": expected["status"],
+                "decision": expected["decision"],
+                "child_status": expected["child_status"],
+                "child_decision": expected["child_decision"],
+                "audit_ok": True,
+                "completed_arms": expected["completed_arms"],
+            },
+            {
+                "event": "autoresearch_v2_round_complete",
+                "campaign_id": payload["campaign_id"],
+                "status": expected["status"],
+                "decision": expected["decision"],
+            },
+        ]
+        if [
+            {key: value for key, value in event.items() if key != "timestamp"}
+            for event in events
+        ] != expected_events:
+            raise EvidenceError("autoresearch-v2 terminal events do not match")
+        resolved_rounds.append(round_dir)
+    return tuple(resolved_rounds)
+
+
 def _autoresearch_timestamp(value: Any, *, name: str) -> str:
     if not isinstance(value, str) or not value or len(value) > 64:
         raise EvidenceError(f"invalid autoresearch {name}")
@@ -19189,6 +19399,7 @@ def _export_evidence_locked(
     output_root: Path,
     source_locks: ExitStack,
     locked_autoresearch_topology: _AutoresearchSourceTopology,
+    locked_autoresearch_v2_topology: _AutoresearchV2SourceTopology,
     harbor_results: Sequence[Path] = (),
     replace: bool = False,
     require_existing_output: bool = False,
@@ -19241,6 +19452,11 @@ def _export_evidence_locked(
             results_root
         )
         cache_performance_paths = set(cache_performance_campaigns)
+        _validate_autoresearch_v2_source_topology(
+            results_root,
+            locked_autoresearch_v2_topology,
+            cache_performance_campaigns,
+        )
         autoresearch_runs, autoresearch_campaigns = _autoresearch_sources(
             results_root,
             locked_topology=locked_autoresearch_topology,
@@ -19295,6 +19511,8 @@ def _export_evidence_locked(
             recognized_top.add(AUTORESEARCH_RESULT_ROOT)
         if cache_performance_campaigns:
             recognized_top.add(SM121_CACHE_PERFORMANCE_RESULT_ROOT)
+        if locked_autoresearch_v2_topology[0] is not None:
+            recognized_top.add(AUTORESEARCH_V2_RESULT_ROOT)
         published_run_ids = [run_dir.name for run_dir in run_dirs] + [
             run_id for _, run_id in autoresearch_runs
         ]
@@ -19432,6 +19650,11 @@ def _export_evidence_locked(
         _validate_autoresearch_source_topology(
             results_root, locked_autoresearch_topology
         )
+        _validate_autoresearch_v2_source_topology(
+            results_root,
+            locked_autoresearch_v2_topology,
+            cache_performance_campaigns,
+        )
         try:
             source_locks.close()
         except (OSError, ValueError) as error:
@@ -19541,11 +19764,15 @@ def export_evidence(
                 locked_topology = _hold_autoresearch_source_locks(
                     results_root, campaign_locks
                 )
+                locked_autoresearch_v2_topology = (
+                    _hold_autoresearch_v2_source_topology(results_root)
+                )
                 return _export_evidence_locked(
                     results_root=results_root,
                     output_root=output_root,
                     source_locks=campaign_locks,
                     locked_autoresearch_topology=locked_topology,
+                    locked_autoresearch_v2_topology=locked_autoresearch_v2_topology,
                     harbor_results=tuple(Path(path) for path in harbor_results),
                     replace=replace,
                     require_existing_output=require_existing_output,

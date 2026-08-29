@@ -1,7 +1,7 @@
 # Qwen3.8-Flash-Next SM121 autoresearch v2 — 2026-08-29
 
-Status: implementation and offline contract tests complete; the first fresh
-round has not yet been frozen or run.
+Status: implementation, offline contract tests, and the first fresh round are
+complete. Its audited child retained cache-on A, so v2 rejected cache-off B.
 
 ## Why there is a v2 controller
 
@@ -80,6 +80,20 @@ No rounded public float is re-reduced to decide a winner. The result remains a
 request-wall result for this synthetic shared-prefix lane; it is not TTFT,
 decode TPS, aggregate throughput, energy, or end-to-end agent productivity.
 
+## First completed round
+
+The first fresh v2 child completed all four A/B/B/A arms and passed its
+read-only cache-policy audit. Its child reducer returned `retain_a`, which the
+wrapper correctly mapped to `complete` / `reject` for candidate B. The two
+replicas measured mean later-turn request wall time of 2.801 seconds for A
+versus 45.188 seconds for B (A/B = 0.0620), and mean full three-turn request
+wall time of 36.979 seconds for A versus 79.115 seconds for B (A/B = 0.4674).
+
+This is a fresh independent confirmation of the earlier cache-policy result;
+the two campaigns are not pooled or re-reduced into a new measurement. The
+published scalar child bundle is
+[`e578d510b0fc`](../evidence/campaigns/qwen38-flash-next-sm121-cache-policy-performance-v1-e578d510b0fc/manifest.json).
+
 ## Commands
 
 Previewing is read-only:
@@ -106,7 +120,9 @@ terminal provenance and the next attempt must freeze new plans. The child
 campaign stays beneath `results/cache-policy-campaigns/`, so the existing
 read-only audit and scalar-only evidence exporter remain the sole publication
 path for its actual measurements. The wrapper is ignored controller
-provenance, not a second measurement archive.
+provenance, not a second measurement archive. The exporter validates only its
+empty pre-plan, frozen-unstarted, or terminal shapes and emits evidence only
+for its independently audited child.
 
 ## Boundaries and next proposal
 
@@ -115,10 +131,9 @@ That frozen block remains non-estimable: O2's C6 tail and O3 startup crossed
 the swap safety gate, and fresh L2/L3 never started. The old lazy panel cannot
 be substituted into its missing cells.
 
-After this v2 cache-policy confirmation reaches a valid terminal result and
-its child scalar evidence is exported and verified, the next product question
-should be a newly admitted one-axis long-context prefill candidate such as
-1,024 versus 2,048 token chunked prefill. It is not registered yet: current
-SM121 source/runtime attestation, exact profiles, a quality/workload contract,
-and a dedicated scalar reducer are still required before a GPU lifetime is
-authorized.
+With the cache-off candidate rejected twice in independent campaigns, the next
+product question should be a newly admitted one-axis long-context prefill
+candidate such as 1,024 versus 2,048 token chunked prefill. It is not
+registered yet: current SM121 source/runtime attestation, exact profiles, a
+quality/workload contract, and a dedicated scalar reducer are still required
+before a GPU lifetime is authorized.

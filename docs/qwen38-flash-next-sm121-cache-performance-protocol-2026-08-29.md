@@ -1,7 +1,8 @@
 # Qwen3.8-Flash-Next SM121 cache-policy timing protocol — 2026-08-29
 
-Status: executed once and read-only audited on 2026-08-29; the reducer retained
-A (`UnifiedRadixCache`) for this exact request-wall lane.
+Status: two independent complete campaigns were read-only audited on
+2026-08-29; each reducer retained A (`UnifiedRadixCache`) for this exact
+request-wall lane.
 
 The replacement SM121 Triton/storage candidate now has scalar evidence for its
 target admission, cache-off B0 behavior, and a complete cache-off/cache-on
@@ -11,18 +12,23 @@ non-resumable performance lane that makes that comparison.
 
 ## Audited result
 
-One complete fresh-lifetime A/B/B/A campaign passed all four exact-answer
-quality gates and admitted all 12 scalar timing observations. The audited
-reducer returned `retain_a`: A's two-replica mean later-turn (`T1 + T2`)
-request wall time was 2.808 seconds versus B's 45.017 seconds (A/B = 0.0624),
-and its mean full three-turn request wall time was 37.151 seconds versus
-85.718 seconds (A/B = 0.4334). A therefore cleared both the at-least-5%
-later-turn improvement and no-more-than-5% full-sequence-regression gates.
+Two complete fresh-lifetime A/B/B/A campaigns passed all four exact-answer
+quality gates and admitted all 12 scalar timing observations. Each audited
+reducer returned `retain_a`:
+
+| Independent campaign | A later-turn mean | B later-turn mean | A/B | A full mean | B full mean | A/B |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Initial result | 2.808 s | 45.017 s | 0.0624 | 37.151 s | 85.718 s | 0.4334 |
+| Fresh v2 child | 2.801 s | 45.188 s | 0.0620 | 36.979 s | 79.115 s | 0.4674 |
+
+Each campaign independently cleared the at-least-5% later-turn improvement
+and no-more-than-5% full-sequence-regression gates. The results agree in
+direction but are not pooled or re-reduced into a new measurement.
 
 This is a narrow result for the pinned image, weights, one-user geometry,
 32K--48K synthetic shared-prefix case, and the stated cache policies. It is
 not a TTFT, decode-TPS, aggregate-throughput, energy, or agent-speed claim,
-and one completed campaign is not a general serving-performance estimate.
+and two completed campaigns are not a general serving-performance estimate.
 The three preceding controller-debugging attempts remain archived as audited
 terminal `partial`/`not_evaluated` campaigns; no timing row from them enters
 this reducer result.
@@ -97,5 +103,5 @@ python3 sparkbench.py audit-sm121-cache-policy-performance \
 
 After a terminal campaign, export only through the normal scalar exporter, run
 it twice to confirm the second output is unchanged, verify the archive, then
-stage and verify the exact evidence index. The completed result above is only
-publishable after those evidence steps succeed.
+stage and verify the exact evidence index. The completed results above are
+only publishable after those evidence steps succeed.

@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import bench.autoresearch_v2 as autoresearch_v2
 from bench.audit import audit_sm121_cache_performance_campaign
 from bench.evidence import (
     EvidenceError,
@@ -579,6 +580,132 @@ class SM121CachePerformanceEvidenceTests(unittest.TestCase):
                 self.assertEqual("partial", manifest["status"])
                 self.assertEqual(2, len(manifest["lifetimes"][0]["turns"]))
                 self.assertEqual(1, len(manifest["quality_attestations"]))
+
+    def test_export_validates_but_never_publishes_autoresearch_v2_wrapper(self) -> None:
+        """A valid v2 controller remains scalar-free provenance around its child."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = evidence_test_support.EvidenceFixture(Path(directory))
+            self._export(fixture)
+            prerequisite = json.loads((fixture.output / "index.json").read_text())["runs"][0][
+                "bundle_sha256"
+            ]
+            now = datetime(2026, 8, 29, 2, 0, tzinfo=timezone.utc)
+            cutoff = "2026-08-29T08:00:00+00:00"
+            with (
+                patch(
+                    "bench.runner.SM121_CACHE_PERFORMANCE_PREREQUISITE_BUNDLE_SHA256S",
+                    (prerequisite,),
+                ),
+                patch(
+                    "bench.evidence.SM121_CACHE_PERFORMANCE_PREREQUISITE_BUNDLE_SHA256S",
+                    (prerequisite,),
+                ),
+                patch(
+                    "bench.autoresearch_v2.SM121_CACHE_PERFORMANCE_PREREQUISITE_BUNDLE_SHA256S",
+                    (prerequisite,),
+                ),
+                patch("bench.runner.datetime") as runner_datetime,
+                patch("bench.runner._image_digest", return_value=None),
+                patch(
+                    "bench.runner._sm121_storage_image_identity",
+                    return_value={
+                        "docker_image_id": SM121_STORAGE_LOCAL_IMAGE_ID,
+                        "platform": SM121_STORAGE_PLATFORM,
+                        "source_tree": SM121_STORAGE_SOURCE_TREE,
+                    },
+                ),
+                patch("bench.runner._host_snapshot", return_value={"host": "fixture"}),
+            ):
+                runner_datetime.now.return_value = now
+                round_dir = autoresearch_v2.freeze_autoresearch_v2(
+                    self.repository
+                    / "manifests"
+                    / "campaigns"
+                    / "qwen38_flash_next_sm121_autoresearch_v2_cache_policy.toml",
+                    results_root=fixture.results,
+                    evidence_root=fixture.output,
+                    cutoff=cutoff,
+                    now=now,
+                )
+                runner_datetime.now.return_value = now + timedelta(seconds=1)
+                frozen_round = autoresearch_v2.freeze_autoresearch_v2(
+                    self.repository
+                    / "manifests"
+                    / "campaigns"
+                    / "qwen38_flash_next_sm121_autoresearch_v2_cache_policy.toml",
+                    results_root=fixture.results,
+                    evidence_root=fixture.output,
+                    cutoff=cutoff,
+                    now=now + timedelta(seconds=1),
+                )
+                self.assertEqual(
+                    {"round.json"}, {path.name for path in frozen_round.iterdir()}
+                )
+                round_payload = autoresearch_v2._load_round(round_dir)
+                child = (
+                    fixture.results
+                    / "cache-policy-campaigns"
+                    / str(round_payload["child_campaign_directory"])
+                )
+                self._write_completed_campaign(child)
+                child_summary = json.loads((child / "summary.json").read_text())
+                with (
+                    patch(
+                        "bench.autoresearch_v2.execute_sm121_cache_performance_campaign",
+                        return_value=child_summary,
+                    ),
+                    patch(
+                        "bench.autoresearch_v2.audit_sm121_cache_performance_campaign",
+                        return_value={"ok": True},
+                    ),
+                ):
+                    summary = autoresearch_v2.run_autoresearch_v2(
+                        round_dir,
+                        workspace=fixture.results.parent,
+                        evidence_root=fixture.output,
+                        now=now,
+                    )
+                self.assertEqual("inconclusive", summary["decision"])
+                failed_plan_root = (
+                    fixture.results
+                    / autoresearch_v2.AUTORESEARCH_V2_RESULT_ROOT
+                    / (
+                        "20260829T020002Z-"
+                        f"{autoresearch_v2.AUTORESEARCH_V2_CAMPAIGN_ID}"
+                    )
+                )
+                failed_plan_root.mkdir()
+                self.assertTrue(self._export(fixture, replace=True)["changed"])
+            published = json.loads((fixture.output / "index.json").read_text())
+            self.assertEqual(
+                1,
+                sum(
+                    entry["evidence_kind"] == "sm121_cache_policy_performance"
+                    for entry in published["campaigns"]
+                ),
+            )
+            serialized = b"\n".join(
+                path.read_bytes() for path in fixture.output.rglob("*") if path.is_file()
+            ).decode("utf-8", errors="ignore")
+            self.assertNotIn("autoresearch-v2", serialized)
+
+    def test_export_rejects_unknown_autoresearch_v2_wrapper_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = evidence_test_support.EvidenceFixture(Path(directory))
+            self._export(fixture)
+            round_dir = (
+                fixture.results
+                / autoresearch_v2.AUTORESEARCH_V2_RESULT_ROOT
+                / (
+                    "20260829T020000Z-"
+                    f"{autoresearch_v2.AUTORESEARCH_V2_CAMPAIGN_ID}"
+                )
+            )
+            round_dir.mkdir(parents=True)
+            (round_dir / "unexpected.txt").write_text("synthetic\n", encoding="utf-8")
+            with self.assertRaisesRegex(EvidenceError, "autoresearch-v2 round topology"):
+                self._export(fixture, replace=True)
 
 
 if __name__ == "__main__":
