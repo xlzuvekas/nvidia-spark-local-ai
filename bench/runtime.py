@@ -41,6 +41,8 @@ from .sglang_sm121_storage import (
     validate_sm121_storage_image_inspection,
 )
 from .sglang_sm121_cache_semantic import (
+    SM121_CACHE_SEMANTIC_CACHE_OFF_ARM,
+    SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
     SM121_CACHE_SEMANTIC_EXECUTION_MODE,
     SM121CacheSemanticError,
     is_sm121_cache_semantic_candidate,
@@ -1488,9 +1490,28 @@ _SM121_CACHE_METRIC_LINE_RE = re.compile(
     r"(?P<value>[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)"
     r"(?:\s+[0-9]+)?$"
 )
+_SM121_CACHE_METRIC_TYPE_RE = re.compile(
+    r"^# TYPE (?P<name>sglang:[A-Za-z0-9_:]+) (?P<metric_type>[A-Za-z_]+)$"
+)
 _SM121_CACHE_LABEL_RE = re.compile(
     r"(?:^|,)(?P<name>[A-Za-z_][A-Za-z0-9_]*)=\"(?P<value>(?:\\.|[^\"])*)\""
 )
+_SM121_CACHE_GUARDRAIL_SAMPLES = {
+    "sglang:evicted_tokens_total": "evicted_tokens",
+    "sglang:num_retracted_requests_total": "retracted_requests",
+}
+_SM121_CACHE_GUARDRAIL_TYPE_FAMILIES = {
+    "sglang:evicted_tokens_total": "sglang:evicted_tokens_total",
+    "sglang:num_retracted_requests_total": "sglang:num_retracted_requests_total",
+}
+_SM121_CACHE_GUARDRAIL_TYPE_ALIASES = frozenset(
+    {
+        *_SM121_CACHE_GUARDRAIL_TYPE_FAMILIES,
+        "sglang:evicted_tokens",
+        "sglang:num_retracted_requests",
+    }
+)
+_SM121_CACHE_CACHE_ON_EVICTION_LABELS = {"cache_type": "UnifiedRadixCache"}
 
 
 def inspect_sm121_cache_source_digests(model: Any) -> dict[str, str]:
@@ -1822,10 +1843,28 @@ def _sm121_cache_metric_integer(raw: str) -> int | None:
     return int(value)
 
 
-def snapshot_sm121_cache_observability_metrics(server: ManagedServer) -> dict[str, Any]:
-    """Read a scalar-only B0 metrics snapshot, returning ``available=false`` on gaps."""
+def snapshot_sm121_cache_observability_metrics(
+    server: ManagedServer, *, semantic_arm: str | None = None
+) -> dict[str, Any]:
+    """Read a scalar-only cache metrics snapshot, failing closed on gaps.
+
+    The paired semantic canary has a narrower, source-pinned interpretation of
+    its two guardrail counters.  In the cache-off arm, ``ChunkCache`` does not
+    register the eviction family and a zero retraction counter has no labelled
+    child sample.  In the cache-on arm, both counter families are registered,
+    while either zero counter may have no labelled child.  The exact
+    declarations and label vectors remain mandatory; only those verified zero
+    omissions count as available.  The older B0 caller keeps its sample-only
+    interpretation by passing no arm.
+    """
 
     snapshot = _sm121_cache_metric_defaults()
+    if semantic_arm not in {
+        None,
+        SM121_CACHE_SEMANTIC_CACHE_OFF_ARM,
+        SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
+    }:
+        return snapshot
     root = server.base_url.removesuffix("/v1").rstrip("/")
     request = urllib.request.Request(
         root + "/metrics", headers=_authorization_headers(server.authorization)
@@ -1864,14 +1903,15 @@ def snapshot_sm121_cache_observability_metrics(server: ManagedServer) -> dict[st
         "host": False,
         "storage": False,
     }
-    guardrail_seen = {
+    guardrail_sample_seen = {
         "sglang:evicted_tokens_total": False,
         "sglang:num_retracted_requests_total": False,
     }
-    guardrails = {
-        "sglang:evicted_tokens_total": "evicted_tokens",
-        "sglang:num_retracted_requests_total": "retracted_requests",
+    guardrail_type_seen = {
+        "sglang:evicted_tokens_total": False,
+        "sglang:num_retracted_requests_total": False,
     }
+    eviction_family_observed = False
     base_labels: dict[str, str] | None = None
 
     def bind_base_labels(candidate: dict[str, str]) -> bool:
@@ -1885,6 +1925,34 @@ def snapshot_sm121_cache_observability_metrics(server: ManagedServer) -> dict[st
 
     malformed = False
     for line in text.splitlines():
+        if line.startswith(("# HELP sglang:evicted_tokens", "sglang:evicted_tokens")):
+            eviction_family_observed = True
+        if line.startswith("# TYPE "):
+            type_match = _SM121_CACHE_METRIC_TYPE_RE.fullmatch(line)
+            if type_match is None:
+                if any(
+                    line.startswith(f"# TYPE {name}")
+                    for name in (
+                        *_SM121_CACHE_GUARDRAIL_TYPE_ALIASES,
+                        *SM121_CACHE_GUARDRAIL_SAMPLES,
+                    )
+                ):
+                    malformed = True
+                continue
+            type_name = type_match.group("name")
+            sample_name = _SM121_CACHE_GUARDRAIL_TYPE_FAMILIES.get(type_name)
+            if sample_name is None:
+                if type_name in _SM121_CACHE_GUARDRAIL_TYPE_ALIASES:
+                    malformed = True
+                continue
+            if (
+                type_match.group("metric_type") != "counter"
+                or guardrail_type_seen[sample_name]
+            ):
+                malformed = True
+                continue
+            guardrail_type_seen[sample_name] = True
+            continue
         match = _SM121_CACHE_METRIC_LINE_RE.fullmatch(line)
         if match is None:
             continue
@@ -1893,7 +1961,7 @@ def snapshot_sm121_cache_observability_metrics(server: ManagedServer) -> dict[st
             "sglang:prefill_effective_tokens_total",
             "sglang:cached_tokens_total",
             *gauges,
-            *guardrails,
+            *_SM121_CACHE_GUARDRAIL_SAMPLES,
         }:
             continue
         labels = _sm121_cache_labels(match.group("labels"))
@@ -1945,12 +2013,26 @@ def snapshot_sm121_cache_observability_metrics(server: ManagedServer) -> dict[st
             snapshot[f"cached_{source_kind}_tokens"] = value
             snapshot[f"cached_{source_kind}_series_present"] = True
             cached_seen[source_kind] = True
-        elif name in guardrails:
-            if not bind_base_labels(labels) or guardrail_seen[name]:
+        elif name in _SM121_CACHE_GUARDRAIL_SAMPLES:
+            if guardrail_sample_seen[name]:
                 malformed = True
                 continue
-            snapshot[guardrails[name]] = value
-            guardrail_seen[name] = True
+            if name == "sglang:evicted_tokens_total":
+                if semantic_arm == SM121_CACHE_SEMANTIC_CACHE_OFF_ARM:
+                    malformed = True
+                    continue
+                if semantic_arm == SM121_CACHE_SEMANTIC_CACHE_ON_ARM:
+                    labels_match = labels == _SM121_CACHE_CACHE_ON_EVICTION_LABELS
+                else:
+                    labels_match = bind_base_labels(labels)
+                if not labels_match:
+                    malformed = True
+                    continue
+            elif not bind_base_labels(labels):
+                malformed = True
+                continue
+            snapshot[_SM121_CACHE_GUARDRAIL_SAMPLES[name]] = value
+            guardrail_sample_seen[name] = True
         else:
             if not bind_base_labels(labels):
                 malformed = True
@@ -1964,14 +2046,31 @@ def snapshot_sm121_cache_observability_metrics(server: ManagedServer) -> dict[st
     snapshot["available"] = not malformed and all(prefill_seen.values()) and all(
         gauge_seen.values()
     )
-    snapshot["guardrail_metrics_available"] = (
-        not malformed and all(guardrail_seen.values())
-    )
+    if semantic_arm == SM121_CACHE_SEMANTIC_CACHE_OFF_ARM:
+        snapshot["guardrail_metrics_available"] = (
+            not malformed
+            and guardrail_type_seen["sglang:num_retracted_requests_total"]
+            and not guardrail_type_seen["sglang:evicted_tokens_total"]
+            and not guardrail_sample_seen["sglang:evicted_tokens_total"]
+            and not eviction_family_observed
+        )
+    elif semantic_arm == SM121_CACHE_SEMANTIC_CACHE_ON_ARM:
+        snapshot["guardrail_metrics_available"] = not malformed and all(
+            guardrail_type_seen.values()
+        )
+    else:
+        snapshot["guardrail_metrics_available"] = not malformed and all(
+            guardrail_sample_seen.values()
+        )
     return snapshot
 
 
 def settle_sm121_cache_observability_metrics(
-    server: ManagedServer, *, timeout_s: float = 45.0, poll_interval_s: float = 1.0
+    server: ManagedServer,
+    *,
+    timeout_s: float = 45.0,
+    poll_interval_s: float = 1.0,
+    semantic_arm: str | None = None,
 ) -> tuple[dict[str, Any], float, int, bool]:
     """Wait for two identical scalar metric views; never retain raw metrics text."""
 
@@ -1979,7 +2078,9 @@ def settle_sm121_cache_observability_metrics(
     previous: dict[str, Any] | None = None
     polls = 0
     while True:
-        current = snapshot_sm121_cache_observability_metrics(server)
+        current = snapshot_sm121_cache_observability_metrics(
+            server, semantic_arm=semantic_arm
+        )
         polls += 1
         if not current["available"]:
             return current, time.monotonic() - started, polls, False

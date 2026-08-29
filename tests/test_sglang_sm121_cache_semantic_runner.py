@@ -104,7 +104,7 @@ class SM121CacheSemanticRunnerTests(unittest.TestCase):
                 mock.patch(
                     "bench.runner.settle_sm121_cache_observability_metrics",
                     side_effect=[(value, 0.0, 2, True) for value in snapshots],
-                ),
+                ) as settle,
                 mock.patch(
                     "bench.runner.request_sm121_cache_semantic_turn",
                     side_effect=[_result(ids) for ids in token_ids],
@@ -127,6 +127,10 @@ class SM121CacheSemanticRunnerTests(unittest.TestCase):
                 if event.get("event") == SM121_CACHE_SEMANTIC_TURN_OBSERVATION_EVENT
             ]
             self.assertEqual(observed, token_ids)
+            self.assertEqual(
+                [call.kwargs for call in settle.call_args_list],
+                [{"semantic_arm": "B"}] * (2 * len(token_ids)),
+            )
             self.assertEqual([event["turn"] for event in turns], list(SM121_CACHE_SEMANTIC_TURN_ORDER))
             self.assertTrue(all(event["semantic_turn_admitted"] for event in turns))
             self.assertEqual([event["shared_prefix_tokens"] for event in turns], [0, len(base), len(base) + 1])

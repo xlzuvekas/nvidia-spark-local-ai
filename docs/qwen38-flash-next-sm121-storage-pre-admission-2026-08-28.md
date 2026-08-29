@@ -262,20 +262,33 @@ silently promoted to a speed result.
 The first frozen B/A execution took that authorized terminal-partial path. B
 completed its isolated quality lifetime and all three semantic turns, then
 teardown and lifecycle audit completed cleanly. Its cache/detail observations
-and ordinary native counters were settled, but the runtime did not materialize
-labeled samples for the two native eviction/retraction counters. The audit
-therefore marked each turn non-admitted for unavailable guardrails and the
-controller left A entirely untouched. This is an observability finding only:
-it establishes neither cache behavior nor a cache-on comparison.
+and ordinary native counters were settled, but its source-attested `ChunkCache`
+did not register an eviction family at all and its scheduler retraction counter
+had no labeled child sample. The audit therefore marked each turn non-admitted
+for unavailable guardrails and the controller left A entirely untouched. This
+is an observability finding only: it establishes neither cache behavior nor a
+cache-on comparison.
 
-The pinned metrics collector explains the gap. Its labeled Prometheus counters
-are materialized only when an increment path calls `labels(...).inc(...)`; on a
-fresh no-event server, Prometheus still declares the counter type but emits no
-labeled sample. The initial parser required a sample, so it correctly failed
-closed under its then-current contract. The scalar B-only partial is retained
-as evidence. A subsequent fresh pair may accept a declared-but-unmaterialized
-zero only after the parser pins that exact source behavior and requires the
-counter declaration itself; it may not infer zero from a missing metric alone.
+The correction is deliberately narrower than treating an absent metric as
+zero. A read-only, no-network, no-GPU probe of the pinned local image confirmed
+the exact `# TYPE sglang:..._total counter` declarations used by its Prometheus
+client; the source-tree and metrics-collector digests remain bound by the
+existing static attestation. The semantic parser now accepts zero by omission
+only under this source-pinned arm-specific contract:
+
+1. B requires exactly one declared
+   `# TYPE sglang:num_retracted_requests_total counter`, no eviction declaration
+   or sample, and the already-validated `ChunkCache` runtime identity. Its
+   absent retraction child is the only accepted zero-by-omission case.
+2. A requires exactly one declared counter type for both eviction and
+   retraction. Either zero child may be absent; if an eviction child is
+   materialized it must be exactly `{cache_type="UnifiedRadixCache"}`, while a
+   retraction child must use the frozen scheduler label vector.
+
+Wrong or duplicate types, an unexpected B eviction family, duplicate children,
+wrong labels, or a missing required declaration remain unavailable and terminal
+`partial`. The original B-only scalar partial is retained as evidence; the
+corrected parser does not reinterpret it as a cache result.
 
 Run and inspect the pair only through the dedicated commands:
 
@@ -296,8 +309,8 @@ from its two raw plan nonces; the raw nonces never leave the ignored plans. A
 also records a scalar receipt for the completed B control before it can start.
 Those commitments prevent static profile fingerprints from accidentally pairing
 separate attempts, without exposing a path, prompt, token sequence, or timing
-field. The exporter still accepts one B/A pair per results root, so a retry
-uses a separate results root/archive rather than mixing campaigns.
+field. Publication preserves that pair-instance binding so retries cannot be
+mistaken for the earlier partial attempt.
 
 ## What remains blocked
 

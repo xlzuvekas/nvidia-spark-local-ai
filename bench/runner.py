@@ -3422,7 +3422,7 @@ def _execute_sm121_cache_semantic_case(
             )
         ):
             before, _ignored_before_wait_s, before_polls, before_settled = (
-                settle_sm121_cache_observability_metrics(server)
+                settle_sm121_cache_observability_metrics(server, semantic_arm=arm)
             )
             request_started = time.perf_counter()
             result = request_sm121_cache_semantic_turn(
@@ -3434,7 +3434,7 @@ def _execute_sm121_cache_semantic_case(
             )
             request_elapsed_s = time.perf_counter() - request_started
             after, _ignored_after_wait_s, after_polls, after_settled = (
-                settle_sm121_cache_observability_metrics(server)
+                settle_sm121_cache_observability_metrics(server, semantic_arm=arm)
             )
             prompt_token_ids = result.pop("private_prompt_token_ids", None)
             if (

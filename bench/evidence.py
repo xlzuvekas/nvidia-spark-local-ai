@@ -4122,16 +4122,19 @@ def _validate_sm121_cache_semantic_source(
 def _prepare_sm121_cache_semantic_pair_export(
     run_dirs: Sequence[Path], results_root: Path
 ) -> list[Path]:
-    """Gate source publication on the semantic B-then-A controller state.
+    """Gate source publication on each semantic B-then-A controller state.
 
     The controller freezes both plan directories before it starts B.  A valid
     B policy failure deliberately leaves the A plan unstarted; publish B's
     terminal scalar partial in that case, but never mistake the frozen A plan
-    for an incomplete individual experiment.  Any started A requires a clean,
-    fully authenticated B plus reciprocal plan bindings.
+    for an incomplete individual experiment.  Several independently frozen
+    pair instances may share a results root, but each one must retain exactly
+    one B and one A plan, keyed by the opaque binding derived from its two
+    run nonces.  Any started A requires a clean, fully authenticated B plus
+    reciprocal plan bindings from the *same* pair instance.
     """
 
-    semantic: dict[str, dict[str, Any]] = {}
+    semantic_pairs: dict[str, dict[str, dict[str, Any]]] = {}
     for run_dir in run_dirs:
         plan = _load_json(run_dir / "plan.json", results_root)
         if not isinstance(plan, dict):
@@ -4148,8 +4151,6 @@ def _prepare_sm121_cache_semantic_pair_export(
             arm = sm121_cache_semantic_arm(model)
         except SM121CacheSemanticError as error:
             raise EvidenceError("SM121 semantic pair arm is invalid") from error
-        if arm in semantic:
-            raise EvidenceError("SM121 semantic evidence accepts only one frozen B/A pair")
         events_path = run_dir / "events.jsonl"
         summary_path = run_dir / "summary.json"
         events_present = events_path.exists() or events_path.is_symlink()
@@ -4174,111 +4175,131 @@ def _prepare_sm121_cache_semantic_pair_export(
         )
         if summary is not None and not isinstance(summary, dict):
             raise EvidenceError("SM121 semantic pair summary must be an object")
-        semantic[arm] = {
+        # Authenticate the frozen arm before trusting the opaque grouping key.
+        # In particular, a forged binding cannot cause two unrelated plans to
+        # be joined merely because they chose the same public-looking digest.
+        static = _validate_sm121_cache_semantic_plan(
+            plan, source_run_id=run_dir.name
+        )
+        if static is None or static[0] != arm:
+            raise EvidenceError("SM121 semantic pair plan arm binding is invalid")
+        pair_binding = static[1]
+        pair_instance_sha256 = pair_binding.get("pair_instance_sha256")
+        if (
+            not isinstance(pair_instance_sha256, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", pair_instance_sha256) is None
+        ):
+            raise EvidenceError("SM121 semantic pair instance binding is invalid")
+        pair = semantic_pairs.setdefault(pair_instance_sha256, {})
+        if arm in pair:
+            raise EvidenceError(
+                "SM121 semantic evidence has duplicate frozen arm for a pair instance"
+            )
+        pair[arm] = {
             "events": events,
             "events_present": events_present,
             "plan": plan,
             "run_dir": run_dir,
+            "static": static,
             "summary": summary,
             "summary_present": summary_present,
         }
-    if not semantic:
+    if not semantic_pairs:
         return list(run_dirs)
-    if set(semantic) != set(SM121_CACHE_SEMANTIC_ARM_ORDER):
-        raise EvidenceError("SM121 semantic evidence requires both frozen B and A plans")
 
-    cache_off = semantic[SM121_CACHE_SEMANTIC_CACHE_OFF_ARM]
-    cache_on = semantic[SM121_CACHE_SEMANTIC_CACHE_ON_ARM]
-    off_dir = cache_off["run_dir"]
-    off_plan = cache_off["plan"]
-    off_events = cache_off["events"]
-    off_summary = cache_off["summary"]
-    on_dir = cache_on["run_dir"]
-    on_plan = cache_on["plan"]
-    on_events = cache_on["events"]
-    on_summary = cache_on["summary"]
-    if not all(
-        isinstance(value, Path)
-        for value in (off_dir, on_dir)
-    ) or not all(
-        isinstance(value, dict)
-        for value in (off_plan, on_plan)
-    ) or not all(
-        isinstance(value, list)
-        for value in (off_events, on_events)
-    ):
-        raise EvidenceError("SM121 semantic pair source state is malformed")
-
-    # Authenticate *both* frozen plans, even when B's terminal policy finding
-    # intentionally prevents the controller from starting A.
-    off_static = _validate_sm121_cache_semantic_plan(
-        off_plan, source_run_id=off_dir.name
-    )
-    on_static = _validate_sm121_cache_semantic_plan(
-        on_plan, source_run_id=on_dir.name
-    )
-    if (
-        off_static is None
-        or on_static is None
-        or off_static[0] != SM121_CACHE_SEMANTIC_CACHE_OFF_ARM
-        or on_static[0] != SM121_CACHE_SEMANTIC_CACHE_ON_ARM
-    ):
-        raise EvidenceError("SM121 semantic pair plan arm binding is invalid")
-    off_model = off_plan.get("model")
-    off_suite = off_plan.get("suite")
-    on_model = on_plan.get("model")
-    on_suite = on_plan.get("suite")
-    off_binding = off_static[1]
-    on_binding = on_static[1]
-    off_fingerprint = off_plan.get("fingerprint")
-    on_fingerprint = on_plan.get("fingerprint")
-    try:
-        pair_instance_sha256 = sm121_cache_semantic_pair_instance_sha256(
-            off_plan.get("run_nonce"), on_plan.get("run_nonce")
-        )
-        if (
-            off_binding.get("pair_instance_sha256") != pair_instance_sha256
-            or on_binding.get("pair_instance_sha256") != pair_instance_sha256
-        ):
-            raise SM121CacheSemanticError("semantic pair instance binding changed")
-        validate_sm121_cache_semantic_pair_binding(
-            off_binding,
-            off_model,
-            off_suite,
-            peer_plan_fingerprint=on_fingerprint,
-            peer_binding=on_binding,
-        )
-        validate_sm121_cache_semantic_pair_binding(
-            on_binding,
-            on_model,
-            on_suite,
-            peer_plan_fingerprint=off_fingerprint,
-            peer_binding=off_binding,
-        )
-    except SM121CacheSemanticError as error:
-        raise EvidenceError("SM121 semantic source pair binding changed") from error
-
-    # Authenticate B before looking at A.  This is the export-side analogue
-    # of the controller's B audit and retains no raw execution material.
-    _validate_sm121_cache_semantic_source(
-        off_plan, off_events, off_summary, source_run_id=off_dir.name
-    )
-    cache_on_unstarted = (
-        cache_on["events_present"] is False
-        and cache_on["summary_present"] is False
-    )
-    if cache_on_unstarted:
-        if off_summary is None or off_summary.get("status") != "partial":
+    unpublished_run_dirs: set[Path] = set()
+    for semantic in semantic_pairs.values():
+        if set(semantic) != set(SM121_CACHE_SEMANTIC_ARM_ORDER):
             raise EvidenceError(
-                "SM121 semantic cache-on arm is unstarted without a terminal B partial"
+                "SM121 semantic evidence requires both frozen B and A plans per pair instance"
             )
-        return [path for path in run_dirs if path != on_dir]
-    if off_summary is None or off_summary.get("status") != "complete":
-        raise EvidenceError("SM121 semantic cache-on arm requires a completed B control")
-    _validate_sm121_cache_semantic_source(
-        on_plan, on_events, on_summary, source_run_id=on_dir.name
-    )
-    return list(run_dirs)
+        cache_off = semantic[SM121_CACHE_SEMANTIC_CACHE_OFF_ARM]
+        cache_on = semantic[SM121_CACHE_SEMANTIC_CACHE_ON_ARM]
+        off_dir = cache_off["run_dir"]
+        off_plan = cache_off["plan"]
+        off_events = cache_off["events"]
+        off_summary = cache_off["summary"]
+        on_dir = cache_on["run_dir"]
+        on_plan = cache_on["plan"]
+        on_events = cache_on["events"]
+        on_summary = cache_on["summary"]
+        off_static = cache_off["static"]
+        on_static = cache_on["static"]
+        if not all(isinstance(value, Path) for value in (off_dir, on_dir)) or not all(
+            isinstance(value, dict) for value in (off_plan, on_plan)
+        ) or not all(isinstance(value, list) for value in (off_events, on_events)) or not all(
+            isinstance(value, tuple) and len(value) == 2
+            for value in (off_static, on_static)
+        ):
+            raise EvidenceError("SM121 semantic pair source state is malformed")
+
+        # Both frozen plans have already been statically authenticated above,
+        # even when B's terminal policy finding intentionally prevents the
+        # controller from starting A.  Recompute the opaque pair commitment
+        # from the private nonces before using the controller topology.
+        if (
+            off_static[0] != SM121_CACHE_SEMANTIC_CACHE_OFF_ARM
+            or on_static[0] != SM121_CACHE_SEMANTIC_CACHE_ON_ARM
+            or not isinstance(off_static[1], dict)
+            or not isinstance(on_static[1], dict)
+        ):
+            raise EvidenceError("SM121 semantic pair plan arm binding is invalid")
+        off_model = off_plan.get("model")
+        off_suite = off_plan.get("suite")
+        on_model = on_plan.get("model")
+        on_suite = on_plan.get("suite")
+        off_binding = off_static[1]
+        on_binding = on_static[1]
+        off_fingerprint = off_plan.get("fingerprint")
+        on_fingerprint = on_plan.get("fingerprint")
+        try:
+            pair_instance_sha256 = sm121_cache_semantic_pair_instance_sha256(
+                off_plan.get("run_nonce"), on_plan.get("run_nonce")
+            )
+            if (
+                off_binding.get("pair_instance_sha256") != pair_instance_sha256
+                or on_binding.get("pair_instance_sha256") != pair_instance_sha256
+            ):
+                raise SM121CacheSemanticError("semantic pair instance binding changed")
+            validate_sm121_cache_semantic_pair_binding(
+                off_binding,
+                off_model,
+                off_suite,
+                peer_plan_fingerprint=on_fingerprint,
+                peer_binding=on_binding,
+            )
+            validate_sm121_cache_semantic_pair_binding(
+                on_binding,
+                on_model,
+                on_suite,
+                peer_plan_fingerprint=off_fingerprint,
+                peer_binding=off_binding,
+            )
+        except SM121CacheSemanticError as error:
+            raise EvidenceError("SM121 semantic source pair binding changed") from error
+
+        # Authenticate B before looking at A.  This is the export-side analogue
+        # of the controller's B audit and retains no raw execution material.
+        _validate_sm121_cache_semantic_source(
+            off_plan, off_events, off_summary, source_run_id=off_dir.name
+        )
+        cache_on_unstarted = (
+            cache_on["events_present"] is False
+            and cache_on["summary_present"] is False
+        )
+        if cache_on_unstarted:
+            if off_summary is None or off_summary.get("status") != "partial":
+                raise EvidenceError(
+                    "SM121 semantic cache-on arm is unstarted without a terminal B partial"
+                )
+            unpublished_run_dirs.add(on_dir)
+            continue
+        if off_summary is None or off_summary.get("status") != "complete":
+            raise EvidenceError("SM121 semantic cache-on arm requires a completed B control")
+        _validate_sm121_cache_semantic_source(
+            on_plan, on_events, on_summary, source_run_id=on_dir.name
+        )
+    return [path for path in run_dirs if path not in unpublished_run_dirs]
 
 
 _SM121_CACHE_SEMANTIC_QUALITY_CATEGORIES = (
@@ -16595,15 +16616,16 @@ def _verify_simple_bundle(
 def _validate_sm121_cache_semantic_published_pairs(
     root: Path, entries: Sequence[dict[str, Any]]
 ) -> None:
-    """Recheck B/A relationship after checksums may have been refreshed.
+    """Recheck each B/A relationship after checksums may have been refreshed.
 
     A standalone terminal B partial is an honest cache-policy finding: the
-    controller never starts A in that state.  Every other published semantic
-    outcome must retain one B and one A bundle with reciprocal public plan
-    fingerprints.
+    controller never starts A in that state.  Multiple independently frozen
+    pair instances may be published together.  Every other semantic outcome
+    must retain one B and one A bundle *within its own opaque pair instance*,
+    with reciprocal public plan fingerprints.
     """
 
-    arms: dict[str, dict[str, Any]] = {}
+    pairs: dict[str, dict[str, dict[str, Any]]] = {}
     for entry in entries:
         run_id = entry.get("run_id")
         if not isinstance(run_id, str):
@@ -16620,42 +16642,70 @@ def _validate_sm121_cache_semantic_published_pairs(
         runtime = manifest.get("runtime")
         proof = runtime.get("sm121_cache_semantic") if isinstance(runtime, dict) else None
         arm = proof.get("arm") if isinstance(proof, dict) else None
-        if arm not in SM121_CACHE_SEMANTIC_ARM_ORDER or arm in arms:
+        binding = proof.get("pair_binding") if isinstance(proof, dict) else None
+        pair_instance_sha256 = (
+            binding.get("pair_instance_sha256") if isinstance(binding, dict) else None
+        )
+        if (
+            arm not in SM121_CACHE_SEMANTIC_ARM_ORDER
+            or not isinstance(pair_instance_sha256, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", pair_instance_sha256) is None
+        ):
             raise EvidenceError("SM121 semantic published pair arms are ambiguous")
-        arms[arm] = {"entry": entry, "manifest": manifest, "proof": proof}
-    if not arms:
+        pair = pairs.setdefault(pair_instance_sha256, {})
+        if arm in pair:
+            raise EvidenceError("SM121 semantic published pair arms are ambiguous")
+        pair[arm] = {"entry": entry, "manifest": manifest, "proof": proof}
+    if not pairs:
         return
-    cache_off = arms.get(SM121_CACHE_SEMANTIC_CACHE_OFF_ARM)
-    cache_on = arms.get(SM121_CACHE_SEMANTIC_CACHE_ON_ARM)
-    if cache_off is None:
-        raise EvidenceError("SM121 semantic A bundle lacks its B control")
-    off_manifest = cache_off["manifest"]
-    off_proof = cache_off["proof"]
-    if not isinstance(off_proof, dict):
-        raise EvidenceError("SM121 semantic B proof is invalid")
-    if cache_on is None:
-        if off_manifest.get("status") != "partial":
-            raise EvidenceError("SM121 semantic completed B bundle lacks A")
-        return
-    on_manifest = cache_on["manifest"]
-    on_proof = cache_on["proof"]
-    if not isinstance(on_proof, dict):
-        raise EvidenceError("SM121 semantic A proof is invalid")
-    if off_manifest.get("status") != "complete":
-        raise EvidenceError("SM121 semantic A bundle follows a non-complete B")
-    if on_manifest.get("status") not in {"complete", "partial"}:
-        raise EvidenceError("SM121 semantic A bundle has an invalid terminal status")
-    off_binding = off_proof.get("pair_binding")
-    on_binding = on_proof.get("pair_binding")
-    if not isinstance(off_binding, dict) or not isinstance(on_binding, dict):
-        raise EvidenceError("SM121 semantic published pair binding is missing")
-    if (
-        off_binding.get("peer_plan_fingerprint") != on_proof.get("plan_fingerprint")
-        or on_binding.get("peer_plan_fingerprint") != off_proof.get("plan_fingerprint")
-        or off_binding.get("pair_instance_sha256")
-        != on_binding.get("pair_instance_sha256")
+
+    # A checksum-refreshed change to only one public instance digest divides a
+    # formerly paired B/A result into separate singleton groups.  Diagnose that
+    # as a reciprocal-binding failure before accepting a B-only partial state.
+    # This retains fail-closed behavior without joining distinct instances.
+    if any(
+        SM121_CACHE_SEMANTIC_CACHE_OFF_ARM in pair
+        and SM121_CACHE_SEMANTIC_CACHE_ON_ARM not in pair
+        for pair in pairs.values()
+    ) and any(
+        SM121_CACHE_SEMANTIC_CACHE_ON_ARM in pair
+        and SM121_CACHE_SEMANTIC_CACHE_OFF_ARM not in pair
+        for pair in pairs.values()
     ):
         raise EvidenceError("SM121 semantic published pair binding is not reciprocal")
+
+    for arms in pairs.values():
+        cache_off = arms.get(SM121_CACHE_SEMANTIC_CACHE_OFF_ARM)
+        cache_on = arms.get(SM121_CACHE_SEMANTIC_CACHE_ON_ARM)
+        if cache_off is None:
+            raise EvidenceError("SM121 semantic A bundle lacks its B control")
+        off_manifest = cache_off["manifest"]
+        off_proof = cache_off["proof"]
+        if not isinstance(off_proof, dict):
+            raise EvidenceError("SM121 semantic B proof is invalid")
+        if cache_on is None:
+            if off_manifest.get("status") != "partial":
+                raise EvidenceError("SM121 semantic completed B bundle lacks A")
+            continue
+        on_manifest = cache_on["manifest"]
+        on_proof = cache_on["proof"]
+        if not isinstance(on_proof, dict):
+            raise EvidenceError("SM121 semantic A proof is invalid")
+        if off_manifest.get("status") != "complete":
+            raise EvidenceError("SM121 semantic A bundle follows a non-complete B")
+        if on_manifest.get("status") not in {"complete", "partial"}:
+            raise EvidenceError("SM121 semantic A bundle has an invalid terminal status")
+        off_binding = off_proof.get("pair_binding")
+        on_binding = on_proof.get("pair_binding")
+        if not isinstance(off_binding, dict) or not isinstance(on_binding, dict):
+            raise EvidenceError("SM121 semantic published pair binding is missing")
+        if (
+            off_binding.get("peer_plan_fingerprint") != on_proof.get("plan_fingerprint")
+            or on_binding.get("peer_plan_fingerprint") != off_proof.get("plan_fingerprint")
+            or off_binding.get("pair_instance_sha256")
+            != on_binding.get("pair_instance_sha256")
+        ):
+            raise EvidenceError("SM121 semantic published pair binding is not reciprocal")
 
 
 def _verify_evidence_topology(root: Path) -> None:

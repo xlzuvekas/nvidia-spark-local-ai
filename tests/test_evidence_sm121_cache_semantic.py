@@ -105,6 +105,38 @@ class SM121CacheSemanticEvidenceTests(unittest.TestCase):
             )
 
     @staticmethod
+    def _relocate_pair(
+        cache_off: Path, cache_on: Path, *, timestamp: str
+    ) -> tuple[Path, Path]:
+        """Free the deterministic run names so a second pair can be frozen.
+
+        Only the timestamp prefix changes.  The exporter still checks the
+        arm-specific fingerprint suffix, and the plans retain their distinct
+        random nonces, so this fixture models two separately frozen instances
+        without depending on wall-clock sleeps.
+        """
+
+        relocated: list[Path] = []
+        for run_dir in (cache_off, cache_on):
+            _prefix, separator, suffix = run_dir.name.partition("-")
+            if not separator:
+                raise AssertionError("semantic fixture run directory lacks a suffix")
+            destination = run_dir.with_name(f"{timestamp}-{suffix}")
+            run_dir.rename(destination)
+            relocated.append(destination)
+        return relocated[0], relocated[1]
+
+    def _freeze_two_pair_instances(
+        self, fixture: evidence_test_support.EvidenceFixture
+    ) -> tuple[Path, Path, Path, Path]:
+        first_off, first_on = self._freeze_pair(fixture)
+        first_off, first_on = self._relocate_pair(
+            first_off, first_on, timestamp="20260828T020000Z"
+        )
+        second_off, second_on = self._freeze_pair(fixture)
+        return first_off, first_on, second_off, second_on
+
+    @staticmethod
     def _rewrite_plan_integrity(
         fixture: evidence_test_support.EvidenceFixture,
         run_dir: Path,
@@ -572,6 +604,97 @@ class SM121CacheSemanticEvidenceTests(unittest.TestCase):
                 }
                 & published_keys
             )
+
+    def test_multiple_pair_instances_export_partial_b_and_complete_pair(self) -> None:
+        """A historic B partial and a later full B/A pair can share one root."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = evidence_test_support.EvidenceFixture(Path(directory))
+            partial_off, partial_on, complete_off, complete_on = (
+                self._freeze_two_pair_instances(fixture)
+            )
+            complete_off_plan = json.loads(
+                (complete_off / "plan.json").read_text(encoding="utf-8")
+            )
+            self._write_arm(
+                partial_off,
+                arm=SM121_CACHE_SEMANTIC_CACHE_OFF_ARM,
+                cache_off_fingerprint=None,
+                partial=True,
+            )
+            self._write_arm(
+                complete_off,
+                arm=SM121_CACHE_SEMANTIC_CACHE_OFF_ARM,
+                cache_off_fingerprint=None,
+                partial=False,
+            )
+            self._write_arm(
+                complete_on,
+                arm=SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
+                cache_off_fingerprint=complete_off_plan["fingerprint"],
+                cache_off_pair_binding_sha256=complete_off_plan["semantic_pair"][
+                    "pair_binding_sha256"
+                ],
+                partial=False,
+            )
+
+            self.assertTrue(self._export(fixture)["changed"])
+            self.assertEqual("verified", verify_evidence(fixture.output)["status"])
+            run_ids = {
+                entry["run_id"]
+                for entry in json.loads(
+                    (fixture.output / "index.json").read_text(encoding="utf-8")
+                )["runs"]
+            }
+            self.assertTrue(
+                {partial_off.name, complete_off.name, complete_on.name} <= run_ids
+            )
+            self.assertNotIn(partial_on.name, run_ids)
+            partial_manifest = json.loads(
+                (fixture.output / "runs" / partial_off.name / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            complete_manifest = json.loads(
+                (fixture.output / "runs" / complete_off.name / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual("partial", partial_manifest["status"])
+            self.assertEqual("complete", complete_manifest["status"])
+            self.assertNotEqual(
+                partial_manifest["runtime"]["sm121_cache_semantic"]["pair_binding"][
+                    "pair_instance_sha256"
+                ],
+                complete_manifest["runtime"]["sm121_cache_semantic"]["pair_binding"][
+                    "pair_instance_sha256"
+                ],
+            )
+
+    def test_multiple_pair_instances_reject_duplicate_arm_within_one_instance(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = evidence_test_support.EvidenceFixture(Path(directory))
+            cache_off, _cache_on = self._freeze_pair(fixture)
+            _prefix, separator, suffix = cache_off.name.partition("-")
+            self.assertTrue(separator)
+            duplicate = cache_off.with_name(f"20260828T020001Z-{suffix}")
+            shutil.copytree(cache_off, duplicate)
+
+            with self.assertRaisesRegex(EvidenceError, "duplicate frozen arm"):
+                self._export(fixture)
+
+    def test_multiple_pair_instances_require_a_plan_per_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = evidence_test_support.EvidenceFixture(Path(directory))
+            _first_off, first_on, _second_off, _second_on = (
+                self._freeze_two_pair_instances(fixture)
+            )
+            shutil.rmtree(first_on)
+
+            with self.assertRaisesRegex(EvidenceError, "per pair instance"):
+                self._export(fixture)
 
     def test_partial_semantic_arm_exports_without_a_timing_claim(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
