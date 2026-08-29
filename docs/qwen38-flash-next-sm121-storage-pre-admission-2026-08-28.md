@@ -227,7 +227,7 @@ IDs, response bodies, raw metrics, source text, and timings presented as a
 performance result. It also rejects a checksum-refreshed generic downgrade of
 the B0 bundle.
 
-## Paired cache-policy semantic canary — ready, not yet measured
+## Paired cache-policy semantic canary — B partial, A correctly withheld
 
 The next admission-only step is a paired B-then-A semantic probe, not a
 benchmark. It uses two newly isolated profiles against the same pinned local
@@ -258,6 +258,24 @@ device-hit and residency deltas. Both arms reject host/storage hits, eviction,
 retraction, missing guardrail counters, unsettled snapshots, or a failed exact
 answer. A non-admitted semantic result is terminal `partial`; it is never
 silently promoted to a speed result.
+
+The first frozen B/A execution took that authorized terminal-partial path. B
+completed its isolated quality lifetime and all three semantic turns, then
+teardown and lifecycle audit completed cleanly. Its cache/detail observations
+and ordinary native counters were settled, but the runtime did not materialize
+labeled samples for the two native eviction/retraction counters. The audit
+therefore marked each turn non-admitted for unavailable guardrails and the
+controller left A entirely untouched. This is an observability finding only:
+it establishes neither cache behavior nor a cache-on comparison.
+
+The pinned metrics collector explains the gap. Its labeled Prometheus counters
+are materialized only when an increment path calls `labels(...).inc(...)`; on a
+fresh no-event server, Prometheus still declares the counter type but emits no
+labeled sample. The initial parser required a sample, so it correctly failed
+closed under its then-current contract. The scalar B-only partial is retained
+as evidence. A subsequent fresh pair may accept a declared-but-unmaterialized
+zero only after the parser pins that exact source behavior and requires the
+counter declaration itself; it may not infer zero from a missing metric alone.
 
 Run and inspect the pair only through the dedicated commands:
 
