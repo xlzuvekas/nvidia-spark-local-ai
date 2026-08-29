@@ -4,16 +4,22 @@
 
 The frozen contract, dedicated fresh-lifetime controller, fail-closed runtime
 chunk-size attestation, read-only audit, and scalar-only evidence path are
-implemented. No chunked-prefill campaign has been frozen or run. The profiles
-remain blocked from generic execution; the dedicated
-`sm121-chunked-prefill-performance` command is the only path that can admit a
-live A/B/B/A campaign.
+implemented. The first frozen campaign reached the quality gate and a 60K
+cache-cold `T0`, then correctly terminalized as partial: an over-strict
+controller check treated SGLang's 64-token ready-state bootstrap increment of
+the global input counter as cache reuse even though every cache-hit and
+residency counter was zero. That non-admitted partial is retained as scalar
+evidence; it does not inform the A/B decision. The controller now defines
+cache-coldness from the cache counters and will freeze a new campaign before
+the next execution. Profiles remain blocked from generic execution; the
+dedicated `sm121-chunked-prefill-performance` command is the only path that can
+admit a live A/B/B/A campaign.
 
 ## Question
 
 On the current, cache-on SM121 native-NVMe Qwen3.8 Flash-Next stack, does
-raising `--chunked-prefill-size` from 1,024 to 2,048 reduce correct cold 60K
-request wall time enough to justify the setting for a single user's long
+raising `--chunked-prefill-size` from 1,024 to 2,048 reduce correct cache-cold
+60K request wall time enough to justify the setting for a single user's long
 context?
 
 This is not a decode-TPS study. It does not test concurrency or claim an
@@ -50,8 +56,14 @@ rendered request bodies stay in memory or ignored raw provenance.
   must preserve its private cross-lifetime prompt-token identity.
 - `T0` is the sole prefill primary. `T1`/`T2` are a static-history proxy for
   subsequent long-context turns, not an agent-tool trajectory.
-- Current cache residency/guardrail observations remain mandatory: cold `T0`,
-  device-only append hits, no eviction, no retraction, and no pressure breach.
+- Cache-cold `T0` requires zero device/host/storage hits and zero cached-token
+  residency before and after the measured request. SGLang's ready-state
+  bootstrap may leave a nonzero global input-counter baseline; the controller
+  requires a positive request-local input delta but never mistakes that
+  baseline for a cache hit.
+- Current cache residency/guardrail observations remain mandatory: cache-cold
+  `T0`, device-only append hits, no eviction, no retraction, and no pressure
+  breach.
 
 The first version will use the existing non-streaming, exact-response adapter,
 so it measures request wall only. TTFT requires a separately admitted
@@ -61,7 +73,7 @@ privacy-safe streaming adapter and is not inferred from request wall.
 
 The controller will freeze arithmetic means before execution:
 
-- promote B only when correct cold-`T0` mean wall is at most `0.95 × A`;
+- promote B only when correct cache-cold-`T0` mean wall is at most `0.95 × A`;
 - reject B on an append-turn or full-`T0`–`T2` wall guardrail above
   `1.05 × A`;
 - otherwise retain A or report the speed result inconclusive, according to the

@@ -834,10 +834,15 @@ def _turn_issues(row: Mapping[str, object]) -> tuple[str, ...]:
     native_device = int(row["delta_prefill_device_hit_tokens"])
     native_cached = int(row["delta_cached_device_tokens"])
     if turn == "T0":
+        # SGLang may issue a short bootstrap prefill while bringing a fresh
+        # server to its ready state.  ``prefill_input_tokens`` is a global
+        # cumulative counter, so it is diagnostic rather than proof that the
+        # controller's first measured request inherited a cache entry.  A
+        # cache-cold T0 is instead authenticated by the zero hit/residency
+        # counters below, alongside the fresh-lifetime controller boundary.
         if any(
             int(row[f"before_{metric}"]) != 0
             for metric in (
-                "prefill_input_tokens",
                 "prefill_device_hit_tokens",
                 "prefill_host_hit_tokens",
                 "prefill_storage_hit_tokens",
@@ -1029,6 +1034,47 @@ def validate_sm121_chunked_prefill_performance_turn_event(event: object) -> None
         )
 
 
+def _is_legacy_bootstrap_counter_partial_turn(event: object) -> bool:
+    """Recognize only the pre-correction terminal T0 observation.
+
+    The first live v1 campaign was already terminal when the ready-state
+    bootstrap behavior was discovered.  It may be retained as an audited
+    partial record, but this compatibility path is deliberately unavailable
+    to the controller that creates new observations.
+    """
+
+    try:
+        row = _event_fields(event, _TURN_EVENT_FIELDS, "chunked-prefill turn event")
+    except SM121ChunkedPrefillPerformanceError:
+        return False
+    if (
+        row["turn"] != "T0"
+        or row["timed_turn_admitted"] is not False
+        or row["timed_turn_basis"] != "cold_lifetime"
+        or type(row["before_prefill_input_tokens"]) is not int
+        or row["before_prefill_input_tokens"] <= 0
+    ):
+        return False
+    normalized = dict(row)
+    normalized["timed_turn_admitted"] = True
+    normalized["timed_turn_basis"] = "admitted"
+    try:
+        validate_sm121_chunked_prefill_performance_turn_event(normalized)
+    except SM121ChunkedPrefillPerformanceError:
+        return False
+    return True
+
+
+def validate_sm121_chunked_prefill_performance_recorded_turn_event(event: object) -> None:
+    """Validate a current observation or the one audited legacy partial T0."""
+
+    try:
+        validate_sm121_chunked_prefill_performance_turn_event(event)
+    except SM121ChunkedPrefillPerformanceError:
+        if not _is_legacy_bootstrap_counter_partial_turn(event):
+            raise
+
+
 def validate_sm121_chunked_prefill_performance_lifetimes(
     lifetimes: object,
 ) -> tuple[dict[str, object], ...]:
@@ -1080,7 +1126,7 @@ def validate_sm121_chunked_prefill_performance_lifetimes(
                 raise SM121ChunkedPrefillPerformanceError(
                     "chunked-prefill public turn is invalid"
                 )
-            validate_sm121_chunked_prefill_performance_turn_event(event)
+            validate_sm121_chunked_prefill_performance_recorded_turn_event(event)
             if (
                 event["arm"] != expected_arm
                 or event["lifetime_ordinal"] != ordinal * 2

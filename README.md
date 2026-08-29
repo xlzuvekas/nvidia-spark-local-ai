@@ -46,7 +46,7 @@ data. Its [human-readable map](evidence/README.md) and
 aborted, and nonterminal attempts without publishing raw payloads. The
 [evidence publication section](BENCHMARK.md#publishing-sanitized-evidence)
 explains how to create and verify both files. The current refresh contains
-2,025 files covering 318 run bundles and 26 campaign bundles.
+2,027 files covering 318 run bundles and 27 campaign bundles.
 
 ## What the results say
 

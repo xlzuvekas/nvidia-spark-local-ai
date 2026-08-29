@@ -31,6 +31,7 @@ from bench.sglang_sm121_chunked_prefill_performance import (
     sm121_chunked_prefill_performance_pair_binding_sha256,
     sm121_chunked_prefill_performance_pair_instance_sha256,
     validate_sm121_chunked_prefill_performance_candidate,
+    validate_sm121_chunked_prefill_performance_recorded_turn_event,
     validate_sm121_chunked_prefill_performance_pair,
     validate_sm121_chunked_prefill_performance_pair_binding,
     validate_sm121_chunked_prefill_performance_suite,
@@ -218,6 +219,10 @@ class SM121ChunkedPrefillPerformanceTests(unittest.TestCase):
         t0 = _turn(ordinal=2, arm="A", turn="T0", wall_s=20.0)
         later = _turn(ordinal=2, arm="A", turn="T1", wall_s=2.0)
         validate_sm121_chunked_prefill_performance_turn_event(t0)
+        self.assertEqual(
+            (True, "admitted"),
+            derive_sm121_chunked_prefill_performance_turn_admission(t0),
+        )
         validate_sm121_chunked_prefill_performance_turn_event(later)
         self.assertEqual(
             (True, "admitted"),
@@ -229,6 +234,51 @@ class SM121ChunkedPrefillPerformanceTests(unittest.TestCase):
             SM121ChunkedPrefillPerformanceError, "admission changed"
         ):
             validate_sm121_chunked_prefill_performance_turn_event(t0)
+
+    def test_t0_allows_bootstrap_prefill_but_not_prior_cache_residency(self) -> None:
+        t0 = _turn(ordinal=2, arm="A", turn="T0", wall_s=20.0)
+        # A fresh SGLang lifetime can increment its global input counter while
+        # becoming ready.  That does not make the controller's first request
+        # cache-warm when all cache counters remain zero.
+        t0["before_prefill_input_tokens"] = 64
+        t0["after_prefill_input_tokens"] = 65
+        t0["delta_prefill_input_tokens"] = 1
+        self.assertEqual(
+            (True, "admitted"),
+            derive_sm121_chunked_prefill_performance_turn_admission(t0),
+        )
+        validate_sm121_chunked_prefill_performance_turn_event(t0)
+
+        t0["before_cached_total_tokens"] = 1
+        t0["after_cached_total_tokens"] = 1
+        t0["delta_cached_total_tokens"] = 0
+        with self.assertRaisesRegex(
+            SM121ChunkedPrefillPerformanceError, "admission changed"
+        ):
+            validate_sm121_chunked_prefill_performance_turn_event(t0)
+
+    def test_only_the_audited_legacy_bootstrap_partial_is_readable(self) -> None:
+        legacy = _turn(ordinal=2, arm="A", turn="T0", wall_s=20.0)
+        legacy["before_prefill_input_tokens"] = 64
+        legacy["after_prefill_input_tokens"] = 65
+        legacy["delta_prefill_input_tokens"] = 1
+        legacy["timed_turn_admitted"] = False
+        legacy["timed_turn_basis"] = "cold_lifetime"
+        with self.assertRaisesRegex(
+            SM121ChunkedPrefillPerformanceError, "admission changed"
+        ):
+            validate_sm121_chunked_prefill_performance_turn_event(legacy)
+        validate_sm121_chunked_prefill_performance_recorded_turn_event(legacy)
+
+        legacy["before_cached_total_tokens"] = 1
+        legacy["after_cached_total_tokens"] = 1
+        legacy["delta_cached_total_tokens"] = 0
+        legacy["timed_turn_admitted"] = True
+        legacy["timed_turn_basis"] = "admitted"
+        with self.assertRaisesRegex(
+            SM121ChunkedPrefillPerformanceError, "admission changed"
+        ):
+            validate_sm121_chunked_prefill_performance_recorded_turn_event(legacy)
 
     def test_score_retains_2k_only_when_t0_and_guardrails_pass(self) -> None:
         lifetimes = [

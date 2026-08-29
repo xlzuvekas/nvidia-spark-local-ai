@@ -37,6 +37,7 @@ from .sglang_sm121_chunked_prefill_performance import (
     validate_sm121_chunked_prefill_performance_candidate,
     validate_sm121_chunked_prefill_performance_lifetimes,
     validate_sm121_chunked_prefill_performance_pair_binding,
+    validate_sm121_chunked_prefill_performance_recorded_turn_event,
     validate_sm121_chunked_prefill_performance_runtime_event,
     validate_sm121_chunked_prefill_performance_static_event,
     validate_sm121_chunked_prefill_performance_suite,
@@ -493,7 +494,7 @@ def validate_source(campaign_dir: Path, results_root: Path) -> dict[str, Any] | 
                     validate_sm121_chunked_prefill_performance_runtime_event(event)
                     runtime_events.append(_without_timestamp(event))
                 elif event.get("event") == SM121_CHUNKED_PREFILL_PERFORMANCE_TURN_EVENT:
-                    validate_sm121_chunked_prefill_performance_turn_event(event)
+                    validate_sm121_chunked_prefill_performance_recorded_turn_event(event)
             except SM121ChunkedPrefillPerformanceError as error:
                 raise ChunkedPrefillEvidenceError(
                     "chunked-prefill journal event is invalid"
@@ -665,7 +666,7 @@ def manifest_from_source(
             "quality_item_count": SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_ITEM_COUNT,
             "timed_turns": list(SM121_CHUNKED_PREFILL_PERFORMANCE_TIMED_TURNS),
             "measurement": "non_streaming_request_wall_s_only",
-            "primary": "cold_t0_request_wall_s",
+            "primary": "cache_cold_t0_request_wall_s",
             "ttft": None,
         },
         "binding": {
@@ -739,7 +740,7 @@ def verify_manifest(
         "quality_item_count": SM121_CHUNKED_PREFILL_PERFORMANCE_QUALITY_ITEM_COUNT,
         "timed_turns": list(SM121_CHUNKED_PREFILL_PERFORMANCE_TIMED_TURNS),
         "measurement": "non_streaming_request_wall_s_only",
-        "primary": "cold_t0_request_wall_s",
+        "primary": "cache_cold_t0_request_wall_s",
         "ttft": None,
     }
     if manifest.get("protocol") != expected_protocol:
