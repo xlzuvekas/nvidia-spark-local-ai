@@ -2,6 +2,10 @@
 
 Status: implementation, offline contract tests, and the first fresh round are
 complete. Its audited child retained cache-on A, so v2 rejected cache-off B.
+Two later current-runtime chunked-prefill studies then retained 2K over 1K and
+4K over 2K for the same 60K static-history proxy. They are independently
+frozen, audited dedicated studies—not retroactive v2 rounds—and are recorded
+as such below.
 
 ## Why there is a v2 controller
 
@@ -124,7 +128,7 @@ provenance, not a second measurement archive. The exporter validates only its
 empty pre-plan, frozen-unstarted, or terminal shapes and emits evidence only
 for its independently audited child.
 
-## Boundaries and next proposal
+## Boundaries and current follow-through
 
 This does not complete the historical O2→O3→L2→L3 lazy-buffer interaction.
 That frozen block remains non-estimable: O2's C6 tail and O3 startup crossed
@@ -132,8 +136,25 @@ the swap safety gate, and fresh L2/L3 never started. The old lazy panel cannot
 be substituted into its missing cells.
 
 With the cache-off candidate rejected twice in independent campaigns, the next
-product question should be a newly admitted one-axis long-context prefill
-candidate such as 1,024 versus 2,048 token chunked prefill. It is not
-registered yet: current SM121 source/runtime attestation, exact profiles, a
-quality/workload contract, and a dedicated scalar reducer are still required
-before a GPU lifetime is authorized.
+product question was a one-axis long-context prefill candidate. That work is
+now complete through two independent frozen panels:
+
+| Panel | Control → candidate | Cache-cold 60K `T0` wall ratio | Decision |
+| --- | --- | ---: | --- |
+| Dedicated prefill v1 | 1K → 2K | 0.772 | retain 2K |
+| Dedicated prefill v2 | 2K → 4K | 0.777 | retain 4K |
+
+Both panels required current-SM121 source/runtime and chunk-size attestation,
+four exact-answer quality lifetimes, A/B/B/A fresh timed lifetimes, the
+privacy-safe 60K static-history workload, and a read-only scalar audit. Their
+full contract and evidence links are in the
+[chunked-prefill study](qwen38-flash-next-sm121-chunked-prefill-protocol-2026-08-29.md).
+
+They deliberately remain separate from the cache-policy v2 registry: a
+registry entry freezes a child before its own inference, whereas those panels
+were frozen and run by their dedicated controller. The cache-policy round,
+prefill v1, and prefill v2 are therefore three distinct pieces of evidence;
+none is retrospectively wrapped, pooled, or re-scored. A future registry
+extension needs a separately reviewed chunked-prefill runner adapter and a new
+one-axis candidate. It must not reuse a completed campaign or authorize
+arbitrary serving flags.

@@ -1330,6 +1330,16 @@ for its exact candidate orientation, decision table, commands, and expansion
 requirements. It does not make the historical lazy-buffer/depth interaction
 estimable and does not authorize arbitrary server-flag changes.
 
+The next product hypothesis was implemented as a separate dedicated
+chunked-prefill controller rather than retroactively wrapping a completed
+measurement in v2. Its independent 1K/2K and 2K/4K A/B/B/A panels each froze
+their own profiles, chunk-size attestations, lifecycle bindings, audit, and
+scalar evidence; they retained 2K and then 4K for the exact 60K static-history
+request-wall proxy. See the [chunked-prefill study](docs/qwen38-flash-next-sm121-chunked-prefill-protocol-2026-08-29.md).
+These are current-runtime product results, but not `autoresearch-v2` rounds;
+they must not be pooled with the v2 cache-policy child or used to imply a
+generic flag-search permission.
+
 ### Publishing sanitized evidence
 
 An evidence export creates a deterministic tracked archive without copying raw
