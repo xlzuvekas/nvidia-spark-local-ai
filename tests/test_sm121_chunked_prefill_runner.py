@@ -27,6 +27,12 @@ from bench.sm121_chunked_prefill_runner import (
     create_sm121_chunked_prefill_performance_campaign,
     execute_sm121_chunked_prefill_performance_campaign,
 )
+from sparkbench import (
+    DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE,
+    build_parser,
+    command_audit_sm121_chunked_prefill_performance,
+    command_sm121_chunked_prefill_performance,
+)
 from tests.test_sglang_sm121_chunked_prefill_performance import _lifetime
 
 
@@ -47,6 +53,20 @@ class SM121ChunkedPrefillRunnerTests(unittest.TestCase):
             / "qwen38_flash_next_sm121_triton_storage_chunked_prefill_performance_v1.toml"
         )
         self.suite = load_suite(self.suite_path)
+
+    def test_cli_exposes_dedicated_non_resumable_campaign_and_audit(self) -> None:
+        parser = build_parser()
+        run_args = parser.parse_args(["sm121-chunked-prefill-performance"])
+        self.assertEqual(DEFAULT_SM121_CHUNKED_PREFILL_PERFORMANCE_SUITE, run_args.suite)
+        self.assertEqual(command_sm121_chunked_prefill_performance, run_args.function)
+        self.assertFalse(hasattr(run_args, "allow_download"))
+        audit_args = parser.parse_args(
+            ["audit-sm121-chunked-prefill-performance", "synthetic-campaign"]
+        )
+        self.assertEqual(Path("synthetic-campaign"), audit_args.campaign_dir)
+        self.assertEqual(
+            command_audit_sm121_chunked_prefill_performance, audit_args.function
+        )
 
     def _freeze(self, root: Path) -> Path:
         with (

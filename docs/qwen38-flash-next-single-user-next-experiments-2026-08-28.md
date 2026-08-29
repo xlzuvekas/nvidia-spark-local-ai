@@ -329,10 +329,10 @@ completes validly:
 
 The current-runtime profile/suite preflight for that first pair is now tracked
 in the [SM121 1K/2K chunked-prefill protocol](qwen38-flash-next-sm121-chunked-prefill-protocol-2026-08-29.md).
-It intentionally remains execution-blocked until its independent controller,
-runtime chunk-size attestation, auditor, and scalar-only exporter exist. Its
-scope is a long-context static-history proxy, not the still-unadmitted
-agentic-coding harness.
+Its dedicated controller, runtime chunk-size attestation, auditor, and
+scalar-only exporter now exist; generic execution remains blocked, and only
+the dedicated command can admit it. Its scope is a long-context static-history
+proxy, not the still-unadmitted agentic-coding harness.
 
 - If 2,048 wins, compare the promoted champion with 4,096.
 - If 2,048 loses, compare 1,024 with 512.
@@ -340,10 +340,11 @@ agentic-coding harness.
 - Clone each new profile from the then-current admitted winner, change only
   `--chunked-prefill-size`, and use ABBA with two fresh lifetimes per arm.
 - Promotion contract: every exact oracle must pass. The sole primary is the
-  candidate/control ratio of unweighted arm means for lifetime-level correct
-  60K E2E; promote only at `<=0.95`. Require candidate/control
-  unweighted-mean later-turn agent wall and 60K TTFT each to remain `<=1.05`.
-  Keep D256 throughput, memory, and swap separate.
+  candidate/control ratio of unweighted arm means for correct cold-`T0` 60K
+  request wall; promote only at `<=0.95`. Require candidate/control
+  unweighted-mean static-history append and full request wall each to remain
+  `<=1.05`. This non-streaming lane has no TTFT or agent-wall claim; keep
+  decode throughput, memory, and swap separate.
 
 At concurrency one, larger chunks have no scheduling-fairness justification.
 They must win on actual prefill or task wall time without harming interactive

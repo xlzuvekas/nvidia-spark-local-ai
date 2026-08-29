@@ -178,6 +178,7 @@ from .sglang_sm121_cache_performance import (
     validate_sm121_cache_performance_lifetimes,
     validate_sm121_cache_performance_turn_event,
 )
+from . import sm121_chunked_prefill_evidence as chunked_prefill_evidence
 
 
 SCHEMA_VERSION = "sparkbench-evidence-v1"
@@ -196,6 +197,8 @@ AUTORESEARCH_RESULT_ROOT = "autoresearch"
 AUTORESEARCH_V2_RESULT_ROOT = autoresearch_v2_module.AUTORESEARCH_V2_RESULT_ROOT
 SM121_CACHE_PERFORMANCE_RESULT_ROOT = "cache-policy-campaigns"
 SM121_CACHE_PERFORMANCE_EVIDENCE_KIND = "sm121_cache_policy_performance"
+SM121_CHUNKED_PREFILL_PERFORMANCE_RESULT_ROOT = chunked_prefill_evidence.RESULT_ROOT
+SM121_CHUNKED_PREFILL_PERFORMANCE_EVIDENCE_KIND = chunked_prefill_evidence.EVIDENCE_KIND
 AUTORESEARCH_EVIDENCE_KIND = "autoresearch_campaign"
 AUTORESEARCH_CAMPAIGN_SCHEMA_VERSION = 3
 AUTORESEARCH_CAMPAIGN_SCHEMA_VERSIONS = frozenset({2, 3})
@@ -16599,6 +16602,23 @@ def _verify_simple_bundle(
         _verify_sm121_cache_performance_bundle(root, directory, entry, primary)
         return
     if category == "campaigns" and (
+        entry.get("evidence_kind")
+        == SM121_CHUNKED_PREFILL_PERFORMANCE_EVIDENCE_KIND
+        or primary.get("evidence_kind")
+        == SM121_CHUNKED_PREFILL_PERFORMANCE_EVIDENCE_KIND
+    ):
+        if (
+            entry.get("evidence_kind")
+            != SM121_CHUNKED_PREFILL_PERFORMANCE_EVIDENCE_KIND
+            or primary.get("evidence_kind")
+            != SM121_CHUNKED_PREFILL_PERFORMANCE_EVIDENCE_KIND
+        ):
+            raise EvidenceError("SM121 chunked-prefill evidence kind changed")
+        _verify_sm121_chunked_prefill_performance_bundle(
+            root, directory, entry, primary
+        )
+        return
+    if category == "campaigns" and (
         entry.get("evidence_kind") == AUTORESEARCH_EVIDENCE_KIND
         or primary.get("evidence_kind") == AUTORESEARCH_EVIDENCE_KIND
     ):
@@ -16829,6 +16849,27 @@ def _verify_sm121_cache_performance_bundle(
         "raw_identifiers_included": False,
     }:
         raise EvidenceError("SM121 cache-performance sanitization changed")
+
+
+def _verify_sm121_chunked_prefill_performance_bundle(
+    root: Path, directory: Path, entry: dict[str, Any], manifest: dict[str, Any]
+) -> None:
+    """Revalidate a 1K/2K scalar bundle without reopening raw provenance."""
+
+    if {path.name for path in directory.iterdir()} != {
+        "checksums.json",
+        "manifest.json",
+    }:
+        raise EvidenceError("SM121 chunked-prefill bundle file set changed")
+    try:
+        chunked_prefill_evidence.verify_manifest(
+            manifest,
+            entry,
+            schema_version=SCHEMA_VERSION,
+            sanitization_policy=SANITIZATION_POLICY,
+        )
+    except chunked_prefill_evidence.ChunkedPrefillEvidenceError as error:
+        raise EvidenceError("SM121 chunked-prefill evidence changed") from error
 
 
 def _validate_sm121_cache_semantic_published_pairs(
@@ -19393,6 +19434,45 @@ def _export_sm121_cache_performance_campaign(
     }
 
 
+def _sm121_chunked_prefill_performance_campaign_dirs(
+    results_root: Path,
+) -> list[Path]:
+    try:
+        return chunked_prefill_evidence.campaign_dirs(results_root)
+    except chunked_prefill_evidence.ChunkedPrefillEvidenceError as error:
+        raise EvidenceError("SM121 chunked-prefill result root is invalid") from error
+
+
+def _export_sm121_chunked_prefill_performance_campaign(
+    campaign_dir: Path, results_root: Path, output_root: Path
+) -> dict[str, Any] | None:
+    try:
+        source = chunked_prefill_evidence.validate_source(campaign_dir, results_root)
+    except chunked_prefill_evidence.ChunkedPrefillEvidenceError as error:
+        raise EvidenceError("SM121 chunked-prefill source is invalid") from error
+    if source is None:
+        return None
+    try:
+        manifest = chunked_prefill_evidence.manifest_from_source(
+            source,
+            schema_version=SCHEMA_VERSION,
+            sanitization_policy=SANITIZATION_POLICY,
+        )
+    except chunked_prefill_evidence.ChunkedPrefillEvidenceError as error:
+        raise EvidenceError("SM121 chunked-prefill projection is invalid") from error
+    relative = Path("campaigns") / str(manifest["campaign_id"])
+    bundle_hash, _ = _write_bundle(
+        output_root, relative, {"manifest.json": manifest}
+    )
+    return {
+        "bundle_sha256": bundle_hash,
+        "campaign_id": manifest["campaign_id"],
+        "evidence_kind": SM121_CHUNKED_PREFILL_PERFORMANCE_EVIDENCE_KIND,
+        "file": str(relative / "manifest.json"),
+        "status": manifest["status"],
+    }
+
+
 def _export_evidence_locked(
     *,
     results_root: Path,
@@ -19452,6 +19532,10 @@ def _export_evidence_locked(
             results_root
         )
         cache_performance_paths = set(cache_performance_campaigns)
+        chunked_prefill_campaigns = _sm121_chunked_prefill_performance_campaign_dirs(
+            results_root
+        )
+        chunked_prefill_paths = set(chunked_prefill_campaigns)
         _validate_autoresearch_v2_source_topology(
             results_root,
             locked_autoresearch_v2_topology,
@@ -19471,6 +19555,9 @@ def _export_evidence_locked(
                 )
                 and not any(
                     ancestor in cache_performance_paths for ancestor in path.parents
+                )
+                and not any(
+                    ancestor in chunked_prefill_paths for ancestor in path.parents
                 )
                 and autoresearch_root not in path.parents
             }
@@ -19511,6 +19598,8 @@ def _export_evidence_locked(
             recognized_top.add(AUTORESEARCH_RESULT_ROOT)
         if cache_performance_campaigns:
             recognized_top.add(SM121_CACHE_PERFORMANCE_RESULT_ROOT)
+        if chunked_prefill_campaigns:
+            recognized_top.add(SM121_CHUNKED_PREFILL_PERFORMANCE_RESULT_ROOT)
         if locked_autoresearch_v2_topology[0] is not None:
             recognized_top.add(AUTORESEARCH_V2_RESULT_ROOT)
         published_run_ids = [run_dir.name for run_dir in run_dirs] + [
@@ -19590,6 +19679,16 @@ def _export_evidence_locked(
             for campaign in cache_performance_campaigns
             if (
                 exported := _export_sm121_cache_performance_campaign(
+                    campaign, results_root, temporary
+                )
+            )
+            is not None
+        )
+        campaigns.extend(
+            exported
+            for campaign in chunked_prefill_campaigns
+            if (
+                exported := _export_sm121_chunked_prefill_performance_campaign(
                     campaign, results_root, temporary
                 )
             )

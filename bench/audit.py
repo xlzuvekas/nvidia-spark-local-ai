@@ -53,6 +53,7 @@ from .sglang_sm121_cache_performance import (
     validate_sm121_cache_performance_static_event,
     validate_sm121_cache_performance_turn_event,
 )
+from . import sm121_chunked_prefill_evidence as chunked_prefill_evidence
 
 
 IssueAdder = Callable[..., None]
@@ -1853,6 +1854,68 @@ def audit_sm121_cache_performance_campaign(
         add_issue(
             "campaign_contract_invalid",
             "cache-performance campaign does not meet the frozen scalar contract",
+        )
+    report["error_count"] = len(report["errors"])
+    report["ok"] = report["error_count"] == 0
+    return report
+
+
+def audit_sm121_chunked_prefill_performance_campaign(
+    campaign_dir: Path,
+) -> dict[str, Any]:
+    """Read-only validation of one SM121 1K/2K A/B/B/A campaign.
+
+    It shares the scalar source validator with publication and never opens
+    prompt content, responses, token IDs, request identifiers, logs, or keys.
+    """
+
+    report: dict[str, Any] = {
+        "schema_version": 1,
+        "read_only": True,
+        "campaign_id": "qwen38-flash-next-sm121-chunked-prefill-performance-v1",
+        "ok": False,
+        "errors": [],
+    }
+
+    def add_issue(code: str, message: str) -> None:
+        report["errors"].append({"code": code, "message": message})
+
+    try:
+        root = campaign_dir.resolve(strict=True)
+        results_root = root.parent.parent
+        if (
+            root.parent.name != chunked_prefill_evidence.RESULT_ROOT
+            or not results_root.is_dir()
+        ):
+            raise ValueError
+        source = chunked_prefill_evidence.validate_source(root, results_root)
+        if source is None:
+            add_issue(
+                "campaign_not_terminal",
+                "frozen chunked-prefill campaign has not reached a terminal summary",
+            )
+        else:
+            summary = source["summary"]
+            report.update(
+                {
+                    "status": summary["status"],
+                    "decision": summary["decision"],
+                    "completed_arms": summary["completed_arms"],
+                    "score": summary["score"],
+                    "static_attestation_count": len(source["static_events"]),
+                    "runtime_attestation_count": len(source["runtime_events"]),
+                }
+            )
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        chunked_prefill_evidence.ChunkedPrefillEvidenceError,
+    ):
+        add_issue(
+            "campaign_contract_invalid",
+            "chunked-prefill campaign does not meet the frozen scalar contract",
         )
     report["error_count"] = len(report["errors"])
     report["ok"] = report["error_count"] == 0
