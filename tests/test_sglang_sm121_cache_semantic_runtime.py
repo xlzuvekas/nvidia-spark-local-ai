@@ -18,7 +18,7 @@ class _Response:
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> bool:
         return False
 
-    def read(self, limit: int) -> bytes:
+    def read(self, limit: int = -1) -> bytes:
         del limit
         return self.payload
 
@@ -145,6 +145,62 @@ class SM121CacheSemanticRuntimeTests(unittest.TestCase):
         self.assertTrue(observed["mamba_extra_buffer_enabled"])
         self.assertTrue(observed["mamba_extra_buffer_lazy_enabled"])
         self.assertEqual(observed["max_mamba_cache_size"], 4)
+
+    def test_chunked_prefill_runtime_identity_attests_one_size(self) -> None:
+        startup = (
+            "Tree cache initialized: source=default impl=UnifiedRadixCache "
+            "hybrid_swa=False hybrid_ssm=True hicache_attached=False "
+            "streaming_wrapped=False"
+        )
+        with (
+            mock.patch.object(
+                runtime,
+                "_run",
+                return_value=SimpleNamespace(returncode=0, stdout=startup, stderr=""),
+            ),
+            mock.patch.object(
+                runtime,
+                "_sm121_cache_server_info_fields",
+                return_value={
+                    "disable_radix_cache": False,
+                    "mamba_radix_cache_strategy": "extra_buffer_lazy",
+                    "max_mamba_cache_size": 4,
+                },
+            ),
+            mock.patch.object(
+                runtime.urllib.request,
+                "urlopen",
+                return_value=_Response(
+                    {"scheduler": {"chunked_prefill_size": 2048}}
+                ),
+            ),
+        ):
+            observed = runtime.inspect_sm121_chunked_prefill_runtime_identity(
+                _server()
+            )
+
+        self.assertEqual(2048, observed["chunked_prefill_size"])
+        self.assertEqual("UnifiedRadixCache", observed["cache_impl"])
+
+    def test_chunked_prefill_runtime_identity_rejects_conflicting_sizes(self) -> None:
+        with mock.patch.object(
+            runtime,
+            "inspect_sm121_cache_runtime_identity",
+            return_value={"cache_impl": "UnifiedRadixCache"},
+        ), mock.patch.object(
+            runtime.urllib.request,
+            "urlopen",
+            return_value=_Response(
+                {
+                    "scheduler": {"chunked_prefill_size": 1024},
+                    "model": {"chunked_prefill_size": 2048},
+                }
+            ),
+        ):
+            with self.assertRaisesRegex(
+                runtime.RuntimeErrorWithContext, "chunked-prefill runtime field"
+            ):
+                runtime.inspect_sm121_chunked_prefill_runtime_identity(_server())
 
 
 if __name__ == "__main__":

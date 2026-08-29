@@ -54,6 +54,11 @@ from .sglang_sm121_cache_performance import (
     is_sm121_cache_performance_candidate,
     validate_sm121_cache_performance_candidate,
 )
+from .sglang_sm121_chunked_prefill_performance import (
+    SM121ChunkedPrefillPerformanceError,
+    is_sm121_chunked_prefill_performance_candidate,
+    validate_sm121_chunked_prefill_performance_candidate,
+)
 from .sglang_sm121_cache_observability import (
     SM121_CACHE_RUNTIME_ATTESTATION_EVENT,
     SM121_CACHE_RUNTIME_EXPECTED,
@@ -1241,11 +1246,17 @@ def _start_sglang_sm121_storage(
 
     semantic_candidate = is_sm121_cache_semantic_candidate(model)
     performance_candidate = is_sm121_cache_performance_candidate(model)
+    chunked_prefill_candidate = is_sm121_chunked_prefill_performance_candidate(
+        model
+    )
     authorized = (
         getattr(model, "cache_semantic_canary_authorized", False) is True
         if semantic_candidate
         else getattr(model, "cache_performance_authorized", False) is True
         if performance_candidate
+        else getattr(model, "chunked_prefill_performance_authorized", False)
+        is True
+        if chunked_prefill_candidate
         else getattr(model, "storage_canary_authorized", False) is True
     )
     if not authorized:
@@ -1257,12 +1268,15 @@ def _start_sglang_sm121_storage(
             validate_sm121_cache_semantic_candidate(model)
         elif performance_candidate:
             validate_sm121_cache_performance_candidate(model)
+        elif chunked_prefill_candidate:
+            validate_sm121_chunked_prefill_performance_candidate(model)
         else:
             validate_sm121_storage_candidate(model)
     except (
         SM121StorageCandidateError,
         SM121CacheSemanticError,
         SM121CachePerformanceError,
+        SM121ChunkedPrefillPerformanceError,
     ) as error:
         raise RuntimeErrorWithContext(str(error)) from error
     if abort_check is not None:
@@ -1404,7 +1418,11 @@ def _start_sglang_sm121_storage(
     server.native_provenance = {
         "candidate_id": (
             str(getattr(model, "id", ""))
-            if semantic_candidate or performance_candidate
+            if (
+                semantic_candidate
+                or performance_candidate
+                or chunked_prefill_candidate
+            )
             else SM121_STORAGE_CANDIDATE_ID
         ),
         "candidate_source_tree": SM121_STORAGE_SOURCE_TREE,
@@ -1781,6 +1799,60 @@ def inspect_sm121_cache_runtime_identity(
             not disabled and strategy == "extra_buffer_lazy"
         ),
     }
+
+
+def inspect_sm121_chunked_prefill_runtime_identity(
+    server: ManagedServer,
+) -> dict[str, Any]:
+    """Return cache identity plus the resolved chunked-prefill size.
+
+    The cache-policy lanes predate a chunk-size attestation and deliberately
+    retain only their narrow cache field set.  This separate reader is for the
+    1K-versus-2K performance lane: it walks ``/server_info`` in memory,
+    accepts one unambiguous positive integer, and returns only that scalar.
+    It never writes the full response or a container path to a journal.
+    """
+
+    observed = inspect_sm121_cache_runtime_identity(server)
+    root = server.base_url.removesuffix("/v1").rstrip("/")
+    request = urllib.request.Request(
+        root + "/server_info", headers=_authorization_headers(server.authorization)
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = json.load(response)
+    except (OSError, ValueError, urllib.error.URLError) as error:
+        raise RuntimeErrorWithContext(
+            "Could not read the SM121 chunked-prefill runtime attestation"
+        ) from error
+    values: list[int] = []
+
+    def walk(value: object, *, depth: int = 0) -> None:
+        if depth > 24:
+            raise RuntimeErrorWithContext("SM121 server-info nesting is invalid")
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "chunked_prefill_size":
+                    if (
+                        isinstance(child, bool)
+                        or not isinstance(child, int)
+                        or child <= 0
+                    ):
+                        raise RuntimeErrorWithContext(
+                            "SM121 chunked-prefill runtime field is invalid"
+                        )
+                    values.append(child)
+                walk(child, depth=depth + 1)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child, depth=depth + 1)
+
+    walk(payload)
+    if not values or any(value != values[0] for value in values[1:]):
+        raise RuntimeErrorWithContext(
+            "SM121 chunked-prefill runtime field is unavailable"
+        )
+    return {**observed, "chunked_prefill_size": values[0]}
 
 
 def attest_sm121_cache_observability_runtime(server: ManagedServer) -> dict[str, Any]:
@@ -2898,11 +2970,17 @@ def start_sglang(
     cache_performance_authorized = (
         getattr(model, "cache_performance_authorized", False) is True
     )
+    chunked_prefill_performance_authorized = (
+        getattr(model, "chunked_prefill_performance_authorized", False) is True
+    )
     blocker = model_execution_blocker(
         model,
         allow_sm121_storage_canary=storage_canary_authorized,
         allow_sm121_cache_semantic_canary=cache_semantic_canary_authorized,
         allow_sm121_cache_performance=cache_performance_authorized,
+        allow_sm121_chunked_prefill_performance=(
+            chunked_prefill_performance_authorized
+        ),
     )
     if blocker is not None:
         raise RuntimeErrorWithContext(blocker)
@@ -2940,6 +3018,7 @@ def start_sglang(
     if (
         is_sm121_cache_semantic_candidate(model)
         or is_sm121_cache_performance_candidate(model)
+        or is_sm121_chunked_prefill_performance_candidate(model)
         or is_sm121_storage_candidate(model)
     ):
         return _start_sglang_sm121_storage(
