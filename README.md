@@ -19,7 +19,7 @@ quality checks, and the provenance needed to interpret each number.
 | What is ready for the replacement SGLang candidate's first admission run? | [SM121 Triton/storage pre-admission gates and the unexecuted target-only fresh-process quality/varied-context canary](docs/qwen38-flash-next-sm121-storage-pre-admission-2026-08-28.md) |
 | What did the admitted SM121 cache-policy timing show without leaking prompts or claiming TTFT? | [Two independent audited A/B/B/A fresh-lifetime results: retain cache-on A](docs/qwen38-flash-next-sm121-cache-performance-protocol-2026-08-29.md) |
 | How is the live SM121 product track now using an autoresearch-style loop safely? | [Current-runtime v2 registry: freeze one reviewed candidate, execute once, and derive retain/reject/inconclusive from audited scalar evidence](docs/qwen38-flash-next-sm121-autoresearch-v2-2026-08-29.md) |
-| What is the next safe 60K prefill optimization test? | [Dedicated current-SM121 1K/2K chunked-prefill A/B/B/A protocol; a long-context proxy, not an agentic claim](docs/qwen38-flash-next-sm121-chunked-prefill-protocol-2026-08-29.md) |
+| What did the current-SM121 1K/2K prefill comparison show? | [Audited A/B/B/A result: retain 2K for the 60K static-history proxy, not an agentic claim](docs/qwen38-flash-next-sm121-chunked-prefill-protocol-2026-08-29.md) |
 | How should the vLLM direct-PLE-mmap path be reproduced? | [Exact stacked source boundary, inferred Radix checkpoint, local readiness, admission, ABBA, long-context, and profiler plan](docs/qwen38-flash-next-vllm-mmap-reproduction-2026-08-28.md) |
 | What do matched PLE mapping/omission and NEXTN depths show? | [Replicated lazy-C8 depth results, semantic-ablation failures, and quality-clean exact-answer v2](docs/qwen38-flash-next-ple-depth-study-2026-08-27.md) |
 | What happened to the single-user Qwen3.8-Flash-Next serving search? | [Frozen 14-cell, nine-case 64K protocol; admission expired without a measurement, and its retired runtime is now blocked at every execution ingress](docs/qwen38-flash-next-single-user-autoresearch-2026-08-28.md) |
@@ -46,10 +46,18 @@ data. Its [human-readable map](evidence/README.md) and
 aborted, and nonterminal attempts without publishing raw payloads. The
 [evidence publication section](BENCHMARK.md#publishing-sanitized-evidence)
 explains how to create and verify both files. The current refresh contains
-2,027 files covering 318 run bundles and 27 campaign bundles.
+2,029 files covering 318 run bundles and 28 campaign bundles.
 
 ## What the results say
 
+- On the current SM121 cache-on Qwen3.8-Flash-Next stack, the audited
+  fresh-lifetime 1K/2K chunked-prefill A/B/B/A panel retained 2K for the 60K
+  static-history proxy. Mean cache-cold `T0` wall was 38.635 s at 2K versus
+  50.022 s at 1K (`0.772x`); append proxy wall remained within guardrail at
+  `1.010x`, and full `T0`–`T2` wall was `0.787x`. This is request-wall evidence
+  at C1 with thinking disabled—not TTFT, decode TPS, concurrency, or an
+  agentic-coding result. See the
+  [chunked-prefill protocol and result](docs/qwen38-flash-next-sm121-chunked-prefill-protocol-2026-08-29.md).
 - In the historical, safety-superseded SM121 TRT-LLM mapped-PLE ABBA panel,
   NEXTN depth two beat depth one in all
   five cells across two independent lifetimes per arm. Mean D256 and fresh

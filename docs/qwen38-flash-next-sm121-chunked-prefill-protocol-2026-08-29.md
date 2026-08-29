@@ -9,11 +9,16 @@ cache-cold `T0`, then correctly terminalized as partial: an over-strict
 controller check treated SGLang's 64-token ready-state bootstrap increment of
 the global input counter as cache reuse even though every cache-hit and
 residency counter was zero. That non-admitted partial is retained as scalar
-evidence; it does not inform the A/B decision. The controller now defines
-cache-coldness from the cache counters and will freeze a new campaign before
-the next execution. Profiles remain blocked from generic execution; the
-dedicated `sm121-chunked-prefill-performance` command is the only path that can
-admit a live A/B/B/A campaign.
+evidence; it does not inform the A/B decision.
+
+The corrected newly frozen campaign completed all four A/B/B/A arms, passed
+all four quality lifetimes, and its read-only audit reported zero errors. It
+retains 2,048-token chunked prefill for this specific 60K static-history
+proxy. The [completed scalar bundle](../evidence/campaigns/qwen38-flash-next-sm121-chunked-prefill-performance-v1-d87fb7c61722/manifest.json)
+and the [initial non-decisive partial bundle](../evidence/campaigns/qwen38-flash-next-sm121-chunked-prefill-performance-v1-8232b4449e14/manifest.json)
+contain no request content. Profiles remain blocked from generic execution;
+the dedicated `sm121-chunked-prefill-performance` command is the only path that
+can admit a further live A/B/B/A campaign.
 
 ## Question
 
@@ -27,6 +32,24 @@ agentic coding benchmark. The present admitted baseline is chat-only with
 thinking disabled and no configured tool parser. A genuine agentic-coding
 comparison needs a separately admitted current-runtime tool/parser and
 reasoning-policy lane before it can reuse this axis.
+
+## Completed result
+
+The frozen reducer uses the unweighted mean of two fresh lifetimes per arm.
+All timed requests were non-streaming and quality-admitted; the table reports
+request wall only.
+
+| Metric | 1K A mean (s) | 2K B mean (s) | B/A | Frozen rule |
+| --- | ---: | ---: | ---: | --- |
+| Cache-cold `T0` 60K request | 50.022 | 38.635 | 0.772 | retain B at `<= 0.95` |
+| Append proxy `T1 + T2` | 3.168 | 3.199 | 1.010 | guardrail `<= 1.05` |
+| Full `T0`–`T2` | 53.190 | 41.834 | 0.787 | guardrail `<= 1.05` |
+
+The 2K setting clears the cache-cold primary by 22.8%, stays within the
+append guardrail, and lowers the complete three-turn wall by 21.3%; the frozen
+decision is therefore `retain_b`. This result promotes only the current
+SM121/cache-on/C1/no-thinking static-history prefill setting. It makes no
+claim about TTFT, decode TPS, concurrency, tool calling, or agentic coding.
 
 ## Frozen siblings
 
@@ -85,7 +108,7 @@ Each lifetime keeps the existing 1,200-second bound, 10 GiB MemAvailable
 floor, 512 MiB starting-swap ceiling, 512 MiB swap-growth ceiling, loopback
 endpoint, no-download rule, ownership cleanup, and benchmark lock.
 
-## Before execution
+## Admission for a future campaign
 
 The controller requires an exact `chunked_prefill_size` server-info attestation
 for both arms and validates the current UnifiedRadix/lazy runtime identity.
