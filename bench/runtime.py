@@ -20,6 +20,25 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from .execution_admission import model_execution_blocker
+from .seccomp_profile_contract import (
+    DERIVED_PATH as SM121_STORAGE_SECCOMP_PATH,
+    DERIVED_SHA256 as SM121_STORAGE_SECCOMP_SHA256,
+    SeccompProfileContractError,
+    verify_seccomp_profile_contract,
+)
+from .sglang_sm121_storage import (
+    SM121_STORAGE_BUILD_CONTRACT_SHA256,
+    SM121_STORAGE_CACHE_PAGES,
+    SM121_STORAGE_CANDIDATE_ID,
+    SM121_STORAGE_MAX_BATCH_PAGES,
+    SM121_STORAGE_MODE,
+    SM121_STORAGE_QUEUE_DEPTH,
+    SM121_STORAGE_SOURCE_TREE,
+    SM121StorageCandidateError,
+    is_sm121_storage_candidate,
+    validate_sm121_storage_candidate,
+    validate_sm121_storage_image_inspection,
+)
 from bench.qwen38_ple_cache import (
     PINNED_LAYOUT as QWEN38_PLE_LAYOUT,
     PLECacheError,
@@ -901,6 +920,12 @@ class ManagedServer:
         repr=False,
         compare=False,
     )
+    _immediate_stop_complete: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def _require_owned_container(self) -> None:
         if not self.container_id or not self.run_identity:
@@ -940,12 +965,15 @@ class ManagedServer:
         with self._lifecycle_lock:
             if not self.container_id:
                 return
+            if self._immediate_stop_complete:
+                return
             self._require_owned_container()
             _run(
                 ["docker", "stop", "--time", "0", self.container_id],
                 check=True,
                 timeout=15,
             )
+            self._immediate_stop_complete = True
 
     def stop(self, *, keep_server: bool = False) -> None:
         with self._lifecycle_lock:
@@ -981,9 +1009,15 @@ class ManagedServer:
             and not keep_server
         ):
             self._require_owned_container()
-            _run(["docker", "stop", "--time", "30", self.container_id], check=True, timeout=45)
+            if not self._immediate_stop_complete:
+                _run(
+                    ["docker", "stop", "--time", "30", self.container_id],
+                    check=True,
+                    timeout=45,
+                )
             _run(["docker", "rm", self.container_id], check=True, timeout=15)
             self.container_id = None
+            self._immediate_stop_complete = False
             if self.backend == "sglang":
                 _unlink_private_secret(self.api_key_path)
                 self.api_key_path = None
@@ -1089,6 +1123,298 @@ def _exact_sglang_snapshot(
         f"/root/.cache/huggingface/hub/{repository_name}/snapshots/{revision}"
     )
     return repository_resolved, container_snapshot
+
+
+def _sm121_storage_image_id(model: Any) -> str:
+    """Recheck the mutable local tag and return its immutable Docker ID."""
+
+    image = str(getattr(model, "image", "") or "")
+    try:
+        result = _run(
+            ["docker", "image", "inspect", image, "--format", "{{json .}}"],
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeErrorWithContext(
+            "Could not inspect the local SM121 storage image"
+        ) from error
+    if result.returncode:
+        raise RuntimeErrorWithContext(
+            "Could not inspect the local SM121 storage image"
+        )
+    try:
+        inspection = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeErrorWithContext(
+            "Local SM121 storage image inspection was not valid JSON"
+        ) from error
+    if not isinstance(inspection, dict):
+        raise RuntimeErrorWithContext(
+            "Local SM121 storage image inspection was not an object"
+        )
+    try:
+        identity = validate_sm121_storage_image_inspection(
+            inspection, image=image
+        )
+    except SM121StorageCandidateError as error:
+        raise RuntimeErrorWithContext(str(error)) from error
+    image_id = identity["docker_image_id"]
+    frozen = getattr(model, "resolved_local_image_id", None)
+    if frozen is None:
+        frozen = getattr(model, "resolved_image", None)
+    if frozen is not None and frozen != image_id:
+        raise RuntimeErrorWithContext(
+            "Frozen local SM121 storage image ID differs from the inspected tag"
+        )
+    return image_id
+
+
+def _sm121_storage_seccomp_profile(workspace: Path) -> Path:
+    """Return the contract-verified, per-container io_uring profile path."""
+
+    try:
+        verification = verify_seccomp_profile_contract(workspace)
+    except (OSError, SeccompProfileContractError) as error:
+        raise RuntimeErrorWithContext(
+            "The SM121 storage seccomp profile did not verify"
+        ) from error
+    if verification.derived_sha256 != SM121_STORAGE_SECCOMP_SHA256:
+        raise RuntimeErrorWithContext(
+            "The SM121 storage seccomp profile hash did not match its pin"
+        )
+    try:
+        root = workspace.resolve(strict=True)
+        profile = (root / SM121_STORAGE_SECCOMP_PATH).resolve(strict=True)
+        profile.relative_to(root)
+    except (OSError, ValueError) as error:
+        raise RuntimeErrorWithContext(
+            "The SM121 storage seccomp profile path is unavailable or unsafe"
+        ) from error
+    if not profile.is_file():
+        raise RuntimeErrorWithContext(
+            "The SM121 storage seccomp profile is not a regular file"
+        )
+    return profile
+
+
+def _start_sglang_sm121_storage(
+    model: Any,
+    *,
+    workspace: Path,
+    target_repository: Path,
+    container_snapshot: str,
+    port: int,
+    server_log_path: Path | None,
+    abort_check: Callable[[], None] | None,
+    on_server_created: Callable[[ManagedServer], None] | None,
+) -> ManagedServer:
+    """Start the dedicated native-NVMe PLE canary with narrow containment."""
+
+    if getattr(model, "storage_canary_authorized", False) is not True:
+        raise RuntimeErrorWithContext(
+            "SM121 storage serving requires the dedicated canary executor"
+        )
+    try:
+        validate_sm121_storage_candidate(model)
+    except SM121StorageCandidateError as error:
+        raise RuntimeErrorWithContext(str(error)) from error
+    if abort_check is not None:
+        abort_check()
+    image_id = _sm121_storage_image_id(model)
+    seccomp_profile = _sm121_storage_seccomp_profile(workspace)
+    run_identity = str(getattr(model, "run_identity", "unknown"))
+    key = secrets.token_urlsafe(32)
+    auth = f"Bearer {key}"
+    sensitive_values = (key, auth)
+    api_key_path = (
+        server_log_path.parent / "api-key"
+        if server_log_path is not None
+        else None
+    )
+    if api_key_path is not None:
+        _write_private_secret(api_key_path, key)
+
+    command = [
+        "docker",
+        "run",
+        "--detach",
+        "--pull=never",
+        "--name",
+        SGLANG_CONTAINER_NAME,
+        "--label",
+        MANAGED_LABEL,
+        "--label",
+        f"ai.sparkbench.run={run_identity}",
+        "--label",
+        "ai.sparkbench.backend=sglang",
+        "--gpus",
+        "all",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--security-opt",
+        f"seccomp={seccomp_profile}",
+        "--shm-size",
+        "16g",
+        "--tmpfs",
+        "/tmp:rw,exec,nosuid,nodev,size=16g",
+        "--tmpfs",
+        "/root/.cache:rw,exec,nosuid,nodev,size=8g",
+        "--ulimit",
+        "memlock=-1",
+        "--ulimit",
+        "stack=67108864",
+        "--publish",
+        f"127.0.0.1:{port}:30000",
+        "--volume",
+        f"{target_repository}:/root/.cache/huggingface/hub/"
+        f"{target_repository.name}:ro",
+        "--env",
+        "HF_HOME=/tmp/sparkbench-hf",
+        "--env",
+        "HF_HUB_CACHE=/tmp/sparkbench-hf/hub",
+        "--env",
+        "HF_MODULES_CACHE=/tmp/sparkbench-hf/modules",
+        "--env",
+        "HF_TOKEN_PATH=/tmp/sparkbench-hf/token-disabled",
+        "--env",
+        "HF_HUB_DISABLE_IMPLICIT_TOKEN=1",
+        "--env",
+        "HF_HUB_DISABLE_TELEMETRY=1",
+        "--env",
+        "HF_HUB_OFFLINE=1",
+        "--env",
+        "TRANSFORMERS_OFFLINE=1",
+        "--env",
+        "SGLANG_RUST_BUILD_MODE=never",
+        "--env",
+        f"SGLANG_QWEN4_PLE_NVME_PATH={container_snapshot}",
+        "--env",
+        "SGLANG_QWEN4_PLE_NVME_BACKEND=io_uring",
+        "--env",
+        f"SGLANG_QWEN4_PLE_NVME_QUEUE_DEPTH={SM121_STORAGE_QUEUE_DEPTH}",
+        "--env",
+        "SGLANG_QWEN4_PLE_NVME_MAX_BATCH_PAGES="
+        f"{SM121_STORAGE_MAX_BATCH_PAGES}",
+        "--env",
+        f"SGLANG_QWEN4_PLE_NVME_CACHE_PAGES={SM121_STORAGE_CACHE_PAGES}",
+        "--env",
+        "SGLANG_CACHE_DIR=/tmp/sglang-cache",
+        "--env",
+        "TRITON_CACHE_DIR=/tmp/triton-cache",
+        "--env",
+        "XDG_CACHE_HOME=/tmp/xdg-cache",
+        "--env",
+        "TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor-cache",
+        "--env",
+        "TILELANG_CACHE_DIR=/tmp/tilelang-cache",
+        "--entrypoint",
+        "sglang",
+        image_id,
+        "serve",
+        "--model-path",
+        container_snapshot,
+        "--api-key=" + key,
+        *(str(argument) for argument in model.args),
+    ]
+    if abort_check is not None:
+        try:
+            abort_check()
+        except BaseException:
+            _unlink_private_secret(api_key_path)
+            raise
+    try:
+        result = _run(command, check=False, timeout=60)
+    except BaseException as launch_error:
+        _unlink_private_secret(api_key_path)
+        raise RuntimeErrorWithContext(
+            "docker run failed: "
+            + _redact_text(str(launch_error), sensitive_values)
+        ) from None
+    if result.returncode:
+        _unlink_private_secret(api_key_path)
+        raise RuntimeErrorWithContext(
+            "docker run failed: "
+            + _redact_text(result.stderr.strip(), sensitive_values)
+        )
+    container_id = result.stdout.strip()
+    if not container_id:
+        _unlink_private_secret(api_key_path)
+        raise RuntimeErrorWithContext(
+            "docker run returned no authenticated SGLang container ID"
+        )
+    server = ManagedServer(
+        "sglang",
+        f"http://127.0.0.1:{port}/v1",
+        container_id=container_id,
+        run_identity=run_identity,
+        authorization=auth,
+        api_key=key,
+        api_key_path=api_key_path,
+    )
+    server.native_provenance = {
+        "candidate_id": SM121_STORAGE_CANDIDATE_ID,
+        "candidate_source_tree": SM121_STORAGE_SOURCE_TREE,
+        "build_contract_sha256": SM121_STORAGE_BUILD_CONTRACT_SHA256,
+        "docker_image_id": image_id,
+        "sglang_storage_mode": SM121_STORAGE_MODE,
+        "sglang_ple_nvme_backend": "io_uring",
+        "sglang_ple_nvme_queue_depth": SM121_STORAGE_QUEUE_DEPTH,
+        "sglang_ple_nvme_max_batch_pages": SM121_STORAGE_MAX_BATCH_PAGES,
+        "sglang_ple_nvme_cache_pages": SM121_STORAGE_CACHE_PAGES,
+        "sglang_rust_build_mode": "never",
+        "seccomp_profile_sha256": "sha256:" + SM121_STORAGE_SECCOMP_SHA256,
+        "container_rootfs": "readonly_tmpfs_writable_cache",
+        "container_capabilities": "dropped_all",
+        "container_no_new_privileges": True,
+        "hf_network_policy": "offline",
+        "network_topology": "loopback_published_bridge",
+        "benchmark_scope": "sm121_storage_pre_admission_canary",
+        "model_acquisition": "disabled_exact_read_only_snapshot",
+        "api_authentication": "ephemeral_bearer",
+        "api_key_file_mode": "0600" if api_key_path is not None else None,
+    }
+    try:
+        if on_server_created is not None:
+            on_server_created(server)
+        if abort_check is not None:
+            abort_check()
+        wait_arguments: dict[str, Any] = {
+            "authorization": auth,
+            "sensitive_values": sensitive_values,
+        }
+        if abort_check is not None:
+            wait_arguments["abort_check"] = abort_check
+        server.startup_s = wait_for_endpoint(
+            server.base_url,
+            float(model.startup_timeout_s),
+            container_id,
+            **wait_arguments,
+        )
+    except BaseException as startup_error:
+        if server_log_path is not None:
+            try:
+                save_server_logs(server, server_log_path)
+            except Exception as log_error:
+                _redact_exception(log_error, sensitive_values)
+                startup_error.add_note(
+                    "Could not persist full startup container logs: "
+                    f"{type(log_error).__name__}: {log_error}"
+                )
+        try:
+            server.stop()
+        except BaseException as cleanup_error:
+            _redact_exception(cleanup_error, sensitive_values)
+            startup_error.add_note(
+                "Could not clean up authenticated SGLang server: "
+                f"{type(cleanup_error).__name__}: {cleanup_error}"
+            )
+        _redact_exception(startup_error, sensitive_values)
+        raise startup_error
+    return server
 
 
 def _resolve_sglang_source_overlays(
@@ -1448,7 +1774,12 @@ def start_sglang(
 ) -> ManagedServer:
     """Start a digest-pinned SGLang server from exact cached snapshots."""
 
-    blocker = model_execution_blocker(model)
+    storage_canary_authorized = (
+        getattr(model, "storage_canary_authorized", False) is True
+    )
+    blocker = model_execution_blocker(
+        model, allow_sm121_storage_canary=storage_canary_authorized
+    )
     if blocker is not None:
         raise RuntimeErrorWithContext(blocker)
     # Runtime acquisition is always forbidden. A typed profile may permit only
@@ -1482,6 +1813,17 @@ def start_sglang(
     target_repository, container_snapshot = _exact_sglang_snapshot(
         hf_cache, source=source, revision=revision, role="target"
     )
+    if is_sm121_storage_candidate(model):
+        return _start_sglang_sm121_storage(
+            model,
+            workspace=workspace,
+            target_repository=target_repository,
+            container_snapshot=container_snapshot,
+            port=port,
+            server_log_path=server_log_path,
+            abort_check=abort_check,
+            on_server_created=on_server_created,
+        )
     draft_source = getattr(model, "draft_source", None)
     draft_revision = getattr(model, "draft_revision", None)
     if (draft_source is None) != (draft_revision is None):

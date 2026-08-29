@@ -58,7 +58,42 @@ from .prefix_cache_protocol import (
     prefix_cache_conditions,
     prefix_cache_steps,
 )
+from .journal import content_hash
 from .report import _summarize_prefix_cache_case
+from .sglang_sm121_storage import (
+    SM121_STORAGE_BUILD_CONTRACT_SHA256,
+    SM121_STORAGE_CACHE_PAGES,
+    SM121_STORAGE_CANDIDATE_ID,
+    SM121_STORAGE_CONTEXT_LENGTH,
+    SM121_STORAGE_LIFETIME_COUNT,
+    SM121_STORAGE_LOCAL_IMAGE_ID,
+    SM121_STORAGE_LOCAL_IMAGE_TAG,
+    SM121_STORAGE_MAX_BATCH_PAGES,
+    SM121_STORAGE_MODE,
+    SM121_STORAGE_NATIVE_CONTEXT,
+    SM121_STORAGE_PLATFORM,
+    SM121_STORAGE_PROFILE_ID,
+    SM121_STORAGE_QUEUE_DEPTH,
+    SM121_STORAGE_REVISION,
+    SM121_STORAGE_RUNTIME_PROVENANCE_EVENT,
+    SM121_STORAGE_SECCOMP_SHA256,
+    SM121_STORAGE_SOURCE,
+    SM121_STORAGE_SOURCE_TREE,
+    SM121_STORAGE_SUITE_ID,
+    SM121_STORAGE_VARIED_CONTEXT_BUDGET_TOKENS,
+    SM121_STORAGE_VARIED_CONTEXT_CASE_ID,
+    SM121_STORAGE_VARIED_CONTEXT_CHAT_PROMPT_TOKENS,
+    SM121_STORAGE_VARIED_CONTEXT_OUTPUT_TOKENS,
+    SM121_STORAGE_VARIED_CONTEXT_PROMPT_SHA256,
+    SM121_STORAGE_VARIED_CONTEXT_RAW_PROMPT_TOKENS,
+    SM121_STORAGE_WEIGHT_FILE_COUNT,
+    SM121_STORAGE_WEIGHT_SIZE_BYTES,
+    SM121StorageCandidateError,
+    sm121_storage_canary_lifecycle_issues,
+    validate_sm121_storage_candidate,
+    validate_sm121_storage_runtime_provenance_event,
+    validate_sm121_storage_suite,
+)
 
 
 SCHEMA_VERSION = "sparkbench-evidence-v1"
@@ -167,6 +202,83 @@ _SGLANG_PLE_CACHE_MODES = frozenset(
         "legacy_unspecified",
         "readonly",
         "writable",
+    }
+)
+
+# This pre-admission lane is deliberately a singleton.  Its plan fingerprint
+# and bound case IDs cover the complete frozen ModelSpec/SuiteSpec projection,
+# including arguments that are inspected but never published.  Keeping the
+# values here makes a source-plan downgrade fail rather than silently falling
+# back to the generic serving exporter.
+_SM121_STORAGE_PLAN_FINGERPRINT = "617357ba7d410d9e"
+_SM121_STORAGE_CASE_IDS = (
+    "synthetic-exact-answer-v2--0ea3ba190d2c",
+    "sm121-varied-context-needle-19000-mid-s20260828-c1-v1--3603f19f5a65",
+)
+_SM121_STORAGE_MODEL_SOURCE_FIELDS = frozenset(
+    {
+        "architecture",
+        "args",
+        "backend",
+        "cache_dir",
+        "description",
+        "draft_model_digest",
+        "draft_model_file",
+        "draft_model_size_bytes",
+        "draft_revision",
+        "draft_source",
+        "draft_weight_size_bytes",
+        "endpoint",
+        "estimated_ram_gib",
+        "fetch_allow_patterns",
+        "fetch_ignore_patterns",
+        "host_safety_max_starting_swap_mib",
+        "host_safety_max_swap_growth_mib",
+        "host_safety_min_memavailable_gib",
+        "id",
+        "image",
+        "image_digest",
+        "lifecycle",
+        "local_image_id",
+        "max_context",
+        "mmproj_digest",
+        "mmproj_file",
+        "mmproj_size_bytes",
+        "model_digest",
+        "model_file",
+        "model_shards",
+        "model_size_bytes",
+        "native_context",
+        "prefix_cache_mode",
+        "quantization",
+        "recipe_revision",
+        "recipe_source",
+        "request_body_json",
+        "revision",
+        "runtime_binary",
+        "runtime_digest",
+        "runtime_parallel",
+        "runtime_python",
+        "runtime_revision",
+        "runtime_source_dir",
+        "served_name",
+        "sglang_allow_hf_metadata_probe",
+        "sglang_ple_cache_marker_digest",
+        "sglang_ple_cache_mode",
+        "sglang_ple_cache_payload_digest",
+        "sglang_ple_mmap",
+        "sglang_ple_nvme_cache_pages",
+        "sglang_ple_nvme_max_batch_pages",
+        "sglang_ple_nvme_queue_depth",
+        "sglang_ple_omitted",
+        "sglang_source_overlays",
+        "sglang_storage_mode",
+        "source",
+        "startup_timeout_s",
+        "support_status",
+        "tasks",
+        "weight_file_count",
+        "weight_size_bytes",
     }
 )
 _QWEN38_PLE_OMISSION_IDENTITY = {
@@ -958,6 +1070,7 @@ _KNOWN_EVENTS = {
     "server_kept",
     "server_ready",
     "server_stopped",
+    SM121_STORAGE_RUNTIME_PROVENANCE_EVENT,
     "sglang_spec_decode_metrics_snapshot",
     "vllm_spec_decode_metrics_snapshot",
     "worker_cleanup",
@@ -2873,6 +2986,276 @@ def _normalize_status(summary: dict[str, Any] | None, events: list[dict[str, Any
     return "nonterminal"
 
 
+def _selects_sm121_storage_canary(plan: dict[str, Any]) -> bool:
+    """Recognize every singleton selector so partial downgrades fail closed."""
+
+    model = plan.get("model")
+    suite = plan.get("suite")
+    return bool(
+        isinstance(model, dict)
+        and (
+            model.get("id") == SM121_STORAGE_PROFILE_ID
+            or model.get("sglang_storage_mode") == SM121_STORAGE_MODE
+        )
+        or isinstance(suite, dict)
+        and suite.get("id") == SM121_STORAGE_SUITE_ID
+    )
+
+
+def _expected_sm121_storage_model() -> dict[str, Any]:
+    """Return the complete public model identity for the singleton lane."""
+
+    return {
+        "architecture": "moe+qsa+gdn",
+        "backend": "sglang",
+        "estimated_ram_gib": 101.0,
+        "id": SM121_STORAGE_PROFILE_ID,
+        "lifecycle": "docker",
+        "max_context": SM121_STORAGE_CONTEXT_LENGTH,
+        "native_context": SM121_STORAGE_NATIVE_CONTEXT,
+        "quantization": "nvfp4+ple-fp8-nvme-io-uring",
+        "revision": SM121_STORAGE_REVISION,
+        "source": SM121_STORAGE_SOURCE,
+        "startup_timeout_s": 1800,
+        "support_status": "exploratory",
+        "tasks": ["chat"],
+        "weight_file_count": SM121_STORAGE_WEIGHT_FILE_COUNT,
+        "weight_size_bytes": SM121_STORAGE_WEIGHT_SIZE_BYTES,
+    }
+
+
+def _expected_sm121_storage_suite() -> dict[str, Any]:
+    return {
+        "id": SM121_STORAGE_SUITE_ID,
+        "schema_version": 1,
+        "cases": [
+            {
+                "case_id": _SM121_STORAGE_CASE_IDS[0],
+                "concurrency": 1,
+                "id": "synthetic-exact-answer-v2",
+                "kind": "quality",
+                "max_output_tokens": 512,
+                "max_turns": 1,
+                "prompt_repetitions": 0,
+                "repetitions": 2,
+                "requires": ["chat"],
+                "temperature": 0.0,
+                "warmups": 0,
+            },
+            {
+                "case_id": _SM121_STORAGE_CASE_IDS[1],
+                "concurrency": 1,
+                "id": SM121_STORAGE_VARIED_CONTEXT_CASE_ID,
+                "kind": "capability",
+                "max_output_tokens": SM121_STORAGE_VARIED_CONTEXT_OUTPUT_TOKENS,
+                "max_turns": 1,
+                "prompt_repetitions": 19_000,
+                "repetitions": 1,
+                "requires": ["chat"],
+                "temperature": 0.0,
+                "warmups": 0,
+            },
+        ],
+    }
+
+
+def _expected_sm121_storage_runtime_provenance() -> dict[str, Any]:
+    """Return only scalar public pins; raw server provenance stays private."""
+
+    return {
+        "api_authentication": "ephemeral_bearer",
+        "api_key_file_mode": "0600",
+        "audit_issue_count": 0,
+        "benchmark_scope": "sm121_storage_pre_admission_canary",
+        "build_contract_sha256": _sha256(
+            SM121_STORAGE_BUILD_CONTRACT_SHA256,
+            name="SM121 storage build contract",
+        ),
+        "candidate_id": SM121_STORAGE_CANDIDATE_ID,
+        "candidate_source_revision": SM121_STORAGE_SOURCE_TREE,
+        "container_capabilities": "dropped_all",
+        "container_no_new_privileges": True,
+        "container_rootfs": "readonly_tmpfs_writable_cache",
+        "docker_image_sha256": _sha256(
+            SM121_STORAGE_LOCAL_IMAGE_ID,
+            name="SM121 storage local image",
+        ),
+        "fresh_server_lifetime_count": SM121_STORAGE_LIFETIME_COUNT,
+        "fresh_server_lifetimes": [1, 2],
+        "hf_network_policy": "offline",
+        "model_acquisition": "disabled_exact_read_only_snapshot",
+        "network_topology": "loopback_published_bridge",
+        "platform": SM121_STORAGE_PLATFORM,
+        "plan_fingerprint": _SM121_STORAGE_PLAN_FINGERPRINT,
+        "seccomp_profile_sha256": _sha256(
+            "sha256:" + SM121_STORAGE_SECCOMP_SHA256,
+            name="SM121 storage seccomp profile",
+        ),
+        "sglang_ple_nvme_backend": "io_uring",
+        "sglang_ple_nvme_cache_pages": SM121_STORAGE_CACHE_PAGES,
+        "sglang_ple_nvme_max_batch_pages": SM121_STORAGE_MAX_BATCH_PAGES,
+        "sglang_ple_nvme_queue_depth": SM121_STORAGE_QUEUE_DEPTH,
+        "sglang_rust_build_mode": "never",
+        "sglang_storage_mode": SM121_STORAGE_MODE,
+        "varied_context_budget_tokens": SM121_STORAGE_VARIED_CONTEXT_BUDGET_TOKENS,
+        "varied_context_chat_prompt_tokens": (
+            SM121_STORAGE_VARIED_CONTEXT_CHAT_PROMPT_TOKENS
+        ),
+        "varied_context_output_tokens": SM121_STORAGE_VARIED_CONTEXT_OUTPUT_TOKENS,
+        "varied_context_prompt_sha256": SM121_STORAGE_VARIED_CONTEXT_PROMPT_SHA256,
+        "varied_context_raw_prompt_tokens": (
+            SM121_STORAGE_VARIED_CONTEXT_RAW_PROMPT_TOKENS
+        ),
+    }
+
+
+def _validate_sm121_storage_source(
+    plan: dict[str, Any],
+    events: list[dict[str, Any]],
+    summary: dict[str, Any] | None,
+    *,
+    source_run_id: str,
+) -> dict[str, Any] | None:
+    """Authenticate the private canary source before publishing any scalars."""
+
+    if not _selects_sm121_storage_canary(plan):
+        return None
+    if type(plan.get("schema_version")) is not int or plan["schema_version"] != 2:
+        raise EvidenceError("SM121 storage canary requires frozen plan schema 2")
+    if set(plan) != {
+        "created_at",
+        "fingerprint",
+        "host_at_plan",
+        "integrity_hash",
+        "model",
+        "models_manifest",
+        "resolved",
+        "run_nonce",
+        "schema_version",
+        "suite",
+        "suite_manifest",
+    }:
+        raise EvidenceError("SM121 storage canary plan schema changed")
+    model = plan.get("model")
+    suite = plan.get("suite")
+    resolved = plan.get("resolved")
+    if (
+        not isinstance(model, dict)
+        or set(model) != _SM121_STORAGE_MODEL_SOURCE_FIELDS
+        or not isinstance(suite, dict)
+        or set(suite) != {"cases", "description", "id", "schema_version"}
+        or not isinstance(resolved, dict)
+        or set(resolved) != {"image_digest", "local_image"}
+    ):
+        raise EvidenceError("SM121 storage canary frozen records changed")
+    try:
+        validate_sm121_storage_candidate(model)
+        validate_sm121_storage_suite(suite)
+    except SM121StorageCandidateError as error:
+        raise EvidenceError(f"invalid SM121 storage canary plan: {error}") from error
+    if not _json_strict_equal(_project_model(plan, summary), _expected_sm121_storage_model()):
+        raise EvidenceError("SM121 storage canary public model identity changed")
+
+    cases = suite.get("cases")
+    if not isinstance(cases, list) or len(cases) != 2:
+        raise EvidenceError("SM121 storage canary case records changed")
+    for index, (case, expected_case_id) in enumerate(
+        zip(cases, _SM121_STORAGE_CASE_IDS, strict=True)
+    ):
+        if not isinstance(case, dict) or set(case) != {
+            "case_id",
+            "concurrency",
+            "id",
+            "kind",
+            "max_output_tokens",
+            "max_turns",
+            "prompt_repetitions",
+            "repetitions",
+            "requires",
+            "temperature",
+            "warmups",
+        }:
+            raise EvidenceError("SM121 storage canary case schema changed")
+        unbound = {key: value for key, value in case.items() if key != "case_id"}
+        calculated = f"{case['id']}--{content_hash({'model': model, 'case': unbound}, 12)}"
+        if case.get("case_id") != expected_case_id or calculated != expected_case_id:
+            raise EvidenceError(
+                f"SM121 storage canary case {index} lost its frozen binding"
+            )
+
+    local_image = resolved.get("local_image")
+    if not _json_strict_equal(
+        local_image,
+        {
+            "docker_image_id": SM121_STORAGE_LOCAL_IMAGE_ID,
+            "platform": SM121_STORAGE_PLATFORM,
+            "source_tree": SM121_STORAGE_SOURCE_TREE,
+        },
+    ) or resolved.get("image_digest") is not None:
+        raise EvidenceError("SM121 storage canary local image identity changed")
+    fingerprint_basis = {
+        "model": model,
+        "suite": {
+            **suite,
+            "cases": [
+                {key: value for key, value in case.items() if key != "case_id"}
+                for case in cases
+            ],
+        },
+        "resolved": resolved,
+    }
+    fingerprint = plan.get("fingerprint")
+    if (
+        fingerprint != _SM121_STORAGE_PLAN_FINGERPRINT
+        or content_hash(fingerprint_basis) != fingerprint
+        or not source_run_id.endswith("-" + fingerprint[:8])
+    ):
+        raise EvidenceError("SM121 storage canary plan fingerprint changed")
+    integrity = plan.get("integrity_hash")
+    integrity_basis = {key: value for key, value in plan.items() if key != "integrity_hash"}
+    if (
+        not isinstance(integrity, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", integrity)
+        or content_hash(integrity_basis, 64) != integrity
+        or not isinstance(plan.get("run_nonce"), str)
+        or re.fullmatch(r"[0-9a-f]{32}", plan["run_nonce"]) is None
+    ):
+        raise EvidenceError("SM121 storage canary plan integrity changed")
+
+    issues = sm121_storage_canary_lifecycle_issues(
+        events, planned_case_ids=_SM121_STORAGE_CASE_IDS
+    )
+    if issues:
+        codes = sorted(
+            str(issue.get("code")) for issue in issues if isinstance(issue, dict)
+        )
+        raise EvidenceError(
+            "SM121 storage canary lifecycle audit failed: " + ", ".join(codes)
+        )
+    provenance_events = [
+        event
+        for event in events
+        if event.get("event") == SM121_STORAGE_RUNTIME_PROVENANCE_EVENT
+    ]
+    if len(provenance_events) != SM121_STORAGE_LIFETIME_COUNT:
+        raise EvidenceError("SM121 storage runtime provenance is incomplete")
+    for lifetime, event in enumerate(provenance_events, start=1):
+        try:
+            validate_sm121_storage_runtime_provenance_event(
+                event, fresh_server_lifetime=lifetime
+            )
+        except SM121StorageCandidateError as error:
+            raise EvidenceError(
+                f"SM121 storage runtime provenance {lifetime} changed"
+            ) from error
+    if not isinstance(summary, dict) or summary.get("status") not in {
+        "complete",
+        "partial",
+    }:
+        raise EvidenceError("SM121 storage canary requires a terminal summary")
+    return _expected_sm121_storage_runtime_provenance()
+
+
 def _project_model(plan: dict[str, Any], summary: dict[str, Any] | None) -> dict[str, Any]:
     model = plan.get("model")
     if not isinstance(model, dict):
@@ -3365,6 +3748,44 @@ def _project_suite(plan: dict[str, Any]) -> dict[str, Any] | None:
             }
         return None
     raw_cases = suite.get("cases")
+    if suite.get("id") == SM121_STORAGE_SUITE_ID:
+        projected = {
+            "id": _safe_id(suite.get("id"), name="suite.id"),
+            "schema_version": suite.get("schema_version"),
+            "cases": [],
+        }
+        for case in suite.get("cases", []):
+            if not isinstance(case, dict):
+                raise EvidenceError("SM121 storage suite case must be an object")
+            projected["cases"].append(
+                {
+                    key: (
+                        [_safe_id(item, name="suite.case.require") for item in value]
+                        if key == "requires" and isinstance(value, list)
+                        else _safe_id(value, name=f"suite.case.{key}")
+                        if key in {"case_id", "id", "kind"}
+                        else _finite(value, name=f"suite.case.{key}")
+                    )
+                    for key, value in case.items()
+                    if key
+                    in {
+                        "case_id",
+                        "concurrency",
+                        "id",
+                        "kind",
+                        "max_output_tokens",
+                        "max_turns",
+                        "prompt_repetitions",
+                        "repetitions",
+                        "requires",
+                        "temperature",
+                        "warmups",
+                    }
+                }
+            )
+        if not _json_strict_equal(projected, _expected_sm121_storage_suite()):
+            raise EvidenceError("SM121 storage canary public suite identity changed")
+        return projected
     if suite.get("id") == AUTORESEARCH_SUITE_ID:
         return _project_autoresearch_suite(suite, source_model=plan.get("model"))
     if suite.get("id") == "agentic-tools" or (
@@ -4020,6 +4441,249 @@ def _project_runtime(plan: dict[str, Any], summary: dict[str, Any] | None) -> di
         if versions:
             result["versions"] = versions
     return result
+
+
+def _validate_sm121_storage_published_bundle(
+    manifest: dict[str, Any],
+    samples: list[dict[str, Any]],
+    aggregates: dict[str, Any],
+) -> None:
+    """Validate the exact public canary bundle, including terminal partials."""
+
+    suite = manifest.get("suite")
+    model = manifest.get("model")
+    if not (
+        isinstance(suite, dict) and suite.get("id") == SM121_STORAGE_SUITE_ID
+    ):
+        if isinstance(model, dict) and model.get("id") == SM121_STORAGE_PROFILE_ID:
+            raise EvidenceError("SM121 storage model lost its exact suite binding")
+        return
+    if not _json_strict_equal(model, _expected_sm121_storage_model()):
+        raise EvidenceError("published SM121 storage model identity changed")
+    if not _json_strict_equal(suite, _expected_sm121_storage_suite()):
+        raise EvidenceError("published SM121 storage suite identity changed")
+    expected_canary_runtime = _expected_sm121_storage_runtime_provenance()
+    expected_runtime = {
+        "backend": "sglang",
+        "image": SM121_STORAGE_LOCAL_IMAGE_TAG,
+        "lifecycle": "docker",
+        "sglang_ple_cache_mode": "disabled",
+        "sglang_ple_mmap": False,
+        "sglang_ple_omitted": False,
+        "sglang_provenance_version": _SGLANG_PROVENANCE_CURRENT_VERSION,
+        "sglang_source_overlay_artifacts": [],
+        "sm121_storage_canary": expected_canary_runtime,
+    }
+    if not _json_strict_equal(manifest.get("runtime"), expected_runtime):
+        raise EvidenceError("published SM121 storage runtime identity changed")
+    expected_artifacts = [
+        {
+            "role": "container_image",
+            "sha256": expected_canary_runtime["docker_image_sha256"],
+            "target": "container-image",
+        }
+    ]
+    if not _json_strict_equal(manifest.get("artifacts"), expected_artifacts):
+        raise EvidenceError("published SM121 storage image artifact changed")
+
+    lifecycle = manifest.get("lifecycle")
+    expected_event_counts = {
+        "case_complete": 2,
+        "case_start": 2,
+        "measurement_complete": 1,
+        "measurement_started": 1,
+        "request_complete": 9,
+        "run_complete": 1,
+        "run_start": 1,
+        "server_ready": 2,
+        "server_stopped": 2,
+        SM121_STORAGE_RUNTIME_PROVENANCE_EVENT: 2,
+    }
+    if (
+        not isinstance(lifecycle, dict)
+        or lifecycle.get("terminal") is not True
+        or lifecycle.get("terminal_event") != "run_complete"
+        or not _json_strict_equal(
+            lifecycle.get("event_counts"), expected_event_counts
+        )
+        or lifecycle.get("event_count") != sum(expected_event_counts.values())
+        or "failure" in lifecycle
+    ):
+        raise EvidenceError("published SM121 storage lifecycle changed")
+    if "journal_elapsed_s" in lifecycle:
+        elapsed = lifecycle["journal_elapsed_s"]
+        if (
+            isinstance(elapsed, bool)
+            or not isinstance(elapsed, (int, float))
+            or not math.isfinite(float(elapsed))
+            or elapsed < 0
+        ):
+            raise EvidenceError("published SM121 storage journal duration is invalid")
+
+    if len(samples) != 9:
+        raise EvidenceError("SM121 storage evidence requires exactly nine requests")
+    result_fields = {
+        "cached_prompt_tokens",
+        "completion_tokens",
+        "decode_metric_source",
+        "decode_s",
+        "decode_tps",
+        "elapsed_s",
+        "emission_event_count",
+        "finish_reason",
+        "load_s",
+        "output_tps",
+        "prompt_tokens",
+        "reasoning_tokens",
+        "server_cached_prompt_tokens",
+        "server_decode_s",
+        "server_decode_tokens",
+        "server_prompt_s",
+        "server_prompt_tokens",
+        "ttft_s",
+    }
+    metadata_fields = {
+        "burst_elapsed_s",
+        "case_attempt",
+        "case_id",
+        "case_sample_index",
+        "kind",
+        "repetition",
+        "sample_index",
+        "sample_type",
+        "selected_attempt",
+        "validation_passed",
+    }
+    quality_categories = (
+        "arithmetic",
+        "logic",
+        "instruction_following",
+        "code_reasoning",
+    ) * 2
+    for index, sample in enumerate(samples, start=1):
+        if not isinstance(sample, dict):
+            raise EvidenceError("SM121 storage request sample must be an object")
+        quality = index <= 8
+        allowed = result_fields | metadata_fields | (
+            {"quality_category"} if quality else set()
+        )
+        required = {
+            "completion_tokens",
+            "elapsed_s",
+            "emission_event_count",
+            "prompt_tokens",
+            "reasoning_tokens",
+        } | metadata_fields
+        if set(sample) - allowed or not required <= set(sample):
+            raise EvidenceError("SM121 storage request sample schema changed")
+        expected_case_id = (
+            _SM121_STORAGE_CASE_IDS[0] if quality else _SM121_STORAGE_CASE_IDS[1]
+        )
+        if (
+            sample.get("sample_index") != index
+            or sample.get("sample_type") != "measured_request"
+            or sample.get("case_attempt") != 1
+            or sample.get("case_id") != expected_case_id
+            or sample.get("case_sample_index") != (index if quality else 1)
+            or sample.get("kind") != ("quality" if quality else "capability")
+            or sample.get("selected_attempt") is not True
+            or sample.get("repetition") != ((index - 1) // 4 if quality else 0)
+        ):
+            raise EvidenceError("SM121 storage request topology changed")
+        prompt_tokens = sample.get("prompt_tokens")
+        completion_tokens = sample.get("completion_tokens")
+        if (
+            type(prompt_tokens) is not int
+            or prompt_tokens <= 0
+            or type(completion_tokens) is not int
+            or completion_tokens <= 0
+            or completion_tokens
+            > (512 if quality else SM121_STORAGE_VARIED_CONTEXT_OUTPUT_TOKENS)
+        ):
+            raise EvidenceError("SM121 storage request token counts are invalid")
+        if quality:
+            if (
+                sample.get("validation_passed") is not True
+                or sample.get("quality_category") != quality_categories[index - 1]
+            ):
+                raise EvidenceError("SM121 storage quality gate is not clean")
+        elif prompt_tokens != SM121_STORAGE_VARIED_CONTEXT_CHAT_PROMPT_TOKENS:
+            raise EvidenceError("SM121 storage varied-context token pin changed")
+        elif not isinstance(sample.get("validation_passed"), bool):
+            raise EvidenceError("SM121 storage varied-context validation is missing")
+
+    quality_samples = samples[:8]
+    varied_sample = samples[8]
+    varied_passed = varied_sample["validation_passed"] is True
+    expected_status = "complete" if varied_passed else "partial"
+    expected_validation_failures = (
+        [] if varied_passed else [_SM121_STORAGE_CASE_IDS[1]]
+    )
+    for key, expected in (
+        ("completed_cases", 2),
+        ("context_limited_cases", []),
+        ("failed_cases", []),
+        ("measurement_invalid_cases", []),
+        ("run_completion_status", "completed"),
+        ("status", expected_status),
+        ("suite", SM121_STORAGE_SUITE_ID),
+        ("unimplemented_cases", []),
+        ("unsupported_cases", []),
+        ("validation_failed_cases", expected_validation_failures),
+        ("startup_measurement_valid", True),
+        ("startup_safety_gates", []),
+    ):
+        if not _json_strict_equal(aggregates.get(key), expected):
+            raise EvidenceError(f"SM121 storage summary field {key} changed")
+    if manifest.get("status") != expected_status:
+        raise EvidenceError("SM121 storage manifest status is inconsistent")
+    cases = aggregates.get("cases")
+    if not isinstance(cases, list) or len(cases) != 2:
+        raise EvidenceError("SM121 storage summary cases changed")
+    by_id = {
+        case.get("case_id"): case for case in cases if isinstance(case, dict)
+    }
+    if set(by_id) != set(_SM121_STORAGE_CASE_IDS):
+        raise EvidenceError("SM121 storage summary case identities changed")
+    quality_case = by_id[_SM121_STORAGE_CASE_IDS[0]]
+    varied_case = by_id[_SM121_STORAGE_CASE_IDS[1]]
+    quality_prompt_tokens = sum(sample["prompt_tokens"] for sample in quality_samples)
+    quality_completion_tokens = sum(
+        sample["completion_tokens"] for sample in quality_samples
+    )
+    expected_categories = {
+        "arithmetic": 1.0,
+        "code_reasoning": 1.0,
+        "instruction_following": 1.0,
+        "logic": 1.0,
+    }
+    for key, expected in (
+        ("kind", "quality"),
+        ("requests", 8),
+        ("concurrency", 1),
+        ("prompt_tokens", quality_prompt_tokens),
+        ("completion_tokens", quality_completion_tokens),
+        ("measurement_valid", True),
+        ("validation_passed", True),
+        ("quality_items", 8),
+        ("quality_scored_items", 8),
+        ("quality_correct", 8),
+        ("quality_accuracy", 1.0),
+        ("quality_accuracy_by_category", expected_categories),
+    ):
+        if not _json_strict_equal(quality_case.get(key), expected):
+            raise EvidenceError(f"SM121 storage quality aggregate {key} changed")
+    for key, expected in (
+        ("kind", "capability"),
+        ("requests", 1),
+        ("concurrency", 1),
+        ("prompt_tokens", varied_sample["prompt_tokens"]),
+        ("completion_tokens", varied_sample["completion_tokens"]),
+        ("measurement_valid", True),
+        ("validation_passed", varied_passed),
+    ):
+        if not _json_strict_equal(varied_case.get(key), expected):
+            raise EvidenceError(f"SM121 storage varied-context aggregate {key} changed")
 
 
 def _project_hardware(plan: dict[str, Any]) -> dict[str, Any]:
@@ -9352,6 +10016,14 @@ def _export_run(
     kind = _run_kind(plan)
     status = _normalize_status(summary, events)
     lifecycle = _lifecycle(events)
+    sm121_storage_runtime = _validate_sm121_storage_source(
+        plan,
+        events,
+        summary,
+        source_run_id=source_run_id,
+    )
+    if sm121_storage_runtime is not None and matrix_id is not None:
+        raise EvidenceError("SM121 storage canary cannot be exported from a matrix")
     projected_model = _project_model(plan, summary)
     suite = _project_suite(plan)
     memory_protocol = bool(
@@ -9389,13 +10061,24 @@ def _export_run(
         projected_model.get("prefix_cache_mode") is not None
         or (isinstance(suite, dict) and suite.get("id") == PREFIX_CACHE_SUITE_ID)
     )
+    artifacts = _collect_artifacts(plan, summary)
+    runtime = _project_runtime(plan, summary)
+    if sm121_storage_runtime is not None:
+        artifacts.append(
+            {
+                "role": "container_image",
+                "sha256": sm121_storage_runtime["docker_image_sha256"],
+                "target": "container-image",
+            }
+        )
+        runtime["sm121_storage_canary"] = sm121_storage_runtime
     manifest: dict[str, Any] = {
-        "artifacts": _collect_artifacts(plan, summary),
+        "artifacts": artifacts,
         "evidence_kind": kind,
         "lifecycle": lifecycle,
         "model": projected_model,
         "run_date_utc": run_date,
-        "runtime": _project_runtime(plan, summary),
+        "runtime": runtime,
         "sanitization": {
             "free_form_text_included": False,
             "payloads_included": False,
@@ -9512,6 +10195,10 @@ def _export_run(
         )
         if manifest["status"] != projected_summary["status"]:
             raise EvidenceError("memory manifest status disagrees with its aggregates")
+    if sm121_storage_runtime is not None:
+        _validate_sm121_storage_published_bundle(
+            manifest, requests, projected_summary
+        )
     _validate_agentic_aggregates(
         requests,
         projected_summary,
@@ -12200,6 +12887,9 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     aggregates = summary["aggregates"]
     if not isinstance(aggregates, dict):
         raise EvidenceError(f"run aggregates must be an object: {run_id}")
+    _validate_sm121_storage_published_bundle(
+        manifest, samples["samples"], aggregates
+    )
     cold_start_annotations = (
         _project_cold_start_safety_annotations(aggregates, source=False)
         if "cold_start_safety_annotations" in aggregates

@@ -381,6 +381,12 @@ def assess_model_availability(
                 )
                 if not runtime_available:
                     details.append("certified Transformers runtime is unavailable")
+            elif model.image and model.sglang_storage_mode is not None:
+                runtime_available = any(
+                    image.reference == model.image
+                    and image.image_id == model.local_image_id
+                    for image in inventory.docker_images
+                )
             elif model.image and model.image_digest:
                 image_name = model.image.split("@sha256:", 1)[0]
                 runtime_available = any(

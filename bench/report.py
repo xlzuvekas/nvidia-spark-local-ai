@@ -36,6 +36,10 @@ from .sglang_metrics import (
     aggregate_sglang_speculative_audits,
     sglang_nextn_depth,
 )
+from .sglang_sm121_storage import (
+    is_sm121_storage_canary_plan,
+    sm121_storage_canary_lifecycle_issues,
+)
 from .vllm_metrics import aggregate_vllm_spec_decode_metrics
 
 
@@ -371,6 +375,25 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         plan = {}
     planned_model = plan.get("model") or {}
     planned_suite = plan.get("suite") or {}
+    sm121_storage_lifecycle_issues: tuple[dict[str, object], ...] = ()
+    if (
+        isinstance(planned_model, dict)
+        and isinstance(planned_suite, dict)
+        and is_sm121_storage_canary_plan(planned_model, planned_suite)
+    ):
+        planned_cases = planned_suite.get("cases")
+        planned_case_ids = (
+            tuple(
+                case.get("case_id")
+                for case in planned_cases
+                if isinstance(case, dict) and isinstance(case.get("case_id"), str)
+            )
+            if isinstance(planned_cases, list)
+            else ()
+        )
+        sm121_storage_lifecycle_issues = sm121_storage_canary_lifecycle_issues(
+            events, planned_case_ids=planned_case_ids
+        )
     mtp_requested = bool(
         planned_model.get("backend") == "llamacpp"
         and llamacpp_mtp_requested(planned_model.get("args") or ())
@@ -1266,6 +1289,8 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     elif mtp_requested and not llamacpp_mtp_evidence["passed"]:
         status = "partial"
     elif dflash_requested and not llamacpp_dflash_evidence["passed"]:
+        status = "partial"
+    elif sm121_storage_lifecycle_issues:
         status = "partial"
     run_error = None
     if status == "aborted" and last_abort >= 0:

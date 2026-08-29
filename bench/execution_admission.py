@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from .sglang_sm121_storage import is_sm121_storage_candidate
+
 
 RETIRED_SGLANG_SOURCE_OVERLAY_DIGESTS = frozenset(
     {
@@ -18,6 +20,10 @@ _RETIRED_SGLANG_SOURCE_OVERLAY_MESSAGE = (
     "This model profile uses a retired SGLang source overlay "
     "and cannot be executed"
 )
+_SM121_STORAGE_CANARY_MESSAGE = (
+    "This SM121 native-storage profile is pre-admission and requires the "
+    "dedicated sm121-storage-canary command"
+)
 
 
 def _field(value: Any, name: str) -> Any:
@@ -26,9 +32,13 @@ def _field(value: Any, name: str) -> Any:
     return getattr(value, name, None)
 
 
-def model_execution_blocker(model: Any) -> str | None:
+def model_execution_blocker(
+    model: Any, *, allow_sm121_storage_canary: bool = False
+) -> str | None:
     """Return a stable blocker when a model contains a retired artifact."""
 
+    if is_sm121_storage_candidate(model) and not allow_sm121_storage_canary:
+        return _SM121_STORAGE_CANARY_MESSAGE
     overlays = _field(model, "sglang_source_overlays")
     if overlays is None:
         return None

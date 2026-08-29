@@ -1,0 +1,27 @@
+schema_version = 1
+
+[suite]
+id = "qwen38-flash-next-sm121-triton-storage-canary"
+description = "Pre-admission Qwen3.8 Flash-Next SM121 native-NVMe PLE canary: a strict quality gate and one fresh-server varied-token long-context retrieval request. Cache reuse, warmups, MTP, and repeated-token-only context are intentionally excluded."
+
+[[cases]]
+id = "synthetic-exact-answer-v2"
+kind = "quality"
+requires = ["chat"]
+warmups = 0
+repetitions = 2
+max_output_tokens = 512
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "sm121-varied-context-needle-19000-mid-s20260828-c1-v1"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 64
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 19000

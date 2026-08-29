@@ -4,9 +4,9 @@
 
 The newly composed SM121 Triton plus read-only `io_uring` PLE candidate has
 passed its build, storage, and focused GPU-kernel prerequisites on the local
-GB10. It is **not admitted to serve the model**. No checkpoint was loaded, no
-server was started, and no throughput, quality, or long-context result is
-claimed here.
+GB10. It is **not admitted to serve the model**. A dedicated first-run canary
+is now implemented, but it has not loaded the checkpoint or started a server.
+No throughput, quality, or long-context result is claimed here.
 
 This is deliberately a mechanical pre-admission record. It narrows the next
 work from source/build uncertainty to an end-to-end correctness and performance
@@ -20,7 +20,7 @@ TRT-LLM sparse-decode route.
 | Candidate | `sglang-sm121-triton-storage-v1` |
 | Source tree | `274ee330db7ea9653807b868c0fb8693d50ed7b2` |
 | Build contract SHA-256 | `c9c7c5bb958a8cf4c0fbc904b40c5e51fac82ef97c6e1fc391e2b67b5c9d9975` |
-| OCI image digest | `sha256:b14c39fb7cb2e0b82f2f8cae1e115a55f2bb69b5ec6fd7ccc4099b219d1096b0` |
+| Local Docker image ID (not a registry digest) | `sha256:b14c39fb7cb2e0b82f2f8cae1e115a55f2bb69b5ec6fd7ccc4099b219d1096b0` |
 | Platform | `linux/arm64` |
 | Device | NVIDIA GB10, compute capability 12.1 |
 
@@ -32,8 +32,9 @@ boundary only; it is not a full-model output check.
 The image was built from the fixed source-tree archive using the pinned
 Linux/ARM64 CUDA base. Its build is reproducible as a source and invocation
 boundary, not as a complete dependency closure: external package resolution
-during the image build remains mutable. The OCI digest above identifies the
-actual resulting image.
+during the image build remains mutable. There is no registry manifest digest
+for this local image; its Docker config ID, platform, and source-tree labels
+form the execution identity.
 
 ## Narrow storage and syscall result
 
@@ -97,13 +98,54 @@ full-page-64 compressed-QSA bookkeeping used by this PLE path. They do not
 exercise model loading, sustained serving, MTP acceptance, request scheduling,
 or varied-token long-context behavior.
 
+## Implemented first execution gate — not yet run
+
+The repository now has one deliberately narrow, target-only canary lane for
+this candidate. Ordinary planning, matrix, benchmark, and resume paths reject
+the profile; the dedicated lane accepts only its fixed image, checkpoint,
+profile, and two-case suite. It freezes the local Docker ID, platform, and
+source-tree label in the plan, then rechecks the mutable tag and launches by
+the immutable ID. The container remains offline, loopback-published,
+read-only, capability-dropped, and subject to the derived `io_uring` seccomp
+profile.
+
+The lane runs two non-resumable server lifetimes, each with no warmup or primer:
+
+1. `synthetic-exact-answer-v2` runs the existing strict quality validator twice
+   with a 512-token output cap.
+2. `sm121-varied-context-needle-19000-mid-s20260828-c1-v1` is one deterministic
+   retrieval request with 19,000 two-word filler records and a unique 12-word
+   recovery phrase at the midpoint. It accepts only the phrase in order,
+   normalizing whitespace and case but not punctuation, and has a 64-token
+   output cap.
+
+The varied request is the first inference after its own server is ready; it
+does not reuse the quality server, a cache, a partial journal, MTP, a draft
+overlay, CUDA graphs, or a repeated-word-only context. Its configured context
+limit is 65,536. Offline verification against the pinned target tokenizer and
+the `enable_thinking=false` chat template counted 62,336 input tokens; the
+fixed admission budget is 62,400 after the 64-token output allowance. The
+generator's prompt SHA-256 is pinned in the regression contract without
+retaining its text. A first run must still record its actual scalar prompt
+accounting before it can support a long-context claim.
+
+Prompts, completions, request identifiers, and credentials remain outside the
+tracked record. A completed canary may publish only exporter-approved scalar
+evidence after teardown and verification. The quality lifetime is a hard
+admission gate: any failed synthetic item tears down that server and prevents
+the long-context lifetime from starting. The read-only canary auditor requires
+the two ordered fresh lifetimes, scalar runtime provenance immediately before
+each ready event, no primer, and terminal cleanup before scalar evidence can
+be exported.
+
 ## What remains blocked
 
 The runtime-attestation schema intentionally accepts only an `admitted` record
 when all of the following are true: retired-overlay rejection, storage import,
 io_uring, PLE row comparison, SM121 Triton, quality, and long-context. The
-first five prerequisites are now demonstrated; the last two are false until a
-new target-only, cache-off end-to-end canary completes.
+first five prerequisites are now demonstrated; the last two are false until
+the implemented target-only, cache-off end-to-end canary completes.
+Implementing the lane is not an admission result.
 
 Before any performance comparison or cache experiment, the next protocol must:
 

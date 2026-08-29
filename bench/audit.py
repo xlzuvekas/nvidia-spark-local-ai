@@ -8,6 +8,14 @@ import math
 from pathlib import Path
 from typing import Any, Callable
 
+from .sglang_sm121_storage import (
+    SM121StorageCandidateError,
+    is_sm121_storage_canary_plan,
+    sm121_storage_canary_lifecycle_issues,
+    validate_sm121_storage_candidate,
+    validate_sm121_storage_suite,
+)
+
 
 IssueAdder = Callable[..., None]
 
@@ -969,6 +977,107 @@ def _audit_summary(
             summary_completed_cases=summary.get("completed_cases"),
         )
     return recomputed
+
+
+def _planned_case_id_order(suite: dict[str, Any]) -> tuple[str, ...]:
+    """Return frozen case IDs in their declared order, without coercion."""
+
+    cases = suite.get("cases")
+    if not isinstance(cases, list):
+        return ()
+    return tuple(
+        case.get("case_id")
+        for case in cases
+        if isinstance(case, dict) and isinstance(case.get("case_id"), str)
+    )
+
+
+def audit_sm121_storage_canary_run(run_dir: Path) -> dict[str, Any]:
+    """Read-only audit of the dedicated two-lifetime SM121 storage canary.
+
+    This intentionally operates on a direct run directory instead of a matrix.
+    It validates the frozen singleton records, plan integrity, and the raw
+    journal's no-primer/fresh-server topology without launching any runtime.
+    """
+
+    root = run_dir.resolve()
+    report: dict[str, Any] = {
+        "schema_version": 1,
+        "run_dir": str(root),
+        "read_only": True,
+        "ok": False,
+        "errors": [],
+    }
+
+    def add_issue(code: str, message: str, **context: Any) -> None:
+        report["errors"].append({"code": code, "message": message, **context})
+
+    plan = _load_json_object(root / "plan.json", add_issue=add_issue)
+    events = _load_jsonl(
+        root / "events.jsonl", add_issue=add_issue, run={"run_dir": str(root)}
+    )
+    if plan is None:
+        report["error_count"] = len(report["errors"])
+        return report
+
+    model = plan.get("model")
+    suite = plan.get("suite")
+    if not isinstance(model, dict):
+        add_issue("invalid_plan_model", "plan.model must be an object")
+    if not isinstance(suite, dict):
+        add_issue("invalid_plan_suite", "plan.suite must be an object")
+    if not isinstance(model, dict) or not isinstance(suite, dict):
+        report["error_count"] = len(report["errors"])
+        return report
+
+    if not is_sm121_storage_canary_plan(model, suite):
+        add_issue(
+            "not_sm121_storage_canary_plan",
+            "run plan does not select the dedicated SM121 storage canary",
+        )
+    else:
+        try:
+            validate_sm121_storage_candidate(model)
+            validate_sm121_storage_suite(suite)
+        except SM121StorageCandidateError as error:
+            add_issue("invalid_sm121_storage_canary_plan", str(error))
+
+    model_id = model.get("id")
+    suite_id = suite.get("id")
+    if isinstance(model_id, str) and isinstance(suite_id, str):
+        planned_case_ids, _ = _audit_plan(
+            plan,
+            matrix_suite=suite_id,
+            model_id=model_id,
+            run_dir=root,
+            add_issue=add_issue,
+            run={"run_dir": str(root)},
+        )
+    else:
+        planned_case_ids = set()
+    planned_case_order = _planned_case_id_order(suite)
+    report["planned_case_ids"] = list(planned_case_order)
+    if set(planned_case_order) != planned_case_ids:
+        add_issue(
+            "sm121_storage_plan_case_identity_mismatch",
+            "frozen plan case IDs are not a complete ordered set",
+        )
+
+    for issue in sm121_storage_canary_lifecycle_issues(
+        events, planned_case_ids=planned_case_order
+    ):
+        code = issue.get("code")
+        message = issue.get("message")
+        if isinstance(code, str) and isinstance(message, str):
+            add_issue(code, message, **{
+                key: value
+                for key, value in issue.items()
+                if key not in {"code", "message"}
+            })
+
+    report["error_count"] = len(report["errors"])
+    report["ok"] = not report["errors"]
+    return report
 
 
 def audit_matrix(matrix_dir: Path) -> dict[str, Any]:

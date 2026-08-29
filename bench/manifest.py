@@ -26,6 +26,14 @@ from .prefix_cache_protocol import (
     PREFIX_CACHE_PREFIX_TARGETS,
     PREFIX_CACHE_SUITE_ID,
 )
+from .sglang_sm121_storage import (
+    SM121_STORAGE_MODE,
+    SM121_STORAGE_PROFILE_ID,
+    SM121_STORAGE_SUITE_ID,
+    SM121StorageCandidateError,
+    validate_sm121_storage_candidate,
+    validate_sm121_storage_suite,
+)
 
 
 SCHEMA_VERSION = 1
@@ -125,6 +133,16 @@ _TPS_SUITE_BY_PROFILE_ID = {
 }
 _FLASH_NEXT_LONG_PROFILE_ID = "qwen38-flash-next-nvfp4-long-sglang"
 _FLASH_NEXT_LONG_SUITE_ID = "qwen38-flash-next-sglang-long-context"
+VARIED_CONTEXT_NEEDLE_CASE_PREFIX = "sm121-varied-context-needle-"
+VARIED_CONTEXT_NEEDLE_PROTOCOL_VERSION = 1
+VARIED_CONTEXT_NEEDLE_MIN_OUTPUT_TOKENS = 32
+_VARIED_CONTEXT_NEEDLE_CASE_ID_PATTERN = re.compile(
+    r"^sm121-varied-context-needle-"
+    r"(?P<filler_records>[1-9][0-9]*)-"
+    r"(?P<depth>mid|tail)-"
+    r"s(?P<seed>[a-z0-9][a-z0-9-]*)-"
+    r"c1-v1$"
+)
 _FLASH_NEXT_AGENT64K_SUITE_ID = "qwen38-flash-next-sglang-agent64k-autoresearch"
 _FLASH_NEXT_AGENT64K_PROFILE_IDS = frozenset(
     {
@@ -134,6 +152,8 @@ _FLASH_NEXT_AGENT64K_PROFILE_IDS = frozenset(
         "qwen38-flash-next-nvfp4-mtp2-agent64k-none-ple-mapped-sglang",
     }
 )
+_SM121_STORAGE_PROFILE_ID = SM121_STORAGE_PROFILE_ID
+_SM121_STORAGE_SUITE_ID = SM121_STORAGE_SUITE_ID
 _PLE_STUDY_PROFILE_IDS_BY_SUITE = {
     "qwen38-flash-next-sglang-ple-depth-c8": frozenset(
         {
@@ -312,6 +332,7 @@ _MODEL_KEYS = frozenset(
         "lifecycle",
         "image",
         "image_digest",
+        "local_image_id",
         "max_context",
         "native_context",
         "startup_timeout_s",
@@ -339,6 +360,10 @@ _MODEL_KEYS = frozenset(
         "sglang_ple_cache_mode",
         "sglang_ple_cache_marker_digest",
         "sglang_ple_cache_payload_digest",
+        "sglang_storage_mode",
+        "sglang_ple_nvme_queue_depth",
+        "sglang_ple_nvme_max_batch_pages",
+        "sglang_ple_nvme_cache_pages",
         "recipe_source",
         "recipe_revision",
         "request_body_json",
@@ -422,6 +447,7 @@ class ModelSpec:
     host_safety_max_starting_swap_mib: int | None = None
     revision: str | None = None
     image_digest: str | None = None
+    local_image_id: str | None = None
     architecture: str = "unknown"
     quantization: str | None = None
     lifecycle: str = "docker"
@@ -444,6 +470,10 @@ class ModelSpec:
     sglang_ple_cache_mode: str | None = None
     sglang_ple_cache_marker_digest: str | None = None
     sglang_ple_cache_payload_digest: str | None = None
+    sglang_storage_mode: str | None = None
+    sglang_ple_nvme_queue_depth: int | None = None
+    sglang_ple_nvme_max_batch_pages: int | None = None
+    sglang_ple_nvme_cache_pages: int | None = None
     recipe_source: str | None = None
     recipe_revision: str | None = None
     request_body_json: str | None = None
@@ -486,7 +516,57 @@ def model_spec_to_dict(model: ModelSpec) -> dict[str, Any]:
         raise ManifestError(
             "model host-safety thresholds must be configured together"
         )
+    storage_fields = (
+        "local_image_id",
+        "sglang_storage_mode",
+        "sglang_ple_nvme_queue_depth",
+        "sglang_ple_nvme_max_batch_pages",
+        "sglang_ple_nvme_cache_pages",
+    )
+    if not any(record[name] is not None for name in storage_fields):
+        for name in storage_fields:
+            record.pop(name)
     return record
+
+
+@dataclass(frozen=True, slots=True)
+class VariedContextNeedleSpec:
+    """Typed identity parsed from a fixed varied-context needle case ID.
+
+    The protocol keeps the depth and deterministic seed inside the stable case
+    identity so generated text never depends on a request identifier.  It is
+    deliberately a derived type rather than additional nullable CaseSpec
+    fields: serializations of every pre-existing suite remain unchanged.
+    """
+
+    filler_records: int
+    depth: str
+    seed: str
+    protocol_version: int = VARIED_CONTEXT_NEEDLE_PROTOCOL_VERSION
+
+
+def varied_context_needle_spec(case_id: str) -> VariedContextNeedleSpec | None:
+    """Parse one fixed varied-context needle case ID into its typed contract.
+
+    ``None`` means the case does not use this protocol.  A case using the
+    reserved prefix but not its complete v1 grammar is rejected instead of
+    silently falling back to a generic capability prompt.
+    """
+
+    if not case_id.startswith(VARIED_CONTEXT_NEEDLE_CASE_PREFIX):
+        return None
+    match = _VARIED_CONTEXT_NEEDLE_CASE_ID_PATTERN.fullmatch(case_id)
+    if match is None:
+        raise ValueError(
+            "varied-context needle IDs must use "
+            "sm121-varied-context-needle-<records>-<mid|tail>-"
+            "s<seed>-c1-v1"
+        )
+    return VariedContextNeedleSpec(
+        filler_records=int(match.group("filler_records")),
+        depth=match.group("depth"),
+        seed=match.group("seed"),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -503,6 +583,12 @@ class CaseSpec:
     concurrency: int = 1
     prompt_repetitions: int = 0
     max_turns: int = 1
+
+    @property
+    def varied_context_needle(self) -> VariedContextNeedleSpec | None:
+        """Return the typed v1 varied-context contract, when this case uses it."""
+
+        return varied_context_needle_spec(self.id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -574,6 +660,7 @@ def load_models(path: str | Path) -> dict[str, ModelSpec]:
             ),
             revision=_optional_string(row, "revision", context),
             image_digest=_optional_string(row, "image_digest", context),
+            local_image_id=_optional_string(row, "local_image_id", context),
             architecture=_optional_string(row, "architecture", context)
             or "unknown",
             quantization=_optional_string(row, "quantization", context),
@@ -624,6 +711,18 @@ def load_models(path: str | Path) -> dict[str, ModelSpec]:
             ),
             sglang_ple_cache_payload_digest=_optional_string(
                 row, "sglang_ple_cache_payload_digest", context
+            ),
+            sglang_storage_mode=_optional_string(
+                row, "sglang_storage_mode", context
+            ),
+            sglang_ple_nvme_queue_depth=_optional_int(
+                row, "sglang_ple_nvme_queue_depth", context, default=None
+            ),
+            sglang_ple_nvme_max_batch_pages=_optional_int(
+                row, "sglang_ple_nvme_max_batch_pages", context, default=None
+            ),
+            sglang_ple_nvme_cache_pages=_optional_int(
+                row, "sglang_ple_nvme_cache_pages", context, default=None
             ),
             recipe_source=_optional_string(row, "recipe_source", context),
             recipe_revision=_optional_string(row, "recipe_revision", context),
@@ -1517,6 +1616,42 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
                 f"{context}.args contains runtime-owned sglang option(s): "
                 + ", ".join(reserved)
             )
+    storage_fields = {
+        "local_image_id": model.local_image_id,
+        "sglang_ple_nvme_queue_depth": model.sglang_ple_nvme_queue_depth,
+        "sglang_ple_nvme_max_batch_pages": (
+            model.sglang_ple_nvme_max_batch_pages
+        ),
+        "sglang_ple_nvme_cache_pages": model.sglang_ple_nvme_cache_pages,
+    }
+    configured_storage_fields = {
+        name: value for name, value in storage_fields.items() if value is not None
+    }
+    if model.sglang_storage_mode is None:
+        if configured_storage_fields:
+            raise ManifestError(
+                f"{context}.local_image_id and native PLE fields require "
+                "sglang_storage_mode"
+            )
+    else:
+        if model.sglang_storage_mode != SM121_STORAGE_MODE:
+            raise ManifestError(
+                f"{context}.sglang_storage_mode is not a supported native "
+                "storage mode"
+            )
+        if len(configured_storage_fields) != len(storage_fields):
+            raise ManifestError(
+                f"{context}.sglang_storage_mode requires local image identity "
+                "and all native PLE parameters"
+            )
+        if model.backend != "sglang":
+            raise ManifestError(
+                f"{context}.sglang_storage_mode is supported only for sglang"
+            )
+        try:
+            validate_sm121_storage_candidate(model)
+        except SM121StorageCandidateError as error:
+            raise ManifestError(f"{context}: {error}") from error
     if model.image_digest and not _DIGEST_PATTERN.fullmatch(model.image_digest):
         raise ManifestError(f"{context}.image_digest must be a sha256 digest")
     for name, digest in (
@@ -1571,6 +1706,46 @@ def validate_case(case: CaseSpec, *, context: str = "case") -> None:
         raise ManifestError(f"{context}.max_turns must be positive")
     if not 0 <= case.temperature <= 2:
         raise ManifestError(f"{context}.temperature must be between 0 and 2")
+    try:
+        varied_context = case.varied_context_needle
+    except ValueError as error:
+        raise ManifestError(f"{context}.id {error}") from error
+    if varied_context is not None:
+        if case.kind != "capability":
+            raise ManifestError(
+                f"{context}.kind must be 'capability' for varied-context needle cases"
+            )
+        if case.requires != ("chat",):
+            raise ManifestError(
+                f"{context}.requires must be ['chat'] for varied-context needle cases"
+            )
+        if case.warmups != 0:
+            raise ManifestError(
+                f"{context}.warmups must be 0 for varied-context needle cases"
+            )
+        if case.repetitions != 1:
+            raise ManifestError(
+                f"{context}.repetitions must be 1 for varied-context needle cases"
+            )
+        if case.concurrency != 1:
+            raise ManifestError(
+                f"{context}.concurrency must be 1 for varied-context needle cases"
+            )
+        if case.temperature != 0:
+            raise ManifestError(
+                f"{context}.temperature must be 0 for varied-context needle cases"
+            )
+        if case.prompt_repetitions != varied_context.filler_records:
+            raise ManifestError(
+                f"{context}.prompt_repetitions must match the varied-context "
+                "needle record count"
+            )
+        if case.max_output_tokens < VARIED_CONTEXT_NEEDLE_MIN_OUTPUT_TOKENS:
+            raise ManifestError(
+                f"{context}.max_output_tokens must be at least "
+                f"{VARIED_CONTEXT_NEEDLE_MIN_OUTPUT_TOKENS} for varied-context "
+                "needle cases"
+            )
     if case.kind == "decode" and case.prompt_repetitions != 0:
         raise ManifestError(
             f"{context}.prompt_repetitions must be 0 for decode cases"
@@ -1711,6 +1886,11 @@ def validate_suite(suite: SuiteSpec, *, context: str = "suite") -> None:
         if case.id in seen:
             raise ManifestError(f"{context}: duplicate case id {case.id!r}")
         seen.add(case.id)
+    if suite.id == _SM121_STORAGE_SUITE_ID:
+        try:
+            validate_sm121_storage_suite(suite)
+        except SM121StorageCandidateError as error:
+            raise ManifestError(f"{context}: {error}") from error
     cache_cases = [case for case in suite.cases if case.kind == "cache"]
     cache_suite = suite.id == PREFIX_CACHE_SUITE_ID
     if cache_suite or cache_cases:
@@ -1808,6 +1988,18 @@ def validate_benchmark_selection(
         raise ManifestError(
             f"{context}: the {_FLASH_NEXT_AGENT64K_SUITE_ID!r} suite requires "
             "one of its exact dedicated agent64k profiles"
+        )
+    sm121_storage_profile = model_id == _SM121_STORAGE_PROFILE_ID
+    sm121_storage_suite = suite.id == _SM121_STORAGE_SUITE_ID
+    if sm121_storage_profile and not sm121_storage_suite:
+        raise ManifestError(
+            f"{context}: the {_SM121_STORAGE_PROFILE_ID!r} profile requires "
+            f"the {_SM121_STORAGE_SUITE_ID!r} suite"
+        )
+    if sm121_storage_suite and not sm121_storage_profile:
+        raise ManifestError(
+            f"{context}: the {_SM121_STORAGE_SUITE_ID!r} suite requires "
+            f"the {_SM121_STORAGE_PROFILE_ID!r} profile"
         )
     ple_study_suite_profiles = _PLE_STUDY_PROFILE_IDS_BY_SUITE.get(suite.id)
     ple_study_profile_suites = _PLE_STUDY_SUITE_IDS_BY_PROFILE_ID.get(model_id)

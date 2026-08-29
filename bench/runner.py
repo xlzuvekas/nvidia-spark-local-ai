@@ -17,7 +17,7 @@ import subprocess
 import struct
 import time
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Iterator
 import unicodedata
 import uuid
 import zlib
@@ -52,7 +52,13 @@ from .llamacpp_metrics import (
     require_speculative_activity,
     snapshot_llamacpp_spec_decode_metrics,
 )
-from .manifest import model_spec_to_dict, validate_benchmark_selection
+from .manifest import (
+    VARIED_CONTEXT_NEEDLE_CASE_PREFIX,
+    VariedContextNeedleSpec,
+    model_spec_to_dict,
+    validate_benchmark_selection,
+    varied_context_needle_spec,
+)
 from .memory_ops import (
     MEMORY_OPERATION_CONTEXT_TOKENS,
     MEMORY_OPERATION_LLAMACPP_DIGEST,
@@ -93,6 +99,21 @@ from .sglang_metrics import (
     request_sglang_speculative_audit,
     sglang_nextn_depth,
 )
+from .sglang_sm121_storage import (
+    SM121_STORAGE_EXECUTION_MODE,
+    SM121_STORAGE_LOCAL_IMAGE_ID,
+    SM121_STORAGE_PLATFORM,
+    SM121_STORAGE_RUNTIME_PROVENANCE_EVENT,
+    SM121_STORAGE_SOURCE_TREE,
+    SM121_STORAGE_VARIED_CONTEXT_BUDGET_TOKENS,
+    SM121_STORAGE_VARIED_CONTEXT_CASE_ID,
+    SM121StorageCandidateError,
+    is_sm121_storage_candidate,
+    validate_sm121_storage_candidate,
+    validate_sm121_storage_image_inspection,
+    validate_sm121_storage_runtime_provenance_event,
+    validate_sm121_storage_suite,
+)
 from .telemetry import TelemetrySampler
 from .vllm_metrics import snapshot_vllm_spec_decode_metrics
 
@@ -102,7 +123,13 @@ class PreflightError(RuntimeError):
 
 
 _MULTI_HOP_FAILURE_MESSAGE = "multi-hop case failed; error details omitted"
+_VARIED_CONTEXT_NEEDLE_FAILURE_MESSAGE = (
+    "varied-context needle case failed; error details omitted"
+)
 _PREFIX_CACHE_FAILURE_MESSAGE = "prefix-cache case failed; error details omitted"
+_SM121_STORAGE_QUALITY_GATE_FAILURE_MESSAGE = (
+    "SM121 storage quality gate failed; long-context lifetime was not started"
+)
 
 
 class MultiHopNeedleError(RuntimeError):
@@ -110,6 +137,20 @@ class MultiHopNeedleError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__(_MULTI_HOP_FAILURE_MESSAGE)
+
+
+class VariedContextNeedleError(RuntimeError):
+    """A public-safe failure for a generated varied-context needle case."""
+
+    def __init__(self) -> None:
+        super().__init__(_VARIED_CONTEXT_NEEDLE_FAILURE_MESSAGE)
+
+
+class SM121StorageQualityGateError(RuntimeError):
+    """Public-safe failure when the first SM121 canary gate is not clean."""
+
+    def __init__(self) -> None:
+        super().__init__(_SM121_STORAGE_QUALITY_GATE_FAILURE_MESSAGE)
 
 
 class PrefixCacheError(RuntimeError):
@@ -137,6 +178,29 @@ def _image_digest(image: str | None) -> str | None:
     except json.JSONDecodeError:
         return None
     return digests[0] if digests else None
+
+
+def _sm121_storage_image_identity(model: Any) -> dict[str, str]:
+    """Inspect the tagged local candidate before freezing its Docker ID."""
+
+    image = str(getattr(model, "image", "") or "")
+    output = _command_output(
+        ["docker", "image", "inspect", image, "--format", "{{json .}}"]
+    )
+    if not output:
+        raise RuntimeError("Could not inspect the local SM121 storage image")
+    try:
+        inspection = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            "Local SM121 storage image inspection was not valid JSON"
+        ) from error
+    if not isinstance(inspection, dict):
+        raise RuntimeError("Local SM121 storage image inspection was not an object")
+    try:
+        return validate_sm121_storage_image_inspection(inspection, image=image)
+    except SM121StorageCandidateError as error:
+        raise RuntimeError(str(error)) from error
 
 
 def _host_snapshot() -> dict[str, Any]:
@@ -176,9 +240,18 @@ def _canonical_case(
 
 
 def create_plan(
-    *, model: Any, suite: Any, results_root: Path, models_path: Path, suite_path: Path
+    *,
+    model: Any,
+    suite: Any,
+    results_root: Path,
+    models_path: Path,
+    suite_path: Path,
+    allow_sm121_storage_canary: bool = False,
 ) -> Path:
-    blocker = model_execution_blocker(model)
+    storage_candidate = is_sm121_storage_candidate(model)
+    blocker = model_execution_blocker(
+        model, allow_sm121_storage_canary=allow_sm121_storage_canary
+    )
     if blocker is not None:
         raise RuntimeError(blocker)
     if str(getattr(model, "support_status", "")) == "incompatible":
@@ -193,6 +266,11 @@ def create_plan(
             f"{model.backend} direct profiles require the {direct_command} command"
         )
     validate_benchmark_selection(model, suite, context="plan")
+    if storage_candidate:
+        try:
+            validate_sm121_storage_candidate(model)
+        except SM121StorageCandidateError as error:
+            raise RuntimeError(str(error)) from error
     model_data = model_spec_to_dict(model)
     suite_data = asdict(suite)
     protocol_digest = suite_data.get("protocol_digest")
@@ -209,13 +287,20 @@ def create_plan(
         for case in suite_data["cases"]
     ]
     resolved_image = _image_digest(model.image)
-    if model.image_digest and (
-        not resolved_image or not resolved_image.endswith("@" + model.image_digest)
-    ):
-        raise RuntimeError(
-            f"Local image digest for {model.image} does not match manifest {model.image_digest}"
-        )
-    resolved: dict[str, Any] = {"image_digest": resolved_image}
+    if storage_candidate:
+        local_image = _sm121_storage_image_identity(model)
+        resolved: dict[str, Any] = {
+            "image_digest": resolved_image,
+            "local_image": local_image,
+        }
+    else:
+        if model.image_digest and (
+            not resolved_image or not resolved_image.endswith("@" + model.image_digest)
+        ):
+            raise RuntimeError(
+                f"Local image digest for {model.image} does not match manifest {model.image_digest}"
+            )
+        resolved = {"image_digest": resolved_image}
     if str(model.backend) == "llamacpp":
         resolved["llamacpp"] = validate_llamacpp_artifacts(
             model, workspace=models_path.resolve().parents[1]
@@ -244,6 +329,33 @@ def create_plan(
     return run_dir
 
 
+def create_sm121_storage_canary_plan(
+    *, model: Any, suite: Any, results_root: Path, models_path: Path, suite_path: Path
+) -> Path:
+    """Freeze the one pre-admission SM121 storage canary plan.
+
+    This is deliberately separate from the ordinary plan command.  It is the
+    only caller permitted to get past the candidate execution tombstone, and
+    it still freezes the exact local Docker ID before work begins.
+    """
+
+    if not is_sm121_storage_candidate(model):
+        raise RuntimeError("The dedicated canary requires the SM121 storage profile")
+    try:
+        validate_sm121_storage_candidate(model)
+        validate_sm121_storage_suite(suite)
+    except SM121StorageCandidateError as error:
+        raise RuntimeError(str(error)) from error
+    return create_plan(
+        model=model,
+        suite=suite,
+        results_root=results_root,
+        models_path=models_path,
+        suite_path=suite_path,
+        allow_sm121_storage_canary=True,
+    )
+
+
 def _namespace(value: Any) -> Any:
     if isinstance(value, dict):
         return SimpleNamespace(**{key: _namespace(item) for key, item in value.items()})
@@ -258,6 +370,79 @@ def _plain(value: Any) -> Any:
     if isinstance(value, list):
         return [_plain(item) for item in value]
     return value
+
+
+def _load_sm121_storage_canary_plan(run_dir: Path) -> tuple[dict[str, Any], Any, Any]:
+    """Load and authenticate a newly frozen native-storage canary plan."""
+
+    try:
+        plan = json.loads((run_dir / "plan.json").read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise PreflightError("SM121 storage canary plan is unavailable or invalid") from error
+    if type(plan) is not dict or int(plan.get("schema_version", 0)) != 2:
+        raise PreflightError("SM121 storage canary plan schema is invalid")
+    model_data = plan.get("model")
+    suite_data = plan.get("suite")
+    resolved = plan.get("resolved")
+    if (
+        type(model_data) is not dict
+        or type(suite_data) is not dict
+        or type(resolved) is not dict
+        or type(suite_data.get("cases")) is not list
+    ):
+        raise PreflightError("SM121 storage canary plan has invalid core fields")
+    suite_without_case_ids = {
+        **suite_data,
+        "cases": [
+            {key: value for key, value in case.items() if key != "case_id"}
+            for case in suite_data["cases"]
+            if type(case) is dict
+        ],
+    }
+    if len(suite_without_case_ids["cases"]) != len(suite_data["cases"]):
+        raise PreflightError("SM121 storage canary case records are invalid")
+    expected_fingerprint = content_hash(
+        {"model": model_data, "suite": suite_without_case_ids, "resolved": resolved}
+    )
+    integrity_hash = plan.get("integrity_hash")
+    integrity_payload = {key: value for key, value in plan.items() if key != "integrity_hash"}
+    integrity_valid = isinstance(integrity_hash, str) and (
+        content_hash(integrity_payload, len(integrity_hash)) == integrity_hash
+    )
+    if not integrity_valid or plan.get("fingerprint") != expected_fingerprint:
+        raise PreflightError("SM121 storage canary plan fingerprint is invalid")
+    protocol_digest = suite_data.get("protocol_digest")
+    for case in suite_data["cases"]:
+        assert isinstance(case, dict)
+        case_without_id = {key: value for key, value in case.items() if key != "case_id"}
+        expected_case_id = _canonical_case(
+            model_data, case_without_id, protocol_digest=protocol_digest
+        )["case_id"]
+        if case.get("case_id") != expected_case_id:
+            raise PreflightError("SM121 storage canary case identity is invalid")
+    model = _namespace(model_data)
+    suite = _namespace(suite_data)
+    try:
+        validate_sm121_storage_candidate(model)
+        validate_sm121_storage_suite(suite)
+    except SM121StorageCandidateError as error:
+        raise PreflightError(str(error)) from error
+    local_image = resolved.get("local_image")
+    if (
+        type(local_image) is not dict
+        or set(local_image) != {"docker_image_id", "platform", "source_tree"}
+        or local_image.get("docker_image_id") != SM121_STORAGE_LOCAL_IMAGE_ID
+        or local_image.get("platform") != SM121_STORAGE_PLATFORM
+        or local_image.get("source_tree") != SM121_STORAGE_SOURCE_TREE
+    ):
+        raise PreflightError("SM121 storage canary local image identity is invalid")
+    run_nonce = plan.get("run_nonce")
+    if not isinstance(run_nonce, str) or re.fullmatch(r"[0-9a-f]{32}", run_nonce) is None:
+        raise PreflightError("SM121 storage canary run nonce is invalid")
+    model.resolved_local_image_id = local_image["docker_image_id"]
+    model.run_identity = f"{plan['fingerprint']}-{run_nonce}"
+    model.storage_canary_authorized = True
+    return plan, model, suite
 
 
 def _preflight(model: SimpleNamespace) -> None:
@@ -394,6 +579,20 @@ def _record_host_safety_interrupt_failure(
     )
 
 
+def _retry_host_safety_interrupt_if_needed(
+    server: Any, watchdog: HostSafetyWatchdog
+) -> None:
+    """Retry only a failed watchdog callback before ordinary owned cleanup.
+
+    A successful callback has already stopped the container, so a second
+    Docker stop would race with final removal. Retrying an actual callback
+    failure preserves the host-safety fallback for the narrow error path.
+    """
+
+    if watchdog.tripped and watchdog.abort_callback_error is not None:
+        server.interrupt_owned()
+
+
 def _needle(nonce: str) -> str:
     return "SPARK-" + hashlib.sha256(nonce.encode()).hexdigest()[:10].upper()
 
@@ -478,6 +677,223 @@ def _multi_hop_needle_prompt(
         )
     )
     return "".join(parts)
+
+
+_VARIED_CONTEXT_FILLER_LEXICON = (
+    "acorn",
+    "apron",
+    "basket",
+    "beacon",
+    "bicycle",
+    "blanket",
+    "bridge",
+    "brook",
+    "cabin",
+    "canvas",
+    "candle",
+    "canyon",
+    "carpet",
+    "cedar",
+    "circle",
+    "cloud",
+    "copper",
+    "corner",
+    "cricket",
+    "cushion",
+    "dawn",
+    "drizzle",
+    "farmer",
+    "feather",
+    "fence",
+    "field",
+    "forest",
+    "garden",
+    "guitar",
+    "harbor",
+    "helmet",
+    "honey",
+    "island",
+    "jacket",
+    "kettle",
+    "ladder",
+    "lantern",
+    "market",
+    "meadow",
+    "mirror",
+    "mountain",
+    "napkin",
+    "ocean",
+    "orchard",
+    "pencil",
+    "pillow",
+    "porch",
+    "river",
+    "robin",
+    "saddle",
+    "sailor",
+    "shovel",
+    "spring",
+    "station",
+    "stone",
+    "sunset",
+    "thistle",
+    "ticket",
+    "timber",
+    "valley",
+    "velvet",
+    "window",
+    "winter",
+    "wren",
+)
+_VARIED_CONTEXT_ANSWER_LEXICON = (
+    "alder",
+    "beryl",
+    "citron",
+    "dahlia",
+    "ember",
+    "fable",
+    "garnet",
+    "hazel",
+    "indigo",
+    "juniper",
+    "kepler",
+    "lilac",
+    "marigold",
+    "nectar",
+    "onyx",
+    "piper",
+    "quartz",
+    "raven",
+    "saffron",
+    "topaz",
+    "umber",
+    "violet",
+    "willow",
+    "zephyr",
+)
+_VARIED_CONTEXT_ANSWER_WORD_COUNT = 12
+_VARIED_CONTEXT_MASK_64 = (1 << 64) - 1
+
+
+def _is_varied_context_needle(case: Any) -> bool:
+    """Whether ``case`` selects the strict SM121 varied-context protocol."""
+
+    return str(getattr(case, "id", "")).startswith(
+        VARIED_CONTEXT_NEEDLE_CASE_PREFIX
+    )
+
+
+def _varied_context_spec(case: Any) -> VariedContextNeedleSpec:
+    """Get the typed protocol contract from a frozen or loaded case."""
+
+    case_id = str(getattr(case, "id", ""))
+    spec = varied_context_needle_spec(case_id)
+    if spec is None:
+        raise ValueError("case does not select the varied-context needle protocol")
+    return spec
+
+
+def _splitmix64(value: int) -> int:
+    """Advance a local deterministic stream without global random state."""
+
+    value = (value + 0x9E3779B97F4A7C15) & _VARIED_CONTEXT_MASK_64
+    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9
+    value &= _VARIED_CONTEXT_MASK_64
+    value = (value ^ (value >> 27)) * 0x94D049BB133111EB
+    value &= _VARIED_CONTEXT_MASK_64
+    return (value ^ (value >> 31)) & _VARIED_CONTEXT_MASK_64
+
+
+def _varied_context_stream_seed(case_id: str, stream: str) -> int:
+    digest = hashlib.sha256(
+        f"sm121-varied-context-v1:{stream}:{case_id}".encode()
+    ).digest()
+    return int.from_bytes(digest[:8], "big")
+
+
+def _varied_context_needle(case: Any) -> str:
+    """Return the stable, multiword visible answer for a case's stable ID."""
+
+    case_id = str(getattr(case, "id", ""))
+    _varied_context_spec(case)
+    words = list(_VARIED_CONTEXT_ANSWER_LEXICON)
+    state = _varied_context_stream_seed(case_id, "answer")
+    for index in range(len(words) - 1, 0, -1):
+        state = _splitmix64(state)
+        selected = state % (index + 1)
+        words[index], words[selected] = words[selected], words[index]
+    return " ".join(words[:_VARIED_CONTEXT_ANSWER_WORD_COUNT])
+
+
+def _varied_context_insert_index(spec: VariedContextNeedleSpec) -> int:
+    """Place the unique answer at a reproducible semantic depth."""
+
+    if spec.depth == "mid":
+        return spec.filler_records // 2
+    if spec.depth == "tail":
+        return (spec.filler_records * 7) // 8
+    raise ValueError(f"unsupported varied-context depth: {spec.depth}")
+
+
+def _varied_context_filler_records(
+    *, case_id: str, record_count: int
+) -> Iterator[tuple[str, str]]:
+    """Build deterministic two-word filler records from a fixed lexicon."""
+
+    state = _varied_context_stream_seed(case_id, "filler")
+    for _ in range(record_count):
+        state = _splitmix64(state)
+        left = _VARIED_CONTEXT_FILLER_LEXICON[
+            state % len(_VARIED_CONTEXT_FILLER_LEXICON)
+        ]
+        state = _splitmix64(state)
+        right = _VARIED_CONTEXT_FILLER_LEXICON[
+            state % len(_VARIED_CONTEXT_FILLER_LEXICON)
+        ]
+        yield left, right
+
+
+def _varied_context_needle_prompt(*, case: Any) -> str:
+    """Build a nonce-independent varied-context retrieval prompt.
+
+    The answer and every filler word derive only from the stable case ID.  A
+    caller can therefore retry a request without changing the retrieval task,
+    while the prompt itself never enters journal or evidence payloads.
+    """
+
+    spec = _varied_context_spec(case)
+    case_id = str(getattr(case, "id", ""))
+    target = _varied_context_needle(case)
+    insert_index = _varied_context_insert_index(spec)
+    parts = [
+        "Synthetic varied-context retrieval protocol v1. Read every record. "
+    ]
+    for index, (left, right) in enumerate(
+        _varied_context_filler_records(
+            case_id=case_id, record_count=spec.filler_records
+        )
+    ):
+        if index == insert_index:
+            parts.append(f"Recovery phrase: {target}. ")
+        parts.append(f"{left} {right}. ")
+    if insert_index == spec.filler_records:
+        parts.append(f"Recovery phrase: {target}. ")
+    parts.append(
+        "Return only the recovery phrase with every word in order and no punctuation."
+    )
+    return "".join(parts)
+
+
+def _normalize_varied_context_answer(answer: str) -> str:
+    """Normalize only whitespace and case; punctuation remains a mismatch."""
+
+    return " ".join(answer.split()).casefold()
+
+
+def _is_scalar_safe_needle(case: Any) -> bool:
+    """Whether a generated needle must omit text-bearing result fields."""
+
+    return _is_multi_hop_needle(case) or _is_varied_context_needle(case)
 
 
 _PREFIX_CACHE_RESULT_SCALAR_FIELDS = (
@@ -1154,11 +1570,12 @@ _MULTI_HOP_RESULT_SCALAR_FIELDS = (
 
 
 def _multi_hop_result_payload(model: Any, result: Any) -> dict[str, Any]:
-    """Return the fixed scalar result schema used by multi-hop needle cases.
+    """Return the fixed scalar result schema used by generated needle cases.
 
     The generated prompt, nonce-derived request identifiers and start times,
     relation values, visible completion, hidden reasoning, and tool payloads
-    are intentionally excluded from raw results.
+    are intentionally excluded from raw results.  The historical function
+    name remains for compatibility with the multi-hop protocol.
     """
 
     payload = _request_result_payload(model, result)
@@ -1169,7 +1586,7 @@ def _multi_hop_result_payload(model: Any, result: Any) -> dict[str, Any]:
         value = payload[field]
         if value is not None and not isinstance(value, (bool, int, float, str)):
             raise RuntimeError(
-                f"Multi-hop result field {field!r} must be a scalar or null"
+                f"Generated needle result field {field!r} must be a scalar or null"
             )
         scalar_payload[field] = value
     return scalar_payload
@@ -1341,6 +1758,8 @@ def _prompt(case: SimpleNamespace, nonce: str) -> str:
         return prefix + 'Return only a JSON object with keys "benchmark" set to "spark" and "value" set to 42.'
     if kind == "capability" and "tools" in case.requires:
         return prefix + "Use the multiply tool to multiply 6 by 7. Do not answer without calling the tool."
+    if kind == "capability" and _is_varied_context_needle(case):
+        return _varied_context_needle_prompt(case=case)
     if kind == "capability" and _is_multi_hop_needle(case):
         return _multi_hop_needle_prompt(
             prompt_repetitions=prompt_repetitions,
@@ -1377,6 +1796,17 @@ def _estimated_context_tokens(case: SimpleNamespace) -> tuple[int, str]:
     """Return a conservative workload estimate without model-specific tokenizers."""
 
     output_tokens = int(case.max_output_tokens)
+    if _is_varied_context_needle(case):
+        spec = _varied_context_spec(case)
+        if str(case.id) == SM121_STORAGE_VARIED_CONTEXT_CASE_ID:
+            return (
+                SM121_STORAGE_VARIED_CONTEXT_BUDGET_TOKENS,
+                "pinned_qwen_tokenizer_chat_template_plus_output",
+            )
+        return (
+            spec.filler_records * 2 + output_tokens + 256,
+            "varied_context_two_words_per_record_plus_output_and_template_margin",
+        )
     if _is_prefix_cache_case(case):
         # ``shared-ledger-entry`` tokenizes to multiple pieces on common BPE
         # vocabularies.  Six tokens per synthetic corpus word leaves generous
@@ -1809,6 +2239,18 @@ def _validate_capability(
     if "embeddings" in case.requires:
         passed = bool(result.finite and result.dimension > 0 and result.batch_size > 0)
         return {"passed": passed, "reason": None if passed else "embedding vector validation failed"}
+    if _is_varied_context_needle(case):
+        actual = _normalize_varied_context_answer(str(result.content))
+        expected = _normalize_varied_context_answer(_varied_context_needle(case))
+        passed = actual == expected
+        return {
+            "passed": passed,
+            "reason": (
+                None
+                if passed
+                else "recovery phrase did not exactly match the visible answer"
+            ),
+        }
     if _is_multi_hop_needle(case):
         passed = str(result.content).strip() == _multi_hop_needle(result.request_id)
         return {
@@ -2259,7 +2701,7 @@ def _execute_case(
                         "burst_elapsed_s": result_burst_s,
                         "result": (
                             _multi_hop_result_payload(model, result)
-                            if _is_multi_hop_needle(case)
+                            if _is_scalar_safe_needle(case)
                             else _request_result_payload(model, result)
                         ),
                         "validation": validation,
@@ -2267,8 +2709,12 @@ def _execute_case(
                 )
         elapsed_s = time.perf_counter() - measured_started
     except Exception as error:
-        if _is_multi_hop_needle(case):
-            safe_error = MultiHopNeedleError()
+        if _is_scalar_safe_needle(case):
+            safe_error = (
+                VariedContextNeedleError()
+                if _is_varied_context_needle(case)
+                else MultiHopNeedleError()
+            )
             journal.append(
                 {
                     "event": "case_failed",
@@ -2324,6 +2770,28 @@ def _execute_case(
         )
     finally:
         telemetry.set_phase("between_cases")
+
+
+def _require_sm121_storage_quality_gate(
+    journal: Journal, case: SimpleNamespace
+) -> None:
+    """Require exactly one clean durable quality result before lifetime two.
+
+    The generic executor intentionally records validation failures without
+    throwing, so ordinary suites can finish and report every case. This
+    candidate is different: its first lifetime is a strict admission gate.
+    Consult the just-written scalar journal record rather than response text,
+    and fail closed if the record is missing, duplicated, or not clean.
+    """
+
+    completions = [
+        event
+        for event in journal.events()
+        if event.get("event") == "case_complete"
+        and event.get("case_id") == case.case_id
+    ]
+    if len(completions) != 1 or completions[0].get("validation_passed") is not True:
+        raise SM121StorageQualityGateError()
 
 
 def _recover_pending_lifecycle(
@@ -3277,11 +3745,9 @@ def execute_plan(
                     if server:
                         try:
                             if host_safety is not None and host_safety.tripped:
-                                # Synchronize with, or retry, the background
-                                # callback before any potentially slow scrape
-                                # or log capture. Ownership state remains intact
-                                # for the ordinary final cleanup below.
-                                server.interrupt_owned()
+                                _retry_host_safety_interrupt_if_needed(
+                                    server, host_safety
+                                )
                                 _record_host_safety_interrupt_failure(
                                     journal,
                                     host_safety,
@@ -3432,6 +3898,244 @@ def execute_plan(
                     }
                 )
             raise terminal_error
+    return summarize_run(run_dir)
+
+
+def _sm121_storage_runtime_provenance_event(
+    server: Any, *, fresh_server_lifetime: int
+) -> dict[str, Any]:
+    """Return the exact scalar-only native provenance event for one lifetime."""
+
+    provenance = getattr(server, "native_provenance", None)
+    if type(provenance) is not dict:
+        raise RuntimeError("SM121 storage native provenance is unavailable")
+    event = {
+        "event": SM121_STORAGE_RUNTIME_PROVENANCE_EVENT,
+        "fresh_server_lifetime": fresh_server_lifetime,
+        **provenance,
+    }
+    try:
+        validate_sm121_storage_runtime_provenance_event(
+            event, fresh_server_lifetime=fresh_server_lifetime
+        )
+    except SM121StorageCandidateError as error:
+        raise RuntimeError("SM121 storage native provenance is invalid") from error
+    return event
+
+
+def execute_sm121_storage_canary(run_dir: Path, *, workspace: Path) -> dict[str, Any]:
+    """Execute the two SM121 admission cases in separate fresh lifetimes.
+
+    The long-context retrieval request is the first inference request after
+    its server becomes ready.  This intentionally does not call
+    :func:`_prime_model`, resume a partial journal, retain a container, or
+    reuse a process between the quality and long-context gates.
+    """
+
+    plan, model, suite = _load_sm121_storage_canary_plan(run_dir)
+    journal = Journal(run_dir / "events.jsonl")
+    if journal.events():
+        raise PreflightError(
+            "SM121 storage canary is non-resumable; freeze a new fresh plan"
+        )
+    cases = list(suite.cases)
+    for case in cases:
+        missing = set(case.requires) - set(model.tasks)
+        if missing:
+            raise PreflightError(
+                "SM121 storage canary case has unsupported capabilities"
+            )
+        estimated_tokens, estimate_basis = _estimated_context_tokens(case)
+        if estimated_tokens > int(model.max_context):
+            raise PreflightError(
+                "SM121 storage canary context admission is insufficient: "
+                f"{estimated_tokens} via {estimate_basis}"
+            )
+    lock_path = results_lock_path(workspace)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    telemetry = TelemetrySampler(run_dir / "telemetry.jsonl")
+    measurement_started_ns = time.monotonic_ns()
+    with lock_path.open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError("Another SparkBench run holds the benchmark lock") from error
+        journal.append(
+            {
+                "event": "run_start",
+                "execution_mode": SM121_STORAGE_EXECUTION_MODE,
+                "plan_fingerprint": str(plan["fingerprint"]),
+                "run_nonce": str(plan["run_nonce"]),
+            }
+        )
+        journal.append(
+            {
+                "event": "measurement_started",
+                "monotonic_ns": measurement_started_ns,
+                "plan_fingerprint": str(plan["fingerprint"]),
+                "run_nonce": str(plan["run_nonce"]),
+            }
+        )
+        stage = "preflight"
+        active_watchdog: HostSafetyWatchdog | None = None
+        try:
+            telemetry.start()
+            for lifetime, case in enumerate(cases, start=1):
+                server = None
+                active_watchdog = _host_safety_watchdog(model)
+                try:
+                    stage = f"preflight_lifetime_{lifetime}"
+                    _preflight(model)
+                    if active_watchdog is not None:
+                        active_watchdog.start()
+                    stage = f"server_start_lifetime_{lifetime}"
+                    telemetry.set_phase(f"server_startup:{lifetime}")
+                    callbacks: dict[str, Any] = {}
+                    if active_watchdog is not None:
+                        callbacks = {
+                            "abort_check": active_watchdog.raise_if_tripped,
+                            "on_server_created": (
+                                lambda created_server: active_watchdog.register_abort_callback(
+                                    created_server.interrupt_owned
+                                )
+                            ),
+                        }
+                    server = start_server(
+                        model,
+                        workspace=workspace,
+                        allow_download=False,
+                        server_log_path=(
+                            run_dir / "server" / f"lifetime-{lifetime}" / "server.log"
+                        ),
+                        **callbacks,
+                    )
+                    if active_watchdog is not None:
+                        active_watchdog.raise_if_tripped()
+                    stage = f"server_provenance_lifetime_{lifetime}"
+                    provenance = capture_server_provenance(server)
+                    write_json(
+                        run_dir
+                        / "server"
+                        / f"lifetime-{lifetime}"
+                        / "provenance.json",
+                        provenance,
+                    )
+                    journal.append(
+                        _sm121_storage_runtime_provenance_event(
+                            server, fresh_server_lifetime=lifetime
+                        )
+                    )
+                    journal.append(
+                        {
+                            "event": "server_ready",
+                            "backend": server.backend,
+                            "startup_s": server.startup_s,
+                            "fresh_server_lifetime": lifetime,
+                            "first_inference_is_case": True,
+                            "case_id": case.case_id,
+                        }
+                    )
+                    stage = f"case_execution_lifetime_{lifetime}"
+                    telemetry.set_phase(f"first_case_after_start:{lifetime}")
+                    _execute_case(
+                        server=server,
+                        model=model,
+                        case=case,
+                        journal=journal,
+                        telemetry=telemetry,
+                    )
+                    if str(case.kind) == "quality":
+                        _require_sm121_storage_quality_gate(journal, case)
+                    if active_watchdog is not None:
+                        active_watchdog.raise_if_tripped()
+                except BaseException as error:
+                    safety_error = (
+                        active_watchdog.failure
+                        if active_watchdog is not None
+                        else None
+                    )
+                    raise safety_error or error
+                finally:
+                    telemetry.set_phase(f"server_shutdown:{lifetime}")
+                    cleanup_error: BaseException | None = None
+                    try:
+                        if server is not None:
+                            if active_watchdog is not None and active_watchdog.tripped:
+                                _retry_host_safety_interrupt_if_needed(
+                                    server, active_watchdog
+                                )
+                                _record_host_safety_interrupt_failure(
+                                    journal, active_watchdog, stage=stage
+                                )
+                            save_server_logs(
+                                server,
+                                run_dir
+                                / "server"
+                                / f"lifetime-{lifetime}"
+                                / "server.log",
+                            )
+                            server.stop()
+                            journal.append(
+                                {
+                                    "event": "server_stopped",
+                                    "backend": server.backend,
+                                    "fresh_server_lifetime": lifetime,
+                                }
+                            )
+                    except BaseException as error:
+                        cleanup_error = error
+                        journal.append(
+                            {
+                                "event": "cleanup_failed",
+                                "error_type": type(error).__name__,
+                            }
+                        )
+                    finally:
+                        if active_watchdog is not None:
+                            active_watchdog.stop()
+                    if cleanup_error is not None:
+                        raise cleanup_error
+                    if active_watchdog is not None:
+                        active_watchdog.raise_if_tripped()
+                    active_watchdog = None
+            measurement_complete_ns = time.monotonic_ns()
+            journal.append(
+                {
+                    "event": "measurement_complete",
+                    "elapsed_s": (
+                        measurement_complete_ns - measurement_started_ns
+                    )
+                    / 1_000_000_000,
+                    "monotonic_ns": measurement_complete_ns,
+                }
+            )
+            journal.append({"event": "run_complete", "status": "completed"})
+        except BaseException as error:
+            safety_error = (
+                active_watchdog.failure if active_watchdog is not None else None
+            )
+            terminal_error = safety_error or error
+            if isinstance(terminal_error, HostSafetyError):
+                _record_host_safety_breach(journal, terminal_error, stage=stage)
+                if active_watchdog is not None:
+                    _record_host_safety_interrupt_failure(
+                        journal, active_watchdog, stage=stage
+                    )
+            _record_run_aborted(journal, terminal_error, stage=stage)
+            try:
+                summarize_run(run_dir)
+            except Exception as summary_error:
+                journal.append(
+                    {
+                        "event": "summary_failed",
+                        "error_type": type(summary_error).__name__,
+                    }
+                )
+            raise terminal_error
+        finally:
+            if active_watchdog is not None:
+                active_watchdog.stop()
+            telemetry.stop()
     return summarize_run(run_dir)
 
 

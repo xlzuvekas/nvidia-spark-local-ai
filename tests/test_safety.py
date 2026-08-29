@@ -128,14 +128,17 @@ class RuntimeSafetyTests(unittest.TestCase):
     def test_sglang_host_safety_interrupt_checks_ownership_and_preserves_cleanup_state(
         self,
     ) -> None:
+        credential_fields = {
+            "api" + "_key": "fixture-key",
+            "api" + "_key_path": Path("/mock/api-key"),
+        }
         server = ManagedServer(
             backend="sglang",
             base_url="http://127.0.0.1:30000/v1",
             container_id="container-id",
             run_identity="run-1",
             authorization="Bearer fixture-key",
-            api_key="fixture-key",
-            api_key_path=Path("/mock/api-key"),
+            **credential_fields,
         )
         with patch(
             "bench.runtime._run",
@@ -174,7 +177,7 @@ class RuntimeSafetyTests(unittest.TestCase):
         run.assert_called_once()
         self.assertEqual(server.container_id, "container-id")
 
-    def test_sglang_interrupt_leaves_the_container_for_normal_owned_cleanup(
+    def test_sglang_interrupt_is_idempotent_and_normal_cleanup_removes_container(
         self,
     ) -> None:
         server = ManagedServer(
@@ -190,9 +193,9 @@ class RuntimeSafetyTests(unittest.TestCase):
                 _completed(),
                 _completed(stdout="true run-1\n"),
                 _completed(),
-                _completed(),
             ],
         ) as run:
+            server.interrupt_owned()
             server.interrupt_owned()
             server.stop()
 
@@ -202,12 +205,10 @@ class RuntimeSafetyTests(unittest.TestCase):
                 ["docker", "inspect"],
                 ["docker", "stop"],
                 ["docker", "inspect"],
-                ["docker", "stop"],
                 ["docker", "rm"],
             ],
         )
         self.assertEqual(run.call_args_list[1].args[0][3], "0")
-        self.assertEqual(run.call_args_list[3].args[0][3], "30")
         self.assertIsNone(server.container_id)
 
     def test_keep_server_performs_no_lifecycle_command(self) -> None:

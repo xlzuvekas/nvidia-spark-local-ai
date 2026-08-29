@@ -17,7 +17,7 @@ from bench.annotations import (
     append_startup_safety_gate,
 )
 from bench.acquire import fetch_model_snapshot
-from bench.audit import audit_matrix
+from bench.audit import audit_matrix, audit_sm121_storage_canary_run
 from bench.autoresearch_campaign import (
     freeze_campaign,
     preview_campaign,
@@ -43,7 +43,12 @@ from bench.manifest import (
 from bench.prefix_cache_protocol import PREFIX_CACHE_SUITE_ID
 from bench.journal import utc_now, write_json
 from bench.report import summarize_run
-from bench.runner import create_plan, execute_plan
+from bench.runner import (
+    create_plan,
+    create_sm121_storage_canary_plan,
+    execute_plan,
+    execute_sm121_storage_canary,
+)
 from bench.trtllm_direct import run_direct_trtllm
 
 
@@ -54,6 +59,9 @@ DEFAULT_DIFFUSION_SUITE = (
     WORKSPACE / "manifests" / "suites" / "diffusion_direct.toml"
 )
 DEFAULT_AUDIO_SUITE = WORKSPACE / "manifests" / "suites" / "audio_asr.toml"
+DEFAULT_SM121_STORAGE_CANARY_SUITE = (
+    WORKSPACE / "manifests" / "suites" / "qwen38_flash_next_sm121_triton_storage_canary.toml"
+)
 DEFAULT_EVIDENCE = WORKSPACE / "evidence"
 DEFAULT_RESULTS = WORKSPACE / "results"
 AUTORESEARCH_CHECKPOINT_READINESS_CODES = frozenset(
@@ -278,6 +286,23 @@ def command_benchmark(args: argparse.Namespace) -> int:
         keep_server=args.keep_server,
         continue_on_error=not args.fail_fast,
     )
+    print(json.dumps(summary, indent=2))
+    return 0 if summary["status"] == "complete" else 1
+
+
+def command_sm121_storage_canary(args: argparse.Namespace) -> int:
+    """Run the isolated pre-admission SM121 native-storage canary."""
+
+    model, suite = _select(args)
+    run_dir = create_sm121_storage_canary_plan(
+        model=model,
+        suite=suite,
+        results_root=args.results,
+        models_path=args.models,
+        suite_path=args.suite,
+    )
+    print(f"Plan: {run_dir}")
+    summary = execute_sm121_storage_canary(run_dir, workspace=WORKSPACE)
     print(json.dumps(summary, indent=2))
     return 0 if summary["status"] == "complete" else 1
 
@@ -513,6 +538,12 @@ def command_audit_matrix(args: argparse.Namespace) -> int:
     return 0 if report["ok"] else 1
 
 
+def command_audit_sm121_storage_canary(args: argparse.Namespace) -> int:
+    report = audit_sm121_storage_canary_run(args.run_dir)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["ok"] else 1
+
+
 def command_export_evidence(args: argparse.Namespace) -> int:
     report = export_evidence(
         results_root=args.results,
@@ -608,6 +639,14 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--keep-server", action="store_true")
     benchmark.add_argument("--fail-fast", action="store_true")
     benchmark.set_defaults(function=command_benchmark)
+
+    storage_canary = subparsers.add_parser(
+        "sm121-storage-canary",
+        help="run the pre-admission fresh-process SM121 native-storage canary",
+    )
+    add_selection(storage_canary)
+    storage_canary.set_defaults(suite=DEFAULT_SM121_STORAGE_CANARY_SUITE)
+    storage_canary.set_defaults(function=command_sm121_storage_canary)
 
     run = subparsers.add_parser("run", aliases=["resume"], help="execute or resume a frozen plan")
     run.add_argument("run_dir", type=Path)
@@ -716,6 +755,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     audit.add_argument("matrix_dir", type=Path)
     audit.set_defaults(function=command_audit_matrix)
+
+    storage_audit = subparsers.add_parser(
+        "audit-sm121-storage-canary",
+        help="read-only topology verification of one SM121 storage canary run",
+    )
+    storage_audit.add_argument("run_dir", type=Path)
+    storage_audit.set_defaults(function=command_audit_sm121_storage_canary)
 
     export = subparsers.add_parser(
         "export-evidence",

@@ -23,7 +23,6 @@ from bench.autoresearch_campaign import (
     CellProjection,
     CellProjectionError,
     EXPECTED_AXES,
-    EXPECTED_CASE_IDS,
     EXPECTED_PRIMARY_CASE_IDS,
     _CellLifecycleProgress,
     _cell_specs,
@@ -289,7 +288,10 @@ def _freeze_campaign_fixture(root: Path) -> Path:
         assert isinstance(results_root, Path)
         run_dir = results_root / "frozen-run"
         run_dir.mkdir()
-        model_data = asdict(model)
+        # Mirror the production planner exactly.  ``ModelSpec`` gains
+        # nullable opt-in fields over time, and its raw dataclass projection
+        # is intentionally not the frozen-plan representation.
+        model_data = model_spec_to_dict(model)
         suite_data = asdict(suite)
         suite_data.pop("protocol_digest", None)
         cases = [_canonical_case(model_data, case) for case in suite_data["cases"]]
