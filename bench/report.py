@@ -40,6 +40,10 @@ from .sglang_sm121_storage import (
     is_sm121_storage_canary_plan,
     sm121_storage_canary_lifecycle_issues,
 )
+from .sglang_sm121_cache_observability import (
+    is_sm121_cache_observability_plan,
+    sm121_cache_observability_lifecycle_issues,
+)
 from .vllm_metrics import aggregate_vllm_spec_decode_metrics
 
 
@@ -376,6 +380,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     planned_model = plan.get("model") or {}
     planned_suite = plan.get("suite") or {}
     sm121_storage_lifecycle_issues: tuple[dict[str, object], ...] = ()
+    sm121_cache_observability_issues: tuple[dict[str, object], ...] = ()
     if (
         isinstance(planned_model, dict)
         and isinstance(planned_suite, dict)
@@ -393,6 +398,27 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         )
         sm121_storage_lifecycle_issues = sm121_storage_canary_lifecycle_issues(
             events, planned_case_ids=planned_case_ids
+        )
+    sm121_cache_observability_plan = bool(
+        isinstance(planned_model, dict)
+        and isinstance(planned_suite, dict)
+        and is_sm121_cache_observability_plan(planned_model, planned_suite)
+    )
+    if sm121_cache_observability_plan:
+        planned_cases = planned_suite.get("cases")
+        planned_case_ids = (
+            tuple(
+                case.get("case_id")
+                for case in planned_cases
+                if isinstance(case, dict) and isinstance(case.get("case_id"), str)
+            )
+            if isinstance(planned_cases, list)
+            else ()
+        )
+        sm121_cache_observability_issues = (
+            sm121_cache_observability_lifecycle_issues(
+                events, planned_case_ids=planned_case_ids
+            )
         )
     mtp_requested = bool(
         planned_model.get("backend") == "llamacpp"
@@ -1164,8 +1190,34 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
                     },
                 }
             )
-        phase_telemetry = telemetry.get(f"case:{case_id}:{attempt_id}") or telemetry.get(
-            case_id
+        if sm121_cache_observability_plan:
+            # B0 uses normal request plumbing only to prove response and native
+            # counter semantics.  Suppress latency, TPS, and energy-derived
+            # fields so its summary cannot be read as a serving benchmark.
+            row.update(
+                {
+                    "observability_only": True,
+                    "median_ttft_s": None,
+                    "p95_ttft_s": None,
+                    "median_e2e_s": None,
+                    "p95_e2e_s": None,
+                    "median_decode_tps": None,
+                    "decode_metric_source": None,
+                    "median_estimated_decode_tps": None,
+                    "decode_estimate_one_token_chunks": None,
+                    "aggregate_output_tps": None,
+                    "request_tps": None,
+                }
+            )
+            if kind == "quality":
+                row["quality_total_request_latency_s"] = None
+        phase_telemetry = (
+            None
+            if sm121_cache_observability_plan
+            else (
+                telemetry.get(f"case:{case_id}:{attempt_id}")
+                or telemetry.get(case_id)
+            )
         )
         if phase_telemetry:
             row["telemetry"] = phase_telemetry
@@ -1292,6 +1344,8 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         status = "partial"
     elif sm121_storage_lifecycle_issues:
         status = "partial"
+    elif sm121_cache_observability_issues:
+        status = "partial"
     run_error = None
     if status == "aborted" and last_abort >= 0:
         aborted_event = events[last_abort]
@@ -1376,6 +1430,10 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         ),
         "cases": rows,
     }
+    if sm121_cache_observability_plan:
+        summary["sm121_cache_observability_lifecycle_issues"] = list(
+            sm121_cache_observability_issues
+        )
     if memory_run_results:
         memory_battery_completed = (
             planned_suite.get("id") == MEMORY_OPERATION_SUITE_ID

@@ -1,0 +1,27 @@
+schema_version = 1
+
+[suite]
+id = "qwen38-flash-next-sm121-triton-storage-cache-observability-canary"
+description = "B0 cache-off observability for the pre-admission Qwen3.8 Flash-Next SM121 native-NVMe runtime. It first requires a fresh-process exact-answer quality gate, then records one non-streaming zero-hit cache-detail and settled-metrics observation. This is not a cache-policy or throughput comparison."
+
+[[cases]]
+id = "synthetic-exact-answer-v2"
+kind = "quality"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 512
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "sm121-cache-zero-hit-observability-v1"
+kind = "capability"
+requires = ["chat"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 16
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0

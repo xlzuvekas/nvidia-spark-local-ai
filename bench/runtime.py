@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -38,6 +39,19 @@ from .sglang_sm121_storage import (
     is_sm121_storage_candidate,
     validate_sm121_storage_candidate,
     validate_sm121_storage_image_inspection,
+)
+from .sglang_sm121_cache_observability import (
+    SM121_CACHE_RUNTIME_ATTESTATION_EVENT,
+    SM121_CACHE_RUNTIME_EXPECTED,
+    SM121_CACHE_SOURCE_DIGESTS,
+    SM121_CACHE_STATIC_ASSERTIONS,
+    SM121_CACHE_STATIC_ATTESTATION_EVENT,
+    SM121_CACHE_ZERO_HIT_EXPECTED_RESPONSE,
+    SM121CacheObservabilityError,
+    sm121_cache_zero_hit_request_body,
+    validate_sm121_cache_zero_hit_request_contract,
+    validate_sm121_cache_runtime_attestation_event,
+    validate_sm121_cache_static_attestation_event,
 )
 from bench.qwen38_ple_cache import (
     PINNED_LAYOUT as QWEN38_PLE_LAYOUT,
@@ -1415,6 +1429,545 @@ def _start_sglang_sm121_storage(
         _redact_exception(startup_error, sensitive_values)
         raise startup_error
     return server
+
+
+# The B0 source check is intentionally a read-only, no-network, no-GPU
+# container invocation.  It binds the reviewed cache-selection and response
+# accounting files to the same local image ID used for serving, without
+# retaining source text or a container filesystem path in the result journal.
+_SM121_CACHE_SOURCE_FILES = {
+    "arg_overrides_sha256": "python/sglang/srt/arg_groups/overrides.py",
+    "cache_registry_sha256": "python/sglang/srt/mem_cache/registry.py",
+    "cache_builder_sha256": "python/sglang/srt/mem_cache/kv_cache_builder.py",
+    "runtime_context_sha256": "python/sglang/srt/runtime_context.py",
+    "metrics_collector_sha256": "python/sglang/srt/observability/metrics_collector.py",
+    "openai_utils_sha256": "python/sglang/srt/entrypoints/openai/utils.py",
+    "openai_protocol_sha256": "python/sglang/srt/entrypoints/openai/protocol.py",
+    "openai_serving_chat_sha256": (
+        "python/sglang/srt/entrypoints/openai/serving_chat.py"
+    ),
+    "openai_usage_processor_sha256": (
+        "python/sglang/srt/entrypoints/openai/usage_processor.py"
+    ),
+    "http_server_sha256": "python/sglang/srt/entrypoints/http_server.py",
+}
+_SM121_CACHE_STARTUP_RE = re.compile(
+    r"Tree cache initialized: source=(?P<cache_source>[a-z_]+) "
+    r"impl=(?P<cache_impl>[A-Za-z0-9_]+) "
+    r"hybrid_swa=(?P<hybrid_swa>True|False) "
+    r"hybrid_ssm=(?P<hybrid_ssm>True|False) "
+    r"hicache_attached=(?P<hicache_attached>True|False) "
+    r"streaming_wrapped=(?P<streaming_wrapped>True|False)"
+)
+_SM121_CACHE_METRIC_LINE_RE = re.compile(
+    r"^(?P<name>sglang:[A-Za-z0-9_:]+)"
+    r"(?:\{(?P<labels>[^}]*)\})?\s+"
+    r"(?P<value>[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)"
+    r"(?:\s+[0-9]+)?$"
+)
+_SM121_CACHE_LABEL_RE = re.compile(
+    r"(?:^|,)(?P<name>[A-Za-z_][A-Za-z0-9_]*)=\"(?P<value>(?:\\.|[^\"])*)\""
+)
+
+
+def attest_sm121_cache_observability_static_source(model: Any) -> dict[str, Any]:
+    """Return an exact scalar cache-source attestation for the local image.
+
+    This does not mount a snapshot, use a GPU, or retain raw source output.
+    A digest mismatch fails closed before the serving container is started.
+    """
+
+    try:
+        validate_sm121_storage_candidate(model)
+    except SM121StorageCandidateError as error:
+        raise RuntimeErrorWithContext(str(error)) from error
+    image_id = _sm121_storage_image_id(model)
+    source_files = tuple(_SM121_CACHE_SOURCE_FILES.values())
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--pull=never",
+        "--network",
+        "none",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=128m",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--entrypoint",
+        "/bin/sh",
+        image_id,
+        "-c",
+        "cd /sgl-workspace/sglang && sha256sum " + " ".join(source_files),
+    ]
+    try:
+        result = _run(command, check=False, timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeErrorWithContext(
+            "Could not inspect SM121 cache-source semantics"
+        ) from error
+    if result.returncode:
+        raise RuntimeErrorWithContext("SM121 cache-source inspection failed")
+    observed: dict[str, str] = {}
+    by_path = {path: field for field, path in _SM121_CACHE_SOURCE_FILES.items()}
+    for line in result.stdout.splitlines():
+        parts = line.split(maxsplit=1)
+        if len(parts) != 2 or parts[1] not in by_path:
+            raise RuntimeErrorWithContext("SM121 cache-source inspection was malformed")
+        digest, relative_path = parts
+        if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise RuntimeErrorWithContext("SM121 cache-source digest was malformed")
+        field = by_path[relative_path]
+        if field in observed:
+            raise RuntimeErrorWithContext("SM121 cache-source digest was duplicated")
+        observed[field] = "sha256:" + digest
+    if set(observed) != set(_SM121_CACHE_SOURCE_FILES):
+        raise RuntimeErrorWithContext("SM121 cache-source inspection was incomplete")
+    event = {
+        "event": SM121_CACHE_STATIC_ATTESTATION_EVENT,
+        "candidate_source_tree": SM121_STORAGE_SOURCE_TREE,
+        **observed,
+        **SM121_CACHE_STATIC_ASSERTIONS,
+    }
+    try:
+        validate_sm121_cache_static_attestation_event(event)
+    except SM121CacheObservabilityError as error:
+        raise RuntimeErrorWithContext("SM121 cache-source semantics changed") from error
+    return event
+
+
+def _sm121_cache_server_info_disable_radix(server: ManagedServer) -> bool:
+    """Extract only the cache-off boolean from an authenticated server-info reply."""
+
+    root = server.base_url.removesuffix("/v1").rstrip("/")
+    request = urllib.request.Request(
+        root + "/server_info", headers=_authorization_headers(server.authorization)
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = json.load(response)
+    except (OSError, ValueError, urllib.error.URLError) as error:
+        raise RuntimeErrorWithContext(
+            "Could not read the SM121 cache runtime attestation"
+        ) from error
+    values: list[bool] = []
+
+    def walk(value: object, *, depth: int = 0) -> None:
+        if depth > 24:
+            raise RuntimeErrorWithContext("SM121 server-info nesting is invalid")
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "disable_radix_cache":
+                    if type(child) is not bool:
+                        raise RuntimeErrorWithContext(
+                            "SM121 cache runtime flag is invalid"
+                        )
+                    values.append(child)
+                walk(child, depth=depth + 1)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child, depth=depth + 1)
+
+    walk(payload)
+    if not values or any(value is not values[0] for value in values[1:]):
+        raise RuntimeErrorWithContext("SM121 cache runtime flag is unavailable")
+    return values[0]
+
+
+def attest_sm121_cache_observability_runtime(server: ManagedServer) -> dict[str, Any]:
+    """Capture the one cache-off startup fact set without persisting logs/info."""
+
+    if server.backend != "sglang" or not server.container_id:
+        raise RuntimeErrorWithContext("SM121 cache runtime is not an owned SGLang server")
+    result = _run(
+        ["docker", "logs", "--tail", "4096", server.container_id],
+        check=False,
+        timeout=30,
+    )
+    if result.returncode:
+        raise RuntimeErrorWithContext("Could not read SM121 cache startup attestation")
+    matches = []
+    for line in (result.stdout + "\n" + result.stderr).splitlines():
+        found = _SM121_CACHE_STARTUP_RE.search(line)
+        if found is not None:
+            matches.append(found.groupdict())
+    if not matches or any(match != matches[0] for match in matches[1:]):
+        raise RuntimeErrorWithContext("SM121 cache startup attestation is unavailable")
+    parsed = matches[0]
+    event = {
+        "event": SM121_CACHE_RUNTIME_ATTESTATION_EVENT,
+        "cache_impl": parsed["cache_impl"],
+        "cache_source": parsed["cache_source"],
+        "hybrid_swa": parsed["hybrid_swa"] == "True",
+        "hybrid_ssm": parsed["hybrid_ssm"] == "True",
+        "hicache_attached": parsed["hicache_attached"] == "True",
+        "streaming_wrapped": parsed["streaming_wrapped"] == "True",
+        "disable_radix_cache": _sm121_cache_server_info_disable_radix(server),
+        # These two booleans are the source-attested predicates for the
+        # observed cache-off server-info flag; the exact source hashes were
+        # recorded before startup and validate this implication.
+        "mamba_extra_buffer_enabled": False,
+        "mamba_extra_buffer_lazy_enabled": False,
+    }
+    try:
+        validate_sm121_cache_runtime_attestation_event(event)
+    except SM121CacheObservabilityError as error:
+        raise RuntimeErrorWithContext("SM121 cache runtime semantics changed") from error
+    return event
+
+
+def _sm121_cache_metric_defaults() -> dict[str, Any]:
+    return {
+        "available": False,
+        "prefill_input_tokens": 0,
+        "prefill_device_hit_tokens": 0,
+        "prefill_host_hit_tokens": 0,
+        "prefill_storage_hit_tokens": 0,
+        "cached_total_tokens": 0,
+        "cached_device_tokens": 0,
+        "cached_host_tokens": 0,
+        "cached_storage_tokens": 0,
+        "cached_total_series_present": False,
+        "cached_device_series_present": False,
+        "cached_host_series_present": False,
+        "cached_storage_series_present": False,
+        "kv_available_tokens": 0,
+        "kv_evictable_tokens": 0,
+        "kv_used_tokens": 0,
+        "mamba_available_tokens": 0,
+        "mamba_evictable_tokens": 0,
+        "mamba_used_tokens": 0,
+    }
+
+
+def _sm121_cache_labels(raw: str | None) -> dict[str, str] | None:
+    if raw in {None, ""}:
+        return {}
+    labels: dict[str, str] = {}
+    position = 0
+    for match in _SM121_CACHE_LABEL_RE.finditer(raw):
+        if match.start() != position:
+            return None
+        position = match.end()
+        labels[match.group("name")] = match.group("value")
+    return labels if position == len(raw) else None
+
+
+def _sm121_cache_metric_integer(raw: str) -> int | None:
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    if not math.isfinite(value) or value < 0 or not value.is_integer():
+        return None
+    return int(value)
+
+
+def snapshot_sm121_cache_observability_metrics(server: ManagedServer) -> dict[str, Any]:
+    """Read a scalar-only B0 metrics snapshot, returning ``available=false`` on gaps."""
+
+    snapshot = _sm121_cache_metric_defaults()
+    root = server.base_url.removesuffix("/v1").rstrip("/")
+    request = urllib.request.Request(
+        root + "/metrics", headers=_authorization_headers(server.authorization)
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            text = response.read().decode("utf-8", errors="replace")
+    except (OSError, urllib.error.URLError) as error:
+        del error
+        return snapshot
+    prefill_seen = {
+        "input": False,
+        "device_hit": False,
+        "host_hit": False,
+        "storage_hit": False,
+    }
+    gauge_seen = {
+        "sglang:kv_available_tokens": False,
+        "sglang:kv_evictable_tokens": False,
+        "sglang:kv_used_tokens": False,
+        "sglang:mamba_available_tokens": False,
+        "sglang:mamba_evictable_tokens": False,
+        "sglang:mamba_used_tokens": False,
+    }
+    gauges = {
+        "sglang:kv_available_tokens": "kv_available_tokens",
+        "sglang:kv_evictable_tokens": "kv_evictable_tokens",
+        "sglang:kv_used_tokens": "kv_used_tokens",
+        "sglang:mamba_available_tokens": "mamba_available_tokens",
+        "sglang:mamba_evictable_tokens": "mamba_evictable_tokens",
+        "sglang:mamba_used_tokens": "mamba_used_tokens",
+    }
+    cached_seen = {
+        "total": False,
+        "device": False,
+        "host": False,
+        "storage": False,
+    }
+    malformed = False
+    for line in text.splitlines():
+        match = _SM121_CACHE_METRIC_LINE_RE.fullmatch(line)
+        if match is None:
+            continue
+        name = match.group("name")
+        if name not in {
+            "sglang:prefill_effective_tokens_total",
+            "sglang:cached_tokens_total",
+            *gauges,
+        }:
+            continue
+        labels = _sm121_cache_labels(match.group("labels"))
+        value = _sm121_cache_metric_integer(match.group("value"))
+        if labels is None or value is None:
+            malformed = True
+            continue
+        if name == "sglang:prefill_effective_tokens_total":
+            mode = labels.get("mode")
+            field = {
+                "input": "prefill_input_tokens",
+                "device_hit": "prefill_device_hit_tokens",
+                "host_hit": "prefill_host_hit_tokens",
+                "storage_hit": "prefill_storage_hit_tokens",
+            }.get(mode)
+            if field is None or labels != {"mode": mode} or prefill_seen[mode]:
+                malformed = True
+                continue
+            snapshot[field] = value
+            prefill_seen[mode] = True
+        elif name == "sglang:cached_tokens_total":
+            source = labels.get("cache_source")
+            source_kind = (
+                "total"
+                if source == "total"
+                else "device"
+                if source == "device"
+                else "host"
+                if source == "host"
+                else "storage"
+                if isinstance(source, str) and source.startswith("storage_")
+                else None
+            )
+            if (
+                source_kind is None
+                or labels != {"cache_source": source}
+                or cached_seen[source_kind]
+            ):
+                malformed = True
+                continue
+            snapshot[f"cached_{source_kind}_tokens"] = value
+            snapshot[f"cached_{source_kind}_series_present"] = True
+            cached_seen[source_kind] = True
+        else:
+            if labels:
+                malformed = True
+                continue
+            field = gauges[name]
+            if gauge_seen[name]:
+                malformed = True
+                continue
+            snapshot[field] = value
+            gauge_seen[name] = True
+    snapshot["available"] = not malformed and all(prefill_seen.values()) and all(
+        gauge_seen.values()
+    )
+    return snapshot
+
+
+def settle_sm121_cache_observability_metrics(
+    server: ManagedServer, *, timeout_s: float = 45.0, poll_interval_s: float = 1.0
+) -> tuple[dict[str, Any], float, int, bool]:
+    """Wait for two identical scalar metric views; never retain raw metrics text."""
+
+    started = time.monotonic()
+    previous: dict[str, Any] | None = None
+    polls = 0
+    while True:
+        current = snapshot_sm121_cache_observability_metrics(server)
+        polls += 1
+        if not current["available"]:
+            return current, time.monotonic() - started, polls, False
+        if previous == current:
+            return current, time.monotonic() - started, polls, True
+        if time.monotonic() - started >= timeout_s:
+            return current, time.monotonic() - started, polls, False
+        previous = current
+        time.sleep(poll_interval_s)
+
+
+def _sm121_cache_exact_json_count(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RuntimeErrorWithContext(f"SM121 cache response {field} is invalid")
+    return value
+
+
+def _sm121_cache_optional_json_count(value: object, field: str) -> int | None:
+    if value is None:
+        return None
+    return _sm121_cache_exact_json_count(value, field)
+
+
+def _sm121_cache_response_detail_observation(
+    payload: dict[str, Any]
+) -> tuple[str, int | None, int | None, int | None]:
+    """Extract only cache-detail states/counts, never response content or IDs."""
+
+    if "sglext" not in payload:
+        return "omitted", None, None, None
+    extension = payload["sglext"]
+    if extension is None:
+        return "null", None, None, None
+    if not isinstance(extension, dict):
+        return "unexpected", None, None, None
+    if "cached_tokens_details" not in extension:
+        return "omitted", None, None, None
+    details = extension["cached_tokens_details"]
+    if details is None:
+        return "null", None, None, None
+    if (
+        not isinstance(details, dict)
+        or set(details) - {"device", "host", "storage", "storage_backend"}
+        or not {"device", "host", "storage"}.issubset(details)
+    ):
+        return "unexpected", None, None, None
+    try:
+        device = _sm121_cache_exact_json_count(
+            details["device"], "response device cached tokens"
+        )
+        host = _sm121_cache_exact_json_count(
+            details["host"], "response host cached tokens"
+        )
+        storage = _sm121_cache_exact_json_count(
+            details["storage"], "response storage cached tokens"
+        )
+    except RuntimeErrorWithContext:
+        return "unexpected", None, None, None
+    state = "zero_details" if (device, host, storage) == (0, 0, 0) else "nonzero_details"
+    return state, device, host, storage
+
+
+def _sm121_cache_usage_detail_observation(
+    usage: dict[str, Any]
+) -> tuple[str, int | None]:
+    """Extract only the exact OpenAI usage cache detail state/count."""
+
+    if "prompt_tokens_details" not in usage:
+        return "omitted", None
+    details = usage["prompt_tokens_details"]
+    if details is None:
+        return "null", None
+    if not isinstance(details, dict) or set(details) != {"cached_tokens"}:
+        return "unexpected", None
+    try:
+        cached = _sm121_cache_exact_json_count(
+            details["cached_tokens"], "usage cached tokens"
+        )
+    except RuntimeErrorWithContext:
+        return "unexpected", None
+    return ("zero_details" if cached == 0 else "nonzero_details"), cached
+
+
+def request_sm121_cache_observability_zero_hit(
+    server: ManagedServer, *, served_name: object
+) -> dict[str, Any]:
+    """Run B0's one non-streaming request and return scalar observations only.
+
+    The response body remains in memory only long enough to verify the strict
+    protocol fields below.  It is never returned, journaled, logged, or added
+    to an exception, so generated text, reasoning, tool payloads, IDs, and
+    server model strings cannot enter a tracked evidence path.
+    """
+
+    parsed = urlsplit(server.base_url)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != "127.0.0.1"
+        or parsed.port is None
+        or parsed.path.rstrip("/") != "/v1"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeErrorWithContext("SM121 cache request endpoint is not loopback")
+    try:
+        validate_sm121_cache_zero_hit_request_contract()
+        request_body = sm121_cache_zero_hit_request_body(served_name)
+    except SM121CacheObservabilityError as error:
+        raise RuntimeErrorWithContext("SM121 cache request contract is invalid") from error
+    request = urllib.request.Request(
+        server.base_url.rstrip("/") + "/chat/completions",
+        data=json.dumps(request_body, separators=(",", ":")).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            **_authorization_headers(server.authorization),
+        },
+    )
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(request, timeout=900) as response:
+            raw = response.read(1_048_577)
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise RuntimeErrorWithContext("SM121 cache zero-hit request was rejected") from None
+    except (OSError, urllib.error.URLError, TimeoutError) as error:
+        raise RuntimeErrorWithContext("SM121 cache zero-hit request failed") from error
+    elapsed_s = time.monotonic() - started
+    if len(raw) > 1_048_576:
+        raise RuntimeErrorWithContext("SM121 cache zero-hit response exceeded its limit")
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeErrorWithContext("SM121 cache zero-hit response was invalid") from error
+    if not isinstance(payload, dict):
+        raise RuntimeErrorWithContext("SM121 cache zero-hit response was not an object")
+    usage = payload.get("usage")
+    choices = payload.get("choices")
+    if (
+        not isinstance(usage, dict)
+        or not isinstance(choices, list)
+        or len(choices) != 1
+    ):
+        raise RuntimeErrorWithContext("SM121 cache zero-hit response lacks required scalars")
+    if not all(isinstance(choice, dict) for choice in choices):
+        raise RuntimeErrorWithContext("SM121 cache zero-hit response choices are invalid")
+    message = choices[0].get("message")
+    if (
+        not isinstance(message, dict)
+        or not isinstance(message.get("content"), str)
+        or message["content"].strip() != SM121_CACHE_ZERO_HIT_EXPECTED_RESPONSE
+    ):
+        raise RuntimeErrorWithContext("SM121 cache zero-hit response failed validation")
+    prompt_tokens = _sm121_cache_exact_json_count(
+        usage.get("prompt_tokens"), "prompt tokens"
+    )
+    completion_tokens = _sm121_cache_exact_json_count(
+        usage.get("completion_tokens"), "completion tokens"
+    )
+    if completion_tokens <= 0:
+        raise RuntimeErrorWithContext("SM121 cache zero-hit response has no completion")
+    reasoning_tokens = _sm121_cache_optional_json_count(
+        usage.get("reasoning_tokens"), "reasoning tokens"
+    )
+    response_state, response_device, response_host, response_storage = (
+        _sm121_cache_response_detail_observation(payload)
+    )
+    usage_state, usage_cached = _sm121_cache_usage_detail_observation(usage)
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "elapsed_s": elapsed_s,
+        "response_detail_state": response_state,
+        "response_device_cached_tokens": response_device,
+        "response_host_cached_tokens": response_host,
+        "response_storage_cached_tokens": response_storage,
+        "usage_detail_state": usage_state,
+        "usage_cached_tokens": usage_cached,
+    }
 
 
 def _resolve_sglang_source_overlays(

@@ -94,6 +94,28 @@ from .sglang_sm121_storage import (
     validate_sm121_storage_runtime_provenance_event,
     validate_sm121_storage_suite,
 )
+from .sglang_sm121_cache_observability import (
+    SM121_CACHE_OBSERVABILITY_EXECUTION_MODE,
+    SM121_CACHE_OBSERVABILITY_SUITE_ID,
+    SM121_CACHE_RUNTIME_ATTESTATION_EVENT,
+    SM121_CACHE_RUNTIME_EXPECTED,
+    SM121_CACHE_SOURCE_DIGESTS,
+    SM121_CACHE_STATIC_ASSERTIONS,
+    SM121_CACHE_STATIC_ATTESTATION_EVENT,
+    SM121_CACHE_ZERO_HIT_CASE_ID,
+    SM121_CACHE_ZERO_HIT_EVENT,
+    SM121_CACHE_ZERO_HIT_MAX_OUTPUT_TOKENS,
+    SM121_CACHE_ZERO_HIT_REQUEST_CONTRACT_SHA256,
+    SM121CacheObservabilityError,
+    expected_sm121_cache_observability_event_counts,
+    is_sm121_cache_observability_plan,
+    sm121_cache_observability_lifecycle_issues,
+    validate_sm121_cache_observability_candidate,
+    validate_sm121_cache_observability_suite,
+    validate_sm121_cache_runtime_attestation_event,
+    validate_sm121_cache_static_attestation_event,
+    validate_sm121_cache_zero_hit_event,
+)
 
 
 SCHEMA_VERSION = "sparkbench-evidence-v1"
@@ -214,6 +236,11 @@ _SM121_STORAGE_PLAN_FINGERPRINT = "617357ba7d410d9e"
 _SM121_STORAGE_CASE_IDS = (
     "synthetic-exact-answer-v2--0ea3ba190d2c",
     "sm121-varied-context-needle-19000-mid-s20260828-c1-v1--3603f19f5a65",
+)
+_SM121_CACHE_OBSERVABILITY_PLAN_FINGERPRINT = "e83f69430252394f"
+_SM121_CACHE_OBSERVABILITY_CASE_IDS = (
+    "synthetic-exact-answer-v2--4660f9c6f3d1",
+    "sm121-cache-zero-hit-observability-v1--9cd3f7845105",
 )
 _SM121_STORAGE_MODEL_SOURCE_FIELDS = frozenset(
     {
@@ -1070,6 +1097,9 @@ _KNOWN_EVENTS = {
     "server_kept",
     "server_ready",
     "server_stopped",
+    SM121_CACHE_STATIC_ATTESTATION_EVENT,
+    SM121_CACHE_RUNTIME_ATTESTATION_EVENT,
+    SM121_CACHE_ZERO_HIT_EVENT,
     SM121_STORAGE_RUNTIME_PROVENANCE_EVENT,
     "sglang_spec_decode_metrics_snapshot",
     "vllm_spec_decode_metrics_snapshot",
@@ -1813,6 +1843,7 @@ _CASE_FIELDS = {
     "output_tokens",
     "output_tokens_per_nfe",
     "output_tokens_per_sampled_joule",
+    "observability_only",
     "outputs_stable",
     "p95_approximate_prefill_tps",
     "p95_e2e_s",
@@ -1830,8 +1861,8 @@ _CASE_FIELDS = {
     "quality_total_completion_tokens",
     "quality_total_prompt_tokens",
     "quality_total_reasoning_tokens",
-    "reasoning_tokens",
     "quality_total_request_latency_s",
+    "reasoning_tokens",
     "request_tps",
     "requests",
     "rerank_candidates_per_request",
@@ -1859,6 +1890,7 @@ _CASE_BOOLEAN_FIELDS = {
     "measurement_valid",
     "multimodal_embedding_validation_passed",
     "multimodal_embeddings_finite",
+    "observability_only",
     "outputs_stable",
     "rerank_ranking_stable",
     "rerank_scores_finite",
@@ -1890,6 +1922,7 @@ _CASE_NULLABLE_FIELDS = {
     "p95_e2e_s",
     "p95_prefill_tps",
     "p95_ttft_s",
+    "quality_total_request_latency_s",
     "quality_total_reasoning_tokens",
     "reasoning_tokens",
     "request_tps",
@@ -2080,6 +2113,7 @@ _SUMMARY_KEYS = {
     "schema_version",
     "shutdown_telemetry",
     "speculative_decoding",
+    "sm121_cache_observability_lifecycle_issues",
     "startup_measurement_annotations",
     "startup_measurement_valid",
     "startup_safety_gates",
@@ -2986,20 +3020,40 @@ def _normalize_status(summary: dict[str, Any] | None, events: list[dict[str, Any
     return "nonterminal"
 
 
-def _selects_sm121_storage_canary(plan: dict[str, Any]) -> bool:
-    """Recognize every singleton selector so partial downgrades fail closed."""
+def _sm121_singleton_lane(plan: dict[str, Any]) -> str | None:
+    """Classify an SM121 singleton plan without allowing suite downgrades."""
 
     model = plan.get("model")
     suite = plan.get("suite")
-    return bool(
+    model_marker = bool(
         isinstance(model, dict)
         and (
             model.get("id") == SM121_STORAGE_PROFILE_ID
             or model.get("sglang_storage_mode") == SM121_STORAGE_MODE
         )
-        or isinstance(suite, dict)
-        and suite.get("id") == SM121_STORAGE_SUITE_ID
     )
+    suite_id = suite.get("id") if isinstance(suite, dict) else None
+    suite_marker = suite_id in {
+        SM121_STORAGE_SUITE_ID,
+        SM121_CACHE_OBSERVABILITY_SUITE_ID,
+    }
+    if not model_marker and not suite_marker:
+        return None
+    if not model_marker or not suite_marker:
+        raise EvidenceError("SM121 singleton profile and suite binding is incomplete")
+    if suite_id == SM121_STORAGE_SUITE_ID:
+        return "storage"
+    if suite_id == SM121_CACHE_OBSERVABILITY_SUITE_ID:
+        return "cache_observability"
+    raise EvidenceError("SM121 singleton suite binding is invalid")
+
+
+def _selects_sm121_storage_canary(plan: dict[str, Any]) -> bool:
+    return _sm121_singleton_lane(plan) == "storage"
+
+
+def _selects_sm121_cache_observability(plan: dict[str, Any]) -> bool:
+    return _sm121_singleton_lane(plan) == "cache_observability"
 
 
 def _expected_sm121_storage_model() -> dict[str, Any]:
@@ -3056,6 +3110,104 @@ def _expected_sm121_storage_suite() -> dict[str, Any]:
                 "warmups": 0,
             },
         ],
+    }
+
+
+def _expected_sm121_cache_observability_suite() -> dict[str, Any]:
+    return {
+        "id": SM121_CACHE_OBSERVABILITY_SUITE_ID,
+        "schema_version": 1,
+        "cases": [
+            {
+                "case_id": _SM121_CACHE_OBSERVABILITY_CASE_IDS[0],
+                "concurrency": 1,
+                "id": "synthetic-exact-answer-v2",
+                "kind": "quality",
+                "max_output_tokens": 512,
+                "max_turns": 1,
+                "prompt_repetitions": 0,
+                "repetitions": 1,
+                "requires": ["chat"],
+                "temperature": 0.0,
+                "warmups": 0,
+            },
+            {
+                "case_id": _SM121_CACHE_OBSERVABILITY_CASE_IDS[1],
+                "concurrency": 1,
+                "id": SM121_CACHE_ZERO_HIT_CASE_ID,
+                "kind": "capability",
+                "max_output_tokens": SM121_CACHE_ZERO_HIT_MAX_OUTPUT_TOKENS,
+                "max_turns": 1,
+                "prompt_repetitions": 0,
+                "repetitions": 1,
+                "requires": ["chat"],
+                "temperature": 0.0,
+                "warmups": 0,
+            },
+        ],
+    }
+
+
+def _sm121_cache_observability_runtime(
+    *,
+    static_event: dict[str, Any],
+    runtime_event: dict[str, Any],
+    zero_event: dict[str, Any],
+) -> dict[str, Any]:
+    """Project B0's scalar cache proof, excluding raw event identifiers."""
+
+    static_fields = {
+        key: value
+        for key, value in static_event.items()
+        if key not in {"event", "timestamp"}
+    }
+    runtime_fields = {
+        key: value
+        for key, value in runtime_event.items()
+        if key not in {"event", "timestamp"}
+    }
+    zero_fields = {
+        key: value
+        for key, value in zero_event.items()
+        if key not in {"event", "timestamp", "attempt_id"}
+    }
+    return {
+        "api_authentication": "ephemeral_bearer",
+        "api_key_file_mode": "0600",
+        "audit_issue_count": 0,
+        "benchmark_scope": "sm121_cache_observability_b0",
+        "build_contract_sha256": _sha256(
+            SM121_STORAGE_BUILD_CONTRACT_SHA256,
+            name="SM121 storage build contract",
+        ),
+        "cache_runtime_attestation": runtime_fields,
+        "cache_static_attestation": static_fields,
+        "candidate_source_revision": SM121_STORAGE_SOURCE_TREE,
+        "container_capabilities": "dropped_all",
+        "container_no_new_privileges": True,
+        "container_rootfs": "readonly_tmpfs_writable_cache",
+        "docker_image_sha256": _sha256(
+            SM121_STORAGE_LOCAL_IMAGE_ID,
+            name="SM121 storage local image",
+        ),
+        "fresh_server_lifetime_count": 1,
+        "fresh_server_lifetimes": [1],
+        "hf_network_policy": "offline",
+        "model_acquisition": "disabled_exact_read_only_snapshot",
+        "network_topology": "loopback_published_bridge",
+        "platform": SM121_STORAGE_PLATFORM,
+        "plan_fingerprint": _SM121_CACHE_OBSERVABILITY_PLAN_FINGERPRINT,
+        "seccomp_profile_sha256": _sha256(
+            "sha256:" + SM121_STORAGE_SECCOMP_SHA256,
+            name="SM121 storage seccomp profile",
+        ),
+        "sglang_ple_nvme_backend": "io_uring",
+        "sglang_ple_nvme_cache_pages": SM121_STORAGE_CACHE_PAGES,
+        "sglang_ple_nvme_max_batch_pages": SM121_STORAGE_MAX_BATCH_PAGES,
+        "sglang_ple_nvme_queue_depth": SM121_STORAGE_QUEUE_DEPTH,
+        "sglang_rust_build_mode": "never",
+        "sglang_storage_mode": SM121_STORAGE_MODE,
+        "zero_hit_observation": zero_fields,
     }
 
 
@@ -3254,6 +3406,155 @@ def _validate_sm121_storage_source(
     }:
         raise EvidenceError("SM121 storage canary requires a terminal summary")
     return _expected_sm121_storage_runtime_provenance()
+
+
+def _validate_sm121_cache_observability_source(
+    plan: dict[str, Any],
+    events: list[dict[str, Any]],
+    summary: dict[str, Any] | None,
+    *,
+    source_run_id: str,
+) -> dict[str, Any] | None:
+    """Authenticate B0's frozen cache-off source before publishing scalars."""
+
+    if not _selects_sm121_cache_observability(plan):
+        return None
+    if type(plan.get("schema_version")) is not int or plan["schema_version"] != 2:
+        raise EvidenceError("SM121 B0 requires frozen plan schema 2")
+    if set(plan) != {
+        "created_at",
+        "fingerprint",
+        "host_at_plan",
+        "integrity_hash",
+        "model",
+        "models_manifest",
+        "resolved",
+        "run_nonce",
+        "schema_version",
+        "suite",
+        "suite_manifest",
+    }:
+        raise EvidenceError("SM121 B0 plan schema changed")
+    model = plan.get("model")
+    suite = plan.get("suite")
+    resolved = plan.get("resolved")
+    if (
+        not isinstance(model, dict)
+        or set(model) != _SM121_STORAGE_MODEL_SOURCE_FIELDS
+        or not isinstance(suite, dict)
+        or set(suite) != {"cases", "description", "id", "schema_version"}
+        or not isinstance(resolved, dict)
+        or set(resolved) != {"image_digest", "local_image"}
+    ):
+        raise EvidenceError("SM121 B0 frozen records changed")
+    try:
+        if not is_sm121_cache_observability_plan(model, suite):
+            raise SM121CacheObservabilityError("B0 plan selector is invalid")
+        validate_sm121_cache_observability_candidate(model)
+        validate_sm121_cache_observability_suite(suite)
+    except SM121CacheObservabilityError as error:
+        raise EvidenceError(f"invalid SM121 B0 plan: {error}") from error
+    if not _json_strict_equal(_project_model(plan, summary), _expected_sm121_storage_model()):
+        raise EvidenceError("SM121 B0 public model identity changed")
+    cases = suite.get("cases")
+    if not isinstance(cases, list) or len(cases) != 2:
+        raise EvidenceError("SM121 B0 case records changed")
+    for index, (case, expected_case_id) in enumerate(
+        zip(cases, _SM121_CACHE_OBSERVABILITY_CASE_IDS, strict=True)
+    ):
+        if not isinstance(case, dict) or set(case) != {
+            "case_id",
+            "concurrency",
+            "id",
+            "kind",
+            "max_output_tokens",
+            "max_turns",
+            "prompt_repetitions",
+            "repetitions",
+            "requires",
+            "temperature",
+            "warmups",
+        }:
+            raise EvidenceError("SM121 B0 case schema changed")
+        unbound = {key: value for key, value in case.items() if key != "case_id"}
+        calculated = f"{case['id']}--{content_hash({'model': model, 'case': unbound}, 12)}"
+        if case.get("case_id") != expected_case_id or calculated != expected_case_id:
+            raise EvidenceError(f"SM121 B0 case {index} lost its frozen binding")
+    if not _json_strict_equal(
+        resolved.get("local_image"),
+        {
+            "docker_image_id": SM121_STORAGE_LOCAL_IMAGE_ID,
+            "platform": SM121_STORAGE_PLATFORM,
+            "source_tree": SM121_STORAGE_SOURCE_TREE,
+        },
+    ) or resolved.get("image_digest") is not None:
+        raise EvidenceError("SM121 B0 local image identity changed")
+    fingerprint_basis = {
+        "model": model,
+        "suite": {
+            **suite,
+            "cases": [
+                {key: value for key, value in case.items() if key != "case_id"}
+                for case in cases
+            ],
+        },
+        "resolved": resolved,
+    }
+    fingerprint = plan.get("fingerprint")
+    if (
+        fingerprint != _SM121_CACHE_OBSERVABILITY_PLAN_FINGERPRINT
+        or content_hash(fingerprint_basis) != fingerprint
+        or not source_run_id.endswith("-" + fingerprint[:8])
+    ):
+        raise EvidenceError("SM121 B0 plan fingerprint changed")
+    integrity = plan.get("integrity_hash")
+    integrity_basis = {key: value for key, value in plan.items() if key != "integrity_hash"}
+    if (
+        not isinstance(integrity, str)
+        or re.fullmatch(r"[0-9a-f]{64}", integrity) is None
+        or content_hash(integrity_basis, 64) != integrity
+        or not isinstance(plan.get("run_nonce"), str)
+        or re.fullmatch(r"[0-9a-f]{32}", plan["run_nonce"]) is None
+    ):
+        raise EvidenceError("SM121 B0 plan integrity changed")
+    issues = sm121_cache_observability_lifecycle_issues(
+        events, planned_case_ids=_SM121_CACHE_OBSERVABILITY_CASE_IDS
+    )
+    if issues:
+        codes = sorted(
+            str(issue.get("code")) for issue in issues if isinstance(issue, dict)
+        )
+        raise EvidenceError("SM121 B0 lifecycle audit failed: " + ", ".join(codes))
+    static_events = [
+        event for event in events if event.get("event") == SM121_CACHE_STATIC_ATTESTATION_EVENT
+    ]
+    runtime_events = [
+        event for event in events if event.get("event") == SM121_CACHE_RUNTIME_ATTESTATION_EVENT
+    ]
+    zero_events = [
+        event for event in events if event.get("event") == SM121_CACHE_ZERO_HIT_EVENT
+    ]
+    if not (len(static_events) == len(runtime_events) == len(zero_events) == 1):
+        raise EvidenceError("SM121 B0 cache attestation events are incomplete")
+    static_event = static_events[0]
+    runtime_event = runtime_events[0]
+    zero_event = zero_events[0]
+    try:
+        validate_sm121_cache_static_attestation_event(static_event)
+        validate_sm121_cache_runtime_attestation_event(runtime_event)
+        validate_sm121_cache_zero_hit_event(zero_event)
+    except SM121CacheObservabilityError as error:
+        raise EvidenceError("SM121 B0 cache attestation changed") from error
+    if not isinstance(summary, dict):
+        raise EvidenceError("SM121 B0 requires a terminal summary")
+    expected_status = "complete" if zero_event["zero_hit_admitted"] else "partial"
+    if summary.get("status") != expected_status:
+        raise EvidenceError("SM121 B0 summary status disagrees with its observation")
+    return _sm121_cache_observability_runtime(
+        static_event=static_event,
+        runtime_event=runtime_event,
+        zero_event=zero_event,
+    )
 
 
 def _project_model(plan: dict[str, Any], summary: dict[str, Any] | None) -> dict[str, Any]:
@@ -3748,7 +4049,10 @@ def _project_suite(plan: dict[str, Any]) -> dict[str, Any] | None:
             }
         return None
     raw_cases = suite.get("cases")
-    if suite.get("id") == SM121_STORAGE_SUITE_ID:
+    if suite.get("id") in {
+        SM121_STORAGE_SUITE_ID,
+        SM121_CACHE_OBSERVABILITY_SUITE_ID,
+    }:
         projected = {
             "id": _safe_id(suite.get("id"), name="suite.id"),
             "schema_version": suite.get("schema_version"),
@@ -3756,7 +4060,7 @@ def _project_suite(plan: dict[str, Any]) -> dict[str, Any] | None:
         }
         for case in suite.get("cases", []):
             if not isinstance(case, dict):
-                raise EvidenceError("SM121 storage suite case must be an object")
+                raise EvidenceError("SM121 singleton suite case must be an object")
             projected["cases"].append(
                 {
                     key: (
@@ -3783,8 +4087,13 @@ def _project_suite(plan: dict[str, Any]) -> dict[str, Any] | None:
                     }
                 }
             )
-        if not _json_strict_equal(projected, _expected_sm121_storage_suite()):
-            raise EvidenceError("SM121 storage canary public suite identity changed")
+        expected_suite = (
+            _expected_sm121_storage_suite()
+            if suite.get("id") == SM121_STORAGE_SUITE_ID
+            else _expected_sm121_cache_observability_suite()
+        )
+        if not _json_strict_equal(projected, expected_suite):
+            raise EvidenceError("SM121 singleton public suite identity changed")
         return projected
     if suite.get("id") == AUTORESEARCH_SUITE_ID:
         return _project_autoresearch_suite(suite, source_model=plan.get("model"))
@@ -4455,6 +4764,13 @@ def _validate_sm121_storage_published_bundle(
     if not (
         isinstance(suite, dict) and suite.get("id") == SM121_STORAGE_SUITE_ID
     ):
+        if (
+            isinstance(suite, dict)
+            and suite.get("id") == SM121_CACHE_OBSERVABILITY_SUITE_ID
+        ):
+            # The cache-off B0 lane intentionally shares the frozen candidate
+            # profile but has its own exact public-bundle validator below.
+            return
         if isinstance(model, dict) and model.get("id") == SM121_STORAGE_PROFILE_ID:
             raise EvidenceError("SM121 storage model lost its exact suite binding")
         return
@@ -4684,6 +5000,322 @@ def _validate_sm121_storage_published_bundle(
     ):
         if not _json_strict_equal(varied_case.get(key), expected):
             raise EvidenceError(f"SM121 storage varied-context aggregate {key} changed")
+
+
+def _validate_sm121_cache_observability_published_bundle(
+    manifest: dict[str, Any],
+    samples: list[dict[str, Any]],
+    aggregates: dict[str, Any],
+) -> None:
+    """Validate B0's exact scalar-only public bundle.
+
+    The source journal contains a narrowly scoped cache proof.  This second
+    validation matters after checksum refresh: it prevents that proof from
+    being replaced by a generic SGLang serving bundle, and prevents B0 from
+    acquiring a throughput interpretation through its aggregates.
+    """
+
+    suite = manifest.get("suite")
+    model = manifest.get("model")
+    runtime = manifest.get("runtime")
+    if not (
+        isinstance(suite, dict)
+        and suite.get("id") == SM121_CACHE_OBSERVABILITY_SUITE_ID
+    ):
+        if (
+            isinstance(runtime, dict)
+            and "sm121_cache_observability" in runtime
+        ):
+            raise EvidenceError("SM121 B0 runtime lost its exact suite binding")
+        return
+    if not _json_strict_equal(model, _expected_sm121_storage_model()):
+        raise EvidenceError("published SM121 B0 model identity changed")
+    if not _json_strict_equal(suite, _expected_sm121_cache_observability_suite()):
+        raise EvidenceError("published SM121 B0 suite identity changed")
+    if not isinstance(runtime, dict):
+        raise EvidenceError("published SM121 B0 runtime is missing")
+    proof = runtime.get("sm121_cache_observability")
+    if not isinstance(proof, dict):
+        raise EvidenceError("published SM121 B0 cache proof is missing")
+    static = proof.get("cache_static_attestation")
+    observed_runtime = proof.get("cache_runtime_attestation")
+    zero = proof.get("zero_hit_observation")
+    if not (
+        isinstance(static, dict)
+        and isinstance(observed_runtime, dict)
+        and isinstance(zero, dict)
+    ):
+        raise EvidenceError("published SM121 B0 cache proof is malformed")
+    static_event = {"event": SM121_CACHE_STATIC_ATTESTATION_EVENT, **static}
+    runtime_event = {"event": SM121_CACHE_RUNTIME_ATTESTATION_EVENT, **observed_runtime}
+    zero_event = {
+        "event": SM121_CACHE_ZERO_HIT_EVENT,
+        "attempt_id": "evidence-verifier",
+        **zero,
+    }
+    try:
+        validate_sm121_cache_static_attestation_event(static_event)
+        validate_sm121_cache_runtime_attestation_event(runtime_event)
+        validate_sm121_cache_zero_hit_event(zero_event)
+    except SM121CacheObservabilityError as error:
+        raise EvidenceError("published SM121 B0 cache proof changed") from error
+    if zero_event.get("case_id") != _SM121_CACHE_OBSERVABILITY_CASE_IDS[1]:
+        raise EvidenceError("published SM121 B0 zero-hit case binding changed")
+    expected_proof = _sm121_cache_observability_runtime(
+        static_event=static_event,
+        runtime_event=runtime_event,
+        zero_event=zero_event,
+    )
+    expected_runtime = {
+        "backend": "sglang",
+        "image": SM121_STORAGE_LOCAL_IMAGE_TAG,
+        "lifecycle": "docker",
+        "sglang_ple_cache_mode": "disabled",
+        "sglang_ple_mmap": False,
+        "sglang_ple_omitted": False,
+        "sglang_provenance_version": _SGLANG_PROVENANCE_CURRENT_VERSION,
+        "sglang_source_overlay_artifacts": [],
+        "sm121_cache_observability": expected_proof,
+    }
+    if not _json_strict_equal(runtime, expected_runtime):
+        raise EvidenceError("published SM121 B0 runtime identity changed")
+    expected_artifacts = [
+        {
+            "role": "container_image",
+            "sha256": expected_proof["docker_image_sha256"],
+            "target": "container-image",
+        }
+    ]
+    if not _json_strict_equal(manifest.get("artifacts"), expected_artifacts):
+        raise EvidenceError("published SM121 B0 image artifact changed")
+
+    expected_event_counts = expected_sm121_cache_observability_event_counts()
+    lifecycle = manifest.get("lifecycle")
+    if (
+        not isinstance(lifecycle, dict)
+        or lifecycle.get("terminal") is not True
+        or lifecycle.get("terminal_event") != "run_complete"
+        or not _json_strict_equal(lifecycle.get("event_counts"), expected_event_counts)
+        or lifecycle.get("event_count") != sum(expected_event_counts.values())
+        or "failure" in lifecycle
+    ):
+        raise EvidenceError("published SM121 B0 lifecycle changed")
+    if "journal_elapsed_s" in lifecycle:
+        elapsed = lifecycle["journal_elapsed_s"]
+        if (
+            isinstance(elapsed, bool)
+            or not isinstance(elapsed, (int, float))
+            or not math.isfinite(float(elapsed))
+            or elapsed < 0
+        ):
+            raise EvidenceError("published SM121 B0 journal duration is invalid")
+
+    if len(samples) != 5:
+        raise EvidenceError("SM121 B0 evidence requires exactly five requests")
+    result_fields = {
+        "cached_prompt_tokens",
+        "completion_tokens",
+        "decode_metric_source",
+        "decode_s",
+        "decode_tps",
+        "elapsed_s",
+        "emission_event_count",
+        "finish_reason",
+        "load_s",
+        "output_tps",
+        "prompt_tokens",
+        "reasoning_tokens",
+        "server_cached_prompt_tokens",
+        "server_decode_s",
+        "server_decode_tokens",
+        "server_prompt_s",
+        "server_prompt_tokens",
+        "ttft_s",
+    }
+    metadata_fields = {
+        "burst_elapsed_s",
+        "case_attempt",
+        "case_id",
+        "case_sample_index",
+        "kind",
+        "repetition",
+        "sample_index",
+        "sample_type",
+        "selected_attempt",
+        "validation_passed",
+    }
+    quality_categories = (
+        "arithmetic",
+        "logic",
+        "instruction_following",
+        "code_reasoning",
+    )
+    for index, sample in enumerate(samples, start=1):
+        if not isinstance(sample, dict):
+            raise EvidenceError("SM121 B0 request sample must be an object")
+        quality = index <= 4
+        allowed = result_fields | metadata_fields | (
+            {"quality_category"} if quality else set()
+        )
+        required = {
+            "completion_tokens",
+            "elapsed_s",
+            "emission_event_count",
+            "prompt_tokens",
+            "reasoning_tokens",
+        } | metadata_fields
+        if set(sample) - allowed or not required <= set(sample):
+            raise EvidenceError("SM121 B0 request sample schema changed")
+        expected_case_id = _SM121_CACHE_OBSERVABILITY_CASE_IDS[0 if quality else 1]
+        if (
+            sample.get("sample_index") != index
+            or sample.get("sample_type") != "measured_request"
+            or sample.get("case_attempt") != 1
+            or sample.get("case_id") != expected_case_id
+            or sample.get("case_sample_index") != (index if quality else 1)
+            or sample.get("kind") != ("quality" if quality else "capability")
+            or sample.get("selected_attempt") is not True
+            or sample.get("repetition") != 0
+        ):
+            raise EvidenceError("SM121 B0 request topology changed")
+        prompt_tokens = sample.get("prompt_tokens")
+        completion_tokens = sample.get("completion_tokens")
+        if (
+            type(prompt_tokens) is not int
+            or prompt_tokens <= 0
+            or type(completion_tokens) is not int
+            or completion_tokens <= 0
+            or completion_tokens
+            > (512 if quality else SM121_CACHE_ZERO_HIT_MAX_OUTPUT_TOKENS)
+        ):
+            raise EvidenceError("SM121 B0 request token counts are invalid")
+        if quality:
+            if (
+                sample.get("validation_passed") is not True
+                or sample.get("quality_category") != quality_categories[index - 1]
+            ):
+                raise EvidenceError("SM121 B0 quality gate is not clean")
+        elif sample.get("validation_passed") is not bool(
+            zero_event["zero_hit_admitted"]
+        ):
+            raise EvidenceError("SM121 B0 capability validation changed")
+
+    quality_samples = samples[:4]
+    observation_sample = samples[4]
+    observation_admitted = bool(zero_event["zero_hit_admitted"])
+    expected_status = "complete" if observation_admitted else "partial"
+    expected_validation_failures = (
+        [] if observation_admitted else [_SM121_CACHE_OBSERVABILITY_CASE_IDS[1]]
+    )
+    for key, expected in (
+        ("completed_cases", 2),
+        ("context_limited_cases", []),
+        ("failed_cases", []),
+        ("measurement_invalid_cases", []),
+        ("run_completion_status", "completed"),
+        ("status", expected_status),
+        ("suite", SM121_CACHE_OBSERVABILITY_SUITE_ID),
+        ("unimplemented_cases", []),
+        ("unsupported_cases", []),
+        ("validation_failed_cases", expected_validation_failures),
+        ("startup_measurement_valid", True),
+        ("startup_safety_gates", []),
+    ):
+        if not _json_strict_equal(aggregates.get(key), expected):
+            raise EvidenceError(f"SM121 B0 summary field {key} changed")
+    if manifest.get("status") != expected_status:
+        raise EvidenceError("SM121 B0 manifest status is inconsistent")
+    cases = aggregates.get("cases")
+    if not isinstance(cases, list) or len(cases) != 2:
+        raise EvidenceError("SM121 B0 summary cases changed")
+    by_id = {
+        case.get("case_id"): case for case in cases if isinstance(case, dict)
+    }
+    if set(by_id) != set(_SM121_CACHE_OBSERVABILITY_CASE_IDS):
+        raise EvidenceError("SM121 B0 summary case identities changed")
+    quality_case = by_id[_SM121_CACHE_OBSERVABILITY_CASE_IDS[0]]
+    observation_case = by_id[_SM121_CACHE_OBSERVABILITY_CASE_IDS[1]]
+    quality_prompt_tokens = sum(sample["prompt_tokens"] for sample in quality_samples)
+    quality_completion_tokens = sum(
+        sample["completion_tokens"] for sample in quality_samples
+    )
+    quality_reasoning_values = [sample["reasoning_tokens"] for sample in quality_samples]
+    quality_reasoning_tokens = (
+        sum(quality_reasoning_values)
+        if all(type(value) is int for value in quality_reasoning_values)
+        else None
+    )
+    observation_reasoning = observation_sample["reasoning_tokens"]
+    for case, expected_kind, expected_requests, expected_prompt, expected_completion, expected_reasoning, expected_validation in (
+        (
+            quality_case,
+            "quality",
+            4,
+            quality_prompt_tokens,
+            quality_completion_tokens,
+            quality_reasoning_tokens,
+            True,
+        ),
+        (
+            observation_case,
+            "capability",
+            1,
+            observation_sample["prompt_tokens"],
+            observation_sample["completion_tokens"],
+            observation_reasoning,
+            observation_admitted,
+        ),
+    ):
+        if not isinstance(case, dict):
+            raise EvidenceError("SM121 B0 summary case must be an object")
+        for key, expected in (
+            ("kind", expected_kind),
+            ("requests", expected_requests),
+            ("concurrency", 1),
+            ("prompt_tokens", expected_prompt),
+            ("completion_tokens", expected_completion),
+            ("reasoning_tokens", expected_reasoning),
+            ("measurement_valid", True),
+            ("validation_passed", expected_validation),
+            ("observability_only", True),
+        ):
+            if not _json_strict_equal(case.get(key), expected):
+                raise EvidenceError(f"SM121 B0 {expected_kind} aggregate {key} changed")
+        for key in (
+            "median_ttft_s",
+            "p95_ttft_s",
+            "median_e2e_s",
+            "p95_e2e_s",
+            "median_decode_tps",
+            "decode_metric_source",
+            "median_estimated_decode_tps",
+            "decode_estimate_one_token_chunks",
+            "aggregate_output_tps",
+            "request_tps",
+        ):
+            if case.get(key) is not None:
+                raise EvidenceError(f"SM121 B0 must not publish {key}")
+        if "telemetry" in case:
+            raise EvidenceError("SM121 B0 must not publish case telemetry")
+    expected_categories = {
+        "arithmetic": 1.0,
+        "code_reasoning": 1.0,
+        "instruction_following": 1.0,
+        "logic": 1.0,
+    }
+    for key, expected in (
+        ("quality_items", 4),
+        ("quality_scored_items", 4),
+        ("quality_correct", 4),
+        ("quality_accuracy", 1.0),
+        ("quality_accuracy_by_category", expected_categories),
+        ("quality_total_prompt_tokens", quality_prompt_tokens),
+        ("quality_total_completion_tokens", quality_completion_tokens),
+        ("quality_total_reasoning_tokens", quality_reasoning_tokens),
+        ("quality_total_request_latency_s", None),
+    ):
+        if not _json_strict_equal(quality_case.get(key), expected):
+            raise EvidenceError(f"SM121 B0 quality aggregate {key} changed")
 
 
 def _project_hardware(plan: dict[str, Any]) -> dict[str, Any]:
@@ -9532,6 +10164,7 @@ def _project_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
         "model": (dict,),
         "run_dir": (str,),
         "run_error": (dict, type(None)),
+        "sm121_cache_observability_lifecycle_issues": (list,),
     }
     for key, expected_types in dropped_types.items():
         if key in summary and not isinstance(summary[key], expected_types):
@@ -10022,8 +10655,16 @@ def _export_run(
         summary,
         source_run_id=source_run_id,
     )
+    sm121_cache_observability_runtime = _validate_sm121_cache_observability_source(
+        plan,
+        events,
+        summary,
+        source_run_id=source_run_id,
+    )
     if sm121_storage_runtime is not None and matrix_id is not None:
         raise EvidenceError("SM121 storage canary cannot be exported from a matrix")
+    if sm121_cache_observability_runtime is not None and matrix_id is not None:
+        raise EvidenceError("SM121 B0 canary cannot be exported from a matrix")
     projected_model = _project_model(plan, summary)
     suite = _project_suite(plan)
     memory_protocol = bool(
@@ -10072,6 +10713,17 @@ def _export_run(
             }
         )
         runtime["sm121_storage_canary"] = sm121_storage_runtime
+    if sm121_cache_observability_runtime is not None:
+        artifacts.append(
+            {
+                "role": "container_image",
+                "sha256": sm121_cache_observability_runtime[
+                    "docker_image_sha256"
+                ],
+                "target": "container-image",
+            }
+        )
+        runtime["sm121_cache_observability"] = sm121_cache_observability_runtime
     manifest: dict[str, Any] = {
         "artifacts": artifacts,
         "evidence_kind": kind,
@@ -10157,7 +10809,7 @@ def _export_run(
             )
         )
     telemetry = _project_telemetry(telemetry_records)
-    if memory_protocol:
+    if memory_protocol or sm121_cache_observability_runtime is not None:
         telemetry = []
     projected_summary = _project_summary(summary)
     try:
@@ -10197,6 +10849,10 @@ def _export_run(
             raise EvidenceError("memory manifest status disagrees with its aggregates")
     if sm121_storage_runtime is not None:
         _validate_sm121_storage_published_bundle(
+            manifest, requests, projected_summary
+        )
+    if sm121_cache_observability_runtime is not None:
+        _validate_sm121_cache_observability_published_bundle(
             manifest, requests, projected_summary
         )
     _validate_agentic_aggregates(
@@ -12793,6 +13449,10 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
         isinstance(manifest_suite, dict)
         and manifest_suite.get("id") == MEMORY_OPERATION_SUITE_ID
     )
+    is_sm121_cache_observability_manifest = (
+        isinstance(manifest_suite, dict)
+        and manifest_suite.get("id") == SM121_CACHE_OBSERVABILITY_SUITE_ID
+    )
     if is_prefix_cache_manifest:
         # Cache bundles are intentionally a complete, exact outer document.
         # Do not rely on checksums alone: an attacker can refresh checksums
@@ -12890,6 +13550,9 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     _validate_sm121_storage_published_bundle(
         manifest, samples["samples"], aggregates
     )
+    _validate_sm121_cache_observability_published_bundle(
+        manifest, samples["samples"], aggregates
+    )
     cold_start_annotations = (
         _project_cold_start_safety_annotations(aggregates, source=False)
         if "cold_start_safety_annotations" in aggregates
@@ -12979,6 +13642,19 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
             chunks,
             include_checksums=True,
         )
+    if is_sm121_cache_observability_manifest:
+        expected_b0_telemetry = _telemetry_files([])["telemetry.json"]
+        if not _json_strict_equal(telemetry, expected_b0_telemetry):
+            raise EvidenceError("SM121 B0 telemetry index changed")
+        expected_b0_files = {
+            "checksums.json",
+            "manifest.json",
+            "samples.json",
+            "summary.json",
+            "telemetry.json",
+        }
+        if {path.name for path in directory.iterdir()} != expected_b0_files:
+            raise EvidenceError("SM121 B0 bundle file set changed")
     sample_count = 0
     segment_count = 0
     expected_sample_index = 1

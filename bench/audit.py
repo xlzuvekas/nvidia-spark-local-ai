@@ -15,6 +15,13 @@ from .sglang_sm121_storage import (
     validate_sm121_storage_candidate,
     validate_sm121_storage_suite,
 )
+from .sglang_sm121_cache_observability import (
+    SM121CacheObservabilityError,
+    is_sm121_cache_observability_plan,
+    sm121_cache_observability_lifecycle_issues,
+    validate_sm121_cache_observability_candidate,
+    validate_sm121_cache_observability_suite,
+)
 
 
 IssueAdder = Callable[..., None]
@@ -1075,6 +1082,89 @@ def audit_sm121_storage_canary_run(run_dir: Path) -> dict[str, Any]:
                 if key not in {"code", "message"}
             })
 
+    report["error_count"] = len(report["errors"])
+    report["ok"] = not report["errors"]
+    return report
+
+
+def audit_sm121_cache_observability_run(run_dir: Path) -> dict[str, Any]:
+    """Read-only audit of B0's one-fresh-server cache-off observation lane."""
+
+    root = run_dir.resolve()
+    report: dict[str, Any] = {
+        "schema_version": 1,
+        "run_dir": str(root),
+        "read_only": True,
+        "ok": False,
+        "errors": [],
+    }
+
+    def add_issue(code: str, message: str, **context: Any) -> None:
+        report["errors"].append({"code": code, "message": message, **context})
+
+    plan = _load_json_object(root / "plan.json", add_issue=add_issue)
+    events = _load_jsonl(
+        root / "events.jsonl", add_issue=add_issue, run={"run_dir": str(root)}
+    )
+    if plan is None:
+        report["error_count"] = len(report["errors"])
+        return report
+    model = plan.get("model")
+    suite = plan.get("suite")
+    if not isinstance(model, dict):
+        add_issue("invalid_plan_model", "plan.model must be an object")
+    if not isinstance(suite, dict):
+        add_issue("invalid_plan_suite", "plan.suite must be an object")
+    if not isinstance(model, dict) or not isinstance(suite, dict):
+        report["error_count"] = len(report["errors"])
+        return report
+    if not is_sm121_cache_observability_plan(model, suite):
+        add_issue(
+            "not_sm121_cache_observability_plan",
+            "run plan does not select the dedicated SM121 B0 canary",
+        )
+    else:
+        try:
+            validate_sm121_cache_observability_candidate(model)
+            validate_sm121_cache_observability_suite(suite)
+        except SM121CacheObservabilityError as error:
+            add_issue("invalid_sm121_cache_observability_plan", str(error))
+
+    model_id = model.get("id")
+    suite_id = suite.get("id")
+    if isinstance(model_id, str) and isinstance(suite_id, str):
+        planned_case_ids, _ = _audit_plan(
+            plan,
+            matrix_suite=suite_id,
+            model_id=model_id,
+            run_dir=root,
+            add_issue=add_issue,
+            run={"run_dir": str(root)},
+        )
+    else:
+        planned_case_ids = set()
+    planned_case_order = _planned_case_id_order(suite)
+    report["planned_case_ids"] = list(planned_case_order)
+    if set(planned_case_order) != planned_case_ids:
+        add_issue(
+            "b0_plan_case_identity_mismatch",
+            "frozen B0 case IDs are not a complete ordered set",
+        )
+    for lifecycle_issue in sm121_cache_observability_lifecycle_issues(
+        events, planned_case_ids=planned_case_order
+    ):
+        code = lifecycle_issue.get("code")
+        message = lifecycle_issue.get("message")
+        if isinstance(code, str) and isinstance(message, str):
+            add_issue(
+                code,
+                message,
+                **{
+                    key: value
+                    for key, value in lifecycle_issue.items()
+                    if key not in {"code", "message"}
+                },
+            )
     report["error_count"] = len(report["errors"])
     report["ok"] = not report["errors"]
     return report

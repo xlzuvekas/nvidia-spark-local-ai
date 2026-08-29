@@ -34,6 +34,11 @@ from .sglang_sm121_storage import (
     validate_sm121_storage_candidate,
     validate_sm121_storage_suite,
 )
+from .sglang_sm121_cache_observability import (
+    SM121_CACHE_OBSERVABILITY_SUITE_ID,
+    SM121CacheObservabilityError,
+    validate_sm121_cache_observability_suite,
+)
 
 
 SCHEMA_VERSION = 1
@@ -154,6 +159,13 @@ _FLASH_NEXT_AGENT64K_PROFILE_IDS = frozenset(
 )
 _SM121_STORAGE_PROFILE_ID = SM121_STORAGE_PROFILE_ID
 _SM121_STORAGE_SUITE_ID = SM121_STORAGE_SUITE_ID
+_SM121_STORAGE_CACHE_OBSERVABILITY_SUITE_ID = SM121_CACHE_OBSERVABILITY_SUITE_ID
+_SM121_STORAGE_SUITE_IDS = frozenset(
+    {
+        _SM121_STORAGE_SUITE_ID,
+        _SM121_STORAGE_CACHE_OBSERVABILITY_SUITE_ID,
+    }
+)
 _PLE_STUDY_PROFILE_IDS_BY_SUITE = {
     "qwen38-flash-next-sglang-ple-depth-c8": frozenset(
         {
@@ -1891,6 +1903,11 @@ def validate_suite(suite: SuiteSpec, *, context: str = "suite") -> None:
             validate_sm121_storage_suite(suite)
         except SM121StorageCandidateError as error:
             raise ManifestError(f"{context}: {error}") from error
+    if suite.id == _SM121_STORAGE_CACHE_OBSERVABILITY_SUITE_ID:
+        try:
+            validate_sm121_cache_observability_suite(suite)
+        except SM121CacheObservabilityError as error:
+            raise ManifestError(f"{context}: {error}") from error
     cache_cases = [case for case in suite.cases if case.kind == "cache"]
     cache_suite = suite.id == PREFIX_CACHE_SUITE_ID
     if cache_suite or cache_cases:
@@ -1990,15 +2007,15 @@ def validate_benchmark_selection(
             "one of its exact dedicated agent64k profiles"
         )
     sm121_storage_profile = model_id == _SM121_STORAGE_PROFILE_ID
-    sm121_storage_suite = suite.id == _SM121_STORAGE_SUITE_ID
+    sm121_storage_suite = suite.id in _SM121_STORAGE_SUITE_IDS
     if sm121_storage_profile and not sm121_storage_suite:
         raise ManifestError(
             f"{context}: the {_SM121_STORAGE_PROFILE_ID!r} profile requires "
-            f"the {_SM121_STORAGE_SUITE_ID!r} suite"
+            "one of its dedicated pre-admission suites"
         )
     if sm121_storage_suite and not sm121_storage_profile:
         raise ManifestError(
-            f"{context}: the {_SM121_STORAGE_SUITE_ID!r} suite requires "
+            f"{context}: the SM121 pre-admission suite requires "
             f"the {_SM121_STORAGE_PROFILE_ID!r} profile"
         )
     ple_study_suite_profiles = _PLE_STUDY_PROFILE_IDS_BY_SUITE.get(suite.id)

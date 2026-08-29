@@ -17,7 +17,11 @@ from bench.annotations import (
     append_startup_safety_gate,
 )
 from bench.acquire import fetch_model_snapshot
-from bench.audit import audit_matrix, audit_sm121_storage_canary_run
+from bench.audit import (
+    audit_matrix,
+    audit_sm121_cache_observability_run,
+    audit_sm121_storage_canary_run,
+)
 from bench.autoresearch_campaign import (
     freeze_campaign,
     preview_campaign,
@@ -45,8 +49,10 @@ from bench.journal import utc_now, write_json
 from bench.report import summarize_run
 from bench.runner import (
     create_plan,
+    create_sm121_cache_observability_plan,
     create_sm121_storage_canary_plan,
     execute_plan,
+    execute_sm121_cache_observability_canary,
     execute_sm121_storage_canary,
 )
 from bench.trtllm_direct import run_direct_trtllm
@@ -61,6 +67,12 @@ DEFAULT_DIFFUSION_SUITE = (
 DEFAULT_AUDIO_SUITE = WORKSPACE / "manifests" / "suites" / "audio_asr.toml"
 DEFAULT_SM121_STORAGE_CANARY_SUITE = (
     WORKSPACE / "manifests" / "suites" / "qwen38_flash_next_sm121_triton_storage_canary.toml"
+)
+DEFAULT_SM121_CACHE_OBSERVABILITY_SUITE = (
+    WORKSPACE
+    / "manifests"
+    / "suites"
+    / "qwen38_flash_next_sm121_triton_storage_cache_observability_canary.toml"
 )
 DEFAULT_EVIDENCE = WORKSPACE / "evidence"
 DEFAULT_RESULTS = WORKSPACE / "results"
@@ -307,6 +319,23 @@ def command_sm121_storage_canary(args: argparse.Namespace) -> int:
     return 0 if summary["status"] == "complete" else 1
 
 
+def command_sm121_cache_observability_canary(args: argparse.Namespace) -> int:
+    """Run the isolated cache-off B0 observation canary."""
+
+    model, suite = _select(args)
+    run_dir = create_sm121_cache_observability_plan(
+        model=model,
+        suite=suite,
+        results_root=args.results,
+        models_path=args.models,
+        suite_path=args.suite,
+    )
+    print(f"Plan: {run_dir}")
+    summary = execute_sm121_cache_observability_canary(run_dir, workspace=WORKSPACE)
+    print(json.dumps(summary, indent=2))
+    return 0 if summary["status"] == "complete" else 1
+
+
 def command_run(args: argparse.Namespace) -> int:
     summary = execute_plan(
         args.run_dir,
@@ -544,6 +573,12 @@ def command_audit_sm121_storage_canary(args: argparse.Namespace) -> int:
     return 0 if report["ok"] else 1
 
 
+def command_audit_sm121_cache_observability(args: argparse.Namespace) -> int:
+    report = audit_sm121_cache_observability_run(args.run_dir)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["ok"] else 1
+
+
 def command_export_evidence(args: argparse.Namespace) -> int:
     report = export_evidence(
         results_root=args.results,
@@ -647,6 +682,14 @@ def build_parser() -> argparse.ArgumentParser:
     add_selection(storage_canary)
     storage_canary.set_defaults(suite=DEFAULT_SM121_STORAGE_CANARY_SUITE)
     storage_canary.set_defaults(function=command_sm121_storage_canary)
+
+    cache_observability = subparsers.add_parser(
+        "sm121-cache-observability-canary",
+        help="run the cache-off SM121 B0 fresh-server observation canary",
+    )
+    add_selection(cache_observability)
+    cache_observability.set_defaults(suite=DEFAULT_SM121_CACHE_OBSERVABILITY_SUITE)
+    cache_observability.set_defaults(function=command_sm121_cache_observability_canary)
 
     run = subparsers.add_parser("run", aliases=["resume"], help="execute or resume a frozen plan")
     run.add_argument("run_dir", type=Path)
@@ -762,6 +805,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     storage_audit.add_argument("run_dir", type=Path)
     storage_audit.set_defaults(function=command_audit_sm121_storage_canary)
+
+    cache_observability_audit = subparsers.add_parser(
+        "audit-sm121-cache-observability",
+        help="read-only topology verification of one SM121 B0 observation run",
+    )
+    cache_observability_audit.add_argument("run_dir", type=Path)
+    cache_observability_audit.set_defaults(
+        function=command_audit_sm121_cache_observability
+    )
 
     export = subparsers.add_parser(
         "export-evidence",

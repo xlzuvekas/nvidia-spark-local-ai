@@ -85,12 +85,16 @@ from .prefix_cache_protocol import (
 from .report import summarize_run
 from .runtime import (
     RuntimeErrorWithContext,
+    attest_sm121_cache_observability_runtime,
+    attest_sm121_cache_observability_static_source,
     capture_server_provenance,
     ollama_model_loaded,
     recover_owned_llamacpp,
     recover_owned_sglang,
     recover_owned_vllm,
     save_server_logs,
+    request_sm121_cache_observability_zero_hit,
+    settle_sm121_cache_observability_metrics,
     start_server,
     validate_llamacpp_artifacts,
 )
@@ -114,6 +118,23 @@ from .sglang_sm121_storage import (
     validate_sm121_storage_runtime_provenance_event,
     validate_sm121_storage_suite,
 )
+from .sglang_sm121_cache_observability import (
+    SM121_CACHE_OBSERVABILITY_CACHED_SERIES,
+    SM121_CACHE_OBSERVABILITY_EXECUTION_MODE,
+    SM121_CACHE_OBSERVABILITY_METRIC_FIELDS,
+    SM121_CACHE_OBSERVABILITY_SUITE_ID,
+    SM121_CACHE_RUNTIME_ATTESTATION_EVENT,
+    SM121_CACHE_STATIC_ATTESTATION_EVENT,
+    SM121_CACHE_ZERO_HIT_CASE_ID,
+    SM121_CACHE_ZERO_HIT_EVENT,
+    SM121_CACHE_ZERO_HIT_REQUEST_CONTRACT_SHA256,
+    SM121CacheObservabilityError,
+    derive_sm121_cache_zero_hit_admission,
+    is_sm121_cache_observability_plan,
+    validate_sm121_cache_observability_candidate,
+    validate_sm121_cache_observability_suite,
+    validate_sm121_cache_zero_hit_event,
+)
 from .telemetry import TelemetrySampler
 from .vllm_metrics import snapshot_vllm_spec_decode_metrics
 
@@ -129,6 +150,9 @@ _VARIED_CONTEXT_NEEDLE_FAILURE_MESSAGE = (
 _PREFIX_CACHE_FAILURE_MESSAGE = "prefix-cache case failed; error details omitted"
 _SM121_STORAGE_QUALITY_GATE_FAILURE_MESSAGE = (
     "SM121 storage quality gate failed; long-context lifetime was not started"
+)
+_SM121_CACHE_OBSERVABILITY_FAILURE_MESSAGE = (
+    "SM121 cache observability request failed; details omitted"
 )
 
 
@@ -151,6 +175,13 @@ class SM121StorageQualityGateError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__(_SM121_STORAGE_QUALITY_GATE_FAILURE_MESSAGE)
+
+
+class SM121CacheObservabilityRequestError(RuntimeError):
+    """Public-safe failure for the B0 non-streaming cache observation."""
+
+    def __init__(self) -> None:
+        super().__init__(_SM121_CACHE_OBSERVABILITY_FAILURE_MESSAGE)
 
 
 class PrefixCacheError(RuntimeError):
@@ -356,6 +387,30 @@ def create_sm121_storage_canary_plan(
     )
 
 
+def create_sm121_cache_observability_plan(
+    *, model: Any, suite: Any, results_root: Path, models_path: Path, suite_path: Path
+) -> Path:
+    """Freeze the separate cache-off B0 plan without admitting generic serving."""
+
+    if not is_sm121_cache_observability_plan(model, suite):
+        raise RuntimeError(
+            "The dedicated cache-observability canary requires its exact SM121 profile and suite"
+        )
+    try:
+        validate_sm121_cache_observability_candidate(model)
+        validate_sm121_cache_observability_suite(suite)
+    except SM121CacheObservabilityError as error:
+        raise RuntimeError(str(error)) from error
+    return create_plan(
+        model=model,
+        suite=suite,
+        results_root=results_root,
+        models_path=models_path,
+        suite_path=suite_path,
+        allow_sm121_storage_canary=True,
+    )
+
+
 def _namespace(value: Any) -> Any:
     if isinstance(value, dict):
         return SimpleNamespace(**{key: _namespace(item) for key, item in value.items()})
@@ -439,6 +494,83 @@ def _load_sm121_storage_canary_plan(run_dir: Path) -> tuple[dict[str, Any], Any,
     run_nonce = plan.get("run_nonce")
     if not isinstance(run_nonce, str) or re.fullmatch(r"[0-9a-f]{32}", run_nonce) is None:
         raise PreflightError("SM121 storage canary run nonce is invalid")
+    model.resolved_local_image_id = local_image["docker_image_id"]
+    model.run_identity = f"{plan['fingerprint']}-{run_nonce}"
+    model.storage_canary_authorized = True
+    return plan, model, suite
+
+
+def _load_sm121_cache_observability_plan(
+    run_dir: Path,
+) -> tuple[dict[str, Any], Any, Any]:
+    """Load and authenticate a newly frozen cache-off B0 plan."""
+
+    try:
+        plan = json.loads((run_dir / "plan.json").read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise PreflightError("SM121 cache-observability plan is unavailable or invalid") from error
+    if type(plan) is not dict or int(plan.get("schema_version", 0)) != 2:
+        raise PreflightError("SM121 cache-observability plan schema is invalid")
+    model_data = plan.get("model")
+    suite_data = plan.get("suite")
+    resolved = plan.get("resolved")
+    if (
+        type(model_data) is not dict
+        or type(suite_data) is not dict
+        or type(resolved) is not dict
+        or type(suite_data.get("cases")) is not list
+    ):
+        raise PreflightError("SM121 cache-observability plan has invalid core fields")
+    suite_without_case_ids = {
+        **suite_data,
+        "cases": [
+            {key: value for key, value in case.items() if key != "case_id"}
+            for case in suite_data["cases"]
+            if type(case) is dict
+        ],
+    }
+    if len(suite_without_case_ids["cases"]) != len(suite_data["cases"]):
+        raise PreflightError("SM121 cache-observability case records are invalid")
+    expected_fingerprint = content_hash(
+        {"model": model_data, "suite": suite_without_case_ids, "resolved": resolved}
+    )
+    integrity_hash = plan.get("integrity_hash")
+    integrity_payload = {key: value for key, value in plan.items() if key != "integrity_hash"}
+    integrity_valid = isinstance(integrity_hash, str) and (
+        content_hash(integrity_payload, len(integrity_hash)) == integrity_hash
+    )
+    if not integrity_valid or plan.get("fingerprint") != expected_fingerprint:
+        raise PreflightError("SM121 cache-observability plan fingerprint is invalid")
+    protocol_digest = suite_data.get("protocol_digest")
+    for case in suite_data["cases"]:
+        assert isinstance(case, dict)
+        case_without_id = {key: value for key, value in case.items() if key != "case_id"}
+        expected_case_id = _canonical_case(
+            model_data, case_without_id, protocol_digest=protocol_digest
+        )["case_id"]
+        if case.get("case_id") != expected_case_id:
+            raise PreflightError("SM121 cache-observability case identity is invalid")
+    model = _namespace(model_data)
+    suite = _namespace(suite_data)
+    try:
+        if not is_sm121_cache_observability_plan(model, suite):
+            raise SM121CacheObservabilityError("B0 plan selector is invalid")
+        validate_sm121_cache_observability_candidate(model)
+        validate_sm121_cache_observability_suite(suite)
+    except SM121CacheObservabilityError as error:
+        raise PreflightError(str(error)) from error
+    local_image = resolved.get("local_image")
+    if (
+        type(local_image) is not dict
+        or set(local_image) != {"docker_image_id", "platform", "source_tree"}
+        or local_image.get("docker_image_id") != SM121_STORAGE_LOCAL_IMAGE_ID
+        or local_image.get("platform") != SM121_STORAGE_PLATFORM
+        or local_image.get("source_tree") != SM121_STORAGE_SOURCE_TREE
+    ):
+        raise PreflightError("SM121 cache-observability local image identity is invalid")
+    run_nonce = plan.get("run_nonce")
+    if not isinstance(run_nonce, str) or re.fullmatch(r"[0-9a-f]{32}", run_nonce) is None:
+        raise PreflightError("SM121 cache-observability run nonce is invalid")
     model.resolved_local_image_id = local_image["docker_image_id"]
     model.run_identity = f"{plan['fingerprint']}-{run_nonce}"
     model.storage_canary_authorized = True
@@ -4135,6 +4267,397 @@ def execute_sm121_storage_canary(run_dir: Path, *, workspace: Path) -> dict[str,
         finally:
             if active_watchdog is not None:
                 active_watchdog.stop()
+            telemetry.stop()
+    return summarize_run(run_dir)
+
+
+def _sm121_cache_observability_zero_event(
+    *,
+    case: SimpleNamespace,
+    attempt_id: str,
+    result: dict[str, Any],
+    before: dict[str, Any],
+    before_settle_s: float,
+    before_polls: int,
+    before_settled: bool,
+    after: dict[str, Any],
+    after_settle_s: float,
+    after_polls: int,
+    after_settled: bool,
+) -> dict[str, Any]:
+    """Bind B0's scalar response and metric windows into one checked event."""
+
+    event: dict[str, Any] = {
+        "event": SM121_CACHE_ZERO_HIT_EVENT,
+        "case_id": case.case_id,
+        "protocol_case_id": SM121_CACHE_ZERO_HIT_CASE_ID,
+        "attempt_id": attempt_id,
+        "request_contract_sha256": SM121_CACHE_ZERO_HIT_REQUEST_CONTRACT_SHA256,
+        "cache_details_requested": True,
+        "streaming": False,
+        "thinking_disabled": True,
+        "response_detail_state": result["response_detail_state"],
+        "usage_detail_state": result["usage_detail_state"],
+        "response_device_cached_tokens": result["response_device_cached_tokens"],
+        "response_host_cached_tokens": result["response_host_cached_tokens"],
+        "response_storage_cached_tokens": result["response_storage_cached_tokens"],
+        "usage_cached_tokens": result["usage_cached_tokens"],
+        "metrics_available": bool(
+            before.get("available") is True and after.get("available") is True
+        ),
+        "metrics_before_polls": before_polls,
+        "metrics_after_polls": after_polls,
+        "metrics_before_settle_s": before_settle_s,
+        "metrics_after_settle_s": after_settle_s,
+        "metrics_before_settled": before_settled,
+        "metrics_after_settled": after_settled,
+        "zero_hit_basis": "not_admitted",
+        "zero_hit_admitted": False,
+    }
+    for prefix, snapshot in (("before", before), ("after", after)):
+        for metric in SM121_CACHE_OBSERVABILITY_METRIC_FIELDS:
+            event[f"{prefix}_{metric}"] = snapshot[metric]
+        for source in SM121_CACHE_OBSERVABILITY_CACHED_SERIES:
+            event[f"{prefix}_cached_{source}_series_present"] = snapshot[
+                f"cached_{source}_series_present"
+            ]
+    for metric in SM121_CACHE_OBSERVABILITY_METRIC_FIELDS:
+        event[f"delta_{metric}"] = event[f"after_{metric}"] - event[
+            f"before_{metric}"
+        ]
+    admitted, basis = derive_sm121_cache_zero_hit_admission(event)
+    event["zero_hit_admitted"] = admitted
+    event["zero_hit_basis"] = basis
+    try:
+        validate_sm121_cache_zero_hit_event(event)
+    except SM121CacheObservabilityError as error:
+        raise SM121CacheObservabilityRequestError() from error
+    return event
+
+
+def _execute_sm121_cache_observability_case(
+    *,
+    server: Any,
+    model: SimpleNamespace,
+    case: SimpleNamespace,
+    journal: Journal,
+    telemetry: TelemetrySampler,
+) -> None:
+    """Run B0's one non-streaming request without recording response payloads."""
+
+    if str(case.id) != SM121_CACHE_ZERO_HIT_CASE_ID:
+        raise SM121CacheObservabilityRequestError()
+    attempt_id = uuid.uuid4().hex
+    journal.append(
+        {
+            "event": "case_start",
+            "case_id": case.case_id,
+            "attempt_id": attempt_id,
+            "kind": case.kind,
+            "concurrency": case.concurrency,
+        }
+    )
+    telemetry.set_phase(f"case:{case.case_id}:{attempt_id}")
+    started = time.perf_counter()
+    try:
+        before, before_settle_s, before_polls, before_settled = (
+            settle_sm121_cache_observability_metrics(server)
+        )
+        result = request_sm121_cache_observability_zero_hit(
+            server, served_name=model.served_name
+        )
+        after, after_settle_s, after_polls, after_settled = (
+            settle_sm121_cache_observability_metrics(server)
+        )
+        event = _sm121_cache_observability_zero_event(
+            case=case,
+            attempt_id=attempt_id,
+            result=result,
+            before=before,
+            before_settle_s=before_settle_s,
+            before_polls=before_polls,
+            before_settled=before_settled,
+            after=after,
+            after_settle_s=after_settle_s,
+            after_polls=after_polls,
+            after_settled=after_settled,
+        )
+        journal.append(event)
+        journal.append(
+            {
+                "event": "request_complete",
+                "case_id": case.case_id,
+                "attempt_id": attempt_id,
+                "kind": case.kind,
+                "repetition": 0,
+                "burst_elapsed_s": result["elapsed_s"],
+                "result": {
+                    "prompt_tokens": result["prompt_tokens"],
+                    "completion_tokens": result["completion_tokens"],
+                    "reasoning_tokens": result["reasoning_tokens"],
+                    "ttft_s": None,
+                    "elapsed_s": result["elapsed_s"],
+                    "decode_s": None,
+                    "decode_tps": None,
+                    "output_tps": None,
+                    "emission_events": 1,
+                    "finish_reason": None,
+                    "response_model": None,
+                    "decode_metric_source": None,
+                },
+                "validation": {"passed": event["zero_hit_admitted"]},
+            }
+        )
+        journal.append(
+            {
+                "event": "case_complete",
+                "case_id": case.case_id,
+                "attempt_id": attempt_id,
+                "kind": case.kind,
+                "concurrency": case.concurrency,
+                "elapsed_s": time.perf_counter() - started,
+                "validation_passed": event["zero_hit_admitted"],
+            }
+        )
+    except BaseException as error:
+        safe_error = SM121CacheObservabilityRequestError()
+        journal.append(
+            {
+                "event": "case_failed",
+                "case_id": case.case_id,
+                "attempt_id": attempt_id,
+                "error_type": type(safe_error).__name__,
+                "error": str(safe_error),
+                "elapsed_s": time.perf_counter() - started,
+            }
+        )
+        raise safe_error from error
+    finally:
+        telemetry.set_phase("between_cases")
+
+
+def execute_sm121_cache_observability_canary(
+    run_dir: Path, *, workspace: Path
+) -> dict[str, Any]:
+    """Execute B0 on one fresh cache-off server, with no cache-policy claim."""
+
+    plan, model, suite = _load_sm121_cache_observability_plan(run_dir)
+    journal = Journal(run_dir / "events.jsonl")
+    if journal.events():
+        raise PreflightError(
+            "SM121 cache-observability canary is non-resumable; freeze a new fresh plan"
+        )
+    cases = list(suite.cases)
+    if len(cases) != 2 or str(cases[1].id) != SM121_CACHE_ZERO_HIT_CASE_ID:
+        raise PreflightError("SM121 cache-observability cases are invalid")
+    for case in cases:
+        missing = set(case.requires) - set(model.tasks)
+        if missing:
+            raise PreflightError(
+                "SM121 cache-observability case has unsupported capabilities"
+            )
+        estimated_tokens, estimate_basis = _estimated_context_tokens(case)
+        if estimated_tokens > int(model.max_context):
+            raise PreflightError(
+                "SM121 cache-observability context admission is insufficient: "
+                f"{estimated_tokens} via {estimate_basis}"
+            )
+    lock_path = results_lock_path(workspace)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    telemetry = TelemetrySampler(run_dir / "telemetry.jsonl")
+    measurement_started_ns = time.monotonic_ns()
+    with lock_path.open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError("Another SparkBench run holds the benchmark lock") from error
+        journal.append(
+            {
+                "event": "run_start",
+                "execution_mode": SM121_CACHE_OBSERVABILITY_EXECUTION_MODE,
+                "plan_fingerprint": str(plan["fingerprint"]),
+                "run_nonce": str(plan["run_nonce"]),
+            }
+        )
+        journal.append(
+            {
+                "event": "measurement_started",
+                "monotonic_ns": measurement_started_ns,
+                "plan_fingerprint": str(plan["fingerprint"]),
+                "run_nonce": str(plan["run_nonce"]),
+            }
+        )
+        stage = "preflight"
+        active_watchdog: HostSafetyWatchdog | None = None
+        server = None
+        terminal_error: BaseException | None = None
+        try:
+            telemetry.start()
+            _preflight(model)
+            stage = "static_cache_source_attestation"
+            journal.append(attest_sm121_cache_observability_static_source(model))
+            active_watchdog = _host_safety_watchdog(model)
+            if active_watchdog is not None:
+                active_watchdog.start()
+            stage = "server_start"
+            telemetry.set_phase("server_startup:1")
+            callbacks: dict[str, Any] = {}
+            if active_watchdog is not None:
+                callbacks = {
+                    "abort_check": active_watchdog.raise_if_tripped,
+                    "on_server_created": (
+                        lambda created_server: active_watchdog.register_abort_callback(
+                            created_server.interrupt_owned
+                        )
+                    ),
+                }
+            server = start_server(
+                model,
+                workspace=workspace,
+                allow_download=False,
+                server_log_path=run_dir / "server" / "lifetime-1" / "server.log",
+                **callbacks,
+            )
+            if active_watchdog is not None:
+                active_watchdog.raise_if_tripped()
+            stage = "server_provenance"
+            write_json(
+                run_dir / "server" / "lifetime-1" / "provenance.json",
+                capture_server_provenance(server),
+            )
+            stage = "runtime_cache_attestation"
+            journal.append(attest_sm121_cache_observability_runtime(server))
+            journal.append(
+                {
+                    "event": "server_ready",
+                    "backend": server.backend,
+                    "startup_s": server.startup_s,
+                    "fresh_server_lifetime": 1,
+                    "first_inference_is_case": True,
+                    "case_id": cases[0].case_id,
+                }
+            )
+            stage = "quality_case"
+            telemetry.set_phase("first_case_after_start:1")
+            _execute_case(
+                server=server,
+                model=model,
+                case=cases[0],
+                journal=journal,
+                telemetry=telemetry,
+            )
+            _require_sm121_storage_quality_gate(journal, cases[0])
+            if active_watchdog is not None:
+                active_watchdog.raise_if_tripped()
+            stage = "zero_hit_observation"
+            _execute_sm121_cache_observability_case(
+                server=server,
+                model=model,
+                case=cases[1],
+                journal=journal,
+                telemetry=telemetry,
+            )
+            if active_watchdog is not None:
+                active_watchdog.raise_if_tripped()
+        except BaseException as error:
+            safety_error = active_watchdog.failure if active_watchdog is not None else None
+            terminal_error = safety_error or error
+        finally:
+            telemetry.set_phase("server_shutdown:1")
+            cleanup_error: BaseException | None = None
+            if server is not None:
+                if active_watchdog is not None and active_watchdog.tripped:
+                    try:
+                        _retry_host_safety_interrupt_if_needed(server, active_watchdog)
+                        _record_host_safety_interrupt_failure(
+                            journal, active_watchdog, stage=stage
+                        )
+                    except BaseException as error:
+                        cleanup_error = error
+                try:
+                    save_server_logs(
+                        server, run_dir / "server" / "lifetime-1" / "server.log"
+                    )
+                except BaseException as error:
+                    if cleanup_error is None:
+                        cleanup_error = error
+                try:
+                    server.stop()
+                    journal.append(
+                        {
+                            "event": "server_stopped",
+                            "backend": server.backend,
+                            "fresh_server_lifetime": 1,
+                        }
+                    )
+                except BaseException as error:
+                    if cleanup_error is None:
+                        cleanup_error = error
+            if cleanup_error is not None:
+                journal.append(
+                    {
+                        "event": "cleanup_failed",
+                        "error_type": type(cleanup_error).__name__,
+                    }
+                )
+            if active_watchdog is not None:
+                active_watchdog.stop()
+            if cleanup_error is not None and terminal_error is None:
+                terminal_error = cleanup_error
+            if terminal_error is None and active_watchdog is not None:
+                try:
+                    active_watchdog.raise_if_tripped()
+                except BaseException as error:
+                    terminal_error = error
+        if terminal_error is not None:
+            telemetry.stop()
+            if isinstance(terminal_error, HostSafetyError):
+                _record_host_safety_breach(journal, terminal_error, stage=stage)
+                if active_watchdog is not None:
+                    _record_host_safety_interrupt_failure(
+                        journal, active_watchdog, stage=stage
+                    )
+            _record_run_aborted(journal, terminal_error, stage=stage)
+            try:
+                summarize_run(run_dir)
+            except Exception as summary_error:
+                journal.append(
+                    {"event": "summary_failed", "error_type": type(summary_error).__name__}
+                )
+            raise terminal_error
+        try:
+            if active_watchdog is not None:
+                active_watchdog.raise_if_tripped()
+            measurement_complete_ns = time.monotonic_ns()
+            journal.append(
+                {
+                    "event": "measurement_complete",
+                    "elapsed_s": (
+                        measurement_complete_ns - measurement_started_ns
+                    )
+                    / 1_000_000_000,
+                    "monotonic_ns": measurement_complete_ns,
+                }
+            )
+            journal.append({"event": "run_complete", "status": "completed"})
+        except BaseException as error:
+            safety_error = active_watchdog.failure if active_watchdog is not None else None
+            terminal_error = safety_error or error
+            if isinstance(terminal_error, HostSafetyError):
+                _record_host_safety_breach(journal, terminal_error, stage=stage)
+                if active_watchdog is not None:
+                    _record_host_safety_interrupt_failure(
+                        journal, active_watchdog, stage=stage
+                    )
+            _record_run_aborted(journal, terminal_error, stage=stage)
+            try:
+                summarize_run(run_dir)
+            except Exception as summary_error:
+                journal.append(
+                    {"event": "summary_failed", "error_type": type(summary_error).__name__}
+                )
+            raise terminal_error
+        finally:
             telemetry.stop()
     return summarize_run(run_dir)
 

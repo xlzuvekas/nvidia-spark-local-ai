@@ -155,6 +155,57 @@ the two ordered fresh lifetimes, scalar runtime provenance immediately before
 each ready event, no primer, and terminal cleanup before scalar evidence can
 be exported.
 
+## Cache-off B0 observability — pending execution
+
+The next lane is deliberately smaller than a cache A/B: it does **not** enable
+Radix, select a cache policy, reuse a prefix, compare wall time, or report TPS.
+It asks one question first: on the exact cache-disabled candidate, do the
+server's response-detail extension and native counters agree that one fresh,
+non-streaming request had no cache hit?
+
+The dedicated `qwen38-flash-next-sm121-triton-storage-cache-observability-canary`
+suite uses the same immutable image, target snapshot, offline/read-only
+container boundary, and one fresh lifetime. Its fixed order is:
+
+1. Four clean `synthetic-exact-answer-v2` quality items, with thinking disabled.
+2. One separately named synthetic request, also thinking-disabled and
+   non-streaming, with `return_cached_tokens_details=true` and `n=1`.
+3. A scalar-only cache observation immediately before that request's ordinary
+   scalar completion record.
+
+Before starting the server, the runner hashes the reviewed cache-selection,
+OpenAI-extension, usage-accounting, and Prometheus source roles inside the
+immutable local image without retaining source text. At startup it requires the
+cache-off `ChunkCache` log record and `disable_radix_cache=true`. Around the
+single observation request it waits for two identical Prometheus snapshots
+before and after; the required input counter must advance while device, host,
+storage, and fallback-total cache-hit counters remain unchanged. The six KV and
+Mamba residency gauges must also be present, although their signed changes are
+diagnostic rather than cache-hit evidence.
+
+The result is `complete` only when those settled native counters agree with
+explicit zero details or the reviewed omitted/null zero-detail form. A clean
+but non-admitted observation is terminal `partial`, not an aborted execution;
+it blocks cache-on work. Any malformed detail, nonzero hit, missing metric,
+unsettled metrics, failed quality item, extra lifecycle event, or cleanup
+failure fails closed. The runner always attempts to stop its owned server even
+if log capture or watchdog cleanup itself fails.
+
+Run this pending B0 check only through its dedicated entry point:
+
+```bash
+python3 sparkbench.py sm121-cache-observability-canary \
+  qwen38-flash-next-nvfp4-sm121-triton-storage-target-only-sglang
+python3 sparkbench.py audit-sm121-cache-observability results/<b0-run>
+```
+
+The raw journal may contain only ignored local runtime artifacts. The tracked
+evidence exporter retains ordinary scalar request counts plus a fixed
+cache-attestation object; it excludes prompts, completions, reasoning, request
+IDs, response bodies, raw metrics, source text, and timings presented as a
+performance result. It also rejects a checksum-refreshed generic downgrade of
+the B0 bundle.
+
 ## What remains blocked
 
 The runtime-attestation schema intentionally accepts only an `admitted` record
