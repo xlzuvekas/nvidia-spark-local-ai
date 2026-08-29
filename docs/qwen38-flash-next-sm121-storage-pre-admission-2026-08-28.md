@@ -4,9 +4,10 @@
 
 The newly composed SM121 Triton plus read-only `io_uring` PLE candidate has
 passed its build, storage, and focused GPU-kernel prerequisites on the local
-GB10. It is **not admitted to serve the model**. A dedicated first-run canary
-is now implemented, but it has not loaded the checkpoint or started a server.
-No throughput, quality, or long-context result is claimed here.
+GB10. Its target-only first-run canary has now completed quality-clean and
+varied-token 64K retrieval checks in two fresh server lifetimes. It is still
+**not generally admitted for serving, cache policy, or speed claims**: this is
+one cache-disabled correctness/capability result, not a throughput benchmark.
 
 This is deliberately a mechanical pre-admission record. It narrows the next
 work from source/build uncertainty to an end-to-end correctness and performance
@@ -98,7 +99,7 @@ full-page-64 compressed-QSA bookkeeping used by this PLE path. They do not
 exercise model loading, sustained serving, MTP acceptance, request scheduling,
 or varied-token long-context behavior.
 
-## Implemented first execution gate — not yet run
+## First execution gate — completed
 
 The repository now has one deliberately narrow, target-only canary lane for
 this candidate. Ordinary planning, matrix, benchmark, and resume paths reject
@@ -126,8 +127,24 @@ limit is 65,536. Offline verification against the pinned target tokenizer and
 the `enable_thinking=false` chat template counted 62,336 input tokens; the
 fixed admission budget is 62,400 after the 64-token output allowance. The
 generator's prompt SHA-256 is pinned in the regression contract without
-retaining its text. A first run must still record its actual scalar prompt
-accounting before it can support a long-context claim.
+retaining its text.
+
+The completed canary recorded the following scalar result:
+
+| Gate | Result |
+| --- | --- |
+| Quality lifetime startup | 493.27 s to ready |
+| Synthetic quality | 8/8 exact items across two repetitions; 100% accuracy |
+| Long-context lifetime startup | 483.00 s to ready |
+| Varied-context retrieval | Passed; 62,336 prompt tokens and 24 completion tokens |
+| Long-context latency | 54.23 s TTFT; 55.68 s end-to-end |
+| Lifecycle / safety | 1,068.53 s total; clean two-lifetime audit; no startup safety gate |
+
+The long-context request produced one measured completion event, so it does
+not yield a defensible decode-TPS estimate. Its 0.43 aggregate output tokens/s
+is end-to-end and dominated by the 54-second prefill/first-token interval; it
+must not be compared with steady-state decode benchmarks. The lowest observed
+available host memory was 18.36 GiB, with no safety gate recorded.
 
 Prompts, completions, request identifiers, and credentials remain outside the
 tracked record. A completed canary may publish only exporter-approved scalar
@@ -143,18 +160,16 @@ be exported.
 The runtime-attestation schema intentionally accepts only an `admitted` record
 when all of the following are true: retired-overlay rejection, storage import,
 io_uring, PLE row comparison, SM121 Triton, quality, and long-context. The
-first five prerequisites are now demonstrated; the last two are false until
-the implemented target-only, cache-off end-to-end canary completes.
-Implementing the lane is not an admission result.
+first target-only canary has now demonstrated all of those gates. That narrow
+admission result does not remove the ordinary-entrypoint tombstone or establish
+a general serving configuration.
 
 Before any performance comparison or cache experiment, the next protocol must:
 
 1. pin the immutable image, model, tokenizer, revision, and serving profile;
-2. start a new loopback-only target-only server with the read-only PLE mount;
-3. complete a quality-clean synthetic exact-answer canary;
-4. complete a varied-token long-context canary at matched prompt/output limits;
-5. verify teardown and scalar-only evidence export; then
-6. run a cold A/B/B/A cache policy experiment in separate process lifetimes.
+2. retain the fresh-process quality and varied-token checks as admission gates;
+3. verify teardown and scalar-only evidence export; then
+4. run a cold A/B/B/A cache policy experiment in separate process lifetimes.
 
 The retired overlay and all historical TRT-LLM measurements remain excluded
 from this candidate. Passing this pre-admission does not license a speed claim
@@ -163,7 +178,7 @@ or an overnight cache campaign.
 ## Repository verification
 
 The new seccomp contract and runtime-attestation validators are fail-closed and
-scalar-only. Their focused suite has 21 tests; the complete repository suite
-passed 968 tests, and module compilation passed. No raw result bundle or
-evidence archive was written because these are infrastructure prerequisites,
-not a completed SparkBench measurement.
+scalar-only. The complete repository suite passed 993 tests, module
+compilation and lint passed, and the committed scalar archive was regenerated
+and verified from the completed canary. Raw result bundles, logs, prompts,
+completions, and credentials remain ignored.
