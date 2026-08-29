@@ -19,6 +19,7 @@ from bench.sglang_sm121_cache_performance import (
     SM121_CACHE_PERFORMANCE_TIMED_TURNS,
     SM121_CACHE_PERFORMANCE_TURN_EVENT,
     SM121CachePerformanceError,
+    derive_sm121_cache_performance_turn_admission,
     score_sm121_cache_performance_campaign,
     sm121_cache_performance_pair_binding_sha256,
     sm121_cache_performance_pair_instance_sha256,
@@ -115,6 +116,24 @@ class SM121CachePerformanceContractTests(unittest.TestCase):
         event["ttft_s"] = 1.0
         with self.assertRaisesRegex(SM121CachePerformanceError, "fields are invalid"):
             validate_sm121_cache_performance_turn_event(event)
+
+    def test_turn_accepts_unexpected_null_cache_detail_shape(self) -> None:
+        event = _turn(ordinal=2, arm="A", turn="T0", wall_s=30.0)
+        event.update(
+            {
+                "response_detail_state": "unexpected",
+                "response_device_cached_tokens": None,
+                "response_host_cached_tokens": None,
+                "response_storage_cached_tokens": None,
+                "usage_detail_state": "unexpected",
+                "usage_cached_tokens": None,
+            }
+        )
+        validate_sm121_cache_performance_turn_event(event)
+        self.assertEqual(
+            (True, "admitted"),
+            derive_sm121_cache_performance_turn_admission(event),
+        )
 
     def test_turn_rejects_nonzero_cached_total_for_cache_off(self) -> None:
         event = _turn(ordinal=4, arm="B", turn="T1", wall_s=30.0)

@@ -649,9 +649,15 @@ def _optional_detail_state(
     *,
     name: str,
 ) -> None:
-    if state not in {"omitted", "null", "zero_details", "nonzero_details"}:
+    if state not in {
+        "omitted",
+        "null",
+        "zero_details",
+        "nonzero_details",
+        "unexpected",
+    }:
         raise SM121CachePerformanceError(f"{name} detail state is invalid")
-    if state in {"omitted", "null"}:
+    if state in {"omitted", "null", "unexpected"}:
         if any(value is not None for value in values):
             raise SM121CachePerformanceError(f"{name} omitted details are not null")
     elif state == "zero_details":
@@ -808,9 +814,15 @@ def validate_sm121_cache_performance_turn_event(event: object) -> None:
     )
     _optional_detail_state(row["response_detail_state"], detail_values, name="response")
     usage = _require_optional_int(row["usage_cached_tokens"], "cache-performance usage cached tokens")
-    if row["usage_detail_state"] not in {"omitted", "null", "zero_details", "nonzero_details"}:
+    if row["usage_detail_state"] not in {
+        "omitted",
+        "null",
+        "zero_details",
+        "nonzero_details",
+        "unexpected",
+    }:
         raise SM121CachePerformanceError("cache-performance usage detail state is invalid")
-    if row["usage_detail_state"] in {"omitted", "null"} and usage is not None:
+    if row["usage_detail_state"] in {"omitted", "null", "unexpected"} and usage is not None:
         raise SM121CachePerformanceError("cache-performance usage details are invalid")
     if row["usage_detail_state"] == "zero_details" and usage != 0:
         raise SM121CachePerformanceError("cache-performance zero usage is invalid")
