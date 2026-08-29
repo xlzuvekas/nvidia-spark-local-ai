@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -262,6 +264,238 @@ class AutoresearchV2RoundTests(unittest.TestCase):
             for sentinel in ("prompt", "completion", "token_ids", "request_id", "path"):
                 self.assertNotIn(sentinel, rendered)
 
+    def test_executor_failure_is_terminal_scalar_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            round_dir, _child = _round(root)
+            cause = RuntimeError("synthetic child request details")
+            with (
+                patch(
+                    "bench.autoresearch_v2.execute_sm121_cache_performance_campaign",
+                    side_effect=cause,
+                ),
+                patch("bench.autoresearch_v2._validate_failure_child_source"),
+            ):
+                with self.assertRaises(v2.AutoresearchV2ExecutionFailure) as caught:
+                    v2.run_autoresearch_v2(
+                        round_dir,
+                        workspace=root,
+                        evidence_root=root / "evidence",
+                        now=_NOW,
+                    )
+            self.assertEqual("child_execution", caught.exception.stage)
+            self.assertIs(cause, caught.exception.__cause__)
+            payload = v2._load_round(round_dir)
+            expected = v2._failure_summary_payload(
+                payload, stage="child_execution"
+            )
+            self.assertEqual(expected, caught.exception.summary)
+            saved = json.loads((round_dir / "summary.json").read_text())
+            self.assertEqual(expected, saved)
+            rendered = json.dumps(saved, sort_keys=True)
+            self.assertNotIn("synthetic child request details", rendered)
+            self.assertNotIn("request", rendered)
+            self.assertEqual(
+                "failed", v2._validate_events(round_dir, payload, terminal=True)
+            )
+            with self.assertRaisesRegex(v2.AutoresearchV2Error, "failure child"):
+                v2.summarize_autoresearch_v2(
+                    round_dir, evidence_root=root / "evidence"
+                )
+            with self.assertRaisesRegex(v2.AutoresearchV2Error, "terminal"):
+                v2.run_autoresearch_v2(
+                    round_dir,
+                    workspace=root,
+                    evidence_root=root / "evidence",
+                    now=_NOW,
+                )
+
+    def test_signal_like_interrupt_does_not_synthesize_a_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            round_dir, _child = _round(root)
+            with patch(
+                "bench.autoresearch_v2.execute_sm121_cache_performance_campaign",
+                side_effect=KeyboardInterrupt,
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    v2.run_autoresearch_v2(
+                        round_dir,
+                        workspace=root,
+                        evidence_root=root / "evidence",
+                        now=_NOW,
+                    )
+            self.assertFalse((round_dir / "summary.json").exists())
+            self.assertEqual(
+                ["autoresearch_v2_round_started"],
+                [
+                    event["event"]
+                    for event in v2.Journal(round_dir / "events.jsonl").strict_events()
+                ],
+            )
+            with self.assertRaisesRegex(v2.AutoresearchV2Error, "cannot be resumed"):
+                v2.run_autoresearch_v2(
+                    round_dir,
+                    workspace=root,
+                    evidence_root=root / "evidence",
+                    now=_NOW,
+                )
+
+    def test_failure_receipt_persistence_failure_is_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            round_dir, _child = _round(root)
+            with (
+                patch(
+                    "bench.autoresearch_v2.execute_sm121_cache_performance_campaign",
+                    side_effect=RuntimeError("synthetic child failure"),
+                ),
+                patch("bench.autoresearch_v2._validate_failure_child_source"),
+                patch(
+                    "bench.autoresearch_v2.write_json",
+                    side_effect=OSError("synthetic receipt write failure"),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    v2.AutoresearchV2Error, "could not be persisted"
+                ) as caught:
+                    v2.run_autoresearch_v2(
+                        round_dir,
+                        workspace=root,
+                        evidence_root=root / "evidence",
+                        now=_NOW,
+                    )
+            self.assertIsInstance(caught.exception.__cause__, OSError)
+            self.assertFalse((round_dir / "summary.json").exists())
+            self.assertEqual(
+                ["autoresearch_v2_round_started", "autoresearch_v2_round_failed"],
+                [
+                    event["event"]
+                    for event in v2.Journal(round_dir / "events.jsonl").strict_events()
+                ],
+            )
+
+    def test_audit_failure_is_terminal_scalar_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            round_dir, _child = _round(root)
+            cause = OSError("synthetic audit payload")
+            with (
+                patch(
+                    "bench.autoresearch_v2.execute_sm121_cache_performance_campaign",
+                    return_value=_child_summary(),
+                ),
+                patch(
+                    "bench.autoresearch_v2.audit_sm121_cache_performance_campaign",
+                    side_effect=cause,
+                ),
+                patch("bench.autoresearch_v2._validate_failure_child_source"),
+            ):
+                with self.assertRaises(v2.AutoresearchV2ExecutionFailure) as caught:
+                    v2.run_autoresearch_v2(
+                        round_dir,
+                        workspace=root,
+                        evidence_root=root / "evidence",
+                        now=_NOW,
+                    )
+            self.assertEqual("child_audit", caught.exception.stage)
+            self.assertIs(cause, caught.exception.__cause__)
+            with self.assertRaisesRegex(v2.AutoresearchV2Error, "failure child"):
+                v2.summarize_autoresearch_v2(
+                    round_dir, evidence_root=root / "evidence"
+                )
+
+    def test_projection_failure_is_terminal_scalar_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            round_dir, _child = _round(root)
+            cause = RuntimeError("synthetic projection payload")
+            with (
+                patch(
+                    "bench.autoresearch_v2.execute_sm121_cache_performance_campaign",
+                    return_value=_child_summary(),
+                ),
+                patch(
+                    "bench.autoresearch_v2.audit_sm121_cache_performance_campaign",
+                    return_value={"ok": True},
+                ),
+                patch("bench.autoresearch_v2._summary_payload", side_effect=cause),
+                patch("bench.autoresearch_v2._validate_failure_child_source"),
+            ):
+                with self.assertRaises(v2.AutoresearchV2ExecutionFailure) as caught:
+                    v2.run_autoresearch_v2(
+                        round_dir,
+                        workspace=root,
+                        evidence_root=root / "evidence",
+                        now=_NOW,
+                    )
+            self.assertEqual("projection", caught.exception.stage)
+            self.assertIs(cause, caught.exception.__cause__)
+
+    def test_failure_stage_is_bound_to_its_terminal_event(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            round_dir, _child = _round(root)
+            with (
+                patch(
+                    "bench.autoresearch_v2.execute_sm121_cache_performance_campaign",
+                    side_effect=RuntimeError("synthetic child request details"),
+                ),
+                patch("bench.autoresearch_v2._validate_failure_child_source"),
+            ):
+                with self.assertRaises(v2.AutoresearchV2ExecutionFailure):
+                    v2.run_autoresearch_v2(
+                        round_dir,
+                        workspace=root,
+                        evidence_root=root / "evidence",
+                        now=_NOW,
+                    )
+            saved = json.loads((round_dir / "summary.json").read_text())
+            saved["failure_stage"] = "child_audit"
+            saved["integrity_hash"] = content_hash(
+                {key: value for key, value in saved.items() if key != "integrity_hash"},
+                64,
+            )
+            write_json(round_dir / "summary.json", saved)
+            with self.assertRaisesRegex(
+                v2.AutoresearchV2Error, "failure stage changed"
+            ):
+                v2.summarize_autoresearch_v2(
+                    round_dir, evidence_root=root / "evidence"
+                )
+
+    def test_failure_started_event_is_bound_to_its_round(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            round_dir, _child = _round(root)
+            with (
+                patch(
+                    "bench.autoresearch_v2.execute_sm121_cache_performance_campaign",
+                    side_effect=RuntimeError("synthetic child request details"),
+                ),
+                patch("bench.autoresearch_v2._validate_failure_child_source"),
+            ):
+                with self.assertRaises(v2.AutoresearchV2ExecutionFailure):
+                    v2.run_autoresearch_v2(
+                        round_dir,
+                        workspace=root,
+                        evidence_root=root / "evidence",
+                        now=_NOW,
+                    )
+            journal_path = round_dir / "events.jsonl"
+            events = v2.Journal(journal_path).strict_events()
+            events[0]["definition_sha256"] = "0" * 64
+            journal_path.write_text(
+                "".join(json.dumps(event, sort_keys=True) + "\n" for event in events),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                v2.AutoresearchV2Error, "started event definition binding changed"
+            ):
+                v2.summarize_autoresearch_v2(
+                    round_dir, evidence_root=root / "evidence"
+                )
+
     def test_summarize_recomputes_the_child_projection_without_execution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -322,3 +556,28 @@ class AutoresearchV2CliTests(unittest.TestCase):
         run = parser.parse_args(["autoresearch-v2-run", "synthetic-round"])
         self.assertEqual(command_autoresearch_v2_run, run.function)
         self.assertEqual(Path("synthetic-round"), run.round_dir)
+
+    def test_cli_failure_prints_only_the_scalar_receipt(self) -> None:
+        args = build_parser().parse_args(["autoresearch-v2-run", "synthetic-round"])
+        summary = {
+            "schema_version": v2.AUTORESEARCH_V2_SCHEMA_VERSION,
+            "campaign_id": v2.AUTORESEARCH_V2_CAMPAIGN_ID,
+            "execution_mode": v2.AUTORESEARCH_V2_EXECUTION_MODE,
+            "child_campaign_id": v2.SM121_CACHE_PERFORMANCE_CAMPAIGN_ID,
+            "child_pair_binding_sha256": _PAIR_BINDING,
+            "status": "partial",
+            "decision": "inconclusive",
+            "failure_stage": "child_execution",
+            "integrity_hash": "d" * 64,
+        }
+        failure = v2.AutoresearchV2ExecutionFailure(
+            stage="child_execution", summary=summary
+        )
+        output = io.StringIO()
+        with (
+            patch("sparkbench.run_autoresearch_v2", side_effect=failure),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(1, command_autoresearch_v2_run(args))
+        self.assertEqual(summary, json.loads(output.getvalue()))
+        self.assertNotIn("synthetic-round", output.getvalue())

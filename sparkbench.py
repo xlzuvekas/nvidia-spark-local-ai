@@ -32,6 +32,7 @@ from bench.autoresearch_campaign import (
     summarize_campaign,
 )
 from bench.autoresearch_v2 import (
+    AutoresearchV2ExecutionFailure,
     freeze_autoresearch_v2,
     preview_autoresearch_v2,
     run_autoresearch_v2,
@@ -380,11 +381,15 @@ def command_autoresearch_v2_plan(args: argparse.Namespace) -> int:
 def command_autoresearch_v2_run(args: argparse.Namespace) -> int:
     """Execute the only authorized current-runtime v2 round once."""
 
-    summary = run_autoresearch_v2(
-        args.round_dir,
-        workspace=WORKSPACE,
-        evidence_root=args.evidence,
-    )
+    try:
+        summary = run_autoresearch_v2(
+            args.round_dir,
+            workspace=WORKSPACE,
+            evidence_root=args.evidence,
+        )
+    except AutoresearchV2ExecutionFailure as error:
+        print(json.dumps(error.summary, indent=2, sort_keys=True))
+        return 1
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0 if summary["status"] == "complete" else 1
 

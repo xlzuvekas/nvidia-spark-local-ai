@@ -18224,8 +18224,10 @@ def _validate_autoresearch_v2_source_topology(
     A v2 controller is only metadata around the independently validated child
     cache-policy campaign.  It is deliberately never projected into the
     scalar evidence corpus.  The accepted raw states are intentionally narrow:
-    an empty pre-plan directory, a frozen round with an unstarted child, or a
-    terminal round with a terminal child.
+    an empty pre-plan directory, a frozen round with an unstarted child, a
+    fully terminal round with a terminal child, or a terminal scalar wrapper
+    failure.  The latter remains unprojected provenance and may bind either an
+    unstarted child or a child that independently terminalized.
     """
 
     root_identity, locked_rounds = topology
@@ -18315,22 +18317,52 @@ def _validate_autoresearch_v2_source_topology(
                 raise EvidenceError("frozen autoresearch-v2 child is unexpectedly terminal")
             resolved_rounds.append(round_dir)
             continue
-        if child_source is None:
-            raise EvidenceError("terminal autoresearch-v2 child is not terminal")
         saved = _load_json(round_dir / "summary.json", results_root)
         try:
+            event_state = autoresearch_v2_module._validate_events(
+                round_dir, payload, terminal=True
+            )
+            if event_state == "failed":
+                saved = autoresearch_v2_module._validate_hashed_payload(
+                    saved,
+                    fields=autoresearch_v2_module._FAILURE_SUMMARY_FIELDS,
+                    name="failure summary",
+                )
+                stage = saved.get("failure_stage")
+                if not isinstance(stage, str):
+                    raise EvidenceError("autoresearch-v2 failure stage is invalid")
+                autoresearch_v2_module._validate_events(
+                    round_dir, payload, terminal=True, failure_stage=stage
+                )
+                expected_failure = autoresearch_v2_module._failure_summary_payload(
+                    payload, stage=stage
+                )
+                if saved != expected_failure:
+                    raise EvidenceError(
+                        "autoresearch-v2 failure summary does not match its round"
+                    )
+                if (
+                    autoresearch_v2_module._failure_stage_requires_terminal_child(
+                        stage
+                    )
+                    and child_source is None
+                ):
+                    raise EvidenceError(
+                        "autoresearch-v2 failure child is not terminal"
+                    )
+                resolved_rounds.append(round_dir)
+                continue
             saved = autoresearch_v2_module._validate_hashed_payload(
                 saved,
                 fields=autoresearch_v2_module._SUMMARY_FIELDS,
                 name="summary",
             )
+            if child_source is None:
+                raise EvidenceError("terminal autoresearch-v2 child is not terminal")
             expected = autoresearch_v2_module._summary_payload(
                 payload,
                 child_summary=child_source["summary"],
                 audit={"ok": True},
-            )
-            autoresearch_v2_module._validate_events(
-                round_dir, payload, terminal=True
             )
         except (KeyError, TypeError, ValueError) as error:
             raise EvidenceError("autoresearch-v2 terminal state is invalid") from error

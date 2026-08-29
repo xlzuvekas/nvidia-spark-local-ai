@@ -119,14 +119,24 @@ python3 sparkbench.py autoresearch-v2-summarize \
   results/autoresearch-v2/FROZEN_ROUND
 ```
 
-There is no resume command. If a started round is interrupted or fails, it is
-terminal provenance and the next attempt must freeze new plans. The child
-campaign stays beneath `results/cache-policy-campaigns/`, so the existing
-read-only audit and scalar-only evidence exporter remain the sole publication
-path for its actual measurements. The wrapper is ignored controller
-provenance, not a second measurement archive. The exporter validates only its
-empty pre-plan, frozen-unstarted, or terminal shapes and emits evidence only
-for its independently audited child.
+There is no resume command. A caught ordinary exception from child execution,
+child audit, or wrapper score projection after `started` appends an exact
+`started` → `failed` scalar receipt only after its bound child passes the
+applicable frozen topology check. The receipt contains `partial` /
+`inconclusive`, the child binding, and one allowlisted stage label only—no
+exception text, path, request, or child-derived measurement. The next attempt
+must freeze new plans. Abrupt process termination, signal interruption, an
+invalid child topology, or a failure to persist that receipt does not
+synthesize terminal provenance; it remains a fail-closed nonterminal state.
+
+The child campaign stays beneath `results/cache-policy-campaigns/`, so the
+existing read-only audit and scalar-only evidence exporter remain the sole
+publication path for its actual measurements. The wrapper is ignored
+controller provenance, not a second measurement archive. The exporter accepts
+the scalar failure receipt only when its child still satisfies the frozen
+topology: an execution-stage failure may have an unstarted or terminal child;
+audit and projection failures require a terminal child. It emits evidence only
+for independently audited child measurements.
 
 ## Boundaries and current follow-through
 

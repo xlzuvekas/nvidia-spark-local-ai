@@ -1325,6 +1325,14 @@ measurement source and the only evidence-export input; the v2 wrapper binds
 its scalar identity and maps its audited decision to `retain`, `reject`, or
 `inconclusive` without recalculating rounded timings.
 
+A caught ordinary executor, child-audit, or score-projection exception after
+the wrapper starts is retained as a separate hashed scalar `partial` /
+`inconclusive` receipt only after its bound child passes the applicable frozen
+topology check. It has only an allowlisted failure-stage label and is never
+evidence-projected. Abrupt termination, invalid child topology, and
+receipt-persistence failures remain fail-closed nonterminal state rather than
+claiming a terminal result.
+
 See the [v2 protocol](docs/qwen38-flash-next-sm121-autoresearch-v2-2026-08-29.md)
 for its exact candidate orientation, decision table, commands, and expansion
 requirements. It does not make the historical lazy-buffer/depth interaction

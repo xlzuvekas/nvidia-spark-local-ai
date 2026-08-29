@@ -642,6 +642,83 @@ class SM121CachePerformanceEvidenceTests(unittest.TestCase):
                 self.assertEqual(
                     {"round.json"}, {path.name for path in frozen_round.iterdir()}
                 )
+                runner_datetime.now.return_value = now + timedelta(seconds=2)
+                failed_round = autoresearch_v2.freeze_autoresearch_v2(
+                    self.repository
+                    / "manifests"
+                    / "campaigns"
+                    / "qwen38_flash_next_sm121_autoresearch_v2_cache_policy.toml",
+                    results_root=fixture.results,
+                    evidence_root=fixture.output,
+                    cutoff=cutoff,
+                    now=now + timedelta(seconds=2),
+                )
+                with patch(
+                    "bench.autoresearch_v2.execute_sm121_cache_performance_campaign",
+                    side_effect=RuntimeError("synthetic wrapper failure"),
+                ):
+                    with self.assertRaises(
+                        autoresearch_v2.AutoresearchV2ExecutionFailure
+                    ):
+                        autoresearch_v2.run_autoresearch_v2(
+                            failed_round,
+                            workspace=fixture.results.parent,
+                            evidence_root=fixture.output,
+                            now=now,
+                        )
+                self.assertEqual(
+                    "child_execution",
+                    autoresearch_v2.summarize_autoresearch_v2(
+                        failed_round, evidence_root=fixture.output
+                    )["failure_stage"],
+                )
+                runner_datetime.now.return_value = now + timedelta(seconds=3)
+                audit_failed_round = autoresearch_v2.freeze_autoresearch_v2(
+                    self.repository
+                    / "manifests"
+                    / "campaigns"
+                    / "qwen38_flash_next_sm121_autoresearch_v2_cache_policy.toml",
+                    results_root=fixture.results,
+                    evidence_root=fixture.output,
+                    cutoff=cutoff,
+                    now=now + timedelta(seconds=3),
+                )
+                audit_failed_payload = autoresearch_v2._load_round(audit_failed_round)
+                audit_failed_child = (
+                    fixture.results
+                    / "cache-policy-campaigns"
+                    / str(audit_failed_payload["child_campaign_directory"])
+                )
+                self._write_completed_campaign(audit_failed_child)
+                audit_failed_child_summary = json.loads(
+                    (audit_failed_child / "summary.json").read_text()
+                )
+                with (
+                    patch(
+                        "bench.autoresearch_v2.execute_sm121_cache_performance_campaign",
+                        return_value=audit_failed_child_summary,
+                    ),
+                    patch(
+                        "bench.autoresearch_v2.audit_sm121_cache_performance_campaign",
+                        side_effect=OSError("synthetic audit failure"),
+                    ),
+                ):
+                    with self.assertRaises(
+                        autoresearch_v2.AutoresearchV2ExecutionFailure
+                    ) as caught:
+                        autoresearch_v2.run_autoresearch_v2(
+                            audit_failed_round,
+                            workspace=fixture.results.parent,
+                            evidence_root=fixture.output,
+                            now=now,
+                        )
+                self.assertEqual("child_audit", caught.exception.stage)
+                self.assertEqual(
+                    "child_audit",
+                    autoresearch_v2.summarize_autoresearch_v2(
+                        audit_failed_round, evidence_root=fixture.output
+                    )["failure_stage"],
+                )
                 round_payload = autoresearch_v2._load_round(round_dir)
                 child = (
                     fixture.results
@@ -671,15 +748,129 @@ class SM121CachePerformanceEvidenceTests(unittest.TestCase):
                     fixture.results
                     / autoresearch_v2.AUTORESEARCH_V2_RESULT_ROOT
                     / (
-                        "20260829T020002Z-"
+                        "20260829T020004Z-"
                         f"{autoresearch_v2.AUTORESEARCH_V2_CAMPAIGN_ID}"
                     )
                 )
                 failed_plan_root.mkdir()
                 self.assertTrue(self._export(fixture, replace=True)["changed"])
+                failed_events_path = failed_round / "events.jsonl"
+                failed_events = autoresearch_v2.Journal(
+                    failed_events_path
+                ).strict_events()
+                failed_events[0]["definition_sha256"] = "0" * 64
+                evidence_test_support.EvidenceFixture.write_jsonl(
+                    failed_events_path, failed_events
+                )
+                with self.assertRaisesRegex(
+                    EvidenceError, "autoresearch-v2 terminal state is invalid"
+                ):
+                    self._export(fixture, replace=True)
+                failed_events[0]["definition_sha256"] = autoresearch_v2._load_round(
+                    failed_round
+                )["definition_sha256"]
+                evidence_test_support.EvidenceFixture.write_jsonl(
+                    failed_events_path, failed_events
+                )
+                runner_datetime.now.return_value = now + timedelta(seconds=5)
+                unstarted_audit_round = autoresearch_v2.freeze_autoresearch_v2(
+                    self.repository
+                    / "manifests"
+                    / "campaigns"
+                    / "qwen38_flash_next_sm121_autoresearch_v2_cache_policy.toml",
+                    results_root=fixture.results,
+                    evidence_root=fixture.output,
+                    cutoff=cutoff,
+                    now=now + timedelta(seconds=5),
+                )
+                with (
+                    patch(
+                        "bench.autoresearch_v2.execute_sm121_cache_performance_campaign",
+                        return_value={},
+                    ),
+                    patch(
+                        "bench.autoresearch_v2.audit_sm121_cache_performance_campaign",
+                        side_effect=OSError("synthetic unstarted audit failure"),
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        autoresearch_v2.AutoresearchV2Error,
+                        "failure child is not terminal",
+                    ):
+                        autoresearch_v2.run_autoresearch_v2(
+                            unstarted_audit_round,
+                            workspace=fixture.results.parent,
+                            evidence_root=fixture.output,
+                            now=now,
+                        )
+                self.assertEqual(
+                    {"round.json", "events.jsonl"},
+                    {path.name for path in unstarted_audit_round.iterdir()},
+                )
+                self.assertEqual(
+                    ["autoresearch_v2_round_started"],
+                    [
+                        event["event"]
+                        for event in autoresearch_v2.Journal(
+                            unstarted_audit_round / "events.jsonl"
+                        ).strict_events()
+                    ],
+                )
+                runner_datetime.now.return_value = now + timedelta(seconds=6)
+                unstarted_projection_round = autoresearch_v2.freeze_autoresearch_v2(
+                    self.repository
+                    / "manifests"
+                    / "campaigns"
+                    / "qwen38_flash_next_sm121_autoresearch_v2_cache_policy.toml",
+                    results_root=fixture.results,
+                    evidence_root=fixture.output,
+                    cutoff=cutoff,
+                    now=now + timedelta(seconds=6),
+                )
+                with (
+                    patch(
+                        "bench.autoresearch_v2.execute_sm121_cache_performance_campaign",
+                        return_value={},
+                    ),
+                    patch(
+                        "bench.autoresearch_v2.audit_sm121_cache_performance_campaign",
+                        return_value={"ok": True},
+                    ),
+                    patch(
+                        "bench.autoresearch_v2._summary_payload",
+                        side_effect=RuntimeError("synthetic projection failure"),
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        autoresearch_v2.AutoresearchV2Error,
+                        "failure child is not terminal",
+                    ):
+                        autoresearch_v2.run_autoresearch_v2(
+                            unstarted_projection_round,
+                            workspace=fixture.results.parent,
+                            evidence_root=fixture.output,
+                            now=now,
+                        )
+                self.assertEqual(
+                    {"round.json", "events.jsonl"},
+                    {path.name for path in unstarted_projection_round.iterdir()},
+                )
+                self.assertEqual(
+                    ["autoresearch_v2_round_started"],
+                    [
+                        event["event"]
+                        for event in autoresearch_v2.Journal(
+                            unstarted_projection_round / "events.jsonl"
+                        ).strict_events()
+                    ],
+                )
+                with self.assertRaisesRegex(
+                    EvidenceError, "autoresearch-v2 round topology is invalid"
+                ):
+                    self._export(fixture, replace=True)
             published = json.loads((fixture.output / "index.json").read_text())
             self.assertEqual(
-                1,
+                2,
                 sum(
                     entry["evidence_kind"] == "sm121_cache_policy_performance"
                     for entry in published["campaigns"]

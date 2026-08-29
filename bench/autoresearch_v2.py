@@ -66,6 +66,13 @@ _SAFE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _SAFE_CHILD_DIRECTORY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PREFIXED_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_FAILURE_STAGES = frozenset(
+    {
+        "child_execution",
+        "child_audit",
+        "projection",
+    }
+)
 _DEFINITION_KEYS = frozenset({"schema_version", "campaign"})
 _CAMPAIGN_KEYS = frozenset(
     {
@@ -132,6 +139,19 @@ _SUMMARY_FIELDS = frozenset(
         "integrity_hash",
     }
 )
+_FAILURE_SUMMARY_FIELDS = frozenset(
+    {
+        "schema_version",
+        "campaign_id",
+        "execution_mode",
+        "child_campaign_id",
+        "child_pair_binding_sha256",
+        "status",
+        "decision",
+        "failure_stage",
+        "integrity_hash",
+    }
+)
 _EVENT_FIELDS = {
     "autoresearch_v2_round_started": frozenset(
         {
@@ -163,11 +183,33 @@ _EVENT_FIELDS = {
             "decision",
         }
     ),
+    "autoresearch_v2_round_failed": frozenset(
+        {
+            "event",
+            "campaign_id",
+            "child_pair_binding_sha256",
+            "stage",
+        }
+    ),
 }
 
 
 class AutoresearchV2Error(ValueError):
     """Raised when a v2 controller contract cannot be safely honored."""
+
+
+class AutoresearchV2ExecutionFailure(AutoresearchV2Error):
+    """A started round preserved a terminal scalar failure record.
+
+    The original exception stays chained for direct local diagnosis.  The CLI
+    routes this type to its stable stage label and scalar summary only, so it
+    does not accidentally render child request details.
+    """
+
+    def __init__(self, *, stage: str, summary: Mapping[str, object]) -> None:
+        super().__init__(f"autoresearch-v2 round terminated during {stage}")
+        self.stage = stage
+        self.summary = dict(summary)
 
 
 @dataclass(frozen=True, slots=True)
@@ -715,7 +757,84 @@ def _summary_payload(
     return payload
 
 
-def _validate_events(round_dir: Path, round_payload: Mapping[str, object], *, terminal: bool) -> None:
+def _failure_summary_payload(
+    round_payload: Mapping[str, object], *, stage: str
+) -> dict[str, object]:
+    """Return the scalar-only terminal result for a wrapper-level failure.
+
+    A child controller normally owns its own partial/failed summary.  This
+    narrow fallback covers failures before that summary can be trusted (for
+    example a child-executor or audit exception).  It deliberately carries no
+    exception type, message, path, request, or child-derived timing.
+    """
+
+    if stage not in _FAILURE_STAGES:
+        raise AutoresearchV2Error("autoresearch-v2 failure stage is invalid")
+    payload: dict[str, object] = {
+        "schema_version": AUTORESEARCH_V2_SCHEMA_VERSION,
+        "campaign_id": round_payload["campaign_id"],
+        "execution_mode": round_payload["execution_mode"],
+        "child_campaign_id": round_payload["child_campaign_id"],
+        "child_pair_binding_sha256": round_payload["child_pair_binding_sha256"],
+        "status": "partial",
+        "decision": "inconclusive",
+        "failure_stage": stage,
+    }
+    payload["integrity_hash"] = content_hash(payload, 64)
+    return payload
+
+
+def _failure_stage_requires_terminal_child(stage: str) -> bool:
+    """Return whether a wrapper failure can only follow a terminal child."""
+
+    if stage not in _FAILURE_STAGES:
+        raise AutoresearchV2Error("autoresearch-v2 failure stage is invalid")
+    return stage != "child_execution"
+
+
+def _record_terminal_failure(
+    round_dir: Path,
+    round_payload: Mapping[str, object],
+    *,
+    child: Path,
+    stage: str,
+) -> dict[str, object]:
+    """Durably retain one sanitized terminal wrapper failure.
+
+    This record is intentionally non-resumable.  If its own durable writes
+    fail, the caller must fail closed rather than infer a terminal result from
+    a partial journal.
+    """
+
+    _validate_failure_child_source(round_dir, child, stage=stage)
+    summary = _failure_summary_payload(round_payload, stage=stage)
+    journal = Journal(round_dir / "events.jsonl")
+    try:
+        journal.append(
+            {
+                "event": "autoresearch_v2_round_failed",
+                "campaign_id": round_payload["campaign_id"],
+                "child_pair_binding_sha256": round_payload[
+                    "child_pair_binding_sha256"
+                ],
+                "stage": stage,
+            }
+        )
+        write_json(round_dir / "summary.json", summary)
+    except Exception as error:
+        raise AutoresearchV2Error(
+            "autoresearch-v2 terminal failure record could not be persisted"
+        ) from error
+    return summary
+
+
+def _validate_events(
+    round_dir: Path,
+    round_payload: Mapping[str, object],
+    *,
+    terminal: bool,
+    failure_stage: str | None = None,
+) -> str:
     journal_path = round_dir / "events.jsonl"
     journal = Journal(journal_path)
     try:
@@ -725,25 +844,63 @@ def _validate_events(round_dir: Path, round_payload: Mapping[str, object], *, te
     if not events:
         if terminal:
             raise AutoresearchV2Error("terminal autoresearch-v2 round has no journal")
-        return
-    expected_names = (
+        return "unstarted"
+    normal_names = (
         "autoresearch_v2_round_started",
         "autoresearch_v2_round_scored",
         "autoresearch_v2_round_complete",
     )
-    if len(events) > len(expected_names):
-        raise AutoresearchV2Error("autoresearch-v2 event journal is too long")
-    for index, event in enumerate(events):
+    failed_names = (
+        "autoresearch_v2_round_started",
+        "autoresearch_v2_round_failed",
+    )
+    names = tuple(event.get("event") for event in events)
+    if names == normal_names:
+        state = "complete"
+    elif names == failed_names:
+        state = "failed"
+    elif not terminal and names == normal_names[: len(names)]:
+        state = ("started", "scored")[len(names) - 1]
+    else:
+        raise AutoresearchV2Error("autoresearch-v2 event order is invalid")
+    for event in events:
         name = event.get("event")
-        if name != expected_names[index] or not isinstance(name, str):
+        if not isinstance(name, str):
             raise AutoresearchV2Error("autoresearch-v2 event order is invalid")
         scalar = {key: value for key, value in event.items() if key != "timestamp"}
         if frozenset(scalar) != _EVENT_FIELDS[name]:
             raise AutoresearchV2Error("autoresearch-v2 event fields changed")
         if scalar.get("campaign_id") != round_payload["campaign_id"]:
             raise AutoresearchV2Error("autoresearch-v2 event campaign changed")
-    if terminal and len(events) != len(expected_names):
-        raise AutoresearchV2Error("terminal autoresearch-v2 journal is incomplete")
+        if name == "autoresearch_v2_round_started":
+            if scalar.get("execution_mode") != round_payload["execution_mode"]:
+                raise AutoresearchV2Error(
+                    "autoresearch-v2 started event execution mode changed"
+                )
+            if scalar.get("definition_sha256") != round_payload["definition_sha256"]:
+                raise AutoresearchV2Error(
+                    "autoresearch-v2 started event definition binding changed"
+                )
+            if (
+                scalar.get("child_pair_binding_sha256")
+                != round_payload["child_pair_binding_sha256"]
+            ):
+                raise AutoresearchV2Error(
+                    "autoresearch-v2 started event child binding changed"
+                )
+        if name == "autoresearch_v2_round_failed":
+            if scalar.get("stage") not in _FAILURE_STAGES:
+                raise AutoresearchV2Error("autoresearch-v2 failure stage is invalid")
+            if failure_stage is not None and scalar.get("stage") != failure_stage:
+                raise AutoresearchV2Error("autoresearch-v2 failure stage changed")
+            if (
+                scalar.get("child_pair_binding_sha256")
+                != round_payload["child_pair_binding_sha256"]
+            ):
+                raise AutoresearchV2Error(
+                    "autoresearch-v2 failure child binding changed"
+                )
+    return state
 
 
 def _read_child_summary(child: Path) -> dict[str, object]:
@@ -754,6 +911,36 @@ def _read_child_summary(child: Path) -> dict[str, object]:
     if not isinstance(raw, dict):
         raise AutoresearchV2Error("autoresearch-v2 child summary is invalid")
     return raw
+
+
+def _validate_failure_child_source(
+    round_dir: Path, child: Path, *, stage: str
+) -> None:
+    """Match the exporter's terminal-child policy for a failed wrapper.
+
+    The scalar source validator is intentionally shared with evidence.  An
+    execution-stage exception may leave a valid unstarted child or a valid
+    terminal child; later stages can occur only after a valid terminal child.
+    No child audit is re-run here, because the failure record specifically
+    covers an audit or projection that already raised.
+    """
+
+    requires_terminal = _failure_stage_requires_terminal_child(stage)
+    try:
+        from .evidence import (
+            EvidenceError,
+            _validate_sm121_cache_performance_source,
+        )
+
+        source = _validate_sm121_cache_performance_source(
+            child, _results_root_for_round(round_dir)
+        )
+    except (OSError, ValueError, KeyError, TypeError, EvidenceError) as error:
+        raise AutoresearchV2Error(
+            "autoresearch-v2 failure child does not meet the scalar contract"
+        ) from error
+    if source is None and requires_terminal:
+        raise AutoresearchV2Error("autoresearch-v2 failure child is not terminal")
 
 
 def run_autoresearch_v2(
@@ -792,11 +979,35 @@ def run_autoresearch_v2(
             "child_pair_binding_sha256": payload["child_pair_binding_sha256"],
         }
     )
-    child_summary = execute_sm121_cache_performance_campaign(
-        child, workspace=workspace, evidence_root=evidence_root
-    )
-    audit = audit_sm121_cache_performance_campaign(child, evidence_root=evidence_root)
-    summary = _summary_payload(payload, child_summary=child_summary, audit=audit)
+    try:
+        child_summary = execute_sm121_cache_performance_campaign(
+            child, workspace=workspace, evidence_root=evidence_root
+        )
+    except Exception as error:
+        summary = _record_terminal_failure(
+            round_dir, payload, child=child, stage="child_execution"
+        )
+        raise AutoresearchV2ExecutionFailure(
+            stage="child_execution", summary=summary
+        ) from error
+    try:
+        audit = audit_sm121_cache_performance_campaign(child, evidence_root=evidence_root)
+    except Exception as error:
+        summary = _record_terminal_failure(
+            round_dir, payload, child=child, stage="child_audit"
+        )
+        raise AutoresearchV2ExecutionFailure(
+            stage="child_audit", summary=summary
+        ) from error
+    try:
+        summary = _summary_payload(payload, child_summary=child_summary, audit=audit)
+    except Exception as error:
+        failure_summary = _record_terminal_failure(
+            round_dir, payload, child=child, stage="projection"
+        )
+        raise AutoresearchV2ExecutionFailure(
+            stage="projection", summary=failure_summary
+        ) from error
     journal.append(
         {
             "event": "autoresearch_v2_round_scored",
@@ -830,15 +1041,32 @@ def summarize_autoresearch_v2(
     payload = _load_round(round_dir)
     _validate_round_definition(payload)
     child = _validate_child_binding(round_dir, payload)
-    source_summary = _read_child_summary(child)
-    audit = audit_sm121_cache_performance_campaign(child, evidence_root=evidence_root)
-    expected = _summary_payload(payload, child_summary=source_summary, audit=audit)
     try:
         saved = json.loads((round_dir / "summary.json").read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise AutoresearchV2Error("autoresearch-v2 round has no terminal summary") from error
+    event_state = _validate_events(round_dir, payload, terminal=True)
+    if event_state == "failed":
+        saved_payload = _validate_hashed_payload(
+            saved, fields=_FAILURE_SUMMARY_FIELDS, name="failure summary"
+        )
+        stage = saved_payload.get("failure_stage")
+        if not isinstance(stage, str):
+            raise AutoresearchV2Error("autoresearch-v2 failure stage is invalid")
+        _validate_events(
+            round_dir, payload, terminal=True, failure_stage=stage
+        )
+        expected_failure = _failure_summary_payload(payload, stage=stage)
+        if saved_payload != expected_failure:
+            raise AutoresearchV2Error(
+                "autoresearch-v2 failure summary does not match its round"
+            )
+        _validate_failure_child_source(round_dir, child, stage=stage)
+        return saved_payload
     saved_payload = _validate_hashed_payload(saved, fields=_SUMMARY_FIELDS, name="summary")
+    source_summary = _read_child_summary(child)
+    audit = audit_sm121_cache_performance_campaign(child, evidence_root=evidence_root)
+    expected = _summary_payload(payload, child_summary=source_summary, audit=audit)
     if saved_payload != expected:
         raise AutoresearchV2Error("autoresearch-v2 summary does not match its child")
-    _validate_events(round_dir, payload, terminal=True)
     return saved_payload
