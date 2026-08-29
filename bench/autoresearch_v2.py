@@ -63,6 +63,7 @@ AUTORESEARCH_V2_MIN_CUTOFF_REMAINING_S = (
 )
 
 _SAFE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+_SAFE_CHILD_DIRECTORY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PREFIXED_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DEFINITION_KEYS = frozenset({"schema_version", "campaign"})
@@ -453,7 +454,7 @@ def _results_root_for_round(round_dir: Path) -> Path:
 
 def _child_campaign_path(round_dir: Path, round_payload: Mapping[str, object]) -> Path:
     name = round_payload.get("child_campaign_directory")
-    if not isinstance(name, str) or _SAFE_ID.fullmatch(name) is None:
+    if not isinstance(name, str) or _SAFE_CHILD_DIRECTORY.fullmatch(name) is None:
         raise AutoresearchV2Error("autoresearch-v2 child campaign name is invalid")
     child = _results_root_for_round(round_dir) / "cache-policy-campaigns" / name
     try:
@@ -532,7 +533,10 @@ def _validate_round_definition(round_payload: Mapping[str, object]) -> None:
     if prerequisites != list(SM121_CACHE_PERFORMANCE_PREREQUISITE_BUNDLE_SHA256S):
         raise AutoresearchV2Error("autoresearch-v2 prerequisite binding changed")
     child_name = round_payload.get("child_campaign_directory")
-    if not isinstance(child_name, str) or _SAFE_ID.fullmatch(child_name) is None:
+    if (
+        not isinstance(child_name, str)
+        or _SAFE_CHILD_DIRECTORY.fullmatch(child_name) is None
+    ):
         raise AutoresearchV2Error("autoresearch-v2 child campaign directory is invalid")
     cutoff = round_payload.get("cutoff")
     if not isinstance(cutoff, str):
@@ -591,7 +595,7 @@ def freeze_autoresearch_v2(
         binding = campaign["pair_binding"]
         child_name = child.name
         if (
-            _SAFE_ID.fullmatch(child_name) is None
+            _SAFE_CHILD_DIRECTORY.fullmatch(child_name) is None
             or not isinstance(campaign.get("integrity_hash"), str)
         or not isinstance(binding.get("pair_binding_sha256"), str)
         ):

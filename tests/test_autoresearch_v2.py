@@ -26,7 +26,7 @@ _NOW = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
 
 
 def _child_campaign(root: Path) -> Path:
-    child = root / "cache-policy-campaigns" / "20260829t030000z-cache-policy"
+    child = root / "cache-policy-campaigns" / "20260829T030000Z-cache-policy"
     child.mkdir(parents=True)
     write_json(
         child / "campaign.json",
