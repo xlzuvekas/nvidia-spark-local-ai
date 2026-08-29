@@ -2,10 +2,11 @@
 
 ## Status
 
-This is a preflight contract only. No chunked-prefill campaign has been frozen
-or run. The two profiles are deliberately blocked from generic execution until
-the dedicated controller, runtime attestation, audit, and scalar-only evidence
-path land.
+The frozen contract, dedicated fresh-lifetime controller, and fail-closed
+runtime chunk-size attestation are implemented. No chunked-prefill campaign
+has been frozen or run. The profiles remain blocked from generic execution;
+the command, read-only audit, and scalar-only evidence path still have to land
+before a live campaign is admitted.
 
 ## Question
 
@@ -73,7 +74,8 @@ endpoint, no-download rule, ownership cleanup, and benchmark lock.
 
 ## Before execution
 
-The controller must add an exact `chunked_prefill_size` server-info attestation
-for both arms, validate the current UnifiedRadix/lazy runtime identity, and
-provide dedicated audit/export/verification coverage. A generic `plan`,
-`run`, or matrix invocation remains rejected by execution admission.
+The controller already requires an exact `chunked_prefill_size` server-info
+attestation for both arms and validates the current UnifiedRadix/lazy runtime
+identity. Dedicated audit/export/verification coverage and its command gate
+must land next. A generic `plan`, `run`, or matrix invocation remains rejected
+by execution admission.

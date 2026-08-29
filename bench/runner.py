@@ -193,6 +193,11 @@ from .sglang_sm121_cache_performance import (
     validate_sm121_cache_performance_suite,
     validate_sm121_cache_performance_turn_event,
 )
+from .sglang_sm121_chunked_prefill_performance import (
+    SM121ChunkedPrefillPerformanceError,
+    is_sm121_chunked_prefill_performance_candidate,
+    validate_sm121_chunked_prefill_performance_candidate,
+)
 from .sglang_sm121_cache_observability import (
     SM121_CACHE_OBSERVABILITY_CACHED_SERIES,
     SM121_CACHE_OBSERVABILITY_EXECUTION_MODE,
@@ -386,20 +391,28 @@ def create_plan(
     allow_sm121_storage_canary: bool = False,
     allow_sm121_cache_semantic_canary: bool = False,
     allow_sm121_cache_performance: bool = False,
+    allow_sm121_chunked_prefill_performance: bool = False,
     run_label: str | None = None,
 ) -> Path:
     semantic_candidate = is_sm121_cache_semantic_candidate(model)
     performance_candidate = is_sm121_cache_performance_candidate(model)
+    chunked_prefill_candidate = is_sm121_chunked_prefill_performance_candidate(
+        model
+    )
     storage_candidate = (
         is_sm121_storage_candidate(model)
         and not semantic_candidate
         and not performance_candidate
+        and not chunked_prefill_candidate
     )
     blocker = model_execution_blocker(
         model,
         allow_sm121_storage_canary=allow_sm121_storage_canary,
         allow_sm121_cache_semantic_canary=allow_sm121_cache_semantic_canary,
         allow_sm121_cache_performance=allow_sm121_cache_performance,
+        allow_sm121_chunked_prefill_performance=(
+            allow_sm121_chunked_prefill_performance
+        ),
     )
     if blocker is not None:
         raise RuntimeError(blocker)
@@ -425,6 +438,11 @@ def create_plan(
             validate_sm121_cache_performance_candidate(model)
         except SM121CachePerformanceError as error:
             raise RuntimeError(str(error)) from error
+    elif chunked_prefill_candidate:
+        try:
+            validate_sm121_chunked_prefill_performance_candidate(model)
+        except SM121ChunkedPrefillPerformanceError as error:
+            raise RuntimeError(str(error)) from error
     elif storage_candidate:
         try:
             validate_sm121_storage_candidate(model)
@@ -446,7 +464,12 @@ def create_plan(
         for case in suite_data["cases"]
     ]
     resolved_image = _image_digest(model.image)
-    if storage_candidate or semantic_candidate or performance_candidate:
+    if (
+        storage_candidate
+        or semantic_candidate
+        or performance_candidate
+        or chunked_prefill_candidate
+    ):
         local_image = _sm121_storage_image_identity(model)
         resolved: dict[str, Any] = {
             "image_digest": resolved_image,
