@@ -1505,6 +1505,10 @@ _SM121_CACHE_GUARDRAIL_FAMILY_PREFIXES = {
     "sglang:num_retracted_requests_total": "sglang:num_retracted_requests",
 }
 _SM121_CACHE_CACHE_ON_EVICTION_LABELS = {"cache_type": "UnifiedRadixCache"}
+_SM121_CACHE_SCHEDULER_LABEL_FIELDS = frozenset(
+    {"model_name", "engine_type", "tp_rank", "pp_rank", "moe_ep_rank"}
+)
+_SM121_CACHE_TOKENIZER_LABEL_FIELDS = frozenset({"model_name", "engine_type"})
 
 
 def inspect_sm121_cache_source_digests(model: Any) -> dict[str, str]:
@@ -1903,16 +1907,35 @@ def snapshot_sm121_cache_observability_metrics(
         name: {"help": False, "type": False, "sample": False, "seen": False}
         for name in _SM121_CACHE_GUARDRAIL_SAMPLES
     }
-    base_labels: dict[str, str] | None = None
+    scheduler_labels: dict[str, str] | None = None
+    tokenizer_labels: dict[str, str] | None = None
 
-    def bind_base_labels(candidate: dict[str, str]) -> bool:
-        """Require one common scheduler-label vector without retaining it."""
+    def bind_scheduler_labels(candidate: dict[str, str]) -> bool:
+        """Require one stable scheduler-label vector without retaining it."""
 
-        nonlocal base_labels
-        if base_labels is None:
-            base_labels = dict(candidate)
+        nonlocal scheduler_labels
+        if (
+            semantic_arm is not None
+            and set(candidate) != _SM121_CACHE_SCHEDULER_LABEL_FIELDS
+        ):
+            return False
+        if scheduler_labels is None:
+            scheduler_labels = dict(candidate)
             return True
-        return base_labels == candidate
+        return scheduler_labels == candidate
+
+    def bind_tokenizer_labels(candidate: dict[str, str]) -> bool:
+        """Bind a finished-request cache counter to its narrower label schema."""
+
+        nonlocal tokenizer_labels
+        if semantic_arm is None:
+            return bind_scheduler_labels(candidate)
+        if set(candidate) != _SM121_CACHE_TOKENIZER_LABEL_FIELDS:
+            return False
+        if tokenizer_labels is None:
+            tokenizer_labels = dict(candidate)
+            return True
+        return tokenizer_labels == candidate
 
     def guardrail_family_for_name(name: str) -> str | None:
         """Return the canonical family for a relevant exact-image metric name."""
@@ -2013,7 +2036,7 @@ def snapshot_sm121_cache_observability_metrics(
             if (
                 field is None
                 or prefill_seen[mode]
-                or not bind_base_labels(metric_base)
+                or not bind_scheduler_labels(metric_base)
             ):
                 malformed = True
                 continue
@@ -2029,7 +2052,9 @@ def snapshot_sm121_cache_observability_metrics(
                 else "host"
                 if source == "host"
                 else "storage"
-                if isinstance(source, str) and source.startswith("storage_")
+                if isinstance(source, str)
+                and source.startswith("storage_")
+                and len(source) > len("storage_")
                 else None
             )
             metric_base = {
@@ -2038,7 +2063,7 @@ def snapshot_sm121_cache_observability_metrics(
             if (
                 source_kind is None
                 or cached_seen[source_kind]
-                or not bind_base_labels(metric_base)
+                or not bind_tokenizer_labels(metric_base)
             ):
                 malformed = True
                 continue
@@ -2060,11 +2085,11 @@ def snapshot_sm121_cache_observability_metrics(
                 if semantic_arm == SM121_CACHE_SEMANTIC_CACHE_ON_ARM:
                     labels_match = labels == _SM121_CACHE_CACHE_ON_EVICTION_LABELS
                 else:
-                    labels_match = bind_base_labels(labels)
+                    labels_match = bind_scheduler_labels(labels)
                 if not labels_match:
                     malformed = True
                     continue
-            elif not bind_base_labels(labels):
+            elif not bind_scheduler_labels(labels):
                 malformed = True
                 continue
             if semantic_arm is not None and value == 0:
@@ -2074,7 +2099,7 @@ def snapshot_sm121_cache_observability_metrics(
             state["seen"] = True
             state["sample"] = True
         else:
-            if not bind_base_labels(labels):
+            if not bind_scheduler_labels(labels):
                 malformed = True
                 continue
             field = gauges[name]
@@ -2083,6 +2108,18 @@ def snapshot_sm121_cache_observability_metrics(
                 continue
             snapshot[field] = value
             gauge_seen[name] = True
+    if semantic_arm is not None and tokenizer_labels is not None:
+        expected_tokenizer_labels = (
+            {
+                field: scheduler_labels[field]
+                for field in _SM121_CACHE_TOKENIZER_LABEL_FIELDS
+            }
+            if scheduler_labels is not None
+            and _SM121_CACHE_TOKENIZER_LABEL_FIELDS.issubset(scheduler_labels)
+            else None
+        )
+        if tokenizer_labels != expected_tokenizer_labels:
+            malformed = True
     snapshot["available"] = not malformed and all(prefill_seen.values()) and all(
         gauge_seen.values()
     )

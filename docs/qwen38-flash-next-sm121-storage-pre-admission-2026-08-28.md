@@ -255,8 +255,8 @@ B requires settled input-counter progress and zero device, host, and storage
 hits on every turn. A requires the same zero result on T0; T1 and T2 must each
 report explicit positive device-only details that reconcile exactly with native
 device-hit and residency deltas. Both arms reject host/storage hits, eviction,
-retraction, missing guardrail counters, unsettled snapshots, or a failed exact
-answer. A non-admitted semantic result is terminal `partial`; it is never
+retraction, unavailable or malformed guardrail families, unsettled snapshots,
+or a failed exact answer. A non-admitted semantic result is terminal `partial`; it is never
 silently promoted to a speed result.
 
 The first frozen B/A execution took that authorized terminal-partial path. B
@@ -293,6 +293,24 @@ TYPE-only, sample-only, duplicate, alias, wrong-type, wrong-label, unexpected
 B-eviction, or otherwise partial families remain unavailable and terminal
 `partial`. The original B-only scalar partial is retained as evidence; the
 corrected parser does not reinterpret it as a cache result.
+
+A subsequent fresh B/A attempt completed B and entered A, but A's T1/T2 again
+ended `partial`. This time the native device-hit counter advanced, so the
+failure was a useful parser diagnostic rather than a missing-cache result. A
+read-only source inspection and scalar-only live reproduction established two
+additional exact-image facts:
+
+1. A non-streaming cache-detail response may provide only `device` and `host`;
+   `storage` is omitted when no L3 detail is present and is normalized to zero.
+2. Scheduler prefill and residency metrics use the full scheduler label vector,
+   while finished-request `cached_tokens_total` uses the narrower tokenizer
+   vector `{model_name, engine_type, cache_source}`. A valid first device hit
+   therefore materializes a lower-cardinality `cache_source="device"` series.
+
+The semantic reader now validates those two source-defined schemas separately,
+requires their shared model/engine values to agree, and still rejects unknown,
+duplicated, or mismatched labels. The partial remains an honest record and is
+not recast as a cache-on result; a new fresh pair is required for admission.
 
 Run and inspect the pair only through the dedicated commands:
 

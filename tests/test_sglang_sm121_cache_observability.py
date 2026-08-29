@@ -283,6 +283,8 @@ def _metric_exposition(
     bad_source: bool = False,
     guardrails: bool = False,
     scheduler_labels: bool = False,
+    cached_uses_scheduler_labels: bool = False,
+    cached_model_name: str = "synthetic",
     guardrail_eviction_help: bool = False,
     guardrail_retraction_help: bool = False,
     guardrail_eviction_type: str | None = None,
@@ -298,9 +300,20 @@ def _metric_exposition(
         if scheduler_labels
         else ""
     )
+    tokenizer_base = (
+        base
+        if cached_uses_scheduler_labels
+        else f'engine_type="prefill",model_name="{cached_model_name}"'
+        if scheduler_labels
+        else ""
+    )
 
     def labels(selector: str = "") -> str:
         joined = ",".join(item for item in (base, selector) if item)
+        return "{" + joined + "}" if joined else ""
+
+    def cached_labels(selector: str = "") -> str:
+        joined = ",".join(item for item in (tokenizer_base, selector) if item)
         return "{" + joined + "}" if joined else ""
 
     lines = [
@@ -318,7 +331,7 @@ def _metric_exposition(
     if cached_total is not None:
         source = "unknown" if bad_source else cached_source
         lines.append(
-            f'sglang:cached_tokens_total{labels(f"cache_source=\"{source}\"")} {cached_total}'
+            f'sglang:cached_tokens_total{cached_labels(f"cache_source=\"{source}\"")} {cached_total}'
         )
     if guardrails:
         guardrail_eviction_help = True
@@ -624,6 +637,38 @@ class SM121CacheObservabilityRuntimeTests(unittest.TestCase):
         self.assertTrue(snapshot["cached_device_series_present"])
         self.assertEqual(snapshot["evicted_tokens"], 7)
         self.assertEqual(snapshot["retracted_requests"], 3)
+
+        with patch(
+            "bench.runtime.urllib.request.urlopen",
+            return_value=_Response(
+                _metric_exposition(
+                    cached_total=32_768,
+                    cached_source="device",
+                    scheduler_labels=True,
+                    cached_uses_scheduler_labels=True,
+                ).encode("utf-8")
+            ),
+        ):
+            mismatched_cached_labels = runtime.snapshot_sm121_cache_observability_metrics(
+                server, semantic_arm=SM121_CACHE_SEMANTIC_CACHE_ON_ARM
+            )
+        self.assertFalse(mismatched_cached_labels["available"])
+
+        with patch(
+            "bench.runtime.urllib.request.urlopen",
+            return_value=_Response(
+                _metric_exposition(
+                    cached_total=32_768,
+                    cached_source="device",
+                    scheduler_labels=True,
+                    cached_model_name="different",
+                ).encode("utf-8")
+            ),
+        ):
+            mismatched_cached_identity = runtime.snapshot_sm121_cache_observability_metrics(
+                server, semantic_arm=SM121_CACHE_SEMANTIC_CACHE_ON_ARM
+            )
+        self.assertFalse(mismatched_cached_identity["available"])
 
         with patch(
             "bench.runtime.urllib.request.urlopen",
