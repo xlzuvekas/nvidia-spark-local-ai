@@ -33,6 +33,10 @@ from .sglang_sm121_storage import (
     SM121StorageCandidateError,
     validate_sm121_storage_image_inspection,
 )
+from .sglang_sm121_cache_semantic import (
+    SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
+    SM121_CACHE_SEMANTIC_RUNTIME_EXPECTED,
+)
 
 
 SM121_AGENT_ADMISSION_PROFILE_ID = (
@@ -140,6 +144,22 @@ SM121_AGENT_ADMISSION_ARGS = (
     "--port",
     "30000",
 )
+
+# This is the scalar-only runtime projection that a future controller must
+# obtain from one freshly started owned server. Keep the leaf contract here so
+# the eventual inspector and the private journal audit cannot drift apart.
+SM121_AGENT_ADMISSION_RUNTIME_EXPECTED = {
+    **SM121_CACHE_SEMANTIC_RUNTIME_EXPECTED[SM121_CACHE_SEMANTIC_CACHE_ON_ARM],
+    "mamba_radix_cache_strategy": "extra_buffer_lazy",
+    "max_mamba_cache_size": SM121_AGENT_ADMISSION_MAX_MAMBA_CACHE_SIZE,
+    "chunked_prefill_size": SM121_AGENT_ADMISSION_CHUNKED_PREFILL_SIZE,
+    "reasoning_parser": "qwen3",
+    "tool_call_parser": "qwen3_coder",
+    "max_running_requests": 1,
+    "max_total_tokens": SM121_STORAGE_CONTEXT_LENGTH,
+    "context_length": SM121_STORAGE_CONTEXT_LENGTH,
+}
+_RUNTIME_IDENTITY_FIELDS = frozenset(SM121_AGENT_ADMISSION_RUNTIME_EXPECTED)
 
 _STATIC_PROBE_FIELDS = frozenset(
     {
@@ -341,6 +361,26 @@ def validate_sm121_agent_admission_profile(model: Any) -> None:
         raise SM121AgentAdmissionError(
             "SM121 agent admission does not import a non-SGLang tool-choice flag"
         )
+
+
+def validate_sm121_agent_admission_runtime_identity(
+    identity: object,
+) -> dict[str, object]:
+    """Require the exact scalar C1 runtime projection.
+
+    This validates a controller-produced allowlist, not an untrusted full
+    ``/server_info`` response. It deliberately has no server, Docker, network,
+    timestamp, or journal side effect.
+    """
+
+    if (
+        type(identity) is not dict
+        or frozenset(identity) != _RUNTIME_IDENTITY_FIELDS
+    ):
+        raise SM121AgentAdmissionError("SM121 agent runtime identity is invalid")
+    for field, expected in SM121_AGENT_ADMISSION_RUNTIME_EXPECTED.items():
+        _require(identity[field], expected, field)
+    return dict(identity)
 
 
 def validate_sm121_agent_admission_suite(suite: Any) -> None:

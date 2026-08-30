@@ -95,6 +95,12 @@ native metric cache counters are zero; those remain mandatory controller-owned
 proofs. Neither the client nor its standalone scalar validator is an admission
 proof without that controller.
 
+The repository also freezes the one allowed scalar runtime-identity projection:
+the cache-on unified Radix/Mamba-lazy state, 4K chunked prefill, Qwen reasoning
+and tool parsers, one running request, and both 64K limits. It is currently a
+pure validator shared with the private auditor—not a live inspector—so it
+cannot start a server or turn a forged record into an admission.
+
 This is deliberately a planning and audit hardening step, not an agent
 admission, performance result, or permission to run Pi.
 

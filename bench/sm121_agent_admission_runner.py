@@ -20,11 +20,10 @@ from typing import Any
 from . import runner as base_runner
 from .journal import Journal, content_hash
 from .sglang_sm121_agent_admission import (
-    SM121_AGENT_ADMISSION_CHUNKED_PREFILL_SIZE,
     SM121_AGENT_ADMISSION_LONG_CONTEXT_CASE_ID,
-    SM121_AGENT_ADMISSION_MAX_MAMBA_CACHE_SIZE,
     SM121_AGENT_ADMISSION_PROFILE_ID,
     SM121_AGENT_ADMISSION_QUALITY_CASE_ID,
+    SM121_AGENT_ADMISSION_RUNTIME_EXPECTED,
     SM121_AGENT_ADMISSION_SUITE_ID,
     SM121_AGENT_ADMISSION_TOOL_CASE_IDS,
     SM121AgentAdmissionError,
@@ -33,13 +32,8 @@ from .sglang_sm121_agent_admission import (
     validate_sm121_agent_parser_static_probe,
 )
 from .sglang_sm121_cache_observability import SM121_CACHE_SOURCE_DIGESTS
-from .sglang_sm121_cache_semantic import (
-    SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
-    SM121_CACHE_SEMANTIC_RUNTIME_EXPECTED,
-    SM121_CACHE_SEMANTIC_STATIC_ASSERTIONS,
-)
+from .sglang_sm121_cache_semantic import SM121_CACHE_SEMANTIC_STATIC_ASSERTIONS
 from .sglang_sm121_storage import (
-    SM121_STORAGE_CONTEXT_LENGTH,
     SM121_STORAGE_LOCAL_IMAGE_ID,
     SM121_STORAGE_PLATFORM,
     SM121_STORAGE_SOURCE_TREE,
@@ -393,17 +387,7 @@ def _load_plan(root: Path) -> tuple[dict[str, Any], SimpleNamespace, SimpleNames
 
 
 def _runtime_expected() -> dict[str, object]:
-    return {
-        **SM121_CACHE_SEMANTIC_RUNTIME_EXPECTED[SM121_CACHE_SEMANTIC_CACHE_ON_ARM],
-        "mamba_radix_cache_strategy": "extra_buffer_lazy",
-        "max_mamba_cache_size": SM121_AGENT_ADMISSION_MAX_MAMBA_CACHE_SIZE,
-        "chunked_prefill_size": SM121_AGENT_ADMISSION_CHUNKED_PREFILL_SIZE,
-        "reasoning_parser": "qwen3",
-        "tool_call_parser": "qwen3_coder",
-        "max_running_requests": 1,
-        "max_total_tokens": SM121_STORAGE_CONTEXT_LENGTH,
-        "context_length": SM121_STORAGE_CONTEXT_LENGTH,
-    }
+    return dict(SM121_AGENT_ADMISSION_RUNTIME_EXPECTED)
 
 
 def _summary(

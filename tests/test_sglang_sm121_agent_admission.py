@@ -27,6 +27,7 @@ from bench.sglang_sm121_agent_admission import (
     SM121_AGENT_ADMISSION_ARGS,
     SM121_AGENT_ADMISSION_CASE_IDS,
     SM121_AGENT_ADMISSION_PROFILE_ID,
+    SM121_AGENT_ADMISSION_RUNTIME_EXPECTED,
     SM121_AGENT_ADMISSION_STATIC_PROBE_ID,
     SM121_AGENT_ADMISSION_STATIC_PROBE_SCHEMA_VERSION,
     SM121_AGENT_ADMISSION_SUITE_ID,
@@ -36,6 +37,7 @@ from bench.sglang_sm121_agent_admission import (
     probe_sm121_agent_parser_static_preflight,
     validate_sm121_agent_admission_candidate,
     validate_sm121_agent_admission_profile,
+    validate_sm121_agent_admission_runtime_identity,
     validate_sm121_agent_parser_static_probe,
     validate_sm121_agent_admission_suite,
 )
@@ -235,6 +237,31 @@ class SM121AgentAdmissionTests(unittest.TestCase):
                     validate_sm121_agent_admission_profile(changed)
                 with self.assertRaises(ManifestError):
                     validate_model(changed)
+
+    def test_runtime_identity_contract_is_exact_and_scalar_only(self) -> None:
+        expected = dict(SM121_AGENT_ADMISSION_RUNTIME_EXPECTED)
+        self.assertEqual(
+            validate_sm121_agent_admission_runtime_identity(expected), expected
+        )
+        for field, value in expected.items():
+            changed = dict(expected)
+            if type(value) is bool:
+                changed[field] = 1
+            elif type(value) is int:
+                changed[field] = True
+            else:
+                changed[field] = value + "-drift"
+            with self.subTest(field=field):
+                with self.assertRaises(SM121AgentAdmissionError):
+                    validate_sm121_agent_admission_runtime_identity(changed)
+        for changed in (
+            {key: value for key, value in expected.items() if key != "reasoning_parser"},
+            {**expected, "server_info": {}},
+            [],
+        ):
+            with self.subTest(shape=type(changed).__name__):
+                with self.assertRaises(SM121AgentAdmissionError):
+                    validate_sm121_agent_admission_runtime_identity(changed)
 
     def test_static_probe_is_image_bound_and_never_requests_gpu_or_network(self) -> None:
         runner = Mock(
