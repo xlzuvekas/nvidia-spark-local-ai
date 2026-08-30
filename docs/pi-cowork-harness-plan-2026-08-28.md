@@ -75,14 +75,14 @@ the dependency surface ambiguous.
 
 After the fixed cutoff and retirement of the superseded runtime:
 
-1. Create an owner-private, normalized, read-only Pi 0.57.1 prefix from the
+1. Retain an owner-private, normalized, read-only Pi 0.57.1 prefix from the
    separately admitted, hash-locked artifact set. The full 222-record closure
-   and one temporary scripts-disabled smoke have been verified, but no retained
-   campaign prefix exists.
-2. Re-verify every exact lockfile integrity against locally staged content and
-   perform a credential-free offline materialization for the retained prefix.
-   Stage any missing artifacts outside the measured lifecycle; never install or
-   resolve packages during a measured run.
+   and the deterministic materialization have been verified; one retained
+   prefix has passed the static admission pin.
+2. Before every task admission, re-verify every exact lockfile integrity and
+   the retained-prefix tree against locally staged content. Stage any missing
+   artifacts outside the measured lifecycle; never install or resolve packages
+   during a measured run.
 3. Freeze every transitive lock entry, the full tree digest, regular-file count
    and bytes, entrypoint digest, Node binary/tree digests, wrapper digest,
    literal system-prompt digest, tool-schema digest, and payload-policy digest.
