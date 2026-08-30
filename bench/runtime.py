@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
+import http.client
 import json
 import math
 import os
 from pathlib import Path, PurePosixPath
 import re
 import secrets
+import selectors
 import signal
 import socket
 import subprocess
@@ -71,6 +73,11 @@ from .sglang_sm121_cache_observability import (
     validate_sm121_cache_zero_hit_request_contract,
     validate_sm121_cache_runtime_attestation_event,
     validate_sm121_cache_static_attestation_event,
+)
+from .sglang_sm121_agent_admission import (
+    SM121_AGENT_ADMISSION_ENDPOINT,
+    SM121AgentAdmissionError,
+    validate_sm121_agent_admission_runtime_identity,
 )
 from bench.qwen38_ple_cache import (
     PINNED_LAYOUT as QWEN38_PLE_LAYOUT,
@@ -988,6 +995,66 @@ class ManagedServer:
                 "Refusing to stop a container not owned by SparkBench"
             )
 
+    def _require_live_owned_loopback_port(
+        self, *, host_port: int, container_port: int
+    ) -> tuple[str, int]:
+        """Require the exact owned SGLang container to own one loopback port.
+
+        This is deliberately narrower than normal lifecycle ownership.  A
+        runtime attestation needs to reject a stopped owned container paired
+        with an unrelated listener on the expected host port.
+        """
+
+        if (
+            type(host_port) is not int
+            or type(container_port) is not int
+            or not 1 <= host_port <= 65535
+            or not 1 <= container_port <= 65535
+            or type(self.container_id) is not str
+        ):
+            raise RuntimeErrorWithContext(
+                "Managed container does not have a valid loopback binding"
+            )
+        ManagedServer._require_owned_container(self)
+        port_binding_template = (
+            "{{.State.Running}} {{.State.StartedAt}} {{.State.Pid}} "
+            "{{range $binding := (index .NetworkSettings.Ports \""
+            + str(container_port)
+            + "/tcp\")}}{{$binding.HostIP}}:{{$binding.HostPort}};{{end}}"
+        )
+        try:
+            inspect = _run(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    port_binding_template,
+                    self.container_id,
+                ],
+                check=False,
+                timeout=20,
+            )
+        except (OSError, subprocess.SubprocessError, UnicodeError):
+            raise RuntimeErrorWithContext(
+                "Managed container is not live on the required loopback port"
+            ) from None
+        binding = re.fullmatch(
+            rf"true (?P<started_at>{_SM121_AGENT_RUNTIME_STARTED_AT_PATTERN}) "
+            rf"(?P<pid>[1-9]\d*) "
+            rf"127\.0\.0\.1:{host_port};\n",
+            inspect.stdout if type(inspect.stdout) is str else "",
+        )
+        if (
+            inspect.returncode != 0
+            or type(inspect.stderr) is not str
+            or inspect.stderr
+            or binding is None
+        ):
+            raise RuntimeErrorWithContext(
+                "Managed container is not live on the required loopback port"
+            )
+        return binding["started_at"], int(binding["pid"])
+
     def interrupt_owned(self) -> None:
         """Immediately stop an exact owned SGLang container without removing it."""
 
@@ -1544,6 +1611,387 @@ _SM121_CACHE_SCHEDULER_LABEL_FIELDS = frozenset(
     {"model_name", "engine_type", "tp_rank", "pp_rank", "moe_ep_rank"}
 )
 _SM121_CACHE_TOKENIZER_LABEL_FIELDS = frozenset({"model_name", "engine_type"})
+_SM121_AGENT_RUNTIME_SERVER_INFO_MAX_BYTES = 2 * 1024 * 1024
+_SM121_AGENT_RUNTIME_LOG_MAX_BYTES = 2 * 1024 * 1024
+_SM121_AGENT_RUNTIME_LOG_TIMEOUT_S = 30.0
+_SM121_AGENT_RUNTIME_LOG_MAX_LINES = 4096
+_SM121_AGENT_RUNTIME_RESPONSE_TIMEOUT_S = 15.0
+_SM121_AGENT_RUNTIME_RESPONSE_CHUNK_BYTES = 64 * 1024
+_SM121_AGENT_RUNTIME_STARTED_AT_PATTERN = (
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z"
+)
+
+
+@dataclass(frozen=True)
+class _SM121AgentRuntimeBinding:
+    """Private immutable values that bind both C1 runtime observations."""
+
+    container_id: str = field(repr=False)
+    run_identity: str = field(repr=False)
+    authorization: str = field(repr=False)
+    api_key: str = field(repr=False)
+    generation: tuple[str, int] = field(repr=False)
+
+
+class _SM121AgentRuntimeNoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects for the fixed loopback C1 runtime read."""
+
+    def redirect_request(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise urllib.error.URLError("SM121 agent runtime redirects are denied")
+
+
+def _sm121_agent_runtime_unique_object(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _sm121_agent_runtime_reject_constant(_value: str) -> None:
+    raise ValueError("non-standard JSON constant")
+
+
+def _sm121_agent_runtime_finite_float(value: str) -> float:
+    """Reject finite-looking JSON exponents that overflow Python ``float``."""
+
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON number")
+    return parsed
+
+
+def _require_sm121_agent_admission_server(
+    server: object,
+) -> tuple[ManagedServer, _SM121AgentRuntimeBinding]:
+    """Require the exact managed endpoint/auth identity before any C1 read."""
+
+    if type(server) is not ManagedServer:
+        raise RuntimeErrorWithContext("SM121 agent runtime is not an owned server")
+    key = server.api_key
+    if (
+        type(server.backend) is not str
+        or server.backend != "sglang"
+        or type(server.base_url) is not str
+        or server.base_url != SM121_AGENT_ADMISSION_ENDPOINT
+        or type(server.container_id) is not str
+        or not server.container_id
+        or type(server.run_identity) is not str
+        or not server.run_identity
+        or type(key) is not str
+        or re.fullmatch(r"[A-Za-z0-9_-]{16,512}", key) is None
+        or type(server.authorization) is not str
+        or server.authorization != "Bearer " + key
+    ):
+        raise RuntimeErrorWithContext("SM121 agent runtime is not an owned server")
+    try:
+        generation = ManagedServer._require_live_owned_loopback_port(
+            server,
+            host_port=30000,
+            container_port=30000,
+        )
+    except (
+        OSError,
+        RuntimeErrorWithContext,
+        subprocess.SubprocessError,
+        UnicodeError,
+        ValueError,
+    ):
+        raise RuntimeErrorWithContext(
+            "SM121 agent runtime is not an owned server"
+        ) from None
+    if (
+        type(generation) is not tuple
+        or len(generation) != 2
+        or type(generation[0]) is not str
+        or re.fullmatch(_SM121_AGENT_RUNTIME_STARTED_AT_PATTERN, generation[0])
+        is None
+        or type(generation[1]) is not int
+        or generation[1] <= 0
+    ):
+        raise RuntimeErrorWithContext("SM121 agent runtime is not an owned server")
+    return server, _SM121AgentRuntimeBinding(
+        server.container_id,
+        server.run_identity,
+        server.authorization,
+        key,
+        generation,
+    )
+
+
+def _open_sm121_agent_runtime_server_info(
+    request: urllib.request.Request, *, timeout_s: float
+) -> Any:
+    """Open one no-proxy/no-redirect C1 server-info request."""
+
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _SM121AgentRuntimeNoRedirect(),
+    )
+    return opener.open(request, timeout=timeout_s)
+
+
+def _sm121_agent_runtime_set_response_timeout(
+    response: object, timeout_s: float
+) -> None:
+    """Set the remaining C1 deadline on urllib's direct response socket."""
+
+    try:
+        sock = response.fp.raw._sock  # type: ignore[attr-defined]
+        settimeout = sock.settimeout
+    except AttributeError:
+        raise RuntimeErrorWithContext(
+            "SM121 agent runtime attestation is invalid"
+        ) from None
+    if not callable(settimeout):
+        raise RuntimeErrorWithContext("SM121 agent runtime attestation is invalid")
+    try:
+        settimeout(timeout_s)
+    except (OSError, ValueError):
+        raise RuntimeErrorWithContext(
+            "Could not read the SM121 agent runtime attestation"
+        ) from None
+
+
+def _read_sm121_agent_runtime_response_body(response: object) -> bytes:
+    """Read a bounded response with one hard total deadline, not per I/O."""
+
+    reader = getattr(response, "read1", None)
+    if not callable(reader):
+        raise RuntimeErrorWithContext("SM121 agent runtime attestation is invalid")
+    payload = bytearray()
+    deadline = time.monotonic() + _SM121_AGENT_RUNTIME_RESPONSE_TIMEOUT_S
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeErrorWithContext(
+                "Could not read the SM121 agent runtime attestation"
+            )
+        _sm121_agent_runtime_set_response_timeout(response, remaining)
+        try:
+            chunk = reader(
+                min(
+                    _SM121_AGENT_RUNTIME_RESPONSE_CHUNK_BYTES,
+                    _SM121_AGENT_RUNTIME_SERVER_INFO_MAX_BYTES + 1 - len(payload),
+                )
+            )
+        except (OSError, TimeoutError, ValueError, http.client.HTTPException):
+            raise RuntimeErrorWithContext(
+                "Could not read the SM121 agent runtime attestation"
+            ) from None
+        if type(chunk) is not bytes:
+            raise RuntimeErrorWithContext("SM121 agent runtime attestation is invalid")
+        if not chunk:
+            return bytes(payload)
+        payload.extend(chunk)
+        if len(payload) > _SM121_AGENT_RUNTIME_SERVER_INFO_MAX_BYTES:
+            raise RuntimeErrorWithContext(
+                "SM121 agent runtime attestation is invalid"
+            )
+        # ``http.client.HTTPResponse.read1`` closes ``fp`` after consuming the
+        # final Content-Length byte.  Return before the next socket-timeout
+        # update in that normal success path.
+        if getattr(response, "length", None) == 0:
+            return bytes(payload)
+
+
+def _read_sm121_agent_runtime_server_info(authorization: str) -> dict[str, object]:
+    """Read one bounded, strict, in-memory C1 ``/server_info`` object."""
+
+    request = urllib.request.Request(
+        SM121_AGENT_ADMISSION_ENDPOINT.removesuffix("/v1") + "/server_info",
+        headers={"Authorization": authorization},
+        method="GET",
+    )
+    try:
+        with _open_sm121_agent_runtime_server_info(
+            request, timeout_s=15.0
+        ) as response:
+            geturl = getattr(response, "geturl", None)
+            response_url = geturl() if callable(geturl) else None
+            if (
+                getattr(response, "status", None) != 200
+                or response_url
+                != SM121_AGENT_ADMISSION_ENDPOINT.removesuffix("/v1")
+                + "/server_info"
+            ):
+                raise RuntimeErrorWithContext(
+                    "SM121 agent runtime attestation is invalid"
+                )
+            payload = _read_sm121_agent_runtime_response_body(response)
+    except urllib.error.HTTPError as error:
+        try:
+            error.close()
+        except OSError:
+            pass
+        raise RuntimeErrorWithContext(
+            "Could not read the SM121 agent runtime attestation"
+        ) from None
+    except RuntimeErrorWithContext:
+        raise
+    except (
+        OSError,
+        TimeoutError,
+        UnicodeError,
+        ValueError,
+        http.client.HTTPException,
+        urllib.error.URLError,
+    ):
+        raise RuntimeErrorWithContext(
+            "Could not read the SM121 agent runtime attestation"
+        ) from None
+    if (
+        not isinstance(payload, bytes)
+        or not payload
+        or len(payload) > _SM121_AGENT_RUNTIME_SERVER_INFO_MAX_BYTES
+    ):
+        raise RuntimeErrorWithContext("SM121 agent runtime attestation is invalid")
+    try:
+        decoded = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_sm121_agent_runtime_unique_object,
+            parse_constant=_sm121_agent_runtime_reject_constant,
+            parse_float=_sm121_agent_runtime_finite_float,
+        )
+    except (
+        UnicodeDecodeError,
+        ValueError,
+        json.JSONDecodeError,
+        RecursionError,
+    ):
+        raise RuntimeErrorWithContext(
+            "SM121 agent runtime attestation is invalid"
+        ) from None
+    if type(decoded) is not dict:
+        raise RuntimeErrorWithContext("SM121 agent runtime attestation is invalid")
+    return decoded
+
+
+def _read_sm121_agent_runtime_startup_logs(
+    container_id: str, *, started_at: str
+) -> bytes:
+    """Read a bounded Docker-log snapshot without retaining it outside C1."""
+
+    try:
+        process = subprocess.Popen(
+            [
+                "docker",
+                "logs",
+                "--since",
+                started_at,
+                "--timestamps",
+                "--tail",
+                "1024",
+                container_id,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise RuntimeErrorWithContext(
+            "Could not read the SM121 agent startup attestation"
+        ) from None
+    selector: selectors.BaseSelector | None = None
+    try:
+        if process.stdout is None or process.stderr is None:
+            raise RuntimeErrorWithContext(
+                "Could not read the SM121 agent startup attestation"
+            )
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        selector.register(process.stderr, selectors.EVENT_READ)
+        chunks: list[bytes] = []
+        byte_count = 0
+        deadline = time.monotonic() + _SM121_AGENT_RUNTIME_LOG_TIMEOUT_S
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("SM121 agent startup log read timed out")
+            events = selector.select(remaining)
+            if not events:
+                raise TimeoutError("SM121 agent startup log read timed out")
+            for key, _event in events:
+                stream = key.fileobj
+                chunk = os.read(stream.fileno(), 64 * 1024)
+                if not chunk:
+                    selector.unregister(stream)
+                    continue
+                byte_count += len(chunk)
+                if byte_count > _SM121_AGENT_RUNTIME_LOG_MAX_BYTES:
+                    raise RuntimeErrorWithContext(
+                        "SM121 agent startup attestation is invalid"
+                    )
+                chunks.append(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or process.wait(timeout=remaining) != 0:
+            raise RuntimeErrorWithContext(
+                "Could not read the SM121 agent startup attestation"
+            )
+        return b"".join(chunks)
+    except (OSError, subprocess.SubprocessError, TimeoutError):
+        raise RuntimeErrorWithContext(
+            "Could not read the SM121 agent startup attestation"
+        ) from None
+    finally:
+        if selector is not None:
+            selector.close()
+        if process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+
+def _sm121_agent_runtime_startup_identity(
+    container_id: str, *, started_at: str
+) -> dict[str, object]:
+    """Return one unambiguous scalar cache-startup event for C1 only."""
+
+    if (
+        type(container_id) is not str
+        or not container_id
+        or type(started_at) is not str
+        or re.fullmatch(_SM121_AGENT_RUNTIME_STARTED_AT_PATTERN, started_at) is None
+    ):
+        raise RuntimeErrorWithContext("SM121 agent runtime is not an owned server")
+    raw_logs = _read_sm121_agent_runtime_startup_logs(
+        container_id,
+        started_at=started_at,
+    )
+    if raw_logs.count(b"\n") > _SM121_AGENT_RUNTIME_LOG_MAX_LINES:
+        raise RuntimeErrorWithContext("SM121 agent startup attestation is invalid")
+    try:
+        lines = raw_logs.decode("utf-8").split("\n")
+    except UnicodeDecodeError:
+        raise RuntimeErrorWithContext(
+            "SM121 agent startup attestation is invalid"
+        ) from None
+    matches = [
+        match.groupdict()
+        for line in lines
+        if (match := _SM121_CACHE_STARTUP_RE.search(line)) is not None
+        and match.end() == len(line)
+    ]
+    if len(matches) != 1:
+        raise RuntimeErrorWithContext("SM121 agent startup attestation is invalid")
+    parsed = matches[0]
+    return {
+        "cache_impl": parsed["cache_impl"],
+        "cache_source": parsed["cache_source"],
+        "hybrid_swa": parsed["hybrid_swa"] == "True",
+        "hybrid_ssm": parsed["hybrid_ssm"] == "True",
+        "hicache_attached": parsed["hicache_attached"] == "True",
+        "streaming_wrapped": parsed["streaming_wrapped"] == "True",
+    }
 
 
 def inspect_sm121_cache_source_digests(model: Any) -> dict[str, str]:
@@ -1628,26 +2076,8 @@ def attest_sm121_cache_observability_static_source(model: Any) -> dict[str, Any]
     return event
 
 
-def _sm121_cache_server_info_fields(server: ManagedServer) -> dict[str, object]:
-    """Read a small, allowlisted cache identity from ``/server_info`` only.
-
-    The full server-info reply can contain operational details which must not
-    enter a journal.  This helper therefore searches it in memory for the
-    three resolved cache fields needed by the SM121 cache contracts, verifies
-    that repeated copies agree, and returns only scalar values.
-    """
-
-    root = server.base_url.removesuffix("/v1").rstrip("/")
-    request = urllib.request.Request(
-        root + "/server_info", headers=_authorization_headers(server.authorization)
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            payload = json.load(response)
-    except (OSError, ValueError, urllib.error.URLError) as error:
-        raise RuntimeErrorWithContext(
-            "Could not read the SM121 cache runtime attestation"
-        ) from error
+def _extract_sm121_cache_server_info_fields(payload: object) -> dict[str, object]:
+    """Project resolved cache fields from an in-memory server-info object."""
     wanted = {
         "disable_radix_cache": bool,
         "mamba_radix_cache_strategy": str,
@@ -1687,6 +2117,29 @@ def _sm121_cache_server_info_fields(server: ManagedServer) -> dict[str, object]:
             raise RuntimeErrorWithContext("SM121 cache runtime field is unavailable")
         result[field] = observed[0]
     return result
+
+
+def _sm121_cache_server_info_fields(server: ManagedServer) -> dict[str, object]:
+    """Read a small, allowlisted cache identity from ``/server_info`` only.
+
+    The full server-info reply can contain operational details which must not
+    enter a journal. This helper therefore searches it in memory for the
+    three resolved cache fields needed by the SM121 cache contracts, verifies
+    that repeated copies agree, and returns only scalar values.
+    """
+
+    root = server.base_url.removesuffix("/v1").rstrip("/")
+    request = urllib.request.Request(
+        root + "/server_info", headers=_authorization_headers(server.authorization)
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = json.load(response)
+    except (OSError, ValueError, urllib.error.URLError) as error:
+        raise RuntimeErrorWithContext(
+            "Could not read the SM121 cache runtime attestation"
+        ) from error
+    return _extract_sm121_cache_server_info_fields(payload)
 
 
 def _sm121_cache_server_info_disable_radix(server: ManagedServer) -> bool:
@@ -1733,15 +2186,8 @@ def _sm121_cache_server_info_disable_radix(server: ManagedServer) -> bool:
     return values[0]
 
 
-def inspect_sm121_cache_runtime_identity(
-    server: ManagedServer, *, disable_radix_cache_override: bool | None = None
-) -> dict[str, Any]:
-    """Return the compact resolved cache identity without retaining raw logs.
-
-    This is shared by the cache-off B0 lane and the paired semantic canary.
-    It intentionally returns resolved arguments and startup identity only; the
-    caller still supplies the exact arm-specific acceptance contract.
-    """
+def _sm121_cache_startup_identity(server: ManagedServer) -> dict[str, object]:
+    """Project the allowlisted cache-startup identity from bounded Docker logs."""
 
     if server.backend != "sglang" or not server.container_id:
         raise RuntimeErrorWithContext("SM121 cache runtime is not an owned SGLang server")
@@ -1760,6 +2206,27 @@ def inspect_sm121_cache_runtime_identity(
     if not matches or any(match != matches[0] for match in matches[1:]):
         raise RuntimeErrorWithContext("SM121 cache startup attestation is unavailable")
     parsed = matches[0]
+    return {
+        "cache_impl": parsed["cache_impl"],
+        "cache_source": parsed["cache_source"],
+        "hybrid_swa": parsed["hybrid_swa"] == "True",
+        "hybrid_ssm": parsed["hybrid_ssm"] == "True",
+        "hicache_attached": parsed["hicache_attached"] == "True",
+        "streaming_wrapped": parsed["streaming_wrapped"] == "True",
+    }
+
+
+def inspect_sm121_cache_runtime_identity(
+    server: ManagedServer, *, disable_radix_cache_override: bool | None = None
+) -> dict[str, Any]:
+    """Return the compact resolved cache identity without retaining raw logs.
+
+    This is shared by the cache-off B0 lane and the paired semantic canary.
+    It intentionally returns resolved arguments and startup identity only; the
+    caller still supplies the exact arm-specific acceptance contract.
+    """
+
+    startup = _sm121_cache_startup_identity(server)
     if disable_radix_cache_override is None:
         server_info = _sm121_cache_server_info_fields(server)
         disabled = server_info["disable_radix_cache"]
@@ -1783,12 +2250,7 @@ def inspect_sm121_cache_runtime_identity(
     ):
         raise RuntimeErrorWithContext("SM121 cache runtime identity is invalid")
     return {
-        "cache_impl": parsed["cache_impl"],
-        "cache_source": parsed["cache_source"],
-        "hybrid_swa": parsed["hybrid_swa"] == "True",
-        "hybrid_ssm": parsed["hybrid_ssm"] == "True",
-        "hicache_attached": parsed["hicache_attached"] == "True",
-        "streaming_wrapped": parsed["streaming_wrapped"] == "True",
+        **startup,
         "disable_radix_cache": disabled,
         "mamba_radix_cache_strategy": strategy,
         "max_mamba_cache_size": max_mamba_cache_size,
@@ -1799,6 +2261,95 @@ def inspect_sm121_cache_runtime_identity(
             not disabled and strategy == "extra_buffer_lazy"
         ),
     }
+
+
+_SM121_AGENT_RUNTIME_TOP_LEVEL_FIELDS = (
+    "disable_radix_cache",
+    "mamba_radix_cache_strategy",
+    "max_mamba_cache_size",
+    "reasoning_parser",
+    "tool_call_parser",
+    "chunked_prefill_size",
+    "max_running_requests",
+    "max_total_tokens",
+    "context_length",
+)
+
+
+def _sm121_agent_runtime_top_level_fields(
+    payload: dict[str, object],
+) -> dict[str, object]:
+    """Read C1 cache/parser/limit facts only from documented root fields.
+
+    The pinned image's ``/server_info`` endpoint expands
+    ``resolved_config_dict(dataclasses.asdict(server_args))`` into its root
+    object.  C1 therefore rejects rather than recursively searching decoys.
+    """
+
+    result: dict[str, object] = {}
+    for field in _SM121_AGENT_RUNTIME_TOP_LEVEL_FIELDS:
+        if field not in payload:
+            raise RuntimeErrorWithContext("SM121 agent runtime field is unavailable")
+        value = payload[field]
+        if field == "disable_radix_cache":
+            valid = type(value) is bool
+        elif field in {
+            "mamba_radix_cache_strategy",
+            "reasoning_parser",
+            "tool_call_parser",
+        }:
+            valid = isinstance(value, str) and bool(value)
+        else:
+            valid = type(value) is int and value > 0
+        if not valid:
+            raise RuntimeErrorWithContext("SM121 agent runtime field is invalid")
+        result[field] = value
+    return result
+
+
+def inspect_sm121_agent_admission_runtime_identity(
+    server: ManagedServer,
+) -> dict[str, object]:
+    """Return the exact C1 scalar runtime identity for one owned server.
+
+    It issues one bounded, no-proxy/no-redirect ``/server_info`` read and one
+    bounded Docker startup-log read. Full responses, logs, credentials,
+    endpoints, container IDs, and timings never leave this function.
+    """
+
+    owned_server, binding_before = _require_sm121_agent_admission_server(server)
+    payload = _read_sm121_agent_runtime_server_info(binding_before.authorization)
+    top_level = _sm121_agent_runtime_top_level_fields(payload)
+    startup = _sm121_agent_runtime_startup_identity(
+        binding_before.container_id,
+        started_at=binding_before.generation[0],
+    )
+    # Bind both bounded observations to the same live owned listener.  The
+    # second check fails closed if the container stopped or its loopback port
+    # changed while the two attestations were being read.
+    post_server, binding_after = _require_sm121_agent_admission_server(
+        owned_server
+    )
+    if post_server is not owned_server or binding_after != binding_before:
+        raise RuntimeErrorWithContext("SM121 agent runtime attestation is invalid")
+    disabled = top_level["disable_radix_cache"]
+    strategy = top_level["mamba_radix_cache_strategy"]
+    identity = {
+        **startup,
+        **top_level,
+        "mamba_extra_buffer_enabled": (
+            disabled is False and strategy in {"extra_buffer", "extra_buffer_lazy"}
+        ),
+        "mamba_extra_buffer_lazy_enabled": (
+            disabled is False and strategy == "extra_buffer_lazy"
+        ),
+    }
+    try:
+        return validate_sm121_agent_admission_runtime_identity(identity)
+    except SM121AgentAdmissionError as error:
+        raise RuntimeErrorWithContext(
+            "SM121 agent runtime identity is invalid"
+        ) from error
 
 
 def inspect_sm121_chunked_prefill_runtime_identity(

@@ -97,9 +97,17 @@ proof without that controller.
 
 The repository also freezes the one allowed scalar runtime-identity projection:
 the cache-on unified Radix/Mamba-lazy state, 4K chunked prefill, Qwen reasoning
-and tool parsers, one running request, and both 64K limits. It is currently a
-pure validator shared with the private auditor—not a live inspector—so it
-cannot start a server or turn a forged record into an admission.
+and tool parsers, one running request, and both 64K limits. An uninvoked
+private inspector now reads that identity from one owned C1 server using fixed
+loopback/no-proxy/no-redirect transport, a bounded strict finite-JSON
+`/server_info` response with a total read deadline, and a bounded one-event
+startup-log projection scoped to that container generation. It checks
+ownership, running state, process generation, and the sole `127.0.0.1:30000`
+to container-`30000` binding before and after those reads. The pinned image
+source expands resolved server configuration into `/server_info`'s top-level
+object, so cache, parser, and limit fields have no recursive fallback. No
+runner or CLI calls this inspector; it cannot start a server or turn a forged
+record into an admission.
 
 This is deliberately a planning and audit hardening step, not an agent
 admission, performance result, or permission to run Pi.

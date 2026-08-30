@@ -48,6 +48,7 @@ SM121_AGENT_ADMISSION_SUITE_ID = (
 SM121_AGENT_ADMISSION_SERVED_NAME = (
     "qwen38-flash-next-nvfp4-sm121-storage-agent-admission"
 )
+SM121_AGENT_ADMISSION_ENDPOINT = "http://127.0.0.1:30000/v1"
 SM121_AGENT_ADMISSION_DESCRIPTION = (
     "Prospective C1 Qwen3.8 Flash-Next NVFP4 Pi/cowork admission profile on "
     "the current SM121 Triton/io_uring storage runtime. It is tombstoned "
@@ -287,7 +288,7 @@ def validate_sm121_agent_admission_profile(model: Any) -> None:
         "host_safety_min_memavailable_gib": SM121_AGENT_ADMISSION_MIN_MEMAVAILABLE_GIB,
         "host_safety_max_swap_growth_mib": SM121_AGENT_ADMISSION_MAX_SWAP_MIB,
         "host_safety_max_starting_swap_mib": SM121_AGENT_ADMISSION_MAX_SWAP_MIB,
-        "endpoint": "http://127.0.0.1:30000/v1",
+        "endpoint": SM121_AGENT_ADMISSION_ENDPOINT,
         "fetch_allow_patterns": (),
         "fetch_ignore_patterns": (),
         "sglang_storage_mode": SM121_STORAGE_MODE,
