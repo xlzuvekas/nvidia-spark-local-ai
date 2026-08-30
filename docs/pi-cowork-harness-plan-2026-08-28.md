@@ -35,12 +35,12 @@ tokenizer probe must also prove the exact low-thinking/tool request budget
 against the read-only cached snapshot; this remains a prerequisite, not a Pi
 benchmark or agent result.
 
-There is now a checked-in minimal frozen source closure and a tested,
-scripts-disabled direct-materialization command. A temporary real-closure
-materialization smoke was independently reverified and removed; there is no
-retained normalized prefix, static core wrapper, Pi/cowork manifest, runner,
-C2 scheduler, validator, or evidence exporter. The current generic agentic
-and historical Harbor paths deliberately enforce
+There is now a checked-in minimal frozen source closure, a tested
+scripts-disabled direct-materialization command, and one retained
+owner-private normalized prefix that passed the static admission pin. There is
+still no static core wrapper, Pi/cowork manifest, runner, C2 scheduler,
+validator, or evidence exporter. The current generic agentic and historical
+Harbor paths deliberately enforce
 different C1-only topologies; reuse their isolation and oracle patterns, but do
 not widen their schemas in place to admit Pi.
 
@@ -443,13 +443,13 @@ or reinterpret a Pi task-wall result as server-only throughput.
 
 ## Implementation order after cutoff
 
-1. Normalize and verify the Pi prefix without invoking the ambient CLI.
-2. Build privacy and forced-timeout fixtures for the Pi-core wrapper.
-3. Run the `fix-git` canary through the new Pi-specific adaptation of the
+1. Build privacy and forced-timeout fixtures for the Pi-core wrapper against
+   the retained admitted prefix.
+2. Run the `fix-git` canary through the new Pi-specific adaptation of the
    Harbor isolation path.
-4. Freeze a coding-only Pi campaign against the six current tasks.
-5. Implement and fixture-test `cowork-core-v1` separately.
-6. Add Pi to cowork only after the virtual-tool oracle passes with the native
+3. Freeze a coding-only Pi campaign against the six current tasks.
+4. Implement and fixture-test `cowork-core-v1` separately.
+5. Add Pi to cowork only after the virtual-tool oracle passes with the native
    bounded runner; label Pi results as client-stack measurements.
 
 Pi is viable locally, but the adapter, payload policy, and immutable prefix are

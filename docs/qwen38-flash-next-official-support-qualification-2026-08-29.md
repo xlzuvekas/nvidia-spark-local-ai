@@ -21,7 +21,7 @@ The current upstream status is narrower than a model-card compatibility claim:
 | Stack | What its primary source currently says | GB10 implication |
 | --- | --- | --- |
 | Qwen | The official collection publishes base and FP8 Flash-Next artifacts; the FP8 card describes fine-grained FP8 (block size 128). | The official low-precision alternative is FP8, not a Qwen-owned Flash-Next NVFP4 checkpoint. |
-| SGLang | [Flash-Next support PR #36497](https://github.com/sgl-project/sglang/pull/36497) remains open; its cookbook points to the model-support work rather than a tagged release. | No released upstream GB10 qualification. A PR comment reports a GB10 run after consumer-Blackwell QSA dispatch changes and an explicit Triton attention setting, which is useful implementation evidence but not a merged or signed-off configuration. |
+| SGLang | [Flash-Next support PR #36497](https://github.com/sgl-project/sglang/pull/36497) remains open; its cookbook says support is not in a tagged release and lists NVFP4 only for B200/B300/GB300. GB10/SM121 is absent from the supported hardware grid. | No released upstream GB10 qualification. A PR comment reports a GB10 run after consumer-Blackwell QSA dispatch changes and an explicit Triton attention setting, which is useful implementation evidence but not a merged or signed-off configuration. |
 | vLLM | [Flash-Next support PR #53896](https://github.com/vllm-project/vllm/pull/53896) remains open. Its stated validation covers NVFP4 without N-gram offload on GB300, GB200, and H200; N-gram offload is BF16/FP8 only on GB200. | The obvious one-Spark NVFP4-plus-offload design is expressly outside that validation, and GB10 is absent. |
 | Unsloth | The relevant Flash-Next releases are [GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) and FP8. | GGUF is a practical llama.cpp/Pi baseline, not evidence for Flash-Next NVFP4 or GB10 support. |
 
@@ -32,6 +32,13 @@ allowed server boot and correct serving. It also says explicit `qwen3`
 reasoning-parser configuration mattered. Those observations reinforce, rather
 than remove, this repository's runtime, parser, varied-token, long-context,
 and cache-safety gates.
+
+A follow-up primary-source check found no newer serving configuration to
+adopt: the latest Qwen repository revision adds MLX support rather than a GB10
+or NVFP4 recipe, and the current SGLang cookbook retains the non-release,
+B200/B300/GB300-only NVFP4 boundary. The current local SM121 profile must
+therefore remain a separately admitted experimental candidate rather than
+inherit an upstream recipe.
 
 ## Consequence for local work
 

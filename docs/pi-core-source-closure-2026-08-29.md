@@ -1,12 +1,13 @@
-# Pi-core frozen source closure and cache audit — 2026-08-29
+# Pi-core frozen source closure, prefix materialization, and admission — 2026-08-29
 
 ## Result
 
-The project has completed a deliberately narrow, offline **source-closure and
-cache-audit** checkpoint for a prospective Pi-core wrapper. It freezes the
-input package metadata needed for a later isolated materialization and checks
+The project has completed a deliberately narrow, offline **source-closure,
+cache-audit, materialization, and prefix-admission** checkpoint for a
+prospective Pi-core wrapper. It freezes the input package metadata, checks
 that its selected artifacts are already present in the local content-addressed
-cache. It is not an executable dependency tree.
+cache, and retains one normalized immutable prefix outside the repository.
+It is not an executable agent dependency or runtime.
 
 | Audited scalar | Result |
 | --- | ---: |
@@ -32,14 +33,15 @@ admission, or a benchmark. It provides no evidence about tool correctness,
 reasoning behavior, context capacity, cache behavior, wall time, latency, or
 throughput.
 
-## Scripts-disabled materialization smoke
+## Scripts-disabled materialization and retained-prefix admission
 
-The repository now has a separately tested `pi-core-prefix-materialize`
-command for the next supply-chain step. It requires an explicitly supplied
-external owner-private `0700` parent and uses no default output location. A
-one-off run against the real cached closure completed, was independently
-re-inspected, and was then removed. It did **not** create a retained or admitted
-prefix.
+The repository has a separately tested `pi-core-prefix-materialize` command
+for the supply-chain step. It requires an explicitly supplied external
+owner-private `0700` parent and uses no default output location. Historical
+one-off materializations against the real cached closure were independently
+re-inspected and removed. A later new materialization retained one immutable
+prefix and passed `pi-core-prefix-admit` against the tracked schema-locked
+policy. Its location remains owner-private and is intentionally not recorded.
 
 | Temporary-materialization scalar | Result |
 | --- | ---: |
@@ -58,13 +60,22 @@ did not run Pi, Node, npm, lifecycle scripts, a network client, a container, a
 model server, inference, or an agent runtime. It supplies no behavioral,
 performance, tool-correctness, or benchmark result.
 
-A second disposable real-closure construction passed the repository's new
-read-only `pi-core-prefix-admit` check. That check binds the full no-links tree
-and the fixed `@mariozechner/pi-agent-core` root entrypoint to the tracked
-schema-locked policy in `manifests/prefixes/pi-core-0.57.1.admission.json`.
-It creates no prefix, imports no JavaScript, and prints only scalar identity.
-The verified temporary output was again removed immediately; the policy is not
-itself a retained prefix, wrapper admission, Pi execution, or benchmark.
+The retained output passed the repository's read-only `pi-core-prefix-admit`
+check. That check binds the full no-links tree and the fixed
+`@mariozechner/pi-agent-core` root entrypoint to the tracked schema-locked
+policy in `manifests/prefixes/pi-core-0.57.1.admission.json`. It creates no
+prefix, imports no JavaScript, and prints only scalar identity. The admitted
+prefix is not a wrapper admission, Pi execution, or benchmark.
+
+| Retained-prefix admission scalar | Result |
+| --- | ---: |
+| Tree entries | 15,563 |
+| Regular files | 13,828 |
+| Symbolic links | 0 |
+| Tree bytes | 75,042,106 |
+| Tree digest | `sha256:aebaccc9fa0c58d9ef15a8b718b08f700d2564cbcc31b518c492a6e993964ac8` |
+| Pi-core root-entrypoint bytes | 210 |
+| Pi-core root-entrypoint digest | `sha256:3cb4d4c12c9f19b9113c10ad7d3451837a5d1b92040747c7e1251f1f41ac3687` |
 
 For every selected installation record, the command copies the mutable npm
 cache blob through no-follow descriptors to a private `0400` staging file
@@ -91,14 +102,14 @@ an intentionally hostile process already running as the materializer owner.
 
 The 222-record closure prevents a future implementation from silently expanding
 its dependency set through an ambient package tree or a network resolver. The
-207 cached artifacts and the temporary smoke demonstrate that fully offline
-construction is feasible, but a retained campaign prefix remains a separate
-safety gate.
+207 cached artifacts and retained admitted prefix demonstrate that fully offline
+construction is feasible. The prefix is a supply-chain prerequisite, not a
+runtime or task admission.
 
 Before Pi-core can be used even for an unscored static wrapper check, the
-materializer must re-verify every selected artifact before extraction, and a
-newly materialized retained prefix must still receive a frozen-prefix admission.
-At a minimum that admission must:
+materializer re-verifies every selected artifact before extraction and the
+retained prefix receives the frozen-prefix admission described above. That
+admission requires:
 
 - preserve the frozen dependency layout without resolver fallback or package
   installation;
@@ -108,9 +119,9 @@ At a minimum that admission must:
 - freeze and verify the resulting regular-file inventory, tree digest, and
   approved entrypoint boundary.
 
-That resulting immutable prefix would still need its own static import and
-wrapper admission. Separately, the prospective server and Pi/cowork agent path
-remain subject to their dedicated parser, payload, tool-semantics, long-context,
+The resulting immutable prefix still needs its own static import and wrapper
+admission. Separately, the prospective server and Pi/cowork agent path remain
+subject to their dedicated parser, payload, tool-semantics, long-context,
 cache-isolation, memory, and swap gates. Only after those are complete can a
 fresh-lifetime coding or cowork benchmark be proposed.
 
