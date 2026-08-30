@@ -1,0 +1,75 @@
+schema_version = 1
+
+[suite]
+id = "qwen38-flash-next-sm121-triton-storage-agent-admission-v1"
+description = "Admission-only C1 six-case current-SM121 Qwen3.8 Flash-Next Pi/cowork tool-and-reasoning gate. It freezes exact-answer quality, four bounded tool-loop semantics, and one rendered 60K low-thinking-plus-tools long-context/cache-zero-first-turn probe; only the dedicated controller may execute it and it does not measure Pi/cowork performance."
+
+[[cases]]
+id = "synthetic-exact-answer-v2"
+kind = "quality"
+requires = ["chat"]
+warmups = 0
+repetitions = 2
+max_output_tokens = 512
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "agentic-select-and-call"
+kind = "agentic"
+requires = ["chat", "tools"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 4096
+max_turns = 6
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "agentic-no-tool"
+kind = "agentic"
+requires = ["chat", "tools"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 4096
+max_turns = 6
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "agentic-two-hop"
+kind = "agentic"
+requires = ["chat", "tools"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 4096
+max_turns = 6
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "agentic-tool-error-recovery"
+kind = "agentic"
+requires = ["chat", "tools"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 4096
+max_turns = 6
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+
+[[cases]]
+id = "sm121-agent-long-context-cache-zero-v1"
+kind = "capability"
+requires = ["chat", "thinking", "tools"]
+warmups = 0
+repetitions = 1
+max_output_tokens = 128
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 60000

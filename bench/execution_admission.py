@@ -61,6 +61,7 @@ def model_execution_blocker(
     allow_sm121_cache_semantic_canary: bool = False,
     allow_sm121_cache_performance: bool = False,
     allow_sm121_chunked_prefill_performance: bool = False,
+    allow_sm121_agent_admission: bool = False,
 ) -> str | None:
     """Return a stable blocker when a model contains a retired artifact."""
 
@@ -69,7 +70,10 @@ def model_execution_blocker(
     chunked_prefill_candidate = is_sm121_chunked_prefill_performance_candidate(
         model
     )
-    if is_sm121_agent_admission_candidate(model):
+    if (
+        is_sm121_agent_admission_candidate(model)
+        and not allow_sm121_agent_admission
+    ):
         return _SM121_AGENT_ADMISSION_MESSAGE
     if (
         semantic_candidate
@@ -88,6 +92,7 @@ def model_execution_blocker(
         return _SM121_CHUNKED_PREFILL_PERFORMANCE_MESSAGE
     if (
         is_sm121_storage_candidate(model)
+        and not is_sm121_agent_admission_candidate(model)
         and not semantic_candidate
         and not performance_candidate
         and not chunked_prefill_candidate

@@ -47,10 +47,43 @@ It explicitly does not import retired QSA/TRT-LLM overlays, MTP, mmap, or the
 vLLM-only `--enable-auto-tool-choice` flag. Generic plan, benchmark, and matrix
 paths reject the profile until a dedicated controller exists.
 
+## Private C1 plan and audit scaffold
+
+The repository now has an exact six-case private C1 plan contract and a
+read-only audit shape under the ignored `logs/agent-admissions/` tree. The
+plan freezes the prospective profile with these ordered gates:
+
+1. exact-answer quality;
+2. deterministic select/call, no-tool, two-hop, and tool-error-recovery
+   scenarios; and
+3. a first-turn 60K low-thinking-plus-tools long-context/cache-zero probe.
+
+The plan uses no generic benchmark route and is deliberately not evidence. It
+can be frozen with:
+
+```bash
+python3 sparkbench.py sm121-agent-admission-plan
+```
+
+There is currently **no live C1 execution command or latent server path**. The
+scaffold intentionally contains no caller-supplied request hooks: such hooks
+could fabricate a scalar success record without actually proving the request
+body, parser state, tool semantics, or cache behavior. Its read-only auditor
+can validate record shape, but cannot accept any record as an admission while
+the controller is unimplemented. The prospective model remains
+runtime-tombstoned even if an internal caller sets an authorization-like
+attribute. The corresponding static parser preflight was rechecked on the
+pinned image during this continuation and again passed without starting an
+inference server or leaving a container behind.
+
+This is deliberately a planning and audit hardening step, not an agent
+admission, performance result, or permission to run Pi.
+
 ## What remains before an agent result
 
-The parser check only removes one static uncertainty. A new dedicated agent
-admission must still prove, in fresh C1 lifetimes:
+The parser check and private plan only remove static and topology uncertainty.
+A reviewed in-repository execution adapter must still prove, in fresh C1
+lifetimes:
 
 1. parser initialization and exact low-effort payload after client/provider
    transformation;
@@ -59,6 +92,11 @@ admission must still prove, in fresh C1 lifetimes:
 3. rendered low-thinking-plus-tools long-context fit and cache-zero-first-turn
    semantics; and
 4. the stronger 14 GiB available-memory and 64 MiB starting/growth swap gates.
+
+The adapter must construct and observe the final direct-client payload itself,
+inspect only allowlisted runtime parser/limit fields, own its no-retry tool
+loop, and clean up verified containers and API-key files on both complete and
+partial paths. It must not accept caller-defined hooks as proof.
 
 Only after those gates can the offline Pi-core wrapper be admitted. Its default
 transport cannot be used as-is because it retries requests; the wrapper needs

@@ -37,6 +37,9 @@ from .sglang_sm121_storage import (
 SM121_AGENT_ADMISSION_PROFILE_ID = (
     "qwen38-flash-next-nvfp4-sm121-triton-storage-agent-admission-sglang"
 )
+SM121_AGENT_ADMISSION_SUITE_ID = (
+    "qwen38-flash-next-sm121-triton-storage-agent-admission-v1"
+)
 SM121_AGENT_ADMISSION_SERVED_NAME = (
     "qwen38-flash-next-nvfp4-sm121-storage-agent-admission"
 )
@@ -55,6 +58,26 @@ SM121_AGENT_ADMISSION_MIN_MEMAVAILABLE_GIB = 14
 SM121_AGENT_ADMISSION_MAX_SWAP_MIB = 64
 SM121_AGENT_ADMISSION_CHUNKED_PREFILL_SIZE = 4_096
 SM121_AGENT_ADMISSION_MAX_MAMBA_CACHE_SIZE = 4
+SM121_AGENT_ADMISSION_QUALITY_CASE_ID = "synthetic-exact-answer-v2"
+SM121_AGENT_ADMISSION_TOOL_CASE_IDS = (
+    "agentic-select-and-call",
+    "agentic-no-tool",
+    "agentic-two-hop",
+    "agentic-tool-error-recovery",
+)
+SM121_AGENT_ADMISSION_LONG_CONTEXT_CASE_ID = "sm121-agent-long-context-cache-zero-v1"
+SM121_AGENT_ADMISSION_CASE_IDS = (
+    SM121_AGENT_ADMISSION_QUALITY_CASE_ID,
+    *SM121_AGENT_ADMISSION_TOOL_CASE_IDS,
+    SM121_AGENT_ADMISSION_LONG_CONTEXT_CASE_ID,
+)
+SM121_AGENT_ADMISSION_SUITE_DESCRIPTION = (
+    "Admission-only C1 six-case current-SM121 Qwen3.8 Flash-Next Pi/cowork "
+    "tool-and-reasoning gate. It freezes exact-answer quality, four bounded "
+    "tool-loop semantics, and one rendered 60K low-thinking-plus-tools "
+    "long-context/cache-zero-first-turn probe; only the dedicated controller "
+    "may execute it and it does not measure Pi/cowork performance."
+)
 SM121_AGENT_ADMISSION_STATIC_PROBE_ID = (
     "qwen38-flash-next-sm121-agent-parser-static-preflight-v1"
 )
@@ -178,6 +201,14 @@ def is_sm121_agent_admission_candidate(model: Any) -> bool:
     return _value(model, "id") == SM121_AGENT_ADMISSION_PROFILE_ID
 
 
+def validate_sm121_agent_admission_candidate(model: Any) -> None:
+    """Require exactly the one prospective C1 agent-admission profile."""
+
+    if not is_sm121_agent_admission_candidate(model):
+        raise SM121AgentAdmissionError("SM121 agent admission profile is invalid")
+    validate_sm121_agent_admission_profile(model)
+
+
 def validate_sm121_agent_admission_profile(model: Any) -> None:
     """Require the immutable current-SM121 low-thinking/parser profile."""
 
@@ -257,7 +288,13 @@ def validate_sm121_agent_admission_profile(model: Any) -> None:
             actual = tuple(actual)
         _require(actual, wanted, field)
     _require(_value(model, "args"), SM121_AGENT_ADMISSION_ARGS, "args")
-    request_body = _canonical_request_body(_value(model, "request_body_json"))
+    request_body_json = _value(model, "request_body_json")
+    _require(
+        request_body_json,
+        SM121_AGENT_ADMISSION_REQUEST_BODY,
+        "request_body_json",
+    )
+    request_body = _canonical_request_body(request_body_json)
     _require(
         request_body,
         {"chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": "low"}},
@@ -275,6 +312,86 @@ def validate_sm121_agent_admission_profile(model: Any) -> None:
         raise SM121AgentAdmissionError(
             "SM121 agent admission does not import a non-SGLang tool-choice flag"
         )
+
+
+def validate_sm121_agent_admission_suite(suite: Any) -> None:
+    """Require the exact six-case, controller-owned C1 admission suite.
+
+    This is a static manifest contract only.  It contains no prompts, rendered
+    payloads, expected completions, or timing thresholds; a later dedicated
+    controller owns those transient inputs and scalar-only outcomes.
+    """
+
+    def require_suite_field(value: object, expected: object, field: str) -> None:
+        try:
+            _require(value, expected, field)
+        except SM121AgentAdmissionError as error:
+            raise SM121AgentAdmissionError(
+                f"SM121 agent admission suite field {field} changed"
+            ) from error
+
+    require_suite_field(
+        _value(suite, "id"), SM121_AGENT_ADMISSION_SUITE_ID, "id"
+    )
+    require_suite_field(
+        _value(suite, "description"),
+        SM121_AGENT_ADMISSION_SUITE_DESCRIPTION,
+        "description",
+    )
+    require_suite_field(_value(suite, "schema_version"), 1, "schema_version")
+    require_suite_field(_value(suite, "protocol_digest"), None, "protocol_digest")
+    cases = _value(suite, "cases")
+    if not isinstance(cases, (list, tuple)) or len(cases) != len(
+        SM121_AGENT_ADMISSION_CASE_IDS
+    ):
+        raise SM121AgentAdmissionError("SM121 agent admission suite cases are invalid")
+    expected_cases = (
+        {
+            "id": SM121_AGENT_ADMISSION_QUALITY_CASE_ID,
+            "kind": "quality",
+            "requires": ("chat",),
+            "warmups": 0,
+            "repetitions": 2,
+            "max_output_tokens": 512,
+            "temperature": 0.0,
+            "concurrency": 1,
+            "prompt_repetitions": 0,
+            "max_turns": 1,
+        },
+        *(
+            {
+                "id": case_id,
+                "kind": "agentic",
+                "requires": ("chat", "tools"),
+                "warmups": 0,
+                "repetitions": 3,
+                "max_output_tokens": 4096,
+                "temperature": 0.0,
+                "concurrency": 1,
+                "prompt_repetitions": 0,
+                "max_turns": 6,
+            }
+            for case_id in SM121_AGENT_ADMISSION_TOOL_CASE_IDS
+        ),
+        {
+            "id": SM121_AGENT_ADMISSION_LONG_CONTEXT_CASE_ID,
+            "kind": "capability",
+            "requires": ("chat", "thinking", "tools"),
+            "warmups": 0,
+            "repetitions": 1,
+            "max_output_tokens": 128,
+            "temperature": 0.0,
+            "concurrency": 1,
+            "prompt_repetitions": 60_000,
+            "max_turns": 1,
+        },
+    )
+    for case, expected in zip(cases, expected_cases, strict=True):
+        for field, wanted in expected.items():
+            actual = _value(case, field)
+            if field == "requires" and isinstance(actual, (list, tuple)):
+                actual = tuple(actual)
+            require_suite_field(actual, wanted, field)
 
 
 def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:

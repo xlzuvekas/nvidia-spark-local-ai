@@ -121,6 +121,12 @@ from .sglang_sm121_storage import (
     validate_sm121_storage_runtime_provenance_event,
     validate_sm121_storage_suite,
 )
+from .sglang_sm121_agent_admission import (
+    SM121AgentAdmissionError,
+    is_sm121_agent_admission_candidate,
+    validate_sm121_agent_admission_candidate,
+    validate_sm121_agent_admission_suite,
+)
 from .sglang_sm121_cache_semantic import (
     SM121_CACHE_SEMANTIC_ARM_ORDER,
     SM121_CACHE_SEMANTIC_CACHE_OFF_PROFILE_ID,
@@ -381,7 +387,7 @@ def _canonical_case(
     return {**case, "case_id": f"{case['id']}--{content_hash(payload, 12)}"}
 
 
-def create_plan(
+def _create_plan(
     *,
     model: Any,
     suite: Any,
@@ -392,8 +398,10 @@ def create_plan(
     allow_sm121_cache_semantic_canary: bool = False,
     allow_sm121_cache_performance: bool = False,
     allow_sm121_chunked_prefill_performance: bool = False,
+    _allow_sm121_agent_admission: bool = False,
     run_label: str | None = None,
 ) -> Path:
+    agent_admission_candidate = is_sm121_agent_admission_candidate(model)
     semantic_candidate = is_sm121_cache_semantic_candidate(model)
     performance_candidate = is_sm121_cache_performance_candidate(model)
     chunked_prefill_candidate = is_sm121_chunked_prefill_performance_candidate(
@@ -401,6 +409,7 @@ def create_plan(
     )
     storage_candidate = (
         is_sm121_storage_candidate(model)
+        and not agent_admission_candidate
         and not semantic_candidate
         and not performance_candidate
         and not chunked_prefill_candidate
@@ -413,6 +422,7 @@ def create_plan(
         allow_sm121_chunked_prefill_performance=(
             allow_sm121_chunked_prefill_performance
         ),
+        allow_sm121_agent_admission=_allow_sm121_agent_admission,
     )
     if blocker is not None:
         raise RuntimeError(blocker)
@@ -427,8 +437,18 @@ def create_plan(
         raise RuntimeError(
             f"{model.backend} direct profiles require the {direct_command} command"
         )
-    validate_benchmark_selection(model, suite, context="plan")
-    if semantic_candidate:
+    validate_benchmark_selection(
+        model,
+        suite,
+        context="plan",
+        allow_sm121_agent_admission=_allow_sm121_agent_admission,
+    )
+    if agent_admission_candidate:
+        try:
+            validate_sm121_agent_admission_candidate(model)
+        except SM121AgentAdmissionError as error:
+            raise RuntimeError(str(error)) from error
+    elif semantic_candidate:
         try:
             validate_sm121_cache_semantic_candidate(model)
         except SM121CacheSemanticError as error:
@@ -466,6 +486,7 @@ def create_plan(
     resolved_image = _image_digest(model.image)
     if (
         storage_candidate
+        or agent_admission_candidate
         or semantic_candidate
         or performance_candidate
         or chunked_prefill_candidate
@@ -512,6 +533,69 @@ def create_plan(
     write_json(run_dir / "plan.json", plan)
     write_json(run_dir / "inventory.json", _host_snapshot())
     return run_dir
+
+
+def create_plan(
+    *,
+    model: Any,
+    suite: Any,
+    results_root: Path,
+    models_path: Path,
+    suite_path: Path,
+    allow_sm121_storage_canary: bool = False,
+    allow_sm121_cache_semantic_canary: bool = False,
+    allow_sm121_cache_performance: bool = False,
+    allow_sm121_chunked_prefill_performance: bool = False,
+    run_label: str | None = None,
+) -> Path:
+    """Freeze a generic benchmark plan without admitting the C1 profile."""
+
+    return _create_plan(
+        model=model,
+        suite=suite,
+        results_root=results_root,
+        models_path=models_path,
+        suite_path=suite_path,
+        allow_sm121_storage_canary=allow_sm121_storage_canary,
+        allow_sm121_cache_semantic_canary=allow_sm121_cache_semantic_canary,
+        allow_sm121_cache_performance=allow_sm121_cache_performance,
+        allow_sm121_chunked_prefill_performance=(
+            allow_sm121_chunked_prefill_performance
+        ),
+        run_label=run_label,
+    )
+
+
+def _create_sm121_agent_admission_plan(
+    *,
+    model: Any,
+    suite: Any,
+    results_root: Path,
+    models_path: Path,
+    suite_path: Path,
+    run_label: str | None = None,
+) -> Path:
+    """Freeze only the exact prospective C1 plan for its private wrapper.
+
+    This function does not execute a model.  Its private caller owns the
+    output-root topology; generic ``create_plan`` intentionally cannot reach
+    this profile.
+    """
+
+    try:
+        validate_sm121_agent_admission_candidate(model)
+        validate_sm121_agent_admission_suite(suite)
+    except SM121AgentAdmissionError as error:
+        raise RuntimeError("SM121 agent admission plan is unavailable") from error
+    return _create_plan(
+        model=model,
+        suite=suite,
+        results_root=results_root,
+        models_path=models_path,
+        suite_path=suite_path,
+        _allow_sm121_agent_admission=True,
+        run_label=run_label,
+    )
 
 
 def create_sm121_storage_canary_plan(

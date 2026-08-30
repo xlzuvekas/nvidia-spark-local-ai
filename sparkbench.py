@@ -91,6 +91,10 @@ from bench.sm121_chunked_prefill_admission_runner import (
     create_sm121_chunked_prefill_8k_admission_plan,
     execute_sm121_chunked_prefill_8k_admission,
 )
+from bench.sm121_agent_admission_runner import (
+    audit_sm121_agent_admission,
+    create_sm121_agent_admission_plan,
+)
 from bench.sglang_sm121_cache_semantic import (
     SM121_CACHE_SEMANTIC_CACHE_OFF_PROFILE_ID,
     SM121_CACHE_SEMANTIC_CACHE_ON_PROFILE_ID,
@@ -174,6 +178,13 @@ DEFAULT_SM121_CHUNKED_PREFILL_8K_ADMISSION_SUITE = (
 DEFAULT_SM121_CHUNKED_PREFILL_8K_ADMISSION_OUTPUT_ROOT = (
     WORKSPACE / "logs" / "chunked-prefill-admissions"
 )
+DEFAULT_SM121_AGENT_ADMISSION_SUITE = (
+    WORKSPACE
+    / "manifests"
+    / "suites"
+    / "qwen38_flash_next_sm121_triton_storage_agent_admission.toml"
+)
+DEFAULT_SM121_AGENT_ADMISSION_OUTPUT_ROOT = WORKSPACE / "logs" / "agent-admissions"
 DEFAULT_AUTORESEARCH_V2_CACHE_POLICY_CAMPAIGN = (
     WORKSPACE
     / "manifests"
@@ -775,6 +786,41 @@ def command_audit_sm121_chunked_prefill_8k_preflight(
     return 0 if report["ok"] else 1
 
 
+def command_sm121_agent_admission_plan(args: argparse.Namespace) -> int:
+    """Freeze one private C1 agent-admission plan without starting inference.
+
+    The plan is intentionally separate from the eventual live controller: that
+    execution remains unavailable until its final-payload and runtime-parser
+    adapters are implemented and reviewed.
+    """
+
+    models = load_models(args.models)
+    try:
+        model = models[SM121_AGENT_ADMISSION_PROFILE_ID]
+    except KeyError as error:
+        raise ManifestError(
+            "SM121 agent admission requires the exact prospective C1 profile"
+        ) from error
+    suite = load_suite(args.suite)
+    run_dir = create_sm121_agent_admission_plan(
+        model=model,
+        suite=suite,
+        output_root=args.output_root,
+        models_path=args.models,
+        suite_path=args.suite,
+    )
+    print(f"Admission plan: {run_dir}")
+    return 0
+
+
+def command_audit_sm121_agent_admission(args: argparse.Namespace) -> int:
+    """Read-only structural audit; it cannot grant C1 admission."""
+
+    report = audit_sm121_agent_admission(args.run_dir)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["ok"] else 1
+
+
 def command_run(args: argparse.Namespace) -> int:
     summary = execute_plan(
         args.run_dir,
@@ -1200,6 +1246,24 @@ def build_parser() -> argparse.ArgumentParser:
     agent_parser_preflight.add_argument("--models", type=Path, default=DEFAULT_MODELS)
     agent_parser_preflight.set_defaults(function=command_sm121_agent_parser_preflight)
 
+    agent_admission_plan = subparsers.add_parser(
+        "sm121-agent-admission-plan",
+        help=(
+            "freeze a private current-SM121 C1 agent-admission plan without "
+            "starting inference"
+        ),
+    )
+    agent_admission_plan.add_argument("--models", type=Path, default=DEFAULT_MODELS)
+    agent_admission_plan.add_argument(
+        "--suite", type=Path, default=DEFAULT_SM121_AGENT_ADMISSION_SUITE
+    )
+    agent_admission_plan.add_argument(
+        "--output-root",
+        type=Path,
+        default=DEFAULT_SM121_AGENT_ADMISSION_OUTPUT_ROOT,
+    )
+    agent_admission_plan.set_defaults(function=command_sm121_agent_admission_plan)
+
     pi_core_closure_freeze = subparsers.add_parser(
         "pi-core-closure-freeze",
         help=(
@@ -1550,6 +1614,13 @@ def build_parser() -> argparse.ArgumentParser:
     chunked_prefill_8k_admission_audit.set_defaults(
         function=command_audit_sm121_chunked_prefill_8k_preflight
     )
+
+    agent_admission_audit = subparsers.add_parser(
+        "audit-sm121-agent-admission",
+        help="read-only structural audit of a private SM121 C1 record; never admits",
+    )
+    agent_admission_audit.add_argument("run_dir", type=Path)
+    agent_admission_audit.set_defaults(function=command_audit_sm121_agent_admission)
 
     export = subparsers.add_parser(
         "export-evidence",

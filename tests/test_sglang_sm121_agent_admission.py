@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stdout
-from dataclasses import replace
+from dataclasses import asdict, replace
 import io
 import json
 from pathlib import Path
@@ -25,22 +25,30 @@ from bench.runner import create_plan
 from bench.runtime import RuntimeErrorWithContext, start_sglang
 from bench.sglang_sm121_agent_admission import (
     SM121_AGENT_ADMISSION_ARGS,
+    SM121_AGENT_ADMISSION_CASE_IDS,
     SM121_AGENT_ADMISSION_PROFILE_ID,
     SM121_AGENT_ADMISSION_STATIC_PROBE_ID,
     SM121_AGENT_ADMISSION_STATIC_PROBE_SCHEMA_VERSION,
+    SM121_AGENT_ADMISSION_SUITE_ID,
     SM121AgentAdmissionError,
     _STATIC_PROBE_SCRIPT,
     is_sm121_agent_admission_candidate,
     probe_sm121_agent_parser_static_preflight,
+    validate_sm121_agent_admission_candidate,
     validate_sm121_agent_admission_profile,
     validate_sm121_agent_parser_static_probe,
+    validate_sm121_agent_admission_suite,
 )
 from bench.sglang_sm121_storage import (
     SM121_STORAGE_LOCAL_IMAGE_ID,
     SM121_STORAGE_LOCAL_IMAGE_TAG,
     SM121_STORAGE_SOURCE_TREE,
 )
-from sparkbench import build_parser, command_sm121_agent_parser_preflight
+from sparkbench import (
+    build_parser,
+    command_sm121_agent_admission_plan,
+    command_sm121_agent_parser_preflight,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,9 +83,16 @@ class SM121AgentAdmissionTests(unittest.TestCase):
         cls.model = load_models(ROOT / "manifests" / "models.toml")[
             SM121_AGENT_ADMISSION_PROFILE_ID
         ]
+        cls.suite = load_suite(
+            ROOT
+            / "manifests"
+            / "suites"
+            / "qwen38_flash_next_sm121_triton_storage_agent_admission.toml"
+        )
 
     def test_manifest_profile_is_exact_and_tombstoned(self) -> None:
         self.assertTrue(is_sm121_agent_admission_candidate(self.model))
+        validate_sm121_agent_admission_candidate(self.model)
         validate_sm121_agent_admission_profile(self.model)
         self.assertEqual(self.model.args, SM121_AGENT_ADMISSION_ARGS)
         self.assertIn(
@@ -87,6 +102,105 @@ class SM121AgentAdmissionTests(unittest.TestCase):
         smoke = load_suite(ROOT / "manifests" / "suites" / "smoke.toml")
         with self.assertRaisesRegex(ManifestError, "tombstoned"):
             validate_benchmark_selection(self.model, smoke)
+
+    def test_exact_six_case_suite_is_static_and_controller_owned(self) -> None:
+        validate_sm121_agent_admission_suite(self.suite)
+        self.assertEqual(self.suite.id, SM121_AGENT_ADMISSION_SUITE_ID)
+        self.assertEqual(
+            tuple(case.id for case in self.suite.cases),
+            SM121_AGENT_ADMISSION_CASE_IDS,
+        )
+        self.assertEqual(len(self.suite.cases), 6)
+        self.assertTrue(all(case.concurrency == 1 for case in self.suite.cases))
+        self.assertTrue(all(case.temperature == 0.0 for case in self.suite.cases))
+
+    def test_dedicated_selection_needs_an_explicit_controller_grant(self) -> None:
+        with self.assertRaisesRegex(ManifestError, "tombstoned"):
+            validate_benchmark_selection(self.model, self.suite)
+        validate_benchmark_selection(
+            self.model,
+            self.suite,
+            allow_sm121_agent_admission=True,
+        )
+        self.assertIsNone(
+            model_execution_blocker(
+                self.model,
+                allow_sm121_agent_admission=True,
+            )
+        )
+
+    def test_generic_planner_rejects_the_prospective_profile_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            results = Path(directory) / "private-admission"
+            with self.assertRaisesRegex(RuntimeError, "dedicated parser/tool"):
+                create_plan(
+                    model=self.model,
+                    suite=self.suite,
+                    results_root=results,
+                    models_path=Path("models.toml"),
+                    suite_path=Path("agent-admission.toml"),
+                    run_label="agent-admission",
+                )
+            self.assertFalse(results.exists())
+
+    def test_exact_candidate_and_suite_reject_identity_and_shape_drift(self) -> None:
+        with self.assertRaises(SM121AgentAdmissionError):
+            validate_sm121_agent_admission_candidate(
+                replace(self.model, id="qwen38-flash-next-sm121-not-agent")
+            )
+
+        semantic_but_noncanonical = replace(
+            self.model,
+            request_body_json=(
+                '{"chat_template_kwargs":{"reasoning_effort":"low",'
+                '"enable_thinking":true}}'
+            ),
+        )
+        with self.assertRaises(SM121AgentAdmissionError):
+            validate_sm121_agent_admission_candidate(semantic_but_noncanonical)
+
+        for drifted_suite in (
+            replace(self.suite, id="qwen38-flash-next-sm121-agent-admission-v2"),
+            replace(
+                self.suite,
+                cases=(
+                    *self.suite.cases[:2],
+                    self.suite.cases[3],
+                    self.suite.cases[2],
+                    *self.suite.cases[4:],
+                ),
+            ),
+            replace(
+                self.suite,
+                cases=(
+                    self.suite.cases[0],
+                    replace(self.suite.cases[1], max_turns=5),
+                    *self.suite.cases[2:],
+                ),
+            ),
+            replace(
+                self.suite,
+                cases=(
+                    *self.suite.cases[:-1],
+                    replace(self.suite.cases[-1], requires=("chat",)),
+                ),
+            ),
+            replace(
+                self.suite,
+                cases=(
+                    replace(self.suite.cases[0], repetitions=True),
+                    *self.suite.cases[1:],
+                ),
+            ),
+            replace(
+                self.suite,
+                cases=(*self.suite.cases[:-1],),
+            ),
+            replace(self.suite, schema_version=True),
+        ):
+            with self.subTest(suite=drifted_suite.id, cases=len(drifted_suite.cases)):
+                with self.assertRaises(SM121AgentAdmissionError):
+                    validate_sm121_agent_admission_suite(drifted_suite)
 
     def test_profile_rejects_parser_and_policy_drift(self) -> None:
         changed_request = replace(
@@ -411,6 +525,27 @@ class SM121AgentAdmissionTests(unittest.TestCase):
         ):
             probe.assert_not_called()
 
+    def test_forgeable_authorization_flag_cannot_start_the_prospective_profile(self) -> None:
+        admitted_model = SimpleNamespace(**asdict(self.model))
+        admitted_model.agent_admission_authorized = True
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with (
+                patch("bench.runtime._existing_container") as existing,
+                patch("bench.runtime._port_is_free") as port_free,
+                patch("bench.runtime._exact_sglang_snapshot") as snapshot,
+                patch(
+                    "bench.runtime._start_sglang_sm121_storage",
+                ) as launcher,
+                self.assertRaisesRegex(
+                    RuntimeErrorWithContext,
+                    "dedicated parser/tool admission controller",
+                ),
+            ):
+                start_sglang(admitted_model, workspace=workspace)
+        for probe in (existing, port_free, snapshot, launcher):
+            probe.assert_not_called()
+
     def test_command_loads_the_exact_profile_and_prints_only_validated_scalars(self) -> None:
         expected = {
             "schema_version": SM121_AGENT_ADMISSION_STATIC_PROBE_SCHEMA_VERSION,
@@ -446,7 +581,54 @@ class SM121AgentAdmissionTests(unittest.TestCase):
         validate_probe.assert_called_once_with(expected)
         self.assertEqual(json.loads(output.getvalue()), expected)
 
+    def test_plan_command_freezes_only_the_exact_private_c1_selection(self) -> None:
+        output = io.StringIO()
+        run_dir = Path("logs") / "agent-admissions" / "fixture"
+        with (
+            patch(
+                "sparkbench.load_models",
+                return_value={SM121_AGENT_ADMISSION_PROFILE_ID: self.model},
+            ) as load,
+            patch("sparkbench.load_suite", return_value=self.suite) as load_suite_mock,
+            patch(
+                "sparkbench.create_sm121_agent_admission_plan",
+                return_value=run_dir,
+            ) as freeze,
+            redirect_stdout(output),
+        ):
+            status = command_sm121_agent_admission_plan(
+                SimpleNamespace(
+                    models=Path("models.toml"),
+                    suite=Path("suite.toml"),
+                    output_root=Path("logs") / "agent-admissions",
+                )
+            )
+        self.assertEqual(status, 0)
+        load.assert_called_once_with(Path("models.toml"))
+        load_suite_mock.assert_called_once_with(Path("suite.toml"))
+        freeze.assert_called_once_with(
+            model=self.model,
+            suite=self.suite,
+            output_root=Path("logs") / "agent-admissions",
+            models_path=Path("models.toml"),
+            suite_path=Path("suite.toml"),
+        )
+        self.assertEqual(output.getvalue(), f"Admission plan: {run_dir}\n")
+
     def test_cli_registers_a_no_selection_parser_preflight(self) -> None:
         args = build_parser().parse_args(["sm121-agent-parser-preflight"])
         self.assertIs(args.function, command_sm121_agent_parser_preflight)
         self.assertEqual(args.models, ROOT / "manifests" / "models.toml")
+
+    def test_cli_registers_private_agent_admission_plan(self) -> None:
+        args = build_parser().parse_args(["sm121-agent-admission-plan"])
+        self.assertIs(args.function, command_sm121_agent_admission_plan)
+        self.assertEqual(args.models, ROOT / "manifests" / "models.toml")
+        self.assertEqual(
+            args.suite,
+            ROOT
+            / "manifests"
+            / "suites"
+            / "qwen38_flash_next_sm121_triton_storage_agent_admission.toml",
+        )
+        self.assertEqual(args.output_root, ROOT / "logs" / "agent-admissions")

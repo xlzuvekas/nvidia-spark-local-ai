@@ -36,9 +36,11 @@ from .sglang_sm121_storage import (
 )
 from .sglang_sm121_agent_admission import (
     SM121_AGENT_ADMISSION_PROFILE_ID,
+    SM121_AGENT_ADMISSION_SUITE_ID,
     SM121AgentAdmissionError,
     is_sm121_agent_admission_candidate,
     validate_sm121_agent_admission_profile,
+    validate_sm121_agent_admission_suite,
 )
 from .sglang_sm121_cache_observability import (
     SM121_CACHE_OBSERVABILITY_SUITE_ID,
@@ -2035,7 +2037,11 @@ def validate_suite(suite: SuiteSpec, *, context: str = "suite") -> None:
 
 
 def validate_benchmark_selection(
-    model: ModelSpec, suite: SuiteSpec, *, context: str = "selection"
+    model: ModelSpec,
+    suite: SuiteSpec,
+    *,
+    context: str = "selection",
+    allow_sm121_agent_admission: bool = False,
 ) -> None:
     """Require protocol-specific profiles and suites to travel together."""
 
@@ -2091,10 +2097,26 @@ def validate_benchmark_selection(
     sm121_agent_admission_profile = (
         model_id == SM121_AGENT_ADMISSION_PROFILE_ID
     )
+    sm121_agent_admission_suite = suite.id == SM121_AGENT_ADMISSION_SUITE_ID
     if sm121_agent_admission_profile:
+        if not allow_sm121_agent_admission:
+            raise ManifestError(
+                f"{context}: the {SM121_AGENT_ADMISSION_PROFILE_ID!r} profile is "
+                "tombstoned pending its dedicated parser/tool admission controller"
+            )
+        if not sm121_agent_admission_suite:
+            raise ManifestError(
+                f"{context}: the {SM121_AGENT_ADMISSION_PROFILE_ID!r} profile "
+                f"requires {SM121_AGENT_ADMISSION_SUITE_ID!r}"
+            )
+        try:
+            validate_sm121_agent_admission_suite(suite)
+        except SM121AgentAdmissionError as error:
+            raise ManifestError(f"{context}: {error}") from error
+    if sm121_agent_admission_suite and not sm121_agent_admission_profile:
         raise ManifestError(
-            f"{context}: the {SM121_AGENT_ADMISSION_PROFILE_ID!r} profile is "
-            "tombstoned pending its dedicated parser/tool admission controller"
+            f"{context}: the {SM121_AGENT_ADMISSION_SUITE_ID!r} suite requires "
+            f"the {SM121_AGENT_ADMISSION_PROFILE_ID!r} profile"
         )
     sm121_storage_profile = model_id == _SM121_STORAGE_PROFILE_ID
     sm121_storage_suite = suite.id in _SM121_STORAGE_SUITE_IDS
