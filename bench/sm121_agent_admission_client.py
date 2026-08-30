@@ -8,8 +8,8 @@ transport.  Request and response text remain in memory only; diagnostics are
 scalar-only and are intended for the private admission controller.
 
 Importing this module does not start a server.  It is not an execution surface:
-the C1 runner remains tombstoned until its dedicated lifetime controller is
-implemented and reviewed.
+only the dedicated C1 lifetime controller may use it after authenticating a
+fresh frozen plan.
 """
 
 from __future__ import annotations
@@ -29,13 +29,13 @@ from .client import RequestResult
 from .sglang_sm121_agent_admission import (
     SM121_AGENT_ADMISSION_LONG_CONTEXT_CASE_ID,
     SM121_AGENT_ADMISSION_ENDPOINT,
-    SM121_AGENT_ADMISSION_LONG_CONTEXT_MIN_PROMPT_TOKENS,
+    SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_PROMPT_TOKENS,
     SM121_AGENT_ADMISSION_LONG_CONTEXT_PROMPT_REPETITIONS,
     SM121_AGENT_ADMISSION_QUALITY_CASE_ID,
     SM121_AGENT_ADMISSION_SERVED_NAME,
     SM121_AGENT_ADMISSION_TOOL_CASE_IDS,
     SM121AgentAdmissionError,
-    validate_sm121_agent_admission_profile,
+    validate_sm121_agent_admission_candidate,
 )
 from .sglang_sm121_storage import SM121_STORAGE_CONTEXT_LENGTH
 
@@ -303,7 +303,11 @@ class _SM121AgentAdmissionClient:
         variant: int,
     ) -> None:
         try:
-            validate_sm121_agent_admission_profile(model)
+            # ``validate_sm121_agent_admission_profile`` deliberately treats
+            # non-C1 models as out of scope.  The private client is not a
+            # generic helper, so require the singleton candidate rather than
+            # allowing a model-shaped caller to pass only the served name.
+            validate_sm121_agent_admission_candidate(model)
         except SM121AgentAdmissionError as error:
             raise SM121AgentAdmissionRequestError("body") from error
         if case_id not in _CASE_OUTPUT_TOKENS:
@@ -335,6 +339,55 @@ class _SM121AgentAdmissionClient:
         self._long_context_prompt_tokens: int | None = None
         self._long_context_cached_prompt_tokens: int | None = None
         self._long_context_response_semantics_verified = False
+        self._controller_deadline: float | None = None
+
+    def _bind_controller_deadline(self, deadline: float) -> None:
+        """Bind this private client to one controller lifetime deadline.
+
+        The factory deliberately has no caller-supplied timeout or transport
+        surface.  The dedicated controller alone binds this internal deadline
+        immediately after construction so every direct read is capped by the
+        remaining lifetime budget rather than the client's nominal 900-second
+        upper bound.
+        """
+
+        if (
+            self._controller_deadline is not None
+            or type(deadline) not in {int, float}
+            or type(deadline) is bool
+            or deadline != deadline
+            or deadline in {float("inf"), float("-inf")}
+            or float(deadline) <= time.monotonic()
+        ):
+            raise SM121AgentAdmissionRequestError("transport")
+        self._controller_deadline = float(deadline)
+
+    def _remaining_request_timeout_s(self) -> float:
+        if self._controller_deadline is None:
+            return SM121_AGENT_ADMISSION_REQUEST_TIMEOUT_S
+        remaining = self._controller_deadline - time.monotonic()
+        if remaining <= 0 or remaining != remaining or remaining == float("inf"):
+            raise SM121AgentAdmissionRequestError("transport")
+        return min(SM121_AGENT_ADMISSION_REQUEST_TIMEOUT_S, remaining)
+
+    def _set_remaining_response_timeout(self, response: object) -> None:
+        """Give every streaming read the actual remaining controller budget."""
+
+        if self._controller_deadline is None:
+            return
+        remaining = self._controller_deadline - time.monotonic()
+        if remaining <= 0 or remaining != remaining or remaining == float("inf"):
+            raise SM121AgentAdmissionRequestError("transport")
+        try:
+            setter = response.fp.raw._sock.settimeout  # type: ignore[attr-defined]
+        except AttributeError:
+            raise SM121AgentAdmissionRequestError("transport") from None
+        if not callable(setter):
+            raise SM121AgentAdmissionRequestError("transport")
+        try:
+            setter(remaining)
+        except (OSError, ValueError):
+            raise SM121AgentAdmissionRequestError("transport") from None
 
     def diagnostics(self) -> C1PayloadDiagnostics:
         verified = (
@@ -505,9 +558,15 @@ class _SM121AgentAdmissionClient:
         response_events = 0
         try:
             with _open_loopback_request(
-                request, timeout_s=SM121_AGENT_ADMISSION_REQUEST_TIMEOUT_S
+                request, timeout_s=self._remaining_request_timeout_s()
             ) as response:
-                for raw_line in response:
+                iterator = iter(response)
+                while True:
+                    self._set_remaining_response_timeout(response)
+                    try:
+                        raw_line = next(iterator)
+                    except StopIteration:
+                        break
                     if (
                         not isinstance(raw_line, bytes)
                         or len(raw_line) > _MAX_SSE_LINE_BYTES
@@ -783,7 +842,7 @@ class _SM121AgentAdmissionClient:
         cached = self._long_context_cached_prompt_tokens
         input_tokenization_verified = (
             type(tokens) is int
-            and tokens >= SM121_AGENT_ADMISSION_LONG_CONTEXT_MIN_PROMPT_TOKENS
+            and tokens == SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_PROMPT_TOKENS
         )
         return {
             "input_tokenization_verified": input_tokenization_verified,

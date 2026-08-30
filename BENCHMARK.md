@@ -1359,8 +1359,7 @@ public V3 evidence export remains denied pending a separate publication policy.
 ### Current-SM121 agent parser preflight
 
 The current public SM121 storage profiles are chat-only/no-thinking and cannot
-support a Pi/cowork or tool-use claim. Before defining a new agent admission,
-the tombstoned
+support a Pi/cowork or tool-use claim. The admission-only
 `qwen38-flash-next-nvfp4-sm121-triton-storage-agent-admission-sglang` profile
 checks the only image-local prerequisite that can be established without
 serving:
@@ -1376,10 +1375,16 @@ read-only, no-GPU container. It returns only parser/limit scalars; it uses no
 host weight mount or model loading, opens no port, emits or persists no timing
 metric, and writes no result directory. A passing preflight is not a model
 startup, quality, tool, long-context, cache, throughput, or agent result; it
-only clears a static prerequisite for a separately implemented fresh-C1
-admission controller. That controller must still bind the final low-effort
-payload, exact tool-loop semantics, long-context fit, cache isolation, and
-stricter host-safety gates before any Pi/cowork workload can run. See the
+only clears a static prerequisite for the dedicated fresh-C1 admission
+controller. Before that controller may start a server, it separately mounts
+the exact cached target snapshot read-only in an offline CPU tokenizer probe
+and accepts only the pinned 60,489-input-token plus 128-output-token budget
+(60,617 of 65,536), along with tokenizer/template/request hashes. It then
+registers one controller-only, one-shot launch lease per fresh lifetime after
+clean-start; the lease is consumed immediately before Docker and revoked on
+cleanup. The controller still has to pass its final low-effort payload, exact
+tool-loop semantics, live long-context/cache isolation, and stricter host-safety
+gates before any Pi/cowork workload can run. See the
 [agent-admission preflight record](docs/qwen38-flash-next-sm121-agent-admission-preflight-2026-08-29.md).
 
 ### Publishing sanitized evidence

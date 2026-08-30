@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stdout
+from copy import deepcopy
 from dataclasses import asdict, replace
 import io
 import json
@@ -14,6 +15,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from bench.execution_admission import model_execution_blocker
+from bench import runtime
 from bench.manifest import (
     ManifestError,
     load_models,
@@ -22,10 +24,25 @@ from bench.manifest import (
     validate_model,
 )
 from bench.runner import create_plan
-from bench.runtime import RuntimeErrorWithContext, start_sglang
+from bench.runtime import (
+    RuntimeErrorWithContext,
+    start_sglang,
+    start_sm121_agent_admission_server,
+)
 from bench.sglang_sm121_agent_admission import (
     SM121_AGENT_ADMISSION_ARGS,
     SM121_AGENT_ADMISSION_CASE_IDS,
+    SM121_AGENT_ADMISSION_LONG_CONTEXT_BUDGET_PROBE_ID,
+    SM121_AGENT_ADMISSION_LONG_CONTEXT_BUDGET_PROBE_SCHEMA_VERSION,
+    SM121_AGENT_ADMISSION_LONG_CONTEXT_BUDGET_TOKENS,
+    SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_PROMPT_TOKENS,
+    SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_TEMPLATE_SHA256,
+    SM121_AGENT_ADMISSION_LONG_CONTEXT_OUTPUT_TOKENS,
+    SM121_AGENT_ADMISSION_LONG_CONTEXT_RAW_PROMPT_SHA256,
+    SM121_AGENT_ADMISSION_LONG_CONTEXT_RENDERED_PROMPT_SHA256,
+    SM121_AGENT_ADMISSION_LONG_CONTEXT_TOKENIZER_SHA256,
+    SM121_AGENT_ADMISSION_LONG_CONTEXT_TOOLS_SHA256,
+    SM121_AGENT_ADMISSION_NATIVE_CACHE_METRIC_FIELDS,
     SM121_AGENT_ADMISSION_PROFILE_ID,
     SM121_AGENT_ADMISSION_RUNTIME_EXPECTED,
     SM121_AGENT_ADMISSION_STATIC_PROBE_ID,
@@ -33,21 +50,27 @@ from bench.sglang_sm121_agent_admission import (
     SM121_AGENT_ADMISSION_SUITE_ID,
     SM121AgentAdmissionError,
     _STATIC_PROBE_SCRIPT,
+    _STATIC_LONG_CONTEXT_TOKENIZER_SCRIPT,
     is_sm121_agent_admission_candidate,
     probe_sm121_agent_parser_static_preflight,
+    probe_sm121_agent_long_context_budget_preflight,
     validate_sm121_agent_admission_candidate,
+    validate_sm121_agent_native_cache_metrics_receipt,
     validate_sm121_agent_admission_profile,
     validate_sm121_agent_admission_runtime_identity,
+    validate_sm121_agent_long_context_budget_probe,
     validate_sm121_agent_parser_static_probe,
     validate_sm121_agent_admission_suite,
 )
 from bench.sglang_sm121_storage import (
     SM121_STORAGE_LOCAL_IMAGE_ID,
     SM121_STORAGE_LOCAL_IMAGE_TAG,
+    SM121_STORAGE_PLATFORM,
     SM121_STORAGE_SOURCE_TREE,
 )
 from sparkbench import (
     build_parser,
+    command_sm121_agent_admission,
     command_sm121_agent_admission_plan,
     command_sm121_agent_parser_preflight,
 )
@@ -79,6 +102,48 @@ def _image_inspection() -> dict[str, object]:
     }
 
 
+def _native_cache_receipt() -> dict[str, object]:
+    before = {
+        field: 0 for field in SM121_AGENT_ADMISSION_NATIVE_CACHE_METRIC_FIELDS
+    }
+    after = dict(before)
+    after["prefill_input_tokens"] = 60_000
+    return {
+        "event": "sm121_agent_native_cache_metrics_receipt",
+        "schema_version": 1,
+        "fresh_lifetime": 3,
+        "same_owned_generation": True,
+        "metrics_available": True,
+        "guardrail_metrics_available": True,
+        "metrics_before_settled": True,
+        "metrics_after_settled": True,
+        "metrics_before_polls": 2,
+        "metrics_after_polls": 2,
+        "metrics_before": before,
+        "metrics_after": after,
+        "native_input_observed": True,
+        "zero_metric_cache_hits": True,
+        "guardrails_clean": True,
+    }
+
+
+def _long_context_budget_probe() -> dict[str, object]:
+    return {
+        "schema_version": SM121_AGENT_ADMISSION_LONG_CONTEXT_BUDGET_PROBE_SCHEMA_VERSION,
+        "probe_id": SM121_AGENT_ADMISSION_LONG_CONTEXT_BUDGET_PROBE_ID,
+        "raw_prompt_sha256": SM121_AGENT_ADMISSION_LONG_CONTEXT_RAW_PROMPT_SHA256,
+        "tools_sha256": SM121_AGENT_ADMISSION_LONG_CONTEXT_TOOLS_SHA256,
+        "tokenizer_sha256": SM121_AGENT_ADMISSION_LONG_CONTEXT_TOKENIZER_SHA256,
+        "chat_template_sha256": SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_TEMPLATE_SHA256,
+        "rendered_prompt_sha256": SM121_AGENT_ADMISSION_LONG_CONTEXT_RENDERED_PROMPT_SHA256,
+        "chat_prompt_tokens": SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_PROMPT_TOKENS,
+        "output_tokens": SM121_AGENT_ADMISSION_LONG_CONTEXT_OUTPUT_TOKENS,
+        "budget_tokens": SM121_AGENT_ADMISSION_LONG_CONTEXT_BUDGET_TOKENS,
+        "context_length": 65_536,
+        "within_context": True,
+    }
+
+
 class SM121AgentAdmissionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -92,7 +157,7 @@ class SM121AgentAdmissionTests(unittest.TestCase):
             / "qwen38_flash_next_sm121_triton_storage_agent_admission.toml"
         )
 
-    def test_manifest_profile_is_exact_and_tombstoned(self) -> None:
+    def test_manifest_profile_is_exact_and_generic_execution_is_blocked(self) -> None:
         self.assertTrue(is_sm121_agent_admission_candidate(self.model))
         validate_sm121_agent_admission_candidate(self.model)
         validate_sm121_agent_admission_profile(self.model)
@@ -263,6 +328,29 @@ class SM121AgentAdmissionTests(unittest.TestCase):
                 with self.assertRaises(SM121AgentAdmissionError):
                     validate_sm121_agent_admission_runtime_identity(changed)
 
+    def test_native_cache_receipt_is_exact_scalar_and_derives_its_gates(self) -> None:
+        receipt = _native_cache_receipt()
+        self.assertEqual(
+            validate_sm121_agent_native_cache_metrics_receipt(receipt), receipt
+        )
+        mutations = (
+            lambda value: value.update({"same_owned_generation": False}),
+            lambda value: value["metrics_after"].update(
+                {"prefill_device_hit_tokens": 1}
+            ),
+            lambda value: value["metrics_before"].update(
+                {"prefill_input_tokens": True}
+            ),
+            lambda value: value.update({"metrics_after_polls": 65}),
+            lambda value: value.update({"prompt": "synthetic-only"}),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                changed = deepcopy(receipt)
+                mutate(changed)
+                with self.assertRaises(SM121AgentAdmissionError):
+                    validate_sm121_agent_native_cache_metrics_receipt(changed)
+
     def test_static_probe_is_image_bound_and_never_requests_gpu_or_network(self) -> None:
         runner = Mock(
             side_effect=(
@@ -432,6 +520,50 @@ class SM121AgentAdmissionTests(unittest.TestCase):
         valid["wall_s"] = 1.0
         with self.assertRaises(SM121AgentAdmissionError):
             validate_sm121_agent_parser_static_probe(valid)
+
+    def test_long_context_budget_is_pinned_before_any_live_request(self) -> None:
+        probe = _long_context_budget_probe()
+        self.assertEqual(
+            validate_sm121_agent_long_context_budget_probe(probe), probe
+        )
+        self.assertLess(probe["budget_tokens"], probe["context_length"])
+        self.assertEqual(
+            probe["budget_tokens"],
+            probe["chat_prompt_tokens"] + probe["output_tokens"],
+        )
+        for field, value in (
+            ("budget_tokens", 65_536),
+            ("tools_sha256", "0" * 64),
+            ("within_context", False),
+        ):
+            drifted = dict(probe)
+            drifted[field] = value
+            with self.subTest(field=field):
+                with self.assertRaises(SM121AgentAdmissionError):
+                    validate_sm121_agent_long_context_budget_probe(drifted)
+
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory)
+            runner = Mock(
+                side_effect=(
+                    _completed(stdout=json.dumps(_image_inspection())),
+                    _completed(stdout=json.dumps(probe)),
+                )
+            )
+            observed = probe_sm121_agent_long_context_budget_preflight(
+                self.model, snapshot_path=snapshot, runner=runner
+            )
+        self.assertEqual(observed, probe)
+        launch = runner.call_args_list[1].args[0]
+        self.assertIn("--network", launch)
+        self.assertIn("none", launch)
+        self.assertIn("--read-only", launch)
+        self.assertIn("--mount", launch)
+        self.assertIn("dst=/model,readonly", launch[launch.index("--mount") + 1])
+        self.assertNotIn("--gpus", launch)
+        self.assertIn("return_dict=False", _STATIC_LONG_CONTEXT_TOKENIZER_SCRIPT)
+        self.assertIn("reasoning_effort': 'low'", _STATIC_LONG_CONTEXT_TOKENIZER_SCRIPT)
+        self.assertIn("'archive ' * 60000", _STATIC_LONG_CONTEXT_TOKENIZER_SCRIPT)
 
     def test_static_probe_fails_closed_on_image_or_json_drift(self) -> None:
         malformed_image = Mock(return_value=_completed(stdout="not-json"))
@@ -613,6 +745,112 @@ class SM121AgentAdmissionTests(unittest.TestCase):
         for probe in (existing, port_free, snapshot, launcher):
             probe.assert_not_called()
 
+    def test_dedicated_server_adapter_requires_a_controller_minted_grant(self) -> None:
+        """The public-looking adapter cannot mint a launch grant itself."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with (
+                patch("bench.runtime._existing_container") as existing,
+                patch("bench.runtime._port_is_free") as port_free,
+                patch("bench.runtime._exact_sglang_snapshot") as snapshot,
+                patch("bench.runtime._start_sglang_sm121_storage") as launcher,
+                self.assertRaisesRegex(
+                    RuntimeErrorWithContext,
+                    "launch is not authorized",
+                ),
+            ):
+                start_sm121_agent_admission_server(self.model, workspace=workspace)
+        for probe in (existing, port_free, snapshot, launcher):
+            probe.assert_not_called()
+
+    def test_runtime_offers_no_model_only_c1_grant_factory(self) -> None:
+        """A model-shaped object cannot mint a launch authority by itself."""
+
+        self.assertFalse(
+            hasattr(runtime, "_sm121_agent_admission_launch_capability")
+        )
+
+    def test_forged_private_lease_is_rejected_before_runtime_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            forged = object()
+            with (
+                patch("bench.runtime._existing_container") as existing,
+                patch("bench.runtime._port_is_free") as port_free,
+                patch("bench.runtime._exact_sglang_snapshot") as snapshot,
+                patch("bench.runtime._start_sglang_sm121_storage") as launcher,
+                self.assertRaisesRegex(
+                    RuntimeErrorWithContext,
+                    "launch is not authorized",
+                ),
+            ):
+                start_sm121_agent_admission_server(
+                    self.model,
+                    workspace=workspace,
+                    _launch_capability=forged,
+                )
+        for probe in (existing, port_free, snapshot, launcher):
+            probe.assert_not_called()
+
+    def test_storage_adapter_consumes_after_final_abort_before_docker(self) -> None:
+        """The final consumption hook sits at the Docker side-effect boundary."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            order: list[str] = []
+
+            def abort_check() -> None:
+                order.append("abort")
+
+            def consume(model: object, capability: object) -> object:
+                order.append("consume")
+                return capability
+
+            def docker_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+                order.append("docker")
+                return _completed(stdout="synthetic-container\n")
+
+            with (
+                patch.object(
+                    runtime,
+                    "_require_sm121_agent_admission_launch_capability",
+                    return_value=object(),
+                ),
+                patch.object(
+                    runtime,
+                    "_sm121_storage_image_id",
+                    return_value=SM121_STORAGE_LOCAL_IMAGE_ID,
+                ),
+                patch.object(
+                    runtime,
+                    "_sm121_storage_seccomp_profile",
+                    return_value=workspace / "seccomp.json",
+                ),
+                patch.object(
+                    runtime,
+                    "_consume_sm121_agent_admission_launch_capability",
+                    side_effect=consume,
+                ),
+                patch.object(runtime, "_run", side_effect=docker_run),
+                patch.object(runtime, "wait_for_endpoint", return_value=0.0),
+                patch.object(runtime.secrets, "token_urlsafe", return_value="test-key"),
+            ):
+                runtime._start_sglang_sm121_storage(
+                    self.model,
+                    workspace=workspace,
+                    target_repository=workspace,
+                    container_snapshot="/synthetic-snapshot",
+                    port=30000,
+                    server_log_path=None,
+                    abort_check=abort_check,
+                    on_server_created=None,
+                    sm121_agent_admission_capability=object(),
+                )
+            self.assertEqual(
+                order, ["abort", "abort", "consume", "docker", "abort"]
+            )
+
     def test_command_loads_the_exact_profile_and_prints_only_validated_scalars(self) -> None:
         expected = {
             "schema_version": SM121_AGENT_ADMISSION_STATIC_PROBE_SCHEMA_VERSION,
@@ -690,6 +928,85 @@ class SM121AgentAdmissionTests(unittest.TestCase):
         )
         self.assertEqual(output.getvalue(), f"Admission plan: {run_dir}\n")
 
+    def test_live_command_uses_only_the_fresh_private_controller(self) -> None:
+        output = io.StringIO()
+        run_dir = Path("logs") / "agent-admissions" / "fixture"
+        summary = {"decision": "blocked", "status": "partial"}
+        with (
+            patch(
+                "sparkbench.load_models",
+                return_value={SM121_AGENT_ADMISSION_PROFILE_ID: self.model},
+            ) as load,
+            patch("sparkbench.load_suite", return_value=self.suite) as load_suite_mock,
+            patch(
+                "sparkbench.create_sm121_agent_admission_plan",
+                return_value=run_dir,
+            ) as freeze,
+            patch(
+                "sparkbench.execute_sm121_agent_admission",
+                return_value=summary,
+            ) as execute,
+            patch(
+                "sparkbench.audit_sm121_agent_admission",
+                return_value={"ok": False},
+            ) as audit,
+            redirect_stdout(output),
+        ):
+            status = command_sm121_agent_admission(
+                SimpleNamespace(
+                    models=Path("models.toml"),
+                    suite=Path("suite.toml"),
+                    output_root=Path("logs") / "agent-admissions",
+                )
+            )
+        self.assertEqual(status, 1)
+        load.assert_called_once_with(Path("models.toml"))
+        load_suite_mock.assert_called_once_with(Path("suite.toml"))
+        freeze.assert_called_once_with(
+            model=self.model,
+            suite=self.suite,
+            output_root=Path("logs") / "agent-admissions",
+            models_path=Path("models.toml"),
+            suite_path=Path("suite.toml"),
+        )
+        execute.assert_called_once_with(run_dir, workspace=ROOT)
+        audit.assert_called_once_with(run_dir)
+        self.assertEqual(
+            output.getvalue(),
+            'Admission: logs/agent-admissions/fixture\n{\n  "decision": "blocked",\n  "status": "partial"\n}\n',
+        )
+
+    def test_live_command_requires_a_passing_read_only_audit_for_exit_zero(self) -> None:
+        run_dir = Path("logs") / "agent-admissions" / "fixture"
+        with (
+            patch(
+                "sparkbench.load_models",
+                return_value={SM121_AGENT_ADMISSION_PROFILE_ID: self.model},
+            ),
+            patch("sparkbench.load_suite", return_value=self.suite),
+            patch(
+                "sparkbench.create_sm121_agent_admission_plan",
+                return_value=run_dir,
+            ),
+            patch(
+                "sparkbench.execute_sm121_agent_admission",
+                return_value={"decision": "admitted", "status": "complete"},
+            ),
+            patch(
+                "sparkbench.audit_sm121_agent_admission",
+                return_value={"ok": False},
+            ),
+            patch("builtins.print"),
+        ):
+            status = command_sm121_agent_admission(
+                SimpleNamespace(
+                    models=Path("models.toml"),
+                    suite=Path("suite.toml"),
+                    output_root=Path("logs") / "agent-admissions",
+                )
+            )
+        self.assertEqual(status, 1)
+
     def test_cli_registers_a_no_selection_parser_preflight(self) -> None:
         args = build_parser().parse_args(["sm121-agent-parser-preflight"])
         self.assertIs(args.function, command_sm121_agent_parser_preflight)
@@ -698,6 +1015,19 @@ class SM121AgentAdmissionTests(unittest.TestCase):
     def test_cli_registers_private_agent_admission_plan(self) -> None:
         args = build_parser().parse_args(["sm121-agent-admission-plan"])
         self.assertIs(args.function, command_sm121_agent_admission_plan)
+        self.assertEqual(args.models, ROOT / "manifests" / "models.toml")
+        self.assertEqual(
+            args.suite,
+            ROOT
+            / "manifests"
+            / "suites"
+            / "qwen38_flash_next_sm121_triton_storage_agent_admission.toml",
+        )
+        self.assertEqual(args.output_root, ROOT / "logs" / "agent-admissions")
+
+    def test_cli_registers_only_the_fresh_private_agent_admission(self) -> None:
+        args = build_parser().parse_args(["sm121-agent-admission"])
+        self.assertIs(args.function, command_sm121_agent_admission)
         self.assertEqual(args.models, ROOT / "manifests" / "models.toml")
         self.assertEqual(
             args.suite,

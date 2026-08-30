@@ -11,11 +11,13 @@ performance result.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import re
 import secrets
 import subprocess
 from typing import Any, Callable, Mapping
 
+from . import agentic_tools
 from .sglang_sm121_storage import (
     SM121_STORAGE_CACHE_PAGES,
     SM121_STORAGE_CONTEXT_LENGTH,
@@ -51,9 +53,9 @@ SM121_AGENT_ADMISSION_SERVED_NAME = (
 SM121_AGENT_ADMISSION_ENDPOINT = "http://127.0.0.1:30000/v1"
 SM121_AGENT_ADMISSION_DESCRIPTION = (
     "Prospective C1 Qwen3.8 Flash-Next NVFP4 Pi/cowork admission profile on "
-    "the current SM121 Triton/io_uring storage runtime. It is tombstoned "
-    "until a dedicated parser, quality, tool-loop, long-context, cache, and "
-    "host-safety admission controller is implemented."
+    "the current SM121 Triton/io_uring storage runtime. Only its dedicated "
+    "non-resumable parser, quality, tool-loop, long-context, cache, and "
+    "host-safety admission controller may execute it."
 )
 SM121_AGENT_ADMISSION_REQUEST_BODY = (
     '{"chat_template_kwargs":{"enable_thinking":true,"reasoning_effort":"low"}}'
@@ -73,12 +75,51 @@ SM121_AGENT_ADMISSION_TOOL_CASE_IDS = (
 )
 SM121_AGENT_ADMISSION_LONG_CONTEXT_CASE_ID = "sm121-agent-long-context-cache-zero-v1"
 SM121_AGENT_ADMISSION_LONG_CONTEXT_PROMPT_REPETITIONS = 60_000
-# The private direct client renders one standalone ``archive `` token-shaped
-# filler per repetition. A returned prompt-token count below this lower bound
-# cannot establish that the intended 60K first turn was actually tokenized.
-SM121_AGENT_ADMISSION_LONG_CONTEXT_MIN_PROMPT_TOKENS = (
-    SM121_AGENT_ADMISSION_LONG_CONTEXT_PROMPT_REPETITIONS
+# Offline tokenizer/template count for the exact client-rendered first turn:
+# 60K ``archive `` fillers, its two fixed instructions, the canonical three
+# tool schemas, the Qwen3.8 low-thinking chat template, and the 128-token
+# output reservation.  The private controller rechecks these values in an
+# image-local, no-network/no-GPU tokenizer probe before it starts C1.
+SM121_AGENT_ADMISSION_LONG_CONTEXT_RAW_PROMPT_SHA256 = (
+    "7e7e5e087b6f4585a004a5e0369ed9be71358fa978a1a6d0cbaf682655fd5918"
 )
+SM121_AGENT_ADMISSION_LONG_CONTEXT_TOOLS_SHA256 = (
+    "6aacd08332e48b6aaee06a27776b5bf6656a38680177502fdf8aaf9a72ee7831"
+)
+SM121_AGENT_ADMISSION_LONG_CONTEXT_TOKENIZER_SHA256 = (
+    "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
+)
+SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_TEMPLATE_SHA256 = (
+    "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+)
+SM121_AGENT_ADMISSION_LONG_CONTEXT_RENDERED_PROMPT_SHA256 = (
+    "a83f3b4585628a4f45b612a35de53c2d968e2ab4e9cc91e20aac49523bef269f"
+)
+SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_PROMPT_TOKENS = 60_489
+SM121_AGENT_ADMISSION_LONG_CONTEXT_OUTPUT_TOKENS = 128
+SM121_AGENT_ADMISSION_LONG_CONTEXT_BUDGET_TOKENS = (
+    SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_PROMPT_TOKENS
+    + SM121_AGENT_ADMISSION_LONG_CONTEXT_OUTPUT_TOKENS
+)
+# Retain the historical name for read-only consumers, but it now means the
+# exact pinned client/template count rather than a permissive filler lower
+# bound. C1 rejects any server-reported count that differs from it.
+SM121_AGENT_ADMISSION_LONG_CONTEXT_MIN_PROMPT_TOKENS = (
+    SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_PROMPT_TOKENS
+)
+SM121_AGENT_ADMISSION_NATIVE_CACHE_METRIC_FIELDS = (
+    "prefill_input_tokens",
+    "prefill_device_hit_tokens",
+    "prefill_host_hit_tokens",
+    "prefill_storage_hit_tokens",
+    "cached_total_tokens",
+    "cached_device_tokens",
+    "cached_host_tokens",
+    "cached_storage_tokens",
+    "evicted_tokens",
+    "retracted_requests",
+)
+SM121_AGENT_ADMISSION_NATIVE_CACHE_MAX_POLLS = 64
 SM121_AGENT_ADMISSION_CASE_IDS = (
     SM121_AGENT_ADMISSION_QUALITY_CASE_ID,
     *SM121_AGENT_ADMISSION_TOOL_CASE_IDS,
@@ -95,6 +136,10 @@ SM121_AGENT_ADMISSION_STATIC_PROBE_ID = (
     "qwen38-flash-next-sm121-agent-parser-static-preflight-v2"
 )
 SM121_AGENT_ADMISSION_STATIC_PROBE_SCHEMA_VERSION = 2
+SM121_AGENT_ADMISSION_LONG_CONTEXT_BUDGET_PROBE_ID = (
+    "qwen38-flash-next-sm121-agent-long-context-tokenizer-preflight-v1"
+)
+SM121_AGENT_ADMISSION_LONG_CONTEXT_BUDGET_PROBE_SCHEMA_VERSION = 1
 _STATIC_CONTAINER_NAME_PREFIX = "sparkbench-sm121-agent-parser-"
 _STATIC_CONTAINER_LABEL = "io.sparkbench.sm121-agent-parser-preflight"
 _STATIC_CONTAINER_NONCE_PATTERN = re.compile(r"[0-9a-f]{32}")
@@ -146,9 +191,9 @@ SM121_AGENT_ADMISSION_ARGS = (
     "30000",
 )
 
-# This is the scalar-only runtime projection that a future controller must
-# obtain from one freshly started owned server. Keep the leaf contract here so
-# the eventual inspector and the private journal audit cannot drift apart.
+# This is the scalar-only runtime projection that the dedicated controller
+# obtains from one freshly started owned server. Keep the leaf contract here so
+# its inspector and private journal audit cannot drift apart.
 SM121_AGENT_ADMISSION_RUNTIME_EXPECTED = {
     **SM121_CACHE_SEMANTIC_RUNTIME_EXPECTED[SM121_CACHE_SEMANTIC_CACHE_ON_ARM],
     "mamba_radix_cache_strategy": "extra_buffer_lazy",
@@ -180,6 +225,22 @@ _STATIC_PROBE_FIELDS = frozenset(
         "context_length",
     }
 )
+_LONG_CONTEXT_BUDGET_PROBE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "probe_id",
+        "raw_prompt_sha256",
+        "tools_sha256",
+        "tokenizer_sha256",
+        "chat_template_sha256",
+        "rendered_prompt_sha256",
+        "chat_prompt_tokens",
+        "output_tokens",
+        "budget_tokens",
+        "context_length",
+        "within_context",
+    }
+)
 _STATIC_PROBE_ARGV = ("--model-path", "dummy", *SM121_AGENT_ADMISSION_ARGS)
 _STATIC_PROBE_SCRIPT = "\n".join(
     (
@@ -204,6 +265,59 @@ _STATIC_PROBE_SCRIPT = "\n".join(
         "}, sort_keys=True, separators=(',', ':')))",
     )
 )
+
+
+def _static_long_context_tools() -> list[dict[str, Any]]:
+    """Return the same fixed first-turn schemas as the private direct client."""
+
+    scenario = agentic_tools._scenario("agentic-select-and-call", 0)
+    return agentic_tools._rotated_tool_schemas(scenario)
+
+
+def _static_long_context_tokenizer_script() -> str:
+    """Build a no-network image-local count script without embedding the prompt."""
+
+    tools = _static_long_context_tools()
+    tools_json = json.dumps(
+        tools, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    )
+    return "\n".join(
+        (
+            "import hashlib",
+            "import json",
+            "from pathlib import Path",
+            "from transformers import AutoTokenizer",
+            "model_path = Path('/model')",
+            "def digest(name):",
+            "    return hashlib.sha256((model_path / name).read_bytes()).hexdigest()",
+            "prompt = ('Read the complete synthetic context before answering. '"
+            " + 'archive ' * 60000"
+            " + 'Do not call a tool. Reply with exactly LONG-CONTEXT-READY.')",
+            f"tools = json.loads({tools_json!r})",
+            "tokenizer = AutoTokenizer.from_pretrained(str(model_path), local_files_only=True)",
+            "kwargs = {'tools': tools, 'add_generation_prompt': True, 'enable_thinking': True, 'reasoning_effort': 'low'}",
+            "rendered = tokenizer.apply_chat_template([{'role': 'user', 'content': prompt}], tokenize=False, **kwargs)",
+            "token_ids = tokenizer.apply_chat_template([{'role': 'user', 'content': prompt}], tokenize=True, return_dict=False, **kwargs)",
+            "chat_prompt_tokens = len(token_ids)",
+            "output_tokens = 128",
+            "budget_tokens = chat_prompt_tokens + output_tokens",
+            "print(json.dumps({",
+            "  'raw_prompt_sha256': hashlib.sha256(prompt.encode()).hexdigest(),",
+            "  'tools_sha256': hashlib.sha256(json.dumps(tools, ensure_ascii=True, separators=(',', ':'), sort_keys=True).encode()).hexdigest(),",
+            "  'tokenizer_sha256': digest('tokenizer.json'),",
+            "  'chat_template_sha256': digest('chat_template.jinja'),",
+            "  'rendered_prompt_sha256': hashlib.sha256(rendered.encode()).hexdigest(),",
+            "  'chat_prompt_tokens': chat_prompt_tokens,",
+            "  'output_tokens': output_tokens,",
+            "  'budget_tokens': budget_tokens,",
+            "  'context_length': 65536,",
+            "  'within_context': budget_tokens < 65536,",
+            "}, sort_keys=True, separators=(',', ':')))",
+        )
+    )
+
+
+_STATIC_LONG_CONTEXT_TOKENIZER_SCRIPT = _static_long_context_tokenizer_script()
 
 
 class SM121AgentAdmissionError(ValueError):
@@ -384,6 +498,110 @@ def validate_sm121_agent_admission_runtime_identity(
     return dict(identity)
 
 
+def validate_sm121_agent_native_cache_metrics_receipt(
+    receipt: object,
+) -> dict[str, object]:
+    """Validate the scalar-only native cache-zero receipt for C1.
+
+    A controller writes this record only after two settled owned-server metric
+    views before and after the sole 60K request.  The provenance binding stays
+    opaque in runtime; this pure validator receives no endpoint, credential,
+    container, process, label, metric text, prompt, response, or timing data.
+    """
+
+    fields = {
+        "event",
+        "schema_version",
+        "fresh_lifetime",
+        "same_owned_generation",
+        "metrics_available",
+        "guardrail_metrics_available",
+        "metrics_before_settled",
+        "metrics_after_settled",
+        "metrics_before_polls",
+        "metrics_after_polls",
+        "metrics_before",
+        "metrics_after",
+        "native_input_observed",
+        "zero_metric_cache_hits",
+        "guardrails_clean",
+    }
+    if type(receipt) is not dict or set(receipt) != fields:
+        raise SM121AgentAdmissionError("SM121 agent native cache receipt is invalid")
+    if (
+        receipt["event"] != "sm121_agent_native_cache_metrics_receipt"
+        or type(receipt["schema_version"]) is not int
+        or receipt["schema_version"] != 1
+        or type(receipt["fresh_lifetime"]) is not int
+        or receipt["fresh_lifetime"] != 3
+    ):
+        raise SM121AgentAdmissionError("SM121 agent native cache receipt is invalid")
+    for field in (
+        "same_owned_generation",
+        "metrics_available",
+        "guardrail_metrics_available",
+        "metrics_before_settled",
+        "metrics_after_settled",
+        "native_input_observed",
+        "zero_metric_cache_hits",
+        "guardrails_clean",
+    ):
+        if type(receipt[field]) is not bool or receipt[field] is not True:
+            raise SM121AgentAdmissionError("SM121 agent native cache receipt is invalid")
+    for field in ("metrics_before_polls", "metrics_after_polls"):
+        value = receipt[field]
+        if (
+            type(value) is not int
+            or not 2 <= value <= SM121_AGENT_ADMISSION_NATIVE_CACHE_MAX_POLLS
+        ):
+            raise SM121AgentAdmissionError("SM121 agent native cache receipt is invalid")
+    maps: dict[str, dict[str, int]] = {}
+    for name in ("metrics_before", "metrics_after"):
+        values = receipt[name]
+        if type(values) is not dict or set(values) != set(
+            SM121_AGENT_ADMISSION_NATIVE_CACHE_METRIC_FIELDS
+        ):
+            raise SM121AgentAdmissionError("SM121 agent native cache receipt is invalid")
+        normalized: dict[str, int] = {}
+        for field in SM121_AGENT_ADMISSION_NATIVE_CACHE_METRIC_FIELDS:
+            value = values[field]
+            if type(value) is not int or value < 0:
+                raise SM121AgentAdmissionError(
+                    "SM121 agent native cache receipt is invalid"
+                )
+            normalized[field] = value
+        maps[name] = normalized
+    before = maps["metrics_before"]
+    after = maps["metrics_after"]
+    hit_fields = tuple(
+        field
+        for field in SM121_AGENT_ADMISSION_NATIVE_CACHE_METRIC_FIELDS
+        if field
+        not in {"prefill_input_tokens", "evicted_tokens", "retracted_requests"}
+    )
+    native_input_observed = (
+        after["prefill_input_tokens"] > before["prefill_input_tokens"]
+    )
+    zero_metric_cache_hits = all(
+        before[field] == after[field] == 0 for field in hit_fields
+    )
+    guardrails_clean = all(
+        before[field] == after[field] == 0
+        for field in ("evicted_tokens", "retracted_requests")
+    )
+    if (
+        receipt["native_input_observed"] is not native_input_observed
+        or receipt["zero_metric_cache_hits"] is not zero_metric_cache_hits
+        or receipt["guardrails_clean"] is not guardrails_clean
+    ):
+        raise SM121AgentAdmissionError("SM121 agent native cache receipt is invalid")
+    return {
+        **{field: receipt[field] for field in fields - {"metrics_before", "metrics_after"}},
+        "metrics_before": dict(before),
+        "metrics_after": dict(after),
+    }
+
+
 def validate_sm121_agent_admission_suite(suite: Any) -> None:
     """Require the exact six-case, controller-owned C1 admission suite.
 
@@ -499,6 +717,37 @@ def validate_sm121_agent_parser_static_probe(probe: object) -> dict[str, object]
         valid = actual is value if isinstance(value, bool) else actual == value
         if not valid:
             raise SM121AgentAdmissionError("SM121 agent parser preflight is invalid")
+    return dict(probe)
+
+
+def validate_sm121_agent_long_context_budget_probe(
+    probe: object,
+) -> dict[str, object]:
+    """Require the pinned tokenizer/template C1 first-turn budget proof."""
+
+    if type(probe) is not dict or frozenset(probe) != _LONG_CONTEXT_BUDGET_PROBE_FIELDS:
+        raise SM121AgentAdmissionError("SM121 agent long-context budget is invalid")
+    expected = {
+        "schema_version": SM121_AGENT_ADMISSION_LONG_CONTEXT_BUDGET_PROBE_SCHEMA_VERSION,
+        "probe_id": SM121_AGENT_ADMISSION_LONG_CONTEXT_BUDGET_PROBE_ID,
+        "raw_prompt_sha256": SM121_AGENT_ADMISSION_LONG_CONTEXT_RAW_PROMPT_SHA256,
+        "tools_sha256": SM121_AGENT_ADMISSION_LONG_CONTEXT_TOOLS_SHA256,
+        "tokenizer_sha256": SM121_AGENT_ADMISSION_LONG_CONTEXT_TOKENIZER_SHA256,
+        "chat_template_sha256": SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_TEMPLATE_SHA256,
+        "rendered_prompt_sha256": SM121_AGENT_ADMISSION_LONG_CONTEXT_RENDERED_PROMPT_SHA256,
+        "chat_prompt_tokens": SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_PROMPT_TOKENS,
+        "output_tokens": SM121_AGENT_ADMISSION_LONG_CONTEXT_OUTPUT_TOKENS,
+        "budget_tokens": SM121_AGENT_ADMISSION_LONG_CONTEXT_BUDGET_TOKENS,
+        "context_length": SM121_STORAGE_CONTEXT_LENGTH,
+        "within_context": True,
+    }
+    for field, value in expected.items():
+        actual = probe.get(field)
+        valid = actual is value if isinstance(value, bool) else actual == value
+        if not valid:
+            raise SM121AgentAdmissionError("SM121 agent long-context budget is invalid")
+    if probe["budget_tokens"] >= probe["context_length"]:
+        raise SM121AgentAdmissionError("SM121 agent long-context budget is invalid")
     return dict(probe)
 
 
@@ -700,3 +949,97 @@ def probe_sm121_agent_parser_static_preflight(
         **observed,
     }
     return validate_sm121_agent_parser_static_probe(probe)
+
+
+def probe_sm121_agent_long_context_budget_preflight(
+    model: Any,
+    *,
+    snapshot_path: Path,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> dict[str, object]:
+    """Tokenize the exact C1 first turn before any inference server starts.
+
+    The target snapshot is supplied by the runtime's exact-cache resolver and
+    mounted read-only into the already pinned local image. This CPU-only,
+    no-network probe checks the target tokenizer and chat template rather than
+    assuming the repeated filler is one token or discovering overflow on the
+    first live long-context request.
+    """
+
+    validate_sm121_agent_admission_candidate(model)
+    if not isinstance(snapshot_path, Path) or snapshot_path.is_symlink():
+        raise SM121AgentAdmissionError("SM121 agent long-context budget is unavailable")
+    try:
+        resolved_snapshot = snapshot_path.resolve(strict=True)
+    except OSError as error:
+        raise SM121AgentAdmissionError(
+            "SM121 agent long-context budget is unavailable"
+        ) from error
+    if not resolved_snapshot.is_dir():
+        raise SM121AgentAdmissionError("SM121 agent long-context budget is unavailable")
+    image_identity = _inspect_static_image(runner)
+    container_name, nonce = _new_static_container_identity()
+    completed = _run_static_container_command(
+        runner,
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--pull=never",
+            "--name",
+            container_name,
+            "--label",
+            f"{_STATIC_CONTAINER_LABEL}={nonce}",
+            "--runtime",
+            "runc",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "64",
+            "--memory",
+            "2g",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,noexec,size=64m",
+            "--mount",
+            f"type=bind,src={resolved_snapshot},dst=/model,readonly",
+            "--env",
+            "HOME=/tmp",
+            "--env",
+            "XDG_CACHE_HOME=/tmp",
+            "--env",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "--entrypoint",
+            "python3",
+            image_identity["docker_image_id"],
+            "-c",
+            _STATIC_LONG_CONTEXT_TOKENIZER_SCRIPT,
+        ],
+        container_name=container_name,
+        nonce=nonce,
+    )
+    if completed.returncode != 0:
+        _best_effort_static_container_cleanup(
+            runner,
+            container_name=container_name,
+            nonce=nonce,
+        )
+        raise SM121AgentAdmissionError("SM121 agent long-context budget failed")
+    try:
+        observed = json.loads(
+            completed.stdout, object_pairs_hook=_unique_json_object
+        )
+    except (TypeError, json.JSONDecodeError, ValueError) as error:
+        raise SM121AgentAdmissionError(
+            "SM121 agent long-context budget failed"
+        ) from error
+    try:
+        return validate_sm121_agent_long_context_budget_probe(observed)
+    except SM121AgentAdmissionError as error:
+        raise SM121AgentAdmissionError(
+            "SM121 agent long-context budget failed"
+        ) from error

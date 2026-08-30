@@ -33,10 +33,20 @@ The checked image is `local/sglang:sm121-storage-274ee330-runtime`, local ID
 `sha256:b14c39fb7cb2e0b82f2f8cae1e115a55f2bb69b5ec6fd7ccc4099b219d1096b0`,
 and source tree `274ee330db7ea9653807b868c0fb8693d50ed7b2`.
 
+The private controller has a separate, target-snapshot tokenizer preflight
+before it can start a C1 server. It mounts only the exact cached target snapshot
+read-only in an offline, CPU-only probe, renders the fixed low-thinking request
+and canonical tool schema, and pins the raw-prompt, tools, tokenizer,
+chat-template, and rendered-prompt hashes. The exact rendered input is 60,489
+tokens; with its 128-token output reservation, the request budget is 60,617 of
+65,536 tokens, leaving 4,919 tokens of headroom. This is not the parser CLI
+command above: it never starts SGLang or uses a GPU, but it does verify the
+actual target tokenizer rather than assuming a 60K filler prompt will fit.
+
 ## What changed
 
 `qwen38-flash-next-nvfp4-sm121-triton-storage-agent-admission-sglang` is now
-an exact, **tombstoned** prospective profile. It preserves the public retained
+an exact, **admission-only** prospective profile. It preserves the public retained
 current-SM121 C1 geometry: 64K context, Triton attention,
 `flashinfer_cutlass`, NVFP4, io_uring PLE, lazy Mamba state, 4K chunked
 prefill, one running request, and disabled CUDA graphs. Its only intended
@@ -52,9 +62,9 @@ admission gates to 14 GiB `MemAvailable` and 64 MiB starting/growth swap.
 
 It explicitly does not import retired QSA/TRT-LLM overlays, MTP, mmap, or the
 vLLM-only `--enable-auto-tool-choice` flag. Generic plan, benchmark, and matrix
-paths reject the profile until a dedicated controller exists.
+paths remain blocked; only the dedicated controller may execute the profile.
 
-## Private C1 plan and audit scaffold
+## Private C1 controller and audit
 
 The repository now has an exact six-case private C1 plan contract and a
 read-only audit shape under the ignored `logs/agent-admissions/` tree. The
@@ -72,65 +82,62 @@ can be frozen with:
 python3 sparkbench.py sm121-agent-admission-plan
 ```
 
-There is currently **no live C1 execution command or latent server path**. The
-scaffold intentionally contains no caller-supplied request hooks: such hooks
-could fabricate a scalar success record without actually proving the request
-body, parser state, tool semantics, or cache behavior. Its read-only auditor
-can validate record shape, but cannot accept any record as an admission while
-the controller is unimplemented. The prospective model remains
-runtime-tombstoned even if an internal caller sets an authorization-like
-attribute. The corresponding static parser preflight was rechecked on the
-pinned image during this continuation and again passed without starting an
-inference server or leaving a container behind.
+The repository now has one dedicated live command:
 
-The next private building block is a byte-bound direct client, still unreachable
-from every CLI and runner. It owns final JSON serialization, validates the
-serialized low-thinking/tool/cache-zero body, sends it once through fixed
-loopback/no-proxy/no-redirect transport, and exposes only bounded scalar
-diagnostics to a future controller. Its internally rendered long case requires
-at least 60,000 returned input tokens, a cache-zero counter, one request on
-that client, and an exact `LONG-CONTEXT-READY` no-tool final answer. It does not
-establish that this is the first request of a freshly started server or that
-native metric cache counters are zero; those remain mandatory controller-owned
-proofs. Neither the client nor its standalone scalar validator is an admission
-proof without that controller.
+```bash
+python3 sparkbench.py sm121-agent-admission
+```
 
-The repository also freezes the one allowed scalar runtime-identity projection:
-the cache-on unified Radix/Mamba-lazy state, 4K chunked prefill, Qwen reasoning
-and tool parsers, one running request, and both 64K limits. An uninvoked
-private inspector now reads that identity from one owned C1 server using fixed
-loopback/no-proxy/no-redirect transport, a bounded strict finite-JSON
-`/server_info` response with a total read deadline, and a bounded one-event
-startup-log projection scoped to that container generation. It checks
-ownership, running state, process generation, and the sole `127.0.0.1:30000`
-to container-`30000` binding before and after those reads. The pinned image
-source expands resolved server configuration into `/server_info`'s top-level
-object, so cache, parser, and limit fields have no recursive fallback. No
-runner or CLI calls this inspector; it cannot start a server or turn a forged
-record into an admission.
+It first freezes a new private plan, then runs exactly three fresh SGLang
+lifetimes: exact-answer quality, four deterministic tool-loop scenarios, and a
+first-turn 60K low-thinking-plus-tools probe. It never resumes a partial plan,
+never uses generic benchmark/matrix execution, and accepts no caller-supplied
+hooks, transports, payloads, or retry policy. The client constructs and checks
+the final serialized request bytes in memory, and the quality gate now uses the
+same explicit `FINAL: <answer>` grammar as the exact-answer validator instead
+of the former bare-question form.
 
-This is deliberately a planning and audit hardening step, not an agent
-admission, performance result, or permission to run Pi.
+The controller authenticates the frozen plan, image identity, and run nonce,
+then registers no launch authority until its top-level clean-start, host,
+parser, and exact-tokenizer gates pass. Every lifetime independently rechecks
+clean start and receives one registry-backed lease tied to the exact in-memory
+model identity and frozen-plan hash. The lease is consumed immediately before
+the Docker launch and revoked during lifetime cleanup, so it cannot be reused
+to start a second server. Each lifetime separately checks source and runtime
+parser/limit identity, owns cleanup, and records only allowlisted scalars under
+the ignored private logs tree. The long-context lifetime takes two settled
+fixed-loopback native metric views before and after its single request; a
+same-generation cache-zero receipt must prove positive native input and zero
+device/host/storage and response cache hits, evictions, and retractions. Metric
+text, labels, endpoints, credentials, prompt, completion, reasoning, timing,
+and container identity never enter the record.
+
+The read-only auditor can now accept a structurally complete record, but this
+change is not an admission result: no live C1 controller run was started for
+this update. The current host must first satisfy both the general preflight
+reserve and the stricter 14 GiB available-memory / 64 MiB starting-and-growth
+swap gate. Before an admitted summary is written, the controller audits the
+complete terminal event shape in memory; the CLI then invokes the independent
+read-only audit and returns success only for an audited admitted record. A
+forged authorization-like model attribute or a model-shaped binding cannot
+bypass the controller because the runtime requires a registered one-shot lease.
+
+This is deliberately an implementation hardening step, not an agent admission,
+performance result, or permission to run Pi.
 
 ## What remains before an agent result
 
-The parser/CLI check and private plan only remove static and topology
-uncertainty.
-A reviewed in-repository execution adapter must still prove, in fresh C1
-lifetimes:
+The parser/CLI check and controller implementation remove static and topology
+uncertainty, but a successful live C1 run must still prove, in fresh lifetimes:
 
 1. parser initialization and exact low-effort payload after client/provider
    transformation;
 2. exact-answer quality, strict tool-call semantics, and bounded tool-error
    recovery;
-3. rendered low-thinking-plus-tools long-context fit, exact no-tool result,
-   fresh-lifetime and cache-zero-first-turn semantics; and
+3. the already-pinned rendered low-thinking-plus-tools long-context budget in
+   a live first-turn request, exact no-tool result, fresh-lifetime, and
+   cache-zero-first-turn semantics; and
 4. the stronger 14 GiB available-memory and 64 MiB starting/growth swap gates.
-
-The adapter must construct and observe the final direct-client payload itself,
-inspect only allowlisted runtime parser/limit fields, own its no-retry tool
-loop, and clean up verified containers and API-key files on both complete and
-partial paths. It must not accept caller-defined hooks as proof.
 
 Only after those gates can the offline Pi-core wrapper be admitted. Its default
 transport cannot be used as-is because it retries requests; the wrapper needs

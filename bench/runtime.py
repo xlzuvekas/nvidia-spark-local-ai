@@ -33,6 +33,7 @@ from .sglang_sm121_storage import (
     SM121_STORAGE_BUILD_CONTRACT_SHA256,
     SM121_STORAGE_CACHE_PAGES,
     SM121_STORAGE_CANDIDATE_ID,
+    SM121_STORAGE_LOCAL_IMAGE_ID,
     SM121_STORAGE_MAX_BATCH_PAGES,
     SM121_STORAGE_MODE,
     SM121_STORAGE_QUEUE_DEPTH,
@@ -76,7 +77,10 @@ from .sglang_sm121_cache_observability import (
 )
 from .sglang_sm121_agent_admission import (
     SM121_AGENT_ADMISSION_ENDPOINT,
+    SM121_AGENT_ADMISSION_NATIVE_CACHE_MAX_POLLS,
     SM121AgentAdmissionError,
+    is_sm121_agent_admission_candidate,
+    validate_sm121_agent_admission_candidate,
     validate_sm121_agent_admission_runtime_identity,
 )
 from bench.qwen38_ple_cache import (
@@ -913,6 +917,27 @@ def _port_is_free(port: int) -> bool:
         return sock.connect_ex(("127.0.0.1", port)) != 0
 
 
+def require_sm121_agent_admission_clean_start() -> None:
+    """Fail closed unless C1 can own a genuinely fresh SGLang lifetime.
+
+    The generic benchmark preflight intentionally permits the managed SGLang
+    name so resumable benchmark paths can recover it. C1 is non-resumable and
+    its long-context probe must be the first request of a newly started server,
+    so it must reject both a pre-existing name and the fixed loopback port
+    before parser/static work or any launch side effect.
+    """
+
+    existing = _existing_container(SGLANG_CONTAINER_NAME)
+    if existing is not None:
+        raise RuntimeErrorWithContext(
+            "SM121 agent admission requires no existing SGLang container"
+        )
+    if not _port_is_free(30000):
+        raise RuntimeErrorWithContext(
+            "SM121 agent admission requires its loopback port to be free"
+        )
+
+
 def _existing_container(
     container_name: str = CONTAINER_NAME,
 ) -> tuple[str, bool, str] | None:
@@ -1225,6 +1250,48 @@ def _exact_sglang_snapshot(
     return repository_resolved, container_snapshot
 
 
+def sm121_agent_admission_target_snapshot(
+    model: Any, *, workspace: Path
+) -> Path:
+    """Return the exact cached C1 target snapshot for its CPU tokenizer proof."""
+
+    try:
+        validate_sm121_agent_admission_candidate(model)
+    except SM121AgentAdmissionError as error:
+        raise RuntimeErrorWithContext(
+            "SM121 agent admission target snapshot is unavailable"
+        ) from error
+    configured_cache = getattr(model, "cache_dir", None)
+    if configured_cache == "user":
+        hf_cache = Path.home() / ".cache" / "huggingface"
+    elif configured_cache in {None, "project"}:
+        hf_cache = (workspace / "data" / "huggingface").resolve()
+    else:
+        raise RuntimeErrorWithContext(
+            "SM121 agent admission target snapshot is unavailable"
+        )
+    try:
+        repository, _container_snapshot = _exact_sglang_snapshot(
+            hf_cache,
+            source=str(model.source),
+            revision=str(model.revision),
+            role="target",
+        )
+        snapshot = (repository / "snapshots" / str(model.revision)).resolve(
+            strict=True
+        )
+        snapshot.relative_to(repository)
+    except (OSError, ValueError, RuntimeErrorWithContext) as error:
+        raise RuntimeErrorWithContext(
+            "SM121 agent admission target snapshot is unavailable"
+        ) from error
+    if not snapshot.is_dir():
+        raise RuntimeErrorWithContext(
+            "SM121 agent admission target snapshot is unavailable"
+        )
+    return snapshot
+
+
 def _sm121_storage_image_id(model: Any) -> str:
     """Recheck the mutable local tag and return its immutable Docker ID."""
 
@@ -1270,6 +1337,77 @@ def _sm121_storage_image_id(model: Any) -> str:
     return image_id
 
 
+def _require_sm121_agent_admission_launch_capability(
+    model: Any,
+    capability: object,
+) -> object:
+    """Reject forged model attributes or grants before a C1 launch side effect."""
+
+    try:
+        # Avoid importing the private controller while generic runtime modules
+        # initialize. This branch is reached only by the C1 adapter, after the
+        # gated controller has registered an opaque in-memory one-shot lease.
+        from .sm121_agent_admission_runner import (
+            _require_sm121_agent_admission_plan_binding,
+        )
+
+        return _require_sm121_agent_admission_plan_binding(model, capability)
+    except (ImportError, SM121AgentAdmissionError) as error:
+        raise RuntimeErrorWithContext(
+            "SM121 agent admission launch is not authorized"
+        ) from error
+
+
+def _consume_sm121_agent_admission_launch_capability(
+    model: Any,
+    capability: object,
+) -> object:
+    """Consume the controller's one-shot lease at the Docker boundary."""
+
+    try:
+        from .sm121_agent_admission_runner import (
+            _consume_sm121_agent_admission_plan_binding,
+        )
+
+        return _consume_sm121_agent_admission_plan_binding(model, capability)
+    except (ImportError, SM121AgentAdmissionError) as error:
+        raise RuntimeErrorWithContext(
+            "SM121 agent admission launch is not authorized"
+        ) from error
+
+
+def start_sm121_agent_admission_server(
+    model: Any,
+    *,
+    workspace: Path,
+    server_log_path: Path | None = None,
+    abort_check: Callable[[], None] | None = None,
+    on_server_created: Callable[[ManagedServer], None] | None = None,
+    _launch_capability: object | None = None,
+) -> ManagedServer:
+    """Start only a C1 profile already authorized by its private controller.
+
+    This adapter deliberately does not mint its own grant: doing that here
+    would let an arbitrary caller turn a model-shaped object into a launch
+    authorization. The dedicated controller registers an opaque one-shot lease
+    only after authenticating its frozen plan and passing its C1 gates, then
+    supplies it for this one call.
+    """
+
+    capability = _require_sm121_agent_admission_launch_capability(
+        model, _launch_capability
+    )
+    return start_sglang(
+        model,
+        workspace=workspace,
+        allow_download=False,
+        server_log_path=server_log_path,
+        abort_check=abort_check,
+        on_server_created=on_server_created,
+        _sm121_agent_admission_capability=capability,
+    )
+
+
 def _sm121_storage_seccomp_profile(workspace: Path) -> Path:
     """Return the contract-verified, per-container io_uring profile path."""
 
@@ -1308,30 +1446,45 @@ def _start_sglang_sm121_storage(
     server_log_path: Path | None,
     abort_check: Callable[[], None] | None,
     on_server_created: Callable[[ManagedServer], None] | None,
+    sm121_agent_admission_capability: object | None = None,
 ) -> ManagedServer:
     """Start the dedicated native-NVMe PLE canary with narrow containment."""
 
+    agent_candidate = is_sm121_agent_admission_candidate(model)
     semantic_candidate = is_sm121_cache_semantic_candidate(model)
     performance_candidate = is_sm121_cache_performance_candidate(model)
     chunked_prefill_candidate = is_sm121_chunked_prefill_performance_candidate(
         model
     )
+    agent_capability = (
+        _require_sm121_agent_admission_launch_capability(
+            model, sm121_agent_admission_capability
+        )
+        if agent_candidate
+        else None
+    )
     authorized = (
-        getattr(model, "cache_semantic_canary_authorized", False) is True
-        if semantic_candidate
-        else getattr(model, "cache_performance_authorized", False) is True
-        if performance_candidate
-        else getattr(model, "chunked_prefill_performance_authorized", False)
-        is True
-        if chunked_prefill_candidate
-        else getattr(model, "storage_canary_authorized", False) is True
+        agent_capability is not None
+        if agent_candidate
+        else (
+            getattr(model, "cache_semantic_canary_authorized", False) is True
+            if semantic_candidate
+            else getattr(model, "cache_performance_authorized", False) is True
+            if performance_candidate
+            else getattr(model, "chunked_prefill_performance_authorized", False)
+            is True
+            if chunked_prefill_candidate
+            else getattr(model, "storage_canary_authorized", False) is True
+        )
     )
     if not authorized:
         raise RuntimeErrorWithContext(
             "SM121 storage serving requires its dedicated canary executor"
         )
     try:
-        if semantic_candidate:
+        if agent_candidate:
+            validate_sm121_agent_admission_candidate(model)
+        elif semantic_candidate:
             validate_sm121_cache_semantic_candidate(model)
         elif performance_candidate:
             validate_sm121_cache_performance_candidate(model)
@@ -1341,6 +1494,7 @@ def _start_sglang_sm121_storage(
             validate_sm121_storage_candidate(model)
     except (
         SM121StorageCandidateError,
+        SM121AgentAdmissionError,
         SM121CacheSemanticError,
         SM121CachePerformanceError,
         SM121ChunkedPrefillPerformanceError,
@@ -1453,6 +1607,19 @@ def _start_sglang_sm121_storage(
         except BaseException:
             _unlink_private_secret(api_key_path)
             raise
+    if agent_candidate:
+        # Validation above is intentionally non-consuming because the C1
+        # adapter/start_sglang/storage chain checks the same opaque lease. The
+        # final watchdog check has now passed, so consume it immediately before
+        # the Docker side effect. It cannot start another server even if Docker
+        # subsequently fails.
+        try:
+            _consume_sm121_agent_admission_launch_capability(
+                model, agent_capability
+            )
+        except BaseException:
+            _unlink_private_secret(api_key_path)
+            raise
     try:
         result = _run(command, check=False, timeout=60)
     except BaseException as launch_error:
@@ -1486,7 +1653,8 @@ def _start_sglang_sm121_storage(
         "candidate_id": (
             str(getattr(model, "id", ""))
             if (
-                semantic_candidate
+                agent_candidate
+                or semantic_candidate
                 or performance_candidate
                 or chunked_prefill_candidate
             )
@@ -1508,7 +1676,9 @@ def _start_sglang_sm121_storage(
         "hf_network_policy": "offline",
         "network_topology": "loopback_published_bridge",
         "benchmark_scope": (
-            SM121_CACHE_SEMANTIC_EXECUTION_MODE
+            "private_non_evidence_c1_admission"
+            if agent_candidate
+            else SM121_CACHE_SEMANTIC_EXECUTION_MODE
             if semantic_candidate
             else SM121_CACHE_PERFORMANCE_EXECUTION_MODE
             if performance_candidate
@@ -1620,6 +1790,10 @@ _SM121_AGENT_RUNTIME_RESPONSE_CHUNK_BYTES = 64 * 1024
 _SM121_AGENT_RUNTIME_STARTED_AT_PATTERN = (
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z"
 )
+_SM121_AGENT_METRICS_MAX_LINES = 4096
+_SM121_AGENT_METRICS_MAX_POLLS = SM121_AGENT_ADMISSION_NATIVE_CACHE_MAX_POLLS
+_SM121_AGENT_METRICS_MIN_POLL_INTERVAL_S = 0.1
+_SM121_AGENT_METRICS_MAX_TIMEOUT_S = 60.0
 
 
 @dataclass(frozen=True)
@@ -1631,6 +1805,13 @@ class _SM121AgentRuntimeBinding:
     authorization: str = field(repr=False)
     api_key: str = field(repr=False)
     generation: tuple[str, int] = field(repr=False)
+
+
+@dataclass(frozen=True)
+class _SM121AgentNativeCacheLease:
+    """Opaque in-memory generation lease for C1 before/after metric reads."""
+
+    binding: _SM121AgentRuntimeBinding = field(repr=False)
 
 
 class _SM121AgentRuntimeNoRedirect(urllib.request.HTTPRedirectHandler):
@@ -1757,16 +1938,31 @@ def _sm121_agent_runtime_set_response_timeout(
         ) from None
 
 
-def _read_sm121_agent_runtime_response_body(response: object) -> bytes:
+def _read_sm121_agent_runtime_response_body(
+    response: object, *, deadline: float | None = None
+) -> bytes:
     """Read a bounded response with one hard total deadline, not per I/O."""
 
     reader = getattr(response, "read1", None)
     if not callable(reader):
         raise RuntimeErrorWithContext("SM121 agent runtime attestation is invalid")
     payload = bytearray()
-    deadline = time.monotonic() + _SM121_AGENT_RUNTIME_RESPONSE_TIMEOUT_S
+    started = time.monotonic()
+    if deadline is None:
+        hard_deadline = started + _SM121_AGENT_RUNTIME_RESPONSE_TIMEOUT_S
+    elif (
+        type(deadline) in {int, float}
+        and type(deadline) is not bool
+        and math.isfinite(float(deadline))
+        and float(deadline) > started
+    ):
+        hard_deadline = min(
+            float(deadline), started + _SM121_AGENT_RUNTIME_RESPONSE_TIMEOUT_S
+        )
+    else:
+        raise RuntimeErrorWithContext("Could not read the SM121 agent runtime attestation")
     while True:
-        remaining = deadline - time.monotonic()
+        remaining = hard_deadline - time.monotonic()
         if remaining <= 0:
             raise RuntimeErrorWithContext(
                 "Could not read the SM121 agent runtime attestation"
@@ -1869,6 +2065,97 @@ def _read_sm121_agent_runtime_server_info(authorization: str) -> dict[str, objec
     if type(decoded) is not dict:
         raise RuntimeErrorWithContext("SM121 agent runtime attestation is invalid")
     return decoded
+
+
+def _read_sm121_agent_admission_metrics(
+    authorization: str, *, deadline: float | None = None
+) -> str:
+    """Read one bounded C1 ``/metrics`` exposition from the fixed listener.
+
+    The generic cache observer predates C1 and intentionally has compatibility
+    transport semantics.  This reader shares the C1 runtime reader's exact
+    loopback/no-proxy/no-redirect and total-byte/deadline properties instead.
+    It returns an in-memory string only; callers project it immediately to
+    allowlisted scalar counters.
+    """
+
+    started = time.monotonic()
+    if deadline is None:
+        hard_deadline = started + _SM121_AGENT_RUNTIME_RESPONSE_TIMEOUT_S
+    elif (
+        type(deadline) in {int, float}
+        and type(deadline) is not bool
+        and math.isfinite(float(deadline))
+        and float(deadline) > started
+    ):
+        hard_deadline = min(
+            float(deadline), started + _SM121_AGENT_RUNTIME_RESPONSE_TIMEOUT_S
+        )
+    else:
+        raise RuntimeErrorWithContext("SM121 agent metrics attestation is invalid")
+    timeout_s = hard_deadline - started
+    if timeout_s <= 0:
+        raise RuntimeErrorWithContext("SM121 agent metrics attestation is invalid")
+    url = SM121_AGENT_ADMISSION_ENDPOINT.removesuffix("/v1") + "/metrics"
+    request = urllib.request.Request(
+        url,
+        headers={"Authorization": authorization},
+        method="GET",
+    )
+    try:
+        with _open_sm121_agent_runtime_server_info(
+            request, timeout_s=timeout_s
+        ) as response:
+            geturl = getattr(response, "geturl", None)
+            response_url = geturl() if callable(geturl) else None
+            if getattr(response, "status", None) != 200 or response_url != url:
+                raise RuntimeErrorWithContext(
+                    "SM121 agent runtime attestation is invalid"
+                )
+            payload = _read_sm121_agent_runtime_response_body(
+                response, deadline=hard_deadline
+            )
+    except urllib.error.HTTPError as error:
+        try:
+            error.close()
+        except OSError:
+            pass
+        raise RuntimeErrorWithContext(
+            "Could not read the SM121 agent runtime attestation"
+        ) from None
+    except RuntimeErrorWithContext:
+        raise
+    except (
+        OSError,
+        TimeoutError,
+        UnicodeError,
+        ValueError,
+        http.client.HTTPException,
+        urllib.error.URLError,
+    ):
+        raise RuntimeErrorWithContext(
+            "Could not read the SM121 agent runtime attestation"
+        ) from None
+    if (
+        not isinstance(payload, bytes)
+        or not payload
+        or len(payload) > _SM121_AGENT_RUNTIME_SERVER_INFO_MAX_BYTES
+        or time.monotonic() > hard_deadline
+    ):
+        raise RuntimeErrorWithContext("SM121 agent runtime attestation is invalid")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        raise RuntimeErrorWithContext(
+            "SM121 agent runtime attestation is invalid"
+        ) from None
+    line_breaks = sum(
+        text.count(marker)
+        for marker in ("\r", "\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+    )
+    if line_breaks > _SM121_AGENT_METRICS_MAX_LINES:
+        raise RuntimeErrorWithContext("SM121 agent runtime attestation is invalid")
+    return text
 
 
 def _read_sm121_agent_runtime_startup_logs(
@@ -2352,6 +2639,142 @@ def inspect_sm121_agent_admission_runtime_identity(
         ) from error
 
 
+def _validate_sm121_agent_admission_metrics_snapshot(
+    snapshot: object,
+) -> dict[str, Any]:
+    """Require the complete scalar projection before a C1 receipt uses it."""
+
+    defaults = _sm121_cache_metric_defaults()
+    if type(snapshot) is not dict or set(snapshot) != set(defaults):
+        raise RuntimeErrorWithContext("SM121 agent metrics attestation is invalid")
+    result: dict[str, Any] = {}
+    bool_fields = {
+        "available",
+        "guardrail_metrics_available",
+        "cached_total_series_present",
+        "cached_device_series_present",
+        "cached_host_series_present",
+        "cached_storage_series_present",
+    }
+    for field in defaults:
+        value = snapshot[field]
+        if field in bool_fields:
+            valid = type(value) is bool
+        else:
+            valid = type(value) is int and value >= 0
+        if not valid:
+            raise RuntimeErrorWithContext(
+                "SM121 agent metrics attestation is invalid"
+            )
+        result[field] = value
+    return result
+
+
+def _snapshot_sm121_agent_admission_metrics(
+    server: ManagedServer, *, deadline: float
+) -> tuple[dict[str, Any], _SM121AgentRuntimeBinding]:
+    """Read one C1 metric view, bound before and after to one generation."""
+
+    if time.monotonic() >= deadline:
+        raise RuntimeErrorWithContext("SM121 agent metrics attestation is invalid")
+    owned_server, binding_before = _require_sm121_agent_admission_server(server)
+    text = _read_sm121_agent_admission_metrics(
+        binding_before.authorization, deadline=deadline
+    )
+    snapshot = _validate_sm121_agent_admission_metrics_snapshot(
+        _parse_sm121_cache_observability_metrics(
+            text, semantic_arm=SM121_CACHE_SEMANTIC_CACHE_ON_ARM
+        )
+    )
+    post_server, binding_after = _require_sm121_agent_admission_server(
+        owned_server
+    )
+    if post_server is not owned_server or binding_after != binding_before:
+        raise RuntimeErrorWithContext("SM121 agent metrics attestation is invalid")
+    if time.monotonic() > deadline:
+        raise RuntimeErrorWithContext("SM121 agent metrics attestation is invalid")
+    return snapshot, binding_before
+
+
+def settle_sm121_agent_admission_metrics(
+    server: ManagedServer,
+    *,
+    deadline: float,
+    timeout_s: float = 45.0,
+    poll_interval_s: float = 1.0,
+    expected_lease: _SM121AgentNativeCacheLease | None = None,
+) -> tuple[dict[str, Any], _SM121AgentNativeCacheLease, int, bool]:
+    """Settle two C1 metric reads on the same owned server generation.
+
+    An opaque lease binds a later settled read to this generation without
+    exposing container, authorization, or process values to the controller's
+    scalar receipt.  The lease is in-memory only and must never be journaled.
+    """
+
+    if (
+        type(deadline) not in {int, float}
+        or type(deadline) is bool
+        or not math.isfinite(float(deadline))
+        or type(timeout_s) not in {int, float}
+        or type(timeout_s) is bool
+        or not math.isfinite(float(timeout_s))
+        or float(timeout_s) <= 0
+        or float(timeout_s) > _SM121_AGENT_METRICS_MAX_TIMEOUT_S
+        or type(poll_interval_s) not in {int, float}
+        or type(poll_interval_s) is bool
+        or not math.isfinite(float(poll_interval_s))
+        or float(poll_interval_s) < _SM121_AGENT_METRICS_MIN_POLL_INTERVAL_S
+        or (
+            expected_lease is not None
+            and type(expected_lease) is not _SM121AgentNativeCacheLease
+        )
+    ):
+        raise RuntimeErrorWithContext("SM121 agent metrics attestation is invalid")
+    started = time.monotonic()
+    if deadline <= started:
+        raise RuntimeErrorWithContext("SM121 agent metrics attestation is invalid")
+    settle_deadline = min(float(deadline), started + float(timeout_s))
+    previous: dict[str, Any] | None = None
+    last: dict[str, Any] | None = None
+    binding: _SM121AgentRuntimeBinding | None = None
+    polls = 0
+    while True:
+        if time.monotonic() >= settle_deadline:
+            if binding is None or last is None:
+                raise RuntimeErrorWithContext(
+                    "SM121 agent metrics attestation is invalid"
+                )
+            if expected_lease is not None and expected_lease.binding != binding:
+                raise RuntimeErrorWithContext(
+                    "SM121 agent metrics attestation is invalid"
+                )
+            return last, _SM121AgentNativeCacheLease(binding), polls, False
+        current, current_binding = _snapshot_sm121_agent_admission_metrics(
+            server, deadline=settle_deadline
+        )
+        polls += 1
+        last = current
+        if binding is None:
+            binding = current_binding
+        elif binding != current_binding:
+            raise RuntimeErrorWithContext("SM121 agent metrics attestation is invalid")
+        if expected_lease is not None and expected_lease.binding != binding:
+            raise RuntimeErrorWithContext("SM121 agent metrics attestation is invalid")
+        if current["available"] is not True:
+            return current, _SM121AgentNativeCacheLease(binding), polls, False
+        if previous == current:
+            return current, _SM121AgentNativeCacheLease(binding), polls, True
+        if polls >= _SM121_AGENT_METRICS_MAX_POLLS:
+            return current, _SM121AgentNativeCacheLease(binding), polls, False
+        if time.monotonic() >= settle_deadline:
+            return current, _SM121AgentNativeCacheLease(binding), polls, False
+        previous = current
+        remaining = settle_deadline - time.monotonic()
+        if remaining <= 0:
+            return current, _SM121AgentNativeCacheLease(binding), polls, False
+        time.sleep(min(float(poll_interval_s), remaining))
+
+
 def inspect_sm121_chunked_prefill_runtime_identity(
     server: ManagedServer,
 ) -> dict[str, Any]:
@@ -2483,10 +2906,10 @@ def _sm121_cache_metric_integer(raw: str) -> int | None:
     return int(value)
 
 
-def snapshot_sm121_cache_observability_metrics(
-    server: ManagedServer, *, semantic_arm: str | None = None
+def _parse_sm121_cache_observability_metrics(
+    text: object, *, semantic_arm: str | None = None
 ) -> dict[str, Any]:
-    """Read a scalar-only cache metrics snapshot, failing closed on gaps.
+    """Parse one in-memory scalar-only cache metrics snapshot.
 
     The paired semantic canary has a narrower, source-pinned interpretation of
     its two guardrail counters.  Its Prometheus multiprocess endpoint does not
@@ -2503,17 +2926,7 @@ def snapshot_sm121_cache_observability_metrics(
         None,
         SM121_CACHE_SEMANTIC_CACHE_OFF_ARM,
         SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
-    }:
-        return snapshot
-    root = server.base_url.removesuffix("/v1").rstrip("/")
-    request = urllib.request.Request(
-        root + "/metrics", headers=_authorization_headers(server.authorization)
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            text = response.read().decode("utf-8", errors="replace")
-    except (OSError, urllib.error.URLError) as error:
-        del error
+    } or type(text) is not str:
         return snapshot
     prefill_seen = {
         "input": False,
@@ -2791,6 +3204,37 @@ def snapshot_sm121_cache_observability_metrics(
             state["sample"] for state in guardrail_families.values()
         )
     return snapshot
+
+
+def snapshot_sm121_cache_observability_metrics(
+    server: ManagedServer, *, semantic_arm: str | None = None
+) -> dict[str, Any]:
+    """Read a scalar-only cache metrics snapshot, failing closed on gaps.
+
+    This legacy observer deliberately keeps its existing generic transport
+    behavior.  C1 uses the shared parser through a separate owned-server,
+    byte-bounded reader below instead of widening this compatibility path.
+    """
+
+    snapshot = _sm121_cache_metric_defaults()
+    if semantic_arm not in {
+        None,
+        SM121_CACHE_SEMANTIC_CACHE_OFF_ARM,
+        SM121_CACHE_SEMANTIC_CACHE_ON_ARM,
+    }:
+        return snapshot
+    root = server.base_url.removesuffix("/v1").rstrip("/")
+    request = urllib.request.Request(
+        root + "/metrics", headers=_authorization_headers(server.authorization)
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            text = response.read().decode("utf-8", errors="replace")
+    except (OSError, urllib.error.URLError):
+        return snapshot
+    return _parse_sm121_cache_observability_metrics(
+        text, semantic_arm=semantic_arm
+    )
 
 
 def settle_sm121_cache_observability_metrics(
@@ -3509,9 +3953,19 @@ def start_sglang(
     server_log_path: Path | None = None,
     abort_check: Callable[[], None] | None = None,
     on_server_created: Callable[[ManagedServer], None] | None = None,
+    _sm121_agent_admission_capability: object | None = None,
 ) -> ManagedServer:
     """Start a digest-pinned SGLang server from exact cached snapshots."""
 
+    agent_candidate = is_sm121_agent_admission_candidate(model)
+    if _sm121_agent_admission_capability is not None and not agent_candidate:
+        raise RuntimeErrorWithContext("SM121 agent admission launch is not authorized")
+    agent_admission_authorized = False
+    if agent_candidate and _sm121_agent_admission_capability is not None:
+        _require_sm121_agent_admission_launch_capability(
+            model, _sm121_agent_admission_capability
+        )
+        agent_admission_authorized = True
     storage_canary_authorized = (
         getattr(model, "storage_canary_authorized", False) is True
     )
@@ -3532,6 +3986,7 @@ def start_sglang(
         allow_sm121_chunked_prefill_performance=(
             chunked_prefill_performance_authorized
         ),
+        allow_sm121_agent_admission=agent_admission_authorized,
     )
     if blocker is not None:
         raise RuntimeErrorWithContext(blocker)
@@ -3567,7 +4022,8 @@ def start_sglang(
         hf_cache, source=source, revision=revision, role="target"
     )
     if (
-        is_sm121_cache_semantic_candidate(model)
+        agent_candidate
+        or is_sm121_cache_semantic_candidate(model)
         or is_sm121_cache_performance_candidate(model)
         or is_sm121_chunked_prefill_performance_candidate(model)
         or is_sm121_storage_candidate(model)
@@ -3581,6 +4037,7 @@ def start_sglang(
             server_log_path=server_log_path,
             abort_check=abort_check,
             on_server_created=on_server_created,
+            sm121_agent_admission_capability=_sm121_agent_admission_capability,
         )
     draft_source = getattr(model, "draft_source", None)
     draft_revision = getattr(model, "draft_revision", None)

@@ -25,10 +25,15 @@ capability, cowork capability, and scheduling results.
 At the frozen 84-file executable boundary
 `33170881721d0dce0f4466495110b336a7451fcd1635c5667f7fc5f722f7599f`, Pi was
 design-only. The 2026-08-29 follow-up adds one narrow prerequisite, not a Pi
-benchmark: the tombstoned current-SM121 low-thinking/tool profile and an
-image-local static parser preflight. The exact image imports `qwen3` reasoning
-and `qwen3_coder` tool parsers without starting a server, mounting host
+benchmark: the admission-only current-SM121 low-thinking/tool profile, its
+private controller, and an image-local static parser preflight. The exact image
+imports `qwen3` reasoning and `qwen3_coder` tool parsers without starting a
+server, mounting host
 weights, loading a model, or using a GPU. See the [preflight record](qwen38-flash-next-sm121-agent-admission-preflight-2026-08-29.md).
+Before a future controller lifetime can start, its separate offline target
+tokenizer probe must also prove the exact low-thinking/tool request budget
+against the read-only cached snapshot; this remains a prerequisite, not a Pi
+benchmark or agent result.
 
 There is now a checked-in minimal frozen source closure and a tested,
 scripts-disabled direct-materialization command. A temporary real-closure
@@ -42,7 +47,7 @@ not widen their schemas in place to admit Pi.
 The temporary tree and the `pi-agent-core` root entrypoint now also have a
 tracked, schema-locked static-admission pin. `pi-core-prefix-admit` can verify
 an explicitly supplied external retained prefix read-only against it; it does
-not create a prefix, import JavaScript, alter the tombstoned model profile, or
+not create a prefix, import JavaScript, alter the admission-only model profile, or
 authorize a Pi/cowork run.
 
 ## Local Pi availability

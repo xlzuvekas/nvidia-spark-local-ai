@@ -15,7 +15,7 @@ from bench import sm121_agent_admission_client as client_module
 from bench.manifest import load_models
 from bench.sglang_sm121_agent_admission import (
     SM121_AGENT_ADMISSION_LONG_CONTEXT_CASE_ID,
-    SM121_AGENT_ADMISSION_LONG_CONTEXT_MIN_PROMPT_TOKENS,
+    SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_PROMPT_TOKENS,
     SM121_AGENT_ADMISSION_LONG_CONTEXT_PROMPT_REPETITIONS,
     SM121_AGENT_ADMISSION_PROFILE_ID,
     SM121_AGENT_ADMISSION_QUALITY_CASE_ID,
@@ -43,6 +43,19 @@ class _Response:
 
     def __iter__(self):
         return iter(self._lines)
+
+
+class _DeadlineResponse(_Response):
+    """Synthetic streaming response that records socket deadline updates."""
+
+    def __init__(self, lines: list[bytes]) -> None:
+        super().__init__(lines)
+        self.socket_timeouts: list[float] = []
+        self.fp = SimpleNamespace(
+            raw=SimpleNamespace(
+                _sock=SimpleNamespace(settimeout=self.socket_timeouts.append)
+            )
+        )
 
 
 def _response(
@@ -107,6 +120,18 @@ class SM121AgentAdmissionClientTests(unittest.TestCase):
             case_id=case_id,
         )
 
+    def test_factory_rejects_a_non_c1_model_even_if_its_served_name_matches(self) -> None:
+        lookalike = SimpleNamespace(
+            id="unrelated-model",
+            served_name=client_module.SM121_AGENT_ADMISSION_SERVED_NAME,
+        )
+        with self.assertRaises(client_module.SM121AgentAdmissionRequestError):
+            client_module.create_sm121_agent_admission_client(
+                server=self._server(),
+                model=lookalike,
+                case_id=SM121_AGENT_ADMISSION_QUALITY_CASE_ID,
+            )
+
     def test_quality_sends_the_exact_prevalidated_bytes_once(self) -> None:
         client = self._client(SM121_AGENT_ADMISSION_QUALITY_CASE_ID)
         prompt = "synthetic quality marker"
@@ -161,6 +186,34 @@ class SM121AgentAdmissionClientTests(unittest.TestCase):
             client_module.validate_c1_payload_diagnostics(diagnostics), diagnostics
         )
 
+    def test_controller_deadline_caps_open_and_every_streaming_read(self) -> None:
+        client = self._client(SM121_AGENT_ADMISSION_QUALITY_CASE_ID)
+        client._bind_controller_deadline(client_module.time.monotonic() + 10.0)
+        response = _DeadlineResponse(_response(content="FINAL: 83")._lines)
+        opener = Mock(return_value=response)
+        with patch(
+            "bench.sm121_agent_admission_client._open_loopback_request", opener
+        ):
+            client.run_quality_turn(prompt="synthetic quality prompt")
+        timeout = opener.call_args.kwargs["timeout_s"]
+        self.assertGreater(timeout, 0)
+        self.assertLessEqual(timeout, 10.0)
+        self.assertTrue(response.socket_timeouts)
+        self.assertTrue(all(0 < value <= 10.0 for value in response.socket_timeouts))
+
+        expired = self._client(SM121_AGENT_ADMISSION_QUALITY_CASE_ID)
+        with patch.object(client_module.time, "monotonic", return_value=10.0):
+            expired._bind_controller_deadline(11.0)
+        with (
+            patch.object(client_module.time, "monotonic", return_value=11.0),
+            patch(
+                "bench.sm121_agent_admission_client._open_loopback_request"
+            ) as blocked_open,
+            self.assertRaises(client_module.SM121AgentAdmissionRequestError),
+        ):
+            expired.run_quality_turn(prompt="synthetic quality prompt")
+        blocked_open.assert_not_called()
+
     def test_long_context_adds_exact_tools_auto_and_cache_zero_receipt(self) -> None:
         client = self._client(SM121_AGENT_ADMISSION_LONG_CONTEXT_CASE_ID)
         expected = client._serialized_body(
@@ -172,7 +225,7 @@ class SM121AgentAdmissionClientTests(unittest.TestCase):
             return_value=_response(
                 content=client_module._LONG_CONTEXT_EXPECTED_CONTENT,
                 cached_tokens=0,
-                prompt_tokens=SM121_AGENT_ADMISSION_LONG_CONTEXT_MIN_PROMPT_TOKENS,
+                prompt_tokens=SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_PROMPT_TOKENS,
             )
         )
 
@@ -227,7 +280,7 @@ class SM121AgentAdmissionClientTests(unittest.TestCase):
                         content=client_module._LONG_CONTEXT_EXPECTED_CONTENT,
                         cached_tokens=cached,
                         prompt_tokens=(
-                            SM121_AGENT_ADMISSION_LONG_CONTEXT_MIN_PROMPT_TOKENS
+                            SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_PROMPT_TOKENS
                         ),
                     )
                 )
@@ -263,12 +316,30 @@ class SM121AgentAdmissionClientTests(unittest.TestCase):
         self.assertTrue(receipt["response_semantics_verified"])
         self.assertTrue(receipt["first_turn_only"])
 
+    def test_long_context_receipt_rejects_a_noncanonical_template_token_count(self) -> None:
+        client = self._client(SM121_AGENT_ADMISSION_LONG_CONTEXT_CASE_ID)
+        opener = Mock(
+            return_value=_response(
+                content=client_module._LONG_CONTEXT_EXPECTED_CONTENT,
+                cached_tokens=0,
+                prompt_tokens=SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_PROMPT_TOKENS
+                - 1,
+            )
+        )
+        with patch(
+            "bench.sm121_agent_admission_client._open_loopback_request", opener
+        ):
+            client.run_long_context_turn()
+        receipt = client.long_context_receipt()
+        self.assertFalse(receipt["input_tokenization_verified"])
+        self.assertFalse(receipt["context_fit"])
+
     def test_long_context_receipt_rejects_tool_or_answer_drift(self) -> None:
         cases = (
             _response(
                 content="WRONG-ANSWER",
                 cached_tokens=0,
-                prompt_tokens=SM121_AGENT_ADMISSION_LONG_CONTEXT_MIN_PROMPT_TOKENS,
+                prompt_tokens=SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_PROMPT_TOKENS,
             ),
             _response(
                 finish_reason="tool_calls",
@@ -280,7 +351,7 @@ class SM121AgentAdmissionClientTests(unittest.TestCase):
                     }
                 ],
                 cached_tokens=0,
-                prompt_tokens=SM121_AGENT_ADMISSION_LONG_CONTEXT_MIN_PROMPT_TOKENS,
+                prompt_tokens=SM121_AGENT_ADMISSION_LONG_CONTEXT_CHAT_PROMPT_TOKENS,
             ),
         )
         for response in cases:

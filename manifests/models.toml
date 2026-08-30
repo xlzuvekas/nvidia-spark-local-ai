@@ -4465,7 +4465,7 @@ args = [
 
 [[models]]
 id = "qwen38-flash-next-nvfp4-sm121-triton-storage-agent-admission-sglang"
-description = "Prospective C1 Qwen3.8 Flash-Next NVFP4 Pi/cowork admission profile on the current SM121 Triton/io_uring storage runtime. It is tombstoned until a dedicated parser, quality, tool-loop, long-context, cache, and host-safety admission controller is implemented."
+description = "Prospective C1 Qwen3.8 Flash-Next NVFP4 Pi/cowork admission profile on the current SM121 Triton/io_uring storage runtime. Only its dedicated non-resumable parser, quality, tool-loop, long-context, cache, and host-safety admission controller may execute it."
 support_status = "exploratory"
 backend = "sglang"
 source = "RadixArk/Qwen3.8-Flash-Next-NVFP4"

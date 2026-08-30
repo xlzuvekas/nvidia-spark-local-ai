@@ -17,9 +17,11 @@ from bench.sglang_sm121_agent_admission import (
     SM121_AGENT_ADMISSION_ENDPOINT,
     SM121_AGENT_ADMISSION_RUNTIME_EXPECTED,
 )
+from bench.sglang_sm121_cache_semantic import SM121_CACHE_SEMANTIC_CACHE_ON_ARM
 
 
 _SERVER_INFO_URL = SM121_AGENT_ADMISSION_ENDPOINT.removesuffix("/v1") + "/server_info"
+_METRICS_URL = SM121_AGENT_ADMISSION_ENDPOINT.removesuffix("/v1") + "/metrics"
 _STARTUP = (
     b"2026-08-29 00:00:00 Tree cache initialized: source=default "
     b"impl=UnifiedRadixCache hybrid_swa=False hybrid_ssm=True "
@@ -114,6 +116,58 @@ def _server() -> runtime.ManagedServer:
         authorization="Bearer " + key,
         api_key=key,
     )
+
+
+def _binding(
+    *,
+    authorization: str = "Bearer " + "x" * 32,
+    generation: tuple[str, int] = _LIVE_GENERATION,
+) -> object:
+    """Return an in-memory-only C1 ownership binding for metrics tests."""
+
+    return runtime._SM121AgentRuntimeBinding(
+        "synthetic-container",
+        "synthetic-run-identity",
+        authorization,
+        "x" * 32,
+        generation,
+    )
+
+
+def _metrics(*, input_tokens: int = 17) -> str:
+    """Produce the complete scalar-only C1 cache-on metric fixture."""
+
+    scheduler = (
+        'engine_type="prefill",model_name="synthetic",moe_ep_rank="0",'
+        'pp_rank="0",tp_rank="0"'
+    )
+
+    def labels(selector: str = "") -> str:
+        joined = ",".join(value for value in (scheduler, selector) if value)
+        return "{" + joined + "}"
+
+    input_mode = 'mode="input"'
+    device_hit_mode = 'mode="device_hit"'
+    host_hit_mode = 'mode="host_hit"'
+    storage_hit_mode = 'mode="storage_hit"'
+    return "\n".join(
+        (
+            "sglang:prefill_effective_tokens_total"
+            f"{labels(input_mode)} {input_tokens}",
+            "sglang:prefill_effective_tokens_total"
+            f"{labels(device_hit_mode)} 0",
+            "sglang:prefill_effective_tokens_total"
+            f"{labels(host_hit_mode)} 0",
+            "sglang:prefill_effective_tokens_total"
+            f"{labels(storage_hit_mode)} 0",
+            f"sglang:kv_available_tokens{labels()} 90",
+            f"sglang:kv_evictable_tokens{labels()} 0",
+            f"sglang:kv_used_tokens{labels()} 10",
+            f"sglang:mamba_available_tokens{labels()} 80",
+            f"sglang:mamba_evictable_tokens{labels()} 0",
+            f"sglang:mamba_used_tokens{labels()} 20",
+        )
+    ) + "\n"
 
 
 class SM121AgentAdmissionRuntimeTests(unittest.TestCase):
@@ -634,7 +688,7 @@ class SM121AgentAdmissionRuntimeTests(unittest.TestCase):
             ) as logs,
             self.assertRaisesRegex(
                 runtime.RuntimeErrorWithContext,
-                "attestation is invalid",
+                "attestation",
             ),
         ):
             runtime.inspect_sm121_agent_admission_runtime_identity(server)
@@ -682,6 +736,256 @@ class SM121AgentAdmissionRuntimeTests(unittest.TestCase):
             response.read_limits,
             [runtime._SM121_AGENT_RUNTIME_RESPONSE_CHUNK_BYTES],
         )
+
+    def test_native_metrics_reader_uses_only_fixed_direct_transport(self) -> None:
+        metrics = _metrics()
+        response = _Response(metrics.encode("utf-8"), url=_METRICS_URL)
+        opener = Mock(return_value=response)
+        with (
+            patch.object(
+                runtime,
+                "_open_sm121_agent_runtime_server_info",
+                opener,
+            ),
+            patch.object(runtime.urllib.request, "urlopen") as generic_urlopen,
+        ):
+            observed = runtime._read_sm121_agent_admission_metrics(
+                "Bearer " + "x" * 32
+            )
+
+        self.assertEqual(observed, metrics)
+        generic_urlopen.assert_not_called()
+        opener.assert_called_once()
+        request = opener.call_args.args[0]
+        self.assertEqual(request.full_url, _METRICS_URL)
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(request.get_header("Authorization"), "Bearer " + "x" * 32)
+        self.assertEqual(
+            opener.call_args.kwargs,
+            {"timeout_s": runtime._SM121_AGENT_RUNTIME_RESPONSE_TIMEOUT_S},
+        )
+        self.assertEqual(
+            response.read_limits,
+            [
+                runtime._SM121_AGENT_RUNTIME_RESPONSE_CHUNK_BYTES,
+                runtime._SM121_AGENT_RUNTIME_RESPONSE_CHUNK_BYTES,
+            ],
+        )
+        self.assertTrue(response.socket_timeouts)
+
+    def test_native_metrics_reader_rejects_transport_and_exposition_drift(self) -> None:
+        malformed_responses = (
+            _Response(b"PRIVATE-METRICS-MARKER", status=503, url=_METRICS_URL),
+            _Response(
+                b"PRIVATE-METRICS-MARKER",
+                url="http://127.0.0.1:30000/redirected",
+            ),
+            _Response(b"\xff", url=_METRICS_URL),
+            _Response(
+                b"\n" * (runtime._SM121_AGENT_METRICS_MAX_LINES + 1),
+                url=_METRICS_URL,
+            ),
+        )
+        for response in malformed_responses:
+            with self.subTest(status=response.status, url=response.geturl()):
+                with (
+                    patch.object(
+                        runtime,
+                        "_open_sm121_agent_runtime_server_info",
+                        return_value=response,
+                    ),
+                    self.assertRaisesRegex(
+                        runtime.RuntimeErrorWithContext,
+                        "attestation is invalid",
+                    ) as caught,
+                ):
+                    runtime._read_sm121_agent_admission_metrics(
+                        "Bearer " + "x" * 32
+                    )
+                self.assertNotIn("PRIVATE-METRICS-MARKER", str(caught.exception))
+
+        with (
+            patch.object(
+                runtime,
+                "_open_sm121_agent_runtime_server_info",
+                return_value=_Response(b"ab", url=_METRICS_URL),
+            ),
+            patch.object(runtime, "_SM121_AGENT_RUNTIME_SERVER_INFO_MAX_BYTES", 1),
+            self.assertRaisesRegex(
+                runtime.RuntimeErrorWithContext,
+                "attestation is invalid",
+            ),
+        ):
+            runtime._read_sm121_agent_admission_metrics("Bearer " + "x" * 32)
+
+    def test_native_metrics_reader_caps_open_and_body_to_settle_deadline(self) -> None:
+        response = _Response(b"metric 1\n", url=_METRICS_URL)
+        opener = Mock(return_value=response)
+        with (
+            patch.object(
+                runtime,
+                "_open_sm121_agent_runtime_server_info",
+                opener,
+            ),
+            patch.object(
+                runtime.time,
+                "monotonic",
+                side_effect=(100.0, 100.0, 100.0, 101.1),
+            ),
+            self.assertRaisesRegex(
+                runtime.RuntimeErrorWithContext,
+                "attestation",
+            ),
+        ):
+            runtime._read_sm121_agent_admission_metrics(
+                "Bearer " + "x" * 32, deadline=101.0
+            )
+        self.assertEqual(opener.call_args.kwargs, {"timeout_s": 1.0})
+        self.assertEqual(response.socket_timeouts, [1.0])
+
+    def test_native_metrics_snapshot_binds_request_and_postcheck(self) -> None:
+        server = _server()
+        binding = _binding()
+        deadline = runtime.time.monotonic() + 10.0
+        reader = Mock(return_value=_metrics())
+        with (
+            patch.object(
+                runtime,
+                "_require_sm121_agent_admission_server",
+                side_effect=((server, binding), (server, binding)),
+            ) as require_owned,
+            patch.object(
+                runtime,
+                "_read_sm121_agent_admission_metrics",
+                reader,
+            ),
+            patch.object(runtime.urllib.request, "urlopen") as generic_urlopen,
+        ):
+            snapshot, lease_binding = runtime._snapshot_sm121_agent_admission_metrics(
+                server, deadline=deadline
+            )
+
+        self.assertEqual(lease_binding, binding)
+        self.assertEqual(
+            require_owned.call_args_list,
+            [call(server), call(server)],
+        )
+        reader.assert_called_once_with("Bearer " + "x" * 32, deadline=deadline)
+        generic_urlopen.assert_not_called()
+        self.assertEqual(set(snapshot), set(runtime._sm121_cache_metric_defaults()))
+        self.assertTrue(snapshot["available"])
+        self.assertTrue(snapshot["guardrail_metrics_available"])
+        self.assertEqual(snapshot["prefill_input_tokens"], 17)
+        self.assertEqual(snapshot["prefill_device_hit_tokens"], 0)
+        self.assertEqual(snapshot["evicted_tokens"], 0)
+        self.assertEqual(snapshot["retracted_requests"], 0)
+
+        replacement = _binding(
+            generation=("2026-08-29T00:00:01.000000000Z", 1235)
+        )
+        with (
+            patch.object(
+                runtime,
+                "_require_sm121_agent_admission_server",
+                side_effect=((server, binding), (server, replacement)),
+            ),
+            patch.object(
+                runtime,
+                "_read_sm121_agent_admission_metrics",
+                return_value=_metrics(),
+            ),
+            self.assertRaisesRegex(
+                runtime.RuntimeErrorWithContext,
+                "metrics attestation is invalid",
+            ),
+        ):
+            runtime._snapshot_sm121_agent_admission_metrics(
+                server, deadline=runtime.time.monotonic() + 10.0
+            )
+
+    def test_native_metrics_settle_requires_same_opaque_generation_lease(self) -> None:
+        server = _server()
+        first = runtime._parse_sm121_cache_observability_metrics(
+            _metrics(), semantic_arm=SM121_CACHE_SEMANTIC_CACHE_ON_ARM
+        )
+        binding = _binding()
+        with (
+            patch.object(
+                runtime,
+                "_snapshot_sm121_agent_admission_metrics",
+                side_effect=((first, binding), (first, binding)),
+            ) as snapshot,
+            patch.object(runtime.time, "sleep") as sleep,
+        ):
+            observed, lease, polls, settled = runtime.settle_sm121_agent_admission_metrics(
+                server,
+                deadline=runtime.time.monotonic() + 10.0,
+                poll_interval_s=0.1,
+            )
+
+        self.assertEqual(observed, first)
+        self.assertEqual(polls, 2)
+        self.assertTrue(settled)
+        self.assertIs(type(lease), runtime._SM121AgentNativeCacheLease)
+        self.assertNotIn("synthetic-container", repr(lease))
+        self.assertNotIn("synthetic-run-identity", repr(lease))
+        self.assertEqual(snapshot.call_count, 2)
+        self.assertTrue(
+            all(
+                item.args == (server,)
+                and isinstance(item.kwargs.get("deadline"), float)
+                for item in snapshot.call_args_list
+            )
+        )
+        sleep.assert_called_once()
+
+        replacement = _binding(
+            generation=("2026-08-29T00:00:01.000000000Z", 1235)
+        )
+        with (
+            patch.object(
+                runtime,
+                "_snapshot_sm121_agent_admission_metrics",
+                side_effect=((first, binding), (first, replacement)),
+            ) as snapshot,
+            patch.object(runtime.time, "sleep") as sleep,
+            self.assertRaisesRegex(
+                runtime.RuntimeErrorWithContext,
+                "metrics attestation is invalid",
+            ),
+        ):
+            runtime.settle_sm121_agent_admission_metrics(
+                server,
+                deadline=runtime.time.monotonic() + 10.0,
+                poll_interval_s=0.1,
+            )
+        self.assertEqual(snapshot.call_count, 2)
+        self.assertTrue(
+            all(item.args == (server,) for item in snapshot.call_args_list)
+        )
+        sleep.assert_called_once()
+
+        expected_lease = runtime._SM121AgentNativeCacheLease(binding)
+        with (
+            patch.object(
+                runtime,
+                "_snapshot_sm121_agent_admission_metrics",
+                return_value=(first, replacement),
+            ) as snapshot,
+            self.assertRaisesRegex(
+                runtime.RuntimeErrorWithContext,
+                "metrics attestation is invalid",
+            ),
+        ):
+            runtime.settle_sm121_agent_admission_metrics(
+                server,
+                deadline=runtime.time.monotonic() + 10.0,
+                poll_interval_s=0.1,
+                expected_lease=expected_lease,
+            )
+        snapshot.assert_called_once()
+        self.assertEqual(snapshot.call_args.args, (server,))
+        self.assertIn("deadline", snapshot.call_args.kwargs)
 
     def test_fixed_opener_disables_proxies_and_redirects(self) -> None:
         request = urllib.request.Request(_SERVER_INFO_URL)
