@@ -67,6 +67,13 @@ SM121_AGENT_ADMISSION_TOOL_CASE_IDS = (
     "agentic-tool-error-recovery",
 )
 SM121_AGENT_ADMISSION_LONG_CONTEXT_CASE_ID = "sm121-agent-long-context-cache-zero-v1"
+SM121_AGENT_ADMISSION_LONG_CONTEXT_PROMPT_REPETITIONS = 60_000
+# The private direct client renders one standalone ``archive `` token-shaped
+# filler per repetition. A returned prompt-token count below this lower bound
+# cannot establish that the intended 60K first turn was actually tokenized.
+SM121_AGENT_ADMISSION_LONG_CONTEXT_MIN_PROMPT_TOKENS = (
+    SM121_AGENT_ADMISSION_LONG_CONTEXT_PROMPT_REPETITIONS
+)
 SM121_AGENT_ADMISSION_CASE_IDS = (
     SM121_AGENT_ADMISSION_QUALITY_CASE_ID,
     *SM121_AGENT_ADMISSION_TOOL_CASE_IDS,
@@ -404,7 +411,7 @@ def validate_sm121_agent_admission_suite(suite: Any) -> None:
             "max_output_tokens": 128,
             "temperature": 0.0,
             "concurrency": 1,
-            "prompt_repetitions": 60_000,
+            "prompt_repetitions": SM121_AGENT_ADMISSION_LONG_CONTEXT_PROMPT_REPETITIONS,
             "max_turns": 1,
         },
     )

@@ -83,6 +83,18 @@ attribute. The corresponding static parser preflight was rechecked on the
 pinned image during this continuation and again passed without starting an
 inference server or leaving a container behind.
 
+The next private building block is a byte-bound direct client, still unreachable
+from every CLI and runner. It owns final JSON serialization, validates the
+serialized low-thinking/tool/cache-zero body, sends it once through fixed
+loopback/no-proxy/no-redirect transport, and exposes only bounded scalar
+diagnostics to a future controller. Its internally rendered long case requires
+at least 60,000 returned input tokens, a cache-zero counter, one request on
+that client, and an exact `LONG-CONTEXT-READY` no-tool final answer. It does not
+establish that this is the first request of a freshly started server or that
+native metric cache counters are zero; those remain mandatory controller-owned
+proofs. Neither the client nor its standalone scalar validator is an admission
+proof without that controller.
+
 This is deliberately a planning and audit hardening step, not an agent
 admission, performance result, or permission to run Pi.
 
@@ -97,8 +109,8 @@ lifetimes:
    transformation;
 2. exact-answer quality, strict tool-call semantics, and bounded tool-error
    recovery;
-3. rendered low-thinking-plus-tools long-context fit and cache-zero-first-turn
-   semantics; and
+3. rendered low-thinking-plus-tools long-context fit, exact no-tool result,
+   fresh-lifetime and cache-zero-first-turn semantics; and
 4. the stronger 14 GiB available-memory and 64 MiB starting/growth swap gates.
 
 The adapter must construct and observe the final direct-client payload itself,
