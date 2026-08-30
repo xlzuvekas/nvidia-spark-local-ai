@@ -50,6 +50,14 @@ def _complete_events() -> list[dict[str, object]]:
             "source_tree": SM121_STORAGE_SOURCE_TREE,
             "reasoning_parser_qwen3": True,
             "tool_call_parser_qwen3_coder": True,
+            "reasoning_parser_instantiated": True,
+            "tool_call_parser_instantiated": True,
+            "reasoning_parser": "qwen3",
+            "tool_call_parser": "qwen3_coder",
+            "chunked_prefill_size": 4096,
+            "max_running_requests": 1,
+            "max_total_tokens": 65536,
+            "context_length": 65536,
         },
     ]
     gates = {

@@ -1369,16 +1369,17 @@ serving:
 python3 sparkbench.py sm121-agent-parser-preflight
 ```
 
-The command verifies the exact local image identity, then imports the Qwen
-`qwen3` reasoning and `qwen3_coder` tool-call registries from an ephemeral
-no-network, read-only, no-GPU container. It uses no host weight mount or model
-loading, opens no port, emits or persists no timing metric, and writes no
-result directory. A passing preflight is not a model startup, quality, tool,
-long-context, cache, throughput, or agent result; it only clears a static
-prerequisite for a separately implemented fresh-C1 admission controller. That
-controller must still bind the final low-effort payload, parser initialization,
-exact tool-loop semantics, long-context fit, cache isolation, and stricter
-host-safety gates before any Pi/cowork workload can run. See the
+The command verifies the exact local image identity, then imports and
+initializes the Qwen `qwen3` reasoning and `qwen3_coder` tool-call parsers and
+parses the frozen C1 argv against a dummy model in an ephemeral no-network,
+read-only, no-GPU container. It returns only parser/limit scalars; it uses no
+host weight mount or model loading, opens no port, emits or persists no timing
+metric, and writes no result directory. A passing preflight is not a model
+startup, quality, tool, long-context, cache, throughput, or agent result; it
+only clears a static prerequisite for a separately implemented fresh-C1
+admission controller. That controller must still bind the final low-effort
+payload, exact tool-loop semantics, long-context fit, cache isolation, and
+stricter host-safety gates before any Pi/cowork workload can run. See the
 [agent-admission preflight record](docs/qwen38-flash-next-sm121-agent-admission-preflight-2026-08-29.md).
 
 ### Publishing sanitized evidence

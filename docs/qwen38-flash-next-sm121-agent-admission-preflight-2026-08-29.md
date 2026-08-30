@@ -2,19 +2,26 @@
 
 ## Result
 
-The exact current SM121 storage image has passed a **static parser-registry
+The exact current SM121 storage image has passed a **static parser/CLI
 preflight** for the prospective C1 Pi/cowork profile. The image-local Python
-imports expose both required entries:
+both exposes and initializes the required entries:
 
 - Qwen reasoning parser: `qwen3`;
 - Qwen Coder tool-call parser: `qwen3_coder`.
 
+It also accepts the exact frozen C1 argv with a dummy model and retains the
+intended resolved scalar values: 4,096-token chunked prefill, one running
+request, and 65,536-token total/context limits. The dummy-model path exits
+before model or GPU initialization, so this is a CLI-contract check rather
+than a serving test.
+
 The check is intentionally not a server or model admission. It starts an
 ephemeral no-network, read-only Docker process with no model mount, no GPU
 request, no published port, no host weight mount or model loading, and no
-inference request. It returns only the exact local image/source identity and
-two booleans. It emits or persists no timing metric, prompt, completion,
-reasoning, tool payload, or result directory.
+inference request. It returns only the exact local image/source identity,
+parser registry/initialization booleans, and resolved parser/limit scalars. It
+emits or persists no timing metric, prompt, completion, reasoning, tool
+payload, or result directory.
 
 Run it with:
 
@@ -81,7 +88,8 @@ admission, performance result, or permission to run Pi.
 
 ## What remains before an agent result
 
-The parser check and private plan only remove static and topology uncertainty.
+The parser/CLI check and private plan only remove static and topology
+uncertainty.
 A reviewed in-repository execution adapter must still prove, in fresh C1
 lifetimes:
 

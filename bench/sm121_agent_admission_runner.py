@@ -599,6 +599,14 @@ def _event_schema_safe(event: object) -> bool:
             "source_tree",
             "reasoning_parser_qwen3",
             "tool_call_parser_qwen3_coder",
+            "reasoning_parser_instantiated",
+            "tool_call_parser_instantiated",
+            "reasoning_parser",
+            "tool_call_parser",
+            "chunked_prefill_size",
+            "max_running_requests",
+            "max_total_tokens",
+            "context_length",
         }
     expected_static = {
         "candidate_source_tree": SM121_STORAGE_SOURCE_TREE,

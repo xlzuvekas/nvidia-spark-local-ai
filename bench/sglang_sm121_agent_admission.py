@@ -1,10 +1,11 @@
 """Pinned static preflight for the prospective current-SM121 agent profile.
 
-This module deliberately proves only an image-local prerequisite: the exact
-current native-storage SGLang image imports the Qwen reasoning and tool parser
-registries that a later C1 Pi/cowork admission will need.  The probe does not
-mount weights, expose a port, request a GPU, start a server, or issue model
-requests.  It is not an agentic, reasoning-quality, or performance result.
+This module deliberately proves only image-local prerequisites: the exact
+current native-storage SGLang image imports and initializes the Qwen reasoning
+and tool parsers, and accepts the exact C1 parser/limit argv with a dummy
+model. The probe does not mount weights, expose a port, request a GPU, start a
+server, or issue model requests. It is not an agentic, reasoning-quality, or
+performance result.
 """
 
 from __future__ import annotations
@@ -79,9 +80,9 @@ SM121_AGENT_ADMISSION_SUITE_DESCRIPTION = (
     "may execute it and it does not measure Pi/cowork performance."
 )
 SM121_AGENT_ADMISSION_STATIC_PROBE_ID = (
-    "qwen38-flash-next-sm121-agent-parser-static-preflight-v1"
+    "qwen38-flash-next-sm121-agent-parser-static-preflight-v2"
 )
-SM121_AGENT_ADMISSION_STATIC_PROBE_SCHEMA_VERSION = 1
+SM121_AGENT_ADMISSION_STATIC_PROBE_SCHEMA_VERSION = 2
 _STATIC_CONTAINER_NAME_PREFIX = "sparkbench-sm121-agent-parser-"
 _STATIC_CONTAINER_LABEL = "io.sparkbench.sm121-agent-parser-preflight"
 _STATIC_CONTAINER_NONCE_PATTERN = re.compile(r"[0-9a-f]{32}")
@@ -141,16 +142,37 @@ _STATIC_PROBE_FIELDS = frozenset(
         "source_tree",
         "reasoning_parser_qwen3",
         "tool_call_parser_qwen3_coder",
+        "reasoning_parser_instantiated",
+        "tool_call_parser_instantiated",
+        "reasoning_parser",
+        "tool_call_parser",
+        "chunked_prefill_size",
+        "max_running_requests",
+        "max_total_tokens",
+        "context_length",
     }
 )
+_STATIC_PROBE_ARGV = ("--model-path", "dummy", *SM121_AGENT_ADMISSION_ARGS)
 _STATIC_PROBE_SCRIPT = "\n".join(
     (
         "import json",
         "from sglang.srt.function_call.function_call_parser import FunctionCallParser",
         "from sglang.srt.parser.reasoning_parser import ReasoningParser",
+        "from sglang.srt.server_args import prepare_server_args",
+        f"server_args = prepare_server_args({list(_STATIC_PROBE_ARGV)!r})",
+        "reasoning_parser = ReasoningParser('qwen3')",
+        "tool_call_parser = FunctionCallParser([], 'qwen3_coder')",
         "print(json.dumps({",
         "    'reasoning_parser_qwen3': 'qwen3' in ReasoningParser.DetectorMap,",
         "    'tool_call_parser_qwen3_coder': 'qwen3_coder' in FunctionCallParser.ToolCallParserEnum,",
+        "    'reasoning_parser_instantiated': reasoning_parser is not None,",
+        "    'tool_call_parser_instantiated': tool_call_parser is not None,",
+        "    'reasoning_parser': server_args.reasoning_parser,",
+        "    'tool_call_parser': server_args.tool_call_parser,",
+        "    'chunked_prefill_size': server_args.chunked_prefill_size,",
+        "    'max_running_requests': server_args.max_running_requests,",
+        "    'max_total_tokens': server_args.max_total_tokens,",
+        "    'context_length': server_args.context_length,",
         "}, sort_keys=True, separators=(',', ':')))",
     )
 )
@@ -415,6 +437,14 @@ def validate_sm121_agent_parser_static_probe(probe: object) -> dict[str, object]
         "source_tree": SM121_STORAGE_SOURCE_TREE,
         "reasoning_parser_qwen3": True,
         "tool_call_parser_qwen3_coder": True,
+        "reasoning_parser_instantiated": True,
+        "tool_call_parser_instantiated": True,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "chunked_prefill_size": SM121_AGENT_ADMISSION_CHUNKED_PREFILL_SIZE,
+        "max_running_requests": 1,
+        "max_total_tokens": SM121_STORAGE_CONTEXT_LENGTH,
+        "context_length": SM121_STORAGE_CONTEXT_LENGTH,
     }
     for field, value in expected.items():
         actual = probe.get(field)
@@ -552,7 +582,7 @@ def probe_sm121_agent_parser_static_preflight(
     *,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> dict[str, object]:
-    """Run one no-network, no-GPU parser-registry preflight in the pinned image."""
+    """Run one no-network, no-GPU parser/CLI preflight in the pinned image."""
 
     validate_sm121_agent_admission_profile(model)
     image_identity = _inspect_static_image(runner)
@@ -609,10 +639,10 @@ def probe_sm121_agent_parser_static_preflight(
         observed = json.loads(completed.stdout, object_pairs_hook=_unique_json_object)
     except (TypeError, json.JSONDecodeError, ValueError) as error:
         raise SM121AgentAdmissionError("SM121 agent parser preflight failed") from error
-    if type(observed) is not dict or frozenset(observed) != {
-        "reasoning_parser_qwen3",
-        "tool_call_parser_qwen3_coder",
-    }:
+    if type(observed) is not dict or frozenset(observed) != (
+        _STATIC_PROBE_FIELDS
+        - {"schema_version", "probe_id", "docker_image_id", "source_tree"}
+    ):
         raise SM121AgentAdmissionError("SM121 agent parser preflight failed")
     probe = {
         "schema_version": SM121_AGENT_ADMISSION_STATIC_PROBE_SCHEMA_VERSION,

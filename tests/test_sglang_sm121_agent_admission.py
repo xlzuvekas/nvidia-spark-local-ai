@@ -245,6 +245,14 @@ class SM121AgentAdmissionTests(unittest.TestCase):
                         {
                             "reasoning_parser_qwen3": True,
                             "tool_call_parser_qwen3_coder": True,
+                            "reasoning_parser_instantiated": True,
+                            "tool_call_parser_instantiated": True,
+                            "reasoning_parser": "qwen3",
+                            "tool_call_parser": "qwen3_coder",
+                            "chunked_prefill_size": 4096,
+                            "max_running_requests": 1,
+                            "max_total_tokens": 65536,
+                            "context_length": 65536,
                         }
                     )
                 ),
@@ -268,6 +276,14 @@ class SM121AgentAdmissionTests(unittest.TestCase):
                 "source_tree": SM121_STORAGE_SOURCE_TREE,
                 "reasoning_parser_qwen3": True,
                 "tool_call_parser_qwen3_coder": True,
+                "reasoning_parser_instantiated": True,
+                "tool_call_parser_instantiated": True,
+                "reasoning_parser": "qwen3",
+                "tool_call_parser": "qwen3_coder",
+                "chunked_prefill_size": 4096,
+                "max_running_requests": 1,
+                "max_total_tokens": 65536,
+                "context_length": 65536,
             },
         )
         self.assertEqual(runner.call_count, 2)
@@ -354,6 +370,14 @@ class SM121AgentAdmissionTests(unittest.TestCase):
                         {
                             "reasoning_parser_qwen3": False,
                             "tool_call_parser_qwen3_coder": True,
+                            "reasoning_parser_instantiated": True,
+                            "tool_call_parser_instantiated": True,
+                            "reasoning_parser": "qwen3",
+                            "tool_call_parser": "qwen3_coder",
+                            "chunked_prefill_size": 4096,
+                            "max_running_requests": 1,
+                            "max_total_tokens": 65536,
+                            "context_length": 65536,
                         }
                     )
                 ),
@@ -369,6 +393,14 @@ class SM121AgentAdmissionTests(unittest.TestCase):
             "source_tree": SM121_STORAGE_SOURCE_TREE,
             "reasoning_parser_qwen3": True,
             "tool_call_parser_qwen3_coder": True,
+            "reasoning_parser_instantiated": True,
+            "tool_call_parser_instantiated": True,
+            "reasoning_parser": "qwen3",
+            "tool_call_parser": "qwen3_coder",
+            "chunked_prefill_size": 4096,
+            "max_running_requests": 1,
+            "max_total_tokens": 65536,
+            "context_length": 65536,
         }
         valid["wall_s"] = 1.0
         with self.assertRaises(SM121AgentAdmissionError):
@@ -412,7 +444,15 @@ class SM121AgentAdmissionTests(unittest.TestCase):
                     stdout=(
                         '{"reasoning_parser_qwen3":true,'
                         '"reasoning_parser_qwen3":true,'
-                        '"tool_call_parser_qwen3_coder":true}'
+                        '"tool_call_parser_qwen3_coder":true,'
+                        '"reasoning_parser_instantiated":true,'
+                        '"tool_call_parser_instantiated":true,'
+                        '"reasoning_parser":"qwen3",'
+                        '"tool_call_parser":"qwen3_coder",'
+                        '"chunked_prefill_size":4096,'
+                        '"max_running_requests":1,'
+                        '"max_total_tokens":65536,'
+                        '"context_length":65536}'
                     )
                 ),
             )
@@ -554,6 +594,14 @@ class SM121AgentAdmissionTests(unittest.TestCase):
             "source_tree": SM121_STORAGE_SOURCE_TREE,
             "reasoning_parser_qwen3": True,
             "tool_call_parser_qwen3_coder": True,
+            "reasoning_parser_instantiated": True,
+            "tool_call_parser_instantiated": True,
+            "reasoning_parser": "qwen3",
+            "tool_call_parser": "qwen3_coder",
+            "chunked_prefill_size": 4096,
+            "max_running_requests": 1,
+            "max_total_tokens": 65536,
+            "context_length": 65536,
         }
         output = io.StringIO()
         with (
