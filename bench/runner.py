@@ -17,11 +17,29 @@ import subprocess
 import struct
 import time
 from types import SimpleNamespace
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 import unicodedata
 import uuid
 import zlib
 
+from .densespark import (
+    DENSESPARK_MODEL_REVISION,
+    DENSESPARK_PQ_SHA256,
+    DENSESPARK_PQ_SIZE_BYTES,
+    DenseSparkContractError,
+    densespark_expected_launch_policy,
+    densespark_expected_resolved_provenance,
+    densespark_local_image_id_for_profile,
+    densespark_pq_artifact_path,
+    is_densespark_profile,
+    is_densespark_warmup_sync_profile,
+    validate_densespark_local_image,
+    validate_densespark_pq_artifact,
+    validate_densespark_profile,
+    validate_densespark_snapshot,
+    validate_densespark_suite,
+    validate_densespark_warmup_sync_sources,
+)
 from .agentic_tools import estimate_agentic_context_tokens, run_agentic_scenario
 from .client import (
     concurrent_chat_requests,
@@ -53,10 +71,17 @@ from .llamacpp_metrics import (
     snapshot_llamacpp_spec_decode_metrics,
 )
 from .manifest import (
+    MATCHED_PROMPT_CASE_PREFIX,
+    MATCHED_PROMPT_GRAPH_PROFILE_IDS,
+    MATCHED_PROMPT_GRAPH_SUITE_IDS,
     VARIED_CONTEXT_NEEDLE_CASE_PREFIX,
     VariedContextNeedleSpec,
+    matched_prompt_graph_study,
+    matched_prompt_protocol,
     model_spec_to_dict,
     validate_benchmark_selection,
+    validate_matched_prompt_graph_model,
+    validate_matched_prompt_graph_suite,
     varied_context_needle_spec,
 )
 from .memory_ops import (
@@ -328,6 +353,152 @@ def _image_digest(image: str | None) -> str | None:
     return digests[0] if digests else None
 
 
+def _densespark_command_runner(
+    command: Sequence[str],
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        list(command),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+
+def _resolve_densespark_contract(model: Any) -> dict[str, Any]:
+    """Resolve scalar-only local C1 provenance before a plan directory exists."""
+
+    try:
+        validate_densespark_profile(model)
+        profile_id = str(model.id)
+        expected_image_id = densespark_local_image_id_for_profile(profile_id)
+        if is_densespark_warmup_sync_profile(model):
+            validate_densespark_warmup_sync_sources()
+        image_id = validate_densespark_local_image(
+            str(model.image),
+            expected_image_id=expected_image_id,
+            runner=_densespark_command_runner,
+        )
+        pq_receipt = validate_densespark_pq_artifact(
+            densespark_pq_artifact_path(),
+            expected_size_bytes=DENSESPARK_PQ_SIZE_BYTES,
+            expected_sha256=DENSESPARK_PQ_SHA256,
+        )
+        repository = (
+            Path.home()
+            / ".cache"
+            / "huggingface"
+            / "hub"
+            / ("models--" + str(model.source).replace("/", "--"))
+        )
+        snapshot_receipt = validate_densespark_snapshot(
+            repository / "snapshots" / DENSESPARK_MODEL_REVISION,
+            repository_root=repository,
+        )
+    except DenseSparkContractError as error:
+        raise RuntimeError("DenseSpark local planning provenance did not verify") from error
+    receipt = densespark_expected_resolved_provenance(profile_id)
+    receipt.update(
+        {
+            "docker_image_id": image_id,
+            "pq_artifact_sha256": pq_receipt.sha256,
+            "pq_artifact_size_bytes": pq_receipt.size_bytes,
+            "weight_file_count": snapshot_receipt.weight_file_count,
+            "weight_size_bytes": snapshot_receipt.weight_size_bytes,
+        }
+    )
+    return receipt
+
+
+def _require_frozen_densespark_contract(
+    model: Any,
+    resolved: object,
+    launch_policy: object,
+) -> None:
+    """Authenticate scalar DenseSpark receipts from an integrity-checked plan."""
+
+    if not is_densespark_profile(model):
+        return
+    profile_id = str(getattr(model, "id", ""))
+    expected = densespark_expected_resolved_provenance(profile_id)
+    if type(resolved) is not dict or resolved != expected:
+        raise PreflightError("Frozen DenseSpark local provenance is invalid")
+    expected_launch_policy = densespark_expected_launch_policy()
+    if type(launch_policy) is not dict or launch_policy != expected_launch_policy:
+        raise PreflightError("Frozen DenseSpark launch policy is invalid")
+    try:
+        validate_densespark_profile(model)
+    except DenseSparkContractError as error:
+        raise PreflightError("Frozen DenseSpark profile contract is invalid") from error
+    model.resolved_local_image_id = densespark_local_image_id_for_profile(
+        profile_id
+    )
+    model.resolved_densespark_launch_policy = dict(expected_launch_policy)
+
+
+def _require_frozen_densespark_suite(model: Any, suite: object) -> None:
+    """Revalidate the exact C1 case topology at every execution boundary."""
+
+    if not is_densespark_profile(model):
+        return
+    if type(suite) is not dict:
+        raise PreflightError("Frozen DenseSpark suite contract is invalid")
+    try:
+        validate_densespark_suite(_namespace(suite))
+    except DenseSparkContractError as error:
+        raise PreflightError("Frozen DenseSpark suite contract is invalid") from error
+
+
+def _require_frozen_matched_prompt_suite(model: Any, suite: object) -> None:
+    """Reject a frozen graph-pair plan that lost its exact paired schedule."""
+
+    suite_record = suite if type(suite) is dict else {}
+    raw_cases = suite_record.get("cases")
+    reserved_case_ids = tuple(
+        case["id"]
+        for case in (raw_cases if isinstance(raw_cases, list) else [])
+        if isinstance(case, dict)
+        and isinstance(case.get("id"), str)
+        and case["id"].startswith(MATCHED_PROMPT_CASE_PREFIX)
+    )
+    model_id = getattr(model, "id", None)
+    suite_id = suite_record.get("id")
+    marked = (
+        model_id in MATCHED_PROMPT_GRAPH_PROFILE_IDS
+        or suite_id in MATCHED_PROMPT_GRAPH_SUITE_IDS
+        or bool(reserved_case_ids)
+    )
+    if not marked:
+        return
+    if type(suite) is not dict:
+        raise PreflightError("Frozen matched-prompt suite contract is invalid")
+    try:
+        model_study = matched_prompt_graph_study(profile_id=model_id)
+        suite_study = matched_prompt_graph_study(suite_id=suite_id)
+        case_studies = tuple(
+            matched_prompt_graph_study(case_id=case_id)
+            for case_id in reserved_case_ids
+            if matched_prompt_protocol(case_id) is not None
+        )
+        if (
+            model_study is None
+            or suite_study is None
+            or len(case_studies) != 1
+            or case_studies[0] is None
+            or model_study != suite_study
+            or case_studies[0] != suite_study
+        ):
+            raise ValueError("matched-prompt graph pair identity changed")
+        validate_matched_prompt_graph_model(
+            model, context="frozen matched-prompt model"
+        )
+        validate_matched_prompt_graph_suite(_namespace(suite))
+    except ValueError as error:
+        raise PreflightError(
+            "Frozen matched-prompt suite contract is invalid"
+        ) from error
+
+
 def _sm121_storage_image_identity(model: Any) -> dict[str, str]:
     """Inspect the tagged local candidate before freezing its Docker ID."""
 
@@ -483,8 +654,15 @@ def _create_plan(
         )
         for case in suite_data["cases"]
     ]
-    resolved_image = _image_digest(model.image)
-    if (
+    densespark_candidate = is_densespark_profile(model)
+    resolved_image = None if densespark_candidate else _image_digest(model.image)
+    if densespark_candidate:
+        resolved = {
+            "image_digest": None,
+            "densespark": _resolve_densespark_contract(model),
+            "densespark_launch_policy": densespark_expected_launch_policy(),
+        }
+    elif (
         storage_candidate
         or agent_admission_candidate
         or semantic_candidate
@@ -2226,7 +2404,13 @@ def _quality_prompt(
 
 
 def _uses_matched_prompt_protocol(case: SimpleNamespace) -> bool:
-    return str(case.id).startswith("ple-study-")
+    case_id = str(case.id)
+    if case_id.startswith("ple-study-"):
+        return True
+    try:
+        return matched_prompt_protocol(case_id) is not None
+    except ValueError as error:
+        raise RuntimeError("matched-prompt case identity is invalid") from error
 
 
 def _extract_quality_answer(content: str) -> tuple[str | None, str | None]:
@@ -5994,6 +6178,13 @@ def execute_plan(
         raise PreflightError(blocker)
     model = _namespace(plan["model"])
     model.resolved_image = plan.get("resolved", {}).get("image_digest")
+    _require_frozen_densespark_contract(
+        model,
+        plan.get("resolved", {}).get("densespark"),
+        plan.get("resolved", {}).get("densespark_launch_policy"),
+    )
+    _require_frozen_densespark_suite(model, plan.get("suite"))
+    _require_frozen_matched_prompt_suite(model, plan.get("suite"))
     run_nonce = plan.get("run_nonce")
     if run_nonce is None:
         # Compatibility for schema-v2 plans frozen before per-plan ownership

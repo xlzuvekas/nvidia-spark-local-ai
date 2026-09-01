@@ -1,0 +1,16 @@
+schema_version = 1
+
+[suite]
+id = "qwen38-flash-next-sm121-triton-storage-c1-cuda-graph"
+description = "Matched single-user D256 decode CUDA-graph screen cloned from the prospective current-SM121 Qwen3.8 Flash-Next agent profile: batch-one BreakableCUDAGraphCapture versus disabled, with eager prefill."
+
+[[cases]]
+id = "matched-prompt-qwen38-flash-next-sm121-triton-storage-cuda-graph-d256-c1-v1"
+kind = "decode"
+requires = ["chat"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0

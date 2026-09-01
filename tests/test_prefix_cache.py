@@ -1645,7 +1645,11 @@ class PrefixCacheEvidenceTests(unittest.TestCase):
             _write_test_json(telemetry_chunk_path, telemetry_chunk)
             _refresh_run_and_root_checksums(fixture.output, fixture.run_id)
             with self.assertRaisesRegex(
-                EvidenceError, "prefix-cache telemetry.gpu_util_pct must be a finite JSON float"
+                EvidenceError,
+                (
+                    r"(?:prefix-cache telemetry\.gpu_util_pct must be a finite "
+                    r"JSON float|telemetry numeric scalar changed)"
+                ),
             ):
                 verify_evidence(fixture.output)
 

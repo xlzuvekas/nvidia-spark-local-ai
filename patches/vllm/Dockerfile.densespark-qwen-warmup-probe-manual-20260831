@@ -1,0 +1,40 @@
+ARG BASE_IMAGE=local/densespark:qwen38-27b-v1.2-0abecc3
+FROM ${BASE_IMAGE}
+
+ARG BASE_IMAGE_ID=sha256:d8d02859a49ebf452d9e20b5fbc0790cd4c38fe9a1f5184096b06e3cc6a751d1
+ARG PROBE_SHA256=95089265e60f67da8d8f33d6fb249e4c79300f0891c38f2f15d4e125001821d3
+ARG QWEN_WARMUP_SHA256=2b08d94662e7b04ce61c0f7a818e0cd1768fe7602a89df04ec6148f62fe3acdb
+ARG KERNEL_WARMUP_SHA256=452ae5db905110df8eb7aac90a93ac80863d166f8ea7d52b8cec02c477477aed
+ARG QWEN_GDN_SHA256=d42cdc95d8d221b49693a46119c714fee3f290282bdfefa63f92f9725f1b20ea
+ARG MAMBA_UTILS_SHA256=53eaae681b5a0327465b28b7b1983303335db852ac9667ae05faa3682d8c6b8c
+ARG FUSED_SIGMOID_SHA256=000ab8996af9788fdb8843a6a3b91833e7a14c8acc0e1ea073a536330f64cb6f
+ARG VLLM_ENTRYPOINT_SHA256=6f6395c128e80861f7f7d21b8e1e4547261ab9e928390aa7a7a89ce0d701ff36
+
+LABEL ai.sparkbench.base.image-id="${BASE_IMAGE_ID}" \
+      ai.sparkbench.diagnostic="densespark-qwen-warmup-probe-v1" \
+      ai.sparkbench.probe.sha256="${PROBE_SHA256}" \
+      ai.sparkbench.qwen-warmup.sha256="${QWEN_WARMUP_SHA256}" \
+      ai.sparkbench.kernel-warmup.sha256="${KERNEL_WARMUP_SHA256}" \
+      ai.sparkbench.qwen-gdn.sha256="${QWEN_GDN_SHA256}" \
+      ai.sparkbench.mamba-utils.sha256="${MAMBA_UTILS_SHA256}" \
+      ai.sparkbench.fused-sigmoid.sha256="${FUSED_SIGMOID_SHA256}" \
+      ai.sparkbench.vllm-entrypoint.sha256="${VLLM_ENTRYPOINT_SHA256}"
+
+COPY --chmod=0444 bench/assets/densespark_qwen_warmup_probe.py \
+    /opt/sparkbench-qwen-warmup-probe/sitecustomize.py
+
+RUN test "$(sha256sum /opt/sparkbench-qwen-warmup-probe/sitecustomize.py | cut -d ' ' -f 1)" = "${PROBE_SHA256}" \
+ && test "$(sha256sum /usr/local/lib/python3.12/dist-packages/vllm/model_executor/warmup/qwen_triton_warmup.py | cut -d ' ' -f 1)" = "${QWEN_WARMUP_SHA256}" \
+ && test "$(sha256sum /usr/local/lib/python3.12/dist-packages/vllm/model_executor/warmup/kernel_warmup.py | cut -d ' ' -f 1)" = "${KERNEL_WARMUP_SHA256}" \
+ && test "$(sha256sum /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py | cut -d ' ' -f 1)" = "${QWEN_GDN_SHA256}" \
+ && test "$(sha256sum /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/mamba/mamba_utils.py | cut -d ' ' -f 1)" = "${MAMBA_UTILS_SHA256}" \
+ && test "$(sha256sum /usr/local/lib/python3.12/dist-packages/vllm/third_party/flash_linear_attention/ops/fused_sigmoid_gating.py | cut -d ' ' -f 1)" = "${FUSED_SIGMOID_SHA256}" \
+ && test "$(sha256sum /usr/local/bin/vllm | cut -d ' ' -f 1)" = "${VLLM_ENTRYPOINT_SHA256}" \
+ && python3 -m py_compile /opt/sparkbench-qwen-warmup-probe/sitecustomize.py
+
+# The normal vLLM entrypoint is deliberately retained. PYTHONPATH makes Python
+# import this probe in both the API process and a spawned EngineCore process.
+ENV PYTHONPATH=/opt/sparkbench-qwen-warmup-probe \
+    SPARKBENCH_QWEN_WARMUP_PROBE=1
+
+ENTRYPOINT ["vllm"]

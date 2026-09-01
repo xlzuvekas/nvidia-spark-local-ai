@@ -1,0 +1,16 @@
+schema_version = 1
+
+[suite]
+id = "qwen38-27b-dspark-c1-cuda-graph"
+description = "Matched single-user D256 screen for the pinned RadixArk Qwen3.8-27B plus DSpark full-versus-disabled decode CUDA-graph ablation."
+
+[[cases]]
+id = "matched-prompt-qwen38-27b-dspark-cuda-graph-d256-c1-v1"
+kind = "decode"
+requires = ["chat"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0

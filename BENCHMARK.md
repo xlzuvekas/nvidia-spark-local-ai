@@ -166,6 +166,63 @@ decode rates are secondary when a server can bundle multiple tokens into one
 stream event. Client-TTFT prefill is an approximation unless the runtime reports
 an isolated prompt-evaluation duration.
 
+### DenseSpark v1.2 and CUDA-graph transfer protocol
+
+The 2026-08-31 DenseSpark lane pins recipe commit
+`0abecc3005cebe6f5e1e0c0e1f16552f95fe0228`, the local image ID recorded in
+`bench/densespark.py`, `Frozenlock/Qwen3.8-27B-int4-AutoRound` revision
+`b4c61732c4f2d8af323d75ba5702b5c7f3361539`, all 18 snapshot-file content
+digests, and the separate PQ-head artifact digest. It disables image pulls and
+Hugging Face downloads, publishes vLLM on loopback, disables prefix caching, uses
+probabilistic MTP depth eight, and keeps automatic `qwen3_xml` tool parsing
+enabled. The Docker bridge remains egress-capable, so this is an
+artifact-download-disabled launch rather than a network-isolated one. Startup
+aborts if `MemAvailable` falls below 14 GiB, swap grows by more than 512 MiB, or
+starting swap already exceeds 512 MiB. Only the owned container may be
+interrupted or recovered.
+
+New plans freeze those launch controls as a separate, digested `frozen-v1`
+receipt and execution rejects a missing or changed receipt. The two earlier
+2026-08-31 attempts predate that binding; evidence retains only their exact
+allowlisted plan hashes as `legacy-unbound` and makes no retroactive
+launch-policy claim. The configuration/image-derived writable compiler
+namespace is descriptor-walked and rejects unsafe ownership, modes, links, file
+types, or topology changes before it is mounted.
+
+Before container creation, the runtime reconstructs the complete expected
+Docker argument vector and requires byte-for-byte equality, including GPU, IPC,
+ulimits, all three mount targets and modes, the pinned image ID, and the complete
+serve argument vector. Added, removed, reordered, or mutated tokens fail closed.
+
+`manifests/suites/qwen38_27b_densespark_c1.toml` is the managed C1 timing
+screen: one warmup and three temperature-zero D256 requests at concurrency one.
+The canonical `agentic-tools` suite is the separate functional gate. The
+experimental warmup-sync profile must remain an exact C1 clone except for its
+immutable derived image and isolated compile-cache namespace. That image wraps
+all three original Qwen warmup helpers with synchronization/timing boundaries;
+it may neither skip a helper nor activate the rank-four-state diagnostic.
+Its hardened Dockerfile, single-payload context allowlist, local base ID, and
+derived image ID are immutable inputs to an artifact-download-disabled rebuild.
+Manual requests outside this managed path are diagnostics, not publishable
+throughput evidence.
+
+The Qwen3.8 27B SGLang graph ablation uses
+`matched-prompt-qwen38-27b-dspark-cuda-graph-d256-c1-v1`. Its warmup and five
+measured request IDs are deterministic, unique within an arm, and byte-identical
+between the FULL and disabled arms. Frozen-plan validation and evidence export
+must reject the superseded clock/model-bound schedule. The Flash-Next transfer
+lane follows the same matched-request requirement, permits only batch-one
+breakable decode graphs versus disabled with eager prefill, and remains blocked
+from generic execution until its dedicated SM121 runtime grants authority.
+Before redaction, export validates the exact arm profile and measured request-ID
+schedule. Published verification binds the graph backend to an exact scalar
+model-contract digest and revalidates sample schemas and aggregate arithmetic.
+
+Export only sanitized scalar receipts. DenseSpark safety failures retain typed
+byte-valued limits and observations plus terminal status, while commands, local
+paths, logs, prompts, completions, reasoning, tool payloads, request identifiers,
+and credentials remain in ignored raw storage.
+
 ### Qwen3.8-Flash-Next day-zero GB10 protocol
 
 The 2026-08-26 local route pins `unsloth/Qwen3.8-Flash-Next-GGUF` revision

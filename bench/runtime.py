@@ -14,15 +14,54 @@ import secrets
 import selectors
 import signal
 import socket
+import stat
 import subprocess
 import threading
 import time
-from typing import Any, Callable, TextIO
+from typing import Any, Callable, Sequence, TextIO
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
+from .densespark import (
+    DENSESPARK_C1_ARGS,
+    DENSESPARK_C1_ENVIRONMENT,
+    DENSESPARK_CONTAINER_SNAPSHOT,
+    DENSESPARK_LAUNCH_CONTAINER_PORT,
+    DENSESPARK_LAUNCH_DOCKER_NETWORK,
+    DENSESPARK_LAUNCH_HOST,
+    DENSESPARK_LAUNCH_HOST_PORT,
+    DENSESPARK_MODEL_REVISION,
+    DENSESPARK_PQ_CONTAINER_PATH,
+    DENSESPARK_PQ_SHA256,
+    DENSESPARK_PQ_SIZE_BYTES,
+    DENSESPARK_PROFILE_ID,
+    DENSESPARK_RECIPE_TREE,
+    DENSESPARK_SERVED_NAME,
+    DENSESPARK_STARTUP_MAX_STARTING_SWAP_MIB,
+    DENSESPARK_STARTUP_MAX_SWAP_GROWTH_MIB,
+    DENSESPARK_STARTUP_MIN_MEMAVAILABLE_GIB,
+    DENSESPARK_TOOL_CALL_PARSER,
+    DenseSparkContractError,
+    densespark_c1_cache_config,
+    densespark_c1_environment,
+    densespark_cache_namespace,
+    densespark_compile_cache_path,
+    densespark_configuration_digest,
+    densespark_expected_launch_policy,
+    densespark_expected_resolved_provenance,
+    densespark_local_image_id_for_profile,
+    densespark_pq_artifact_path,
+    is_densespark_profile,
+    is_densespark_warmup_sync_profile,
+    validate_densespark_local_image,
+    validate_densespark_pq_artifact,
+    validate_densespark_profile,
+    validate_densespark_snapshot,
+    validate_densespark_warmup_sync_sources,
+)
 from .execution_admission import model_execution_blocker
+from .host_safety import HostSafetyWatchdog
 from .seccomp_profile_contract import (
     DERIVED_PATH as SM121_STORAGE_SECCOMP_PATH,
     DERIVED_SHA256 as SM121_STORAGE_SECCOMP_SHA256,
@@ -3843,6 +3882,637 @@ def _readonly_sglang_ple_dir(
     return resolved, record
 
 
+def _densespark_cache_metadata(
+    metadata: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _require_densespark_cache_node(
+    metadata: os.stat_result,
+    *,
+    anchor: bool,
+) -> None:
+    """Require trusted ownership, mode, and file type for one cache node."""
+
+    if stat.S_ISLNK(metadata.st_mode):
+        raise RuntimeErrorWithContext(
+            "DenseSpark compile cache path must not contain symlinks"
+        )
+    if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
+        raise RuntimeErrorWithContext(
+            "DenseSpark compile cache permits only directories and regular files"
+        )
+    if anchor:
+        allowed_owners = {os.geteuid()}
+    else:
+        # The host creates the anchors, while the root container legitimately
+        # creates files and directories below the bind-mounted namespace.
+        allowed_owners = {os.geteuid(), 0}
+    if metadata.st_uid not in allowed_owners:
+        raise RuntimeErrorWithContext(
+            "DenseSpark compile cache contains an untrusted owner"
+        )
+    if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RuntimeErrorWithContext(
+            "DenseSpark compile cache must not be group/world-writable"
+        )
+    if metadata.st_mode & (stat.S_ISUID | stat.S_ISGID):
+        raise RuntimeErrorWithContext(
+            "DenseSpark compile cache must not contain set-id nodes"
+        )
+    if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink != 1:
+        raise RuntimeErrorWithContext(
+            "DenseSpark compile cache regular files must not be hard-linked"
+        )
+
+
+def _validate_densespark_compile_cache_tree(root: Path) -> None:
+    """Descriptor-walk an existing cache without following any symlinks."""
+
+    directory_flags = os.O_RDONLY
+    directory_flags |= getattr(os, "O_CLOEXEC", 0)
+    directory_flags |= getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+
+    def walk(directory_descriptor: int, *, depth: int) -> None:
+        if depth > 64:
+            raise RuntimeErrorWithContext(
+                "DenseSpark compile cache directory nesting is unsafe"
+            )
+        directory_before = os.fstat(directory_descriptor)
+        _require_densespark_cache_node(directory_before, anchor=depth == 0)
+        for name in os.listdir(directory_descriptor):
+            if type(name) is not str or not name or "/" in name or "\\" in name:
+                raise RuntimeErrorWithContext(
+                    "DenseSpark compile cache contains an unsafe entry name"
+                )
+            entry_before = os.stat(
+                name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            _require_densespark_cache_node(entry_before, anchor=False)
+            if stat.S_ISDIR(entry_before.st_mode):
+                child_descriptor = -1
+                try:
+                    child_descriptor = os.open(
+                        name,
+                        directory_flags,
+                        dir_fd=directory_descriptor,
+                    )
+                    child_opened = os.fstat(child_descriptor)
+                    if _densespark_cache_metadata(
+                        entry_before
+                    ) != _densespark_cache_metadata(child_opened):
+                        raise RuntimeErrorWithContext(
+                            "DenseSpark compile cache changed while being inspected"
+                        )
+                    walk(child_descriptor, depth=depth + 1)
+                    child_after = os.fstat(child_descriptor)
+                    entry_after = os.stat(
+                        name,
+                        dir_fd=directory_descriptor,
+                        follow_symlinks=False,
+                    )
+                    if _densespark_cache_metadata(
+                        child_after
+                    ) != _densespark_cache_metadata(entry_after):
+                        raise RuntimeErrorWithContext(
+                            "DenseSpark compile cache changed while being inspected"
+                        )
+                finally:
+                    if child_descriptor >= 0:
+                        os.close(child_descriptor)
+        directory_after = os.fstat(directory_descriptor)
+        if _densespark_cache_metadata(
+            directory_before
+        ) != _densespark_cache_metadata(directory_after):
+            raise RuntimeErrorWithContext(
+                "DenseSpark compile cache changed while being inspected"
+            )
+
+    root_before = os.stat(root, follow_symlinks=False)
+    _require_densespark_cache_node(root_before, anchor=True)
+    root_descriptor = -1
+    try:
+        root_descriptor = os.open(root, directory_flags)
+        root_opened = os.fstat(root_descriptor)
+        if _densespark_cache_metadata(root_before) != _densespark_cache_metadata(
+            root_opened
+        ):
+            raise RuntimeErrorWithContext(
+                "DenseSpark compile cache changed while being opened"
+            )
+        walk(root_descriptor, depth=0)
+        root_after = os.stat(root, follow_symlinks=False)
+        descriptor_after = os.fstat(root_descriptor)
+        if _densespark_cache_metadata(
+            descriptor_after
+        ) != _densespark_cache_metadata(root_after):
+            raise RuntimeErrorWithContext(
+                "DenseSpark compile cache path changed while being inspected"
+            )
+    finally:
+        if root_descriptor >= 0:
+            os.close(root_descriptor)
+
+
+def _prepare_densespark_compile_cache(
+    profile_id: str = DENSESPARK_PROFILE_ID,
+    *,
+    home: Path | None = None,
+) -> Path:
+    """Create and validate the fixed, configuration-derived compile cache.
+
+    The home and cache anchors must be non-symlink directories owned by the
+    invoking effective UID and not group/world-writable.  Existing descendants
+    may instead be root-owned because the container runs as root, but they must
+    remain non-writable by group/other and consist solely of ordinary,
+    single-link files and directories.  This makes the writable mount trust
+    boundary explicit without rejecting normal root-owned compiler artifacts.
+    """
+
+    home_path = Path.home() if home is None else Path(home)
+    try:
+        home_before = os.stat(home_path, follow_symlinks=False)
+        _require_densespark_cache_node(home_before, anchor=True)
+        if not stat.S_ISDIR(home_before.st_mode):
+            raise RuntimeErrorWithContext(
+                "DenseSpark compile cache home must be a directory"
+            )
+        home_resolved = home_path.resolve(strict=True)
+        user_cache = home_resolved / ".cache"
+        intended = densespark_compile_cache_path(
+            home=home_resolved,
+            profile_id=profile_id,
+        )
+        profile_cache = intended.parent
+        intended.relative_to(user_cache)
+
+        # Validate each parent before using it to create the next component;
+        # otherwise a pre-existing symlink could redirect the mkdir itself.
+        for directory in (user_cache, profile_cache, intended):
+            try:
+                metadata = os.stat(directory, follow_symlinks=False)
+            except FileNotFoundError:
+                os.mkdir(directory, mode=0o700)
+                metadata = os.stat(directory, follow_symlinks=False)
+            _require_densespark_cache_node(metadata, anchor=True)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise RuntimeErrorWithContext(
+                    "DenseSpark compile cache anchors must be directories"
+                )
+
+        anchors: dict[Path, os.stat_result] = {}
+        for directory in (home_resolved, user_cache, profile_cache, intended):
+            metadata = os.stat(directory, follow_symlinks=False)
+            _require_densespark_cache_node(metadata, anchor=True)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise RuntimeErrorWithContext(
+                    "DenseSpark compile cache anchors must be directories"
+                )
+            anchors[directory] = metadata
+
+        cache_root = user_cache.resolve(strict=True)
+        resolved = intended.resolve(strict=True)
+        if cache_root != user_cache or resolved != intended:
+            raise RuntimeErrorWithContext(
+                "DenseSpark compile cache path must not contain symlinks"
+            )
+        resolved.relative_to(cache_root)
+        _validate_densespark_compile_cache_tree(resolved)
+
+        for directory, metadata_before in anchors.items():
+            metadata_after = os.stat(directory, follow_symlinks=False)
+            if _densespark_cache_metadata(
+                metadata_before
+            ) != _densespark_cache_metadata(metadata_after):
+                raise RuntimeErrorWithContext(
+                    "DenseSpark compile cache anchors changed during validation"
+                )
+    except RuntimeErrorWithContext:
+        raise
+    except (OSError, TypeError, ValueError) as error:
+        raise RuntimeErrorWithContext(
+            "DenseSpark compile cache path could not be prepared safely"
+        ) from error
+    return resolved
+
+
+def _densespark_image_runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    return _run(list(command), check=False, timeout=20)
+
+
+def _validate_densespark_launch_command(
+    command: Sequence[str],
+    *,
+    image_id: str,
+    run_identity: str,
+    repository: Path,
+    pq_artifact: Path,
+    compile_cache: Path,
+) -> None:
+    """Reject any managed launch that differs from the complete expected argv."""
+
+    if not isinstance(command, (list, tuple)) or not all(
+        type(argument) is str for argument in command
+    ):
+        raise DenseSparkContractError("DenseSpark launch command is invalid")
+    if (
+        type(image_id) is not str
+        or not image_id
+        or type(run_identity) is not str
+        or not run_identity
+        or not all(
+            isinstance(path, Path)
+            for path in (repository, pq_artifact, compile_cache)
+        )
+    ):
+        raise DenseSparkContractError(
+            "DenseSpark launch command expectations are invalid"
+        )
+
+    policy = densespark_expected_launch_policy()
+    expected_labels = (
+        str(policy["label_managed"]),
+        f"ai.sparkbench.run={run_identity}",
+        str(policy["label_backend"]),
+    )
+    expected_environment = tuple(
+        f"{name}={value}" for name, value in DENSESPARK_C1_ENVIRONMENT
+    )
+    expected_publish = (
+        f"{policy['publish_host']}:{policy['publish_host_port']}:"
+        f"{policy['publish_container_port']}"
+    )
+    expected = [
+        "docker",
+        "run",
+        "--detach",
+        "--pull=never",
+        "--network",
+        str(policy["docker_network"]),
+        "--name",
+        CONTAINER_NAME,
+        *(item for label in expected_labels for item in ("--label", label)),
+        "--entrypoint",
+        "vllm",
+        "--gpus",
+        "all",
+        "--ipc",
+        "host",
+        "--ulimit",
+        "memlock=-1",
+        "--ulimit",
+        "stack=67108864",
+        "--publish",
+        expected_publish,
+        "--volume",
+        f"{repository}:/root/.cache/huggingface/hub/{repository.name}:ro",
+        "--volume",
+        f"{pq_artifact}:{DENSESPARK_PQ_CONTAINER_PATH}:ro",
+        "--volume",
+        f"{compile_cache}:/root/.cache/vllm:rw",
+        *(
+            item
+            for environment in expected_environment
+            for item in ("--env", environment)
+        ),
+        image_id,
+        "serve",
+        DENSESPARK_CONTAINER_SNAPSHOT,
+        "--served-model-name",
+        DENSESPARK_SERVED_NAME,
+        *DENSESPARK_C1_ARGS,
+    ]
+    if list(command) != expected:
+        raise DenseSparkContractError(
+            "DenseSpark launch command does not match its frozen policy"
+        )
+
+
+def _densespark_startup_watchdog() -> HostSafetyWatchdog:
+    """Return the fixed cold-compile safety monitor for only this adapter."""
+
+    policy = densespark_expected_launch_policy()
+    return HostSafetyWatchdog(
+        min_memavailable_gib=(
+            int(policy["host_safety_min_memavailable_bytes"]) // 1024**3
+        ),
+        max_swap_growth_mib=(
+            int(policy["host_safety_max_swap_growth_bytes"]) // 1024**2
+        ),
+        max_starting_swap_mib=(
+            int(policy["host_safety_max_starting_swap_bytes"]) // 1024**2
+        ),
+    )
+
+
+def _interrupt_densespark_startup(server: ManagedServer) -> None:
+    """Immediately stop only the exact owned DenseSpark vLLM container."""
+
+    with server._lifecycle_lock:
+        if not server.container_id:
+            return
+        server._require_owned_container()
+        _run(
+            ["docker", "stop", "--time", "0", server.container_id],
+            check=True,
+            timeout=15,
+        )
+        server._immediate_stop_complete = True
+
+
+def _recover_failed_densespark_run(run_identity: str) -> None:
+    """Remove a failed-start container only when its ownership still matches."""
+
+    recovery = recover_owned_vllm(run_identity)
+    if recovery == "different_container_present":
+        raise RuntimeErrorWithContext(
+            "DenseSpark launch failure left an ambiguously owned container"
+        )
+
+
+def _start_densespark_vllm(
+    model: Any,
+    *,
+    workspace: Path,
+    port: int,
+    allow_download: bool,
+    server_log_path: Path | None,
+) -> ManagedServer:
+    """Launch the exact local DenseSpark C1 runtime under managed ownership."""
+
+    if allow_download:
+        raise RuntimeErrorWithContext(
+            "DenseSpark managed serving disables model-artifact downloads"
+        )
+    try:
+        validate_densespark_profile(model)
+    except DenseSparkContractError as error:
+        raise RuntimeErrorWithContext(str(error)) from error
+    launch_policy = densespark_expected_launch_policy()
+    if getattr(model, "resolved_densespark_launch_policy", None) != launch_policy:
+        raise RuntimeErrorWithContext(
+            "DenseSpark launch policy is not bound to the frozen plan"
+        )
+    if port != DENSESPARK_LAUNCH_HOST_PORT:
+        raise RuntimeErrorWithContext(
+            "DenseSpark managed serving requires its frozen loopback port"
+        )
+    profile_id = str(model.id)
+    expected_image_id = densespark_local_image_id_for_profile(profile_id)
+    if is_densespark_warmup_sync_profile(model):
+        try:
+            validate_densespark_warmup_sync_sources()
+        except DenseSparkContractError as error:
+            raise RuntimeErrorWithContext(
+                "DenseSpark warmup-sync source provenance did not verify"
+            ) from error
+
+    hf_cache = _huggingface_root(model, workspace)
+    repository = (
+        hf_cache
+        / "hub"
+        / ("models--" + str(model.source).replace("/", "--"))
+    )
+    snapshot = repository / "snapshots" / DENSESPARK_MODEL_REVISION
+    try:
+        snapshot_receipt = validate_densespark_snapshot(
+            snapshot,
+            repository_root=repository,
+        )
+        hf_cache_resolved = hf_cache.resolve(strict=True)
+        repository_resolved = repository.resolve(strict=True)
+        repository_resolved.relative_to(hf_cache_resolved)
+        snapshot.resolve(strict=True).relative_to(repository_resolved)
+    except (DenseSparkContractError, OSError, ValueError) as error:
+        raise RuntimeErrorWithContext(
+            "DenseSpark exact cached snapshot failed prelaunch validation"
+        ) from error
+
+    compile_cache = _prepare_densespark_compile_cache(profile_id)
+    pq_artifact = densespark_pq_artifact_path()
+    environment = densespark_c1_environment()
+    run_identity = str(getattr(model, "run_identity", "unknown"))
+    command = [
+        "docker",
+        "run",
+        "--detach",
+        "--pull=never",
+        "--network",
+        DENSESPARK_LAUNCH_DOCKER_NETWORK,
+        "--name",
+        CONTAINER_NAME,
+        "--label",
+        MANAGED_LABEL,
+        "--label",
+        f"ai.sparkbench.run={run_identity}",
+        "--label",
+        "ai.sparkbench.backend=vllm",
+        "--entrypoint",
+        "vllm",
+        "--gpus",
+        "all",
+        "--ipc",
+        "host",
+        "--ulimit",
+        "memlock=-1",
+        "--ulimit",
+        "stack=67108864",
+        "--publish",
+        f"{DENSESPARK_LAUNCH_HOST}:{port}:{DENSESPARK_LAUNCH_CONTAINER_PORT}",
+        "--volume",
+        f"{repository_resolved}:/root/.cache/huggingface/hub/"
+        f"{repository.name}:ro",
+        "--volume",
+        f"{pq_artifact}:{DENSESPARK_PQ_CONTAINER_PATH}:ro",
+        "--volume",
+        f"{compile_cache}:/root/.cache/vllm:rw",
+    ]
+    for name, value in environment.items():
+        command.extend(("--env", f"{name}={value}"))
+    command.extend(
+        (
+            expected_image_id,
+            "serve",
+            DENSESPARK_CONTAINER_SNAPSHOT,
+            "--served-model-name",
+            DENSESPARK_SERVED_NAME,
+            *DENSESPARK_C1_ARGS,
+        )
+    )
+    try:
+        _validate_densespark_launch_command(
+            command,
+            image_id=expected_image_id,
+            run_identity=run_identity,
+            repository=repository_resolved,
+            pq_artifact=pq_artifact,
+            compile_cache=compile_cache,
+        )
+    except DenseSparkContractError as error:
+        raise RuntimeErrorWithContext(
+            "DenseSpark launch command policy did not verify"
+        ) from error
+
+    # These two mutable local inputs are deliberately the final checks before
+    # Docker creates the container.  No cache setup or path discovery follows.
+    try:
+        pq_receipt = validate_densespark_pq_artifact(
+            pq_artifact,
+            expected_size_bytes=DENSESPARK_PQ_SIZE_BYTES,
+            expected_sha256=DENSESPARK_PQ_SHA256,
+        )
+        image_id = validate_densespark_local_image(
+            str(model.image),
+            expected_image_id=expected_image_id,
+            runner=_densespark_image_runner,
+        )
+    except DenseSparkContractError as error:
+        raise RuntimeErrorWithContext(
+            "DenseSpark local prelaunch provenance did not verify"
+        ) from error
+
+    watchdog = _densespark_startup_watchdog()
+    server: ManagedServer | None = None
+    try:
+        watchdog.start()
+        result = _run(command, check=False, timeout=60)
+        if result.returncode:
+            launch_error = RuntimeErrorWithContext(
+                "docker run failed for managed DenseSpark"
+            )
+            try:
+                _recover_failed_densespark_run(run_identity)
+            except BaseException as cleanup_error:
+                launch_error.add_note(
+                    "Could not recover a failed DenseSpark docker run: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+            raise launch_error
+        container_id = result.stdout.strip()
+        if re.fullmatch(r"[0-9a-f]{64}", container_id) is None:
+            launch_error = RuntimeErrorWithContext(
+                "docker run returned an invalid managed DenseSpark container ID"
+            )
+            try:
+                _recover_failed_densespark_run(run_identity)
+            except BaseException as cleanup_error:
+                launch_error.add_note(
+                    "Could not recover a malformed DenseSpark docker run: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+            raise launch_error
+        server = ManagedServer(
+            "vllm",
+            f"http://127.0.0.1:{port}/v1",
+            container_id=container_id,
+            run_identity=run_identity,
+        )
+        watchdog.register_abort_callback(
+            lambda: _interrupt_densespark_startup(server)
+        )
+        watchdog.raise_if_tripped()
+        config = densespark_c1_cache_config(profile_id)
+        server.native_provenance = {
+            "densespark_profile": profile_id,
+            "densespark_recipe_revision": str(model.recipe_revision),
+            "densespark_recipe_tree": DENSESPARK_RECIPE_TREE,
+            "model_revision": DENSESPARK_MODEL_REVISION,
+            "model_weight_file_count": snapshot_receipt.weight_file_count,
+            "model_weight_size_bytes": snapshot_receipt.weight_size_bytes,
+            "docker_image_id": image_id,
+            "pq_artifact_sha256": pq_receipt.sha256,
+            "pq_artifact_size_bytes": pq_receipt.size_bytes,
+            "configuration_sha256": densespark_configuration_digest(config),
+            "compile_cache_namespace": densespark_cache_namespace(config),
+            "gpu_memory_utilization": 0.86,
+            "gpu_memory_configuration_reduction": (
+                "upstream_0.90_to_0.86_memavailable_margin"
+            ),
+            "speculative_depth": 8,
+            "draft_sample_method": "probabilistic",
+            "prefix_caching": False,
+            "tool_calling": True,
+            "tool_call_parser": DENSESPARK_TOOL_CALL_PARSER,
+            "densespark_launch_policy": dict(launch_policy),
+            "hf_hub_policy": "offline",
+            "network_topology": "loopback_published_bridge_egress_capable",
+            "network_isolation": "none",
+            "startup_min_memavailable_gib": (
+                DENSESPARK_STARTUP_MIN_MEMAVAILABLE_GIB
+            ),
+            "startup_max_swap_growth_mib": (
+                DENSESPARK_STARTUP_MAX_SWAP_GROWTH_MIB
+            ),
+            "startup_max_starting_swap_mib": (
+                DENSESPARK_STARTUP_MAX_STARTING_SWAP_MIB
+            ),
+            "startup_starting_swap_used_kib": watchdog.starting_swap_used_kib,
+        }
+        if is_densespark_warmup_sync_profile(model):
+            expected_receipt = densespark_expected_resolved_provenance(profile_id)
+            server.native_provenance.update(
+                {
+                    "densespark_warmup_mode": expected_receipt["mode"],
+                    "densespark_warmup_probe_sha256": expected_receipt[
+                        "probe_sha256"
+                    ],
+                    "densespark_warmup_qwen_source_sha256": expected_receipt[
+                        "qwen_warmup_source_sha256"
+                    ],
+                }
+            )
+        server.startup_s = wait_for_endpoint(
+            server.base_url,
+            float(model.startup_timeout_s),
+            container_id,
+            abort_check=watchdog.raise_if_tripped,
+        )
+        watchdog.raise_if_tripped()
+    except BaseException as startup_error:
+        if server is not None and server_log_path is not None:
+            try:
+                save_server_logs(server, server_log_path)
+            except Exception as log_error:
+                startup_error.add_note(
+                    "Could not persist full startup container logs: "
+                    f"{type(log_error).__name__}: {log_error}"
+                )
+        if watchdog.abort_callback_error is not None:
+            callback_error = watchdog.abort_callback_error
+            startup_error.add_note(
+                "DenseSpark safety interrupt failed: "
+                f"{type(callback_error).__name__}: {callback_error}"
+            )
+        if server is not None:
+            try:
+                server.stop()
+            except BaseException as cleanup_error:
+                startup_error.add_note(
+                    "Could not clean up managed DenseSpark server: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+        raise
+    finally:
+        watchdog.stop()
+    if server is None:
+        raise RuntimeErrorWithContext("DenseSpark server creation was incomplete")
+    return server
+
+
 def start_vllm(
     model: Any,
     *,
@@ -3861,6 +4531,15 @@ def start_vllm(
         )
     if not _port_is_free(port):
         raise RuntimeErrorWithContext(f"Port {port} is already in use")
+
+    if is_densespark_profile(model):
+        return _start_densespark_vllm(
+            model,
+            workspace=workspace,
+            port=port,
+            allow_download=allow_download,
+            server_log_path=server_log_path,
+        )
 
     cache_root = (workspace / "data").resolve()
     configured_cache = getattr(model, "cache_dir", None)

@@ -1,0 +1,17 @@
+schema_version = 1
+
+[suite]
+id = "qwen38-27b-densespark-c1"
+description = "Minimal concurrency-one D256 timing check for the exact local DenseSpark v1.2 Qwen3.8 27B profile; tool correctness uses the canonical agentic-tools suite."
+
+[[cases]]
+id = "densespark-c1-decode-256"
+kind = "decode"
+requires = ["chat"]
+warmups = 1
+repetitions = 3
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+max_turns = 1

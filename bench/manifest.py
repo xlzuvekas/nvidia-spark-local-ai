@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -10,6 +10,15 @@ import tomllib
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit
 
+from .densespark import (
+    DENSESPARK_PROFILE_IDS,
+    DENSESPARK_SUITE_ID,
+    DENSESPARK_TOOL_SUITE_ID,
+    DenseSparkContractError,
+    is_densespark_profile,
+    validate_densespark_profile,
+    validate_densespark_suite,
+)
 from .memory_ops import (
     MEMORY_OPERATION_CONTEXT_TOKENS,
     MEMORY_OPERATION_LLAMACPP_DIGEST,
@@ -41,6 +50,16 @@ from .sglang_sm121_agent_admission import (
     is_sm121_agent_admission_candidate,
     validate_sm121_agent_admission_profile,
     validate_sm121_agent_admission_suite,
+)
+from .sglang_sm121_cuda_graph import (
+    SM121_CUDA_GRAPH_CASE_ID,
+    SM121_CUDA_GRAPH_PROFILE_IDS,
+    SM121_CUDA_GRAPH_SUITE_DESCRIPTION,
+    SM121_CUDA_GRAPH_SUITE_ID,
+    SM121CudaGraphError,
+    is_sm121_cuda_graph_candidate,
+    validate_sm121_cuda_graph_candidate,
+    validate_sm121_cuda_graph_suite,
 )
 from .sglang_sm121_cache_observability import (
     SM121_CACHE_OBSERVABILITY_SUITE_ID,
@@ -84,6 +103,148 @@ HOST_SAFETY_MODEL_FIELDS = (
     "host_safety_min_memavailable_gib",
     "host_safety_max_swap_growth_mib",
     "host_safety_max_starting_swap_mib",
+)
+MATCHED_PROMPT_CASE_PREFIX = "matched-prompt-"
+MATCHED_REQUEST_UNIQUE_PROTOCOL = "matched-request-unique-v1"
+QWEN38_27B_DSPARK_CUDA_GRAPH_SUITE_ID = (
+    "qwen38-27b-dspark-c1-cuda-graph"
+)
+QWEN38_27B_DSPARK_CUDA_GRAPH_SUITE_DESCRIPTION = (
+    "Matched single-user D256 screen for the pinned RadixArk Qwen3.8-27B "
+    "plus DSpark full-versus-disabled decode CUDA-graph ablation."
+)
+QWEN38_27B_DSPARK_CUDA_GRAPH_CASE_ID = (
+    "matched-prompt-qwen38-27b-dspark-cuda-graph-d256-c1-v1"
+)
+QWEN38_27B_DSPARK_CUDA_GRAPH_PROFILE_IDS = frozenset(
+    {
+        "qwen38-27b-nvfp4-dspark-c1-cuda-graph-full-sglang",
+        "qwen38-27b-nvfp4-dspark-c1-cuda-graph-disabled-sglang",
+    }
+)
+QWEN38_27B_DSPARK_SOURCE_PROFILE_ID = "qwen38-27b-nvfp4-dspark-sglang"
+QWEN38_27B_DSPARK_CUDA_GRAPH_FULL_PROFILE_ID = (
+    "qwen38-27b-nvfp4-dspark-c1-cuda-graph-full-sglang"
+)
+QWEN38_27B_DSPARK_CUDA_GRAPH_DISABLED_PROFILE_ID = (
+    "qwen38-27b-nvfp4-dspark-c1-cuda-graph-disabled-sglang"
+)
+QWEN38_27B_DSPARK_CUDA_GRAPH_FULL_DESCRIPTION = (
+    "Matched C1 D256 CUDA-graph-on arm cloned from the pinned RadixArk/DSpark "
+    "profile, with an explicit batch-one full decode graph, eager prefill, "
+    "and metrics."
+)
+QWEN38_27B_DSPARK_CUDA_GRAPH_DISABLED_DESCRIPTION = (
+    "Matched C1 D256 CUDA-graph-off arm cloned from the pinned RadixArk/DSpark "
+    "profile, with explicit batch-one decode geometry, eager prefill, and "
+    "metrics."
+)
+QWEN38_27B_DSPARK_SOURCE_DESCRIPTION = (
+    "Managed serving-config reproduction of the pinned upstream recipe; "
+    "SparkBench cases and results remain independent. Apache-2.0 target with "
+    "the card-license=other DSpark draft."
+)
+QWEN38_27B_DSPARK_SOURCE_ARGS = (
+    "--trust-remote-code",
+    "--tp-size",
+    "1",
+    "--served-model-name",
+    "qwen3.8-27b",
+    "--mem-fraction-static",
+    "0.50",
+    "--attention-backend",
+    "flashinfer",
+    "--chunked-prefill-size",
+    "8192",
+    "--disable-prefill-cuda-graph",
+    "--cuda-graph-max-bs",
+    "4",
+    "--speculative-algorithm",
+    "DSPARK",
+    "--speculative-dspark-block-size",
+    "7",
+    "--speculative-draft-model-quantization",
+    "unquant",
+    "--mamba-radix-cache-strategy",
+    "extra_buffer_lazy",
+    "--mamba-ssm-dtype",
+    "bfloat16",
+    "--max-mamba-cache-size",
+    "96",
+    "--max-running-requests",
+    "8",
+    "--enable-torch-compile",
+    "--torch-compile-max-bs",
+    "4",
+    "--num-continuous-decode-steps",
+    "2",
+    "--reasoning-parser",
+    "qwen3",
+    "--tool-call-parser",
+    "qwen3_coder",
+    "--host",
+    "0.0.0.0",
+    "--port",
+    "30000",
+)
+
+
+def qwen38_27b_dspark_cuda_graph_args(backend: str) -> tuple[str, ...]:
+    """Return the one reviewed graph delta over the pinned DSpark source."""
+
+    if backend not in {"full", "disabled"}:
+        raise ValueError("Qwen3.8 27B graph backend must be full or disabled")
+    args = list(QWEN38_27B_DSPARK_SOURCE_ARGS)
+    graph_index = args.index("--disable-prefill-cuda-graph")
+    if args[graph_index : graph_index + 3] != [
+        "--disable-prefill-cuda-graph",
+        "--cuda-graph-max-bs",
+        "4",
+    ]:
+        raise AssertionError("Qwen3.8 27B source graph bundle changed")
+    args[graph_index : graph_index + 3] = [
+        "--cuda-graph-backend-decode",
+        backend,
+        "--cuda-graph-bs-decode",
+        "1",
+        "--cuda-graph-backend-prefill",
+        "disabled",
+        "--enable-metrics",
+    ]
+    return tuple(args)
+
+
+@dataclass(frozen=True, slots=True)
+class MatchedPromptGraphStudy:
+    """One exact model/suite/case binding for a matched prompt schedule."""
+
+    suite_id: str
+    suite_description: str
+    case_id: str
+    profile_ids: frozenset[str]
+
+
+MATCHED_PROMPT_GRAPH_STUDIES = (
+    MatchedPromptGraphStudy(
+        suite_id=QWEN38_27B_DSPARK_CUDA_GRAPH_SUITE_ID,
+        suite_description=QWEN38_27B_DSPARK_CUDA_GRAPH_SUITE_DESCRIPTION,
+        case_id=QWEN38_27B_DSPARK_CUDA_GRAPH_CASE_ID,
+        profile_ids=QWEN38_27B_DSPARK_CUDA_GRAPH_PROFILE_IDS,
+    ),
+    MatchedPromptGraphStudy(
+        suite_id=SM121_CUDA_GRAPH_SUITE_ID,
+        suite_description=SM121_CUDA_GRAPH_SUITE_DESCRIPTION,
+        case_id=SM121_CUDA_GRAPH_CASE_ID,
+        profile_ids=SM121_CUDA_GRAPH_PROFILE_IDS,
+    ),
+)
+MATCHED_PROMPT_GRAPH_SUITE_IDS = frozenset(
+    study.suite_id for study in MATCHED_PROMPT_GRAPH_STUDIES
+)
+MATCHED_PROMPT_GRAPH_PROFILE_IDS = frozenset(
+    profile_id
+    for study in MATCHED_PROMPT_GRAPH_STUDIES
+    for profile_id in study.profile_ids
 )
 _QWEN38_PLE_ABLATION_IDENTITY = (
     "RadixArk/Qwen3.8-Flash-Next-NVFP4",
@@ -405,6 +566,9 @@ _MODEL_KEYS = frozenset(
         "draft_model_file",
         "draft_model_digest",
         "draft_model_size_bytes",
+        "densespark_pq_file",
+        "densespark_pq_digest",
+        "densespark_pq_size_bytes",
         "sglang_allow_hf_metadata_probe",
         "sglang_source_overlays",
         "sglang_ple_mmap",
@@ -515,6 +679,9 @@ class ModelSpec:
     draft_model_file: str | None = None
     draft_model_digest: str | None = None
     draft_model_size_bytes: int | None = None
+    densespark_pq_file: str | None = None
+    densespark_pq_digest: str | None = None
+    densespark_pq_size_bytes: int | None = None
     sglang_allow_hf_metadata_probe: bool = False
     sglang_source_overlays: tuple[SGLangSourceOverlay, ...] = ()
     sglang_ple_mmap: bool = False
@@ -578,7 +745,158 @@ def model_spec_to_dict(model: ModelSpec) -> dict[str, Any]:
     if not any(record[name] is not None for name in storage_fields):
         for name in storage_fields:
             record.pop(name)
+    elif is_densespark_profile(model):
+        for name in storage_fields[1:]:
+            record.pop(name)
+    densespark_fields = (
+        "densespark_pq_file",
+        "densespark_pq_digest",
+        "densespark_pq_size_bytes",
+    )
+    if not any(record[name] is not None for name in densespark_fields):
+        for name in densespark_fields:
+            record.pop(name)
     return record
+
+
+def qwen38_27b_dspark_cuda_graph_expected_model(
+    profile_id: str,
+) -> ModelSpec:
+    """Construct one complete reviewed Qwen3.8 27B graph-arm identity."""
+
+    source = ModelSpec(
+        id=QWEN38_27B_DSPARK_SOURCE_PROFILE_ID,
+        backend="sglang",
+        source="RadixArk/Qwen3.8-27B-NVFP4",
+        served_name="qwen3.8-27b",
+        tasks=("chat", "json", "thinking", "tools"),
+        image=(
+            "lmsysorg/sglang@sha256:"
+            "febfb971c7352570fc445c466ebd6ffc9d896024958e544a60f2137fd85856b1"
+        ),
+        max_context=262_144,
+        native_context=262_144,
+        startup_timeout_s=1_800,
+        args=QWEN38_27B_DSPARK_SOURCE_ARGS,
+        endpoint="http://127.0.0.1:30000/v1",
+        estimated_ram_gib=92.0,
+        revision="52d1adc5f38aa5ebf099c29ed7025ba34cfbb854",
+        image_digest=(
+            "sha256:"
+            "febfb971c7352570fc445c466ebd6ffc9d896024958e544a60f2137fd85856b1"
+        ),
+        architecture="dense+dspark-draft",
+        quantization="nvfp4+unquant-dspark",
+        description=QWEN38_27B_DSPARK_SOURCE_DESCRIPTION,
+        cache_dir="user",
+        weight_size_bytes=21_921_697_280,
+        weight_file_count=3,
+        draft_source="RadixArk/Qwen3.8-27B-DSpark",
+        draft_revision="923ed3a8572615643f0137e424e4ce4edd7f1cda",
+        draft_weight_size_bytes=2_718_576_122,
+        sglang_allow_hf_metadata_probe=True,
+        recipe_source="hasso5703/dgx-spark-qwen38",
+        recipe_revision="3590fb29296b1babd85405daad1eef1c4a3ebe0f",
+        support_status="spark_other_backend",
+    )
+    if profile_id == QWEN38_27B_DSPARK_CUDA_GRAPH_FULL_PROFILE_ID:
+        return replace(
+            source,
+            id=profile_id,
+            description=QWEN38_27B_DSPARK_CUDA_GRAPH_FULL_DESCRIPTION,
+            args=qwen38_27b_dspark_cuda_graph_args("full"),
+        )
+    if profile_id == QWEN38_27B_DSPARK_CUDA_GRAPH_DISABLED_PROFILE_ID:
+        return replace(
+            source,
+            id=profile_id,
+            description=QWEN38_27B_DSPARK_CUDA_GRAPH_DISABLED_DESCRIPTION,
+            args=qwen38_27b_dspark_cuda_graph_args("disabled"),
+        )
+    raise ValueError(f"{profile_id!r} is not a Qwen3.8 27B graph profile")
+
+
+def is_qwen38_27b_dspark_cuda_graph_candidate(model: Any) -> bool:
+    """Return whether ``model`` claims one reviewed Qwen3.8 27B graph ID."""
+
+    model_id = (
+        model.get("id") if isinstance(model, Mapping) else getattr(model, "id", None)
+    )
+    return model_id in QWEN38_27B_DSPARK_CUDA_GRAPH_PROFILE_IDS
+
+
+def _coerce_qwen38_27b_dspark_cuda_graph_model(model: Any) -> ModelSpec:
+    if isinstance(model, ModelSpec):
+        return model
+    if isinstance(model, Mapping):
+        record = dict(model)
+    else:
+        try:
+            record = dict(vars(model))
+        except TypeError as error:
+            raise ManifestError(
+                "Qwen3.8 27B graph profile must be a model record"
+            ) from error
+    unknown = set(record) - set(ModelSpec.__dataclass_fields__)
+    if unknown:
+        raise ManifestError(
+            "Qwen3.8 27B graph profile has unknown fields: "
+            + ", ".join(sorted(unknown))
+        )
+    for name in (
+        "args",
+        "fetch_allow_patterns",
+        "fetch_ignore_patterns",
+        "tasks",
+    ):
+        value = record.get(name)
+        if isinstance(value, (list, tuple)):
+            record[name] = tuple(value)
+    overlays = record.get("sglang_source_overlays")
+    if isinstance(overlays, (list, tuple)):
+        record["sglang_source_overlays"] = tuple(
+            item
+            if isinstance(item, SGLangSourceOverlay)
+            else SGLangSourceOverlay(**item)
+            if isinstance(item, Mapping)
+            else item
+            for item in overlays
+        )
+    shards = record.get("model_shards")
+    if isinstance(shards, (list, tuple)):
+        record["model_shards"] = tuple(
+            item
+            if isinstance(item, ModelShard)
+            else ModelShard(**item)
+            if isinstance(item, Mapping)
+            else item
+            for item in shards
+        )
+    try:
+        return ModelSpec(**record)
+    except (TypeError, ValueError) as error:
+        raise ManifestError(
+            "Qwen3.8 27B graph profile is not a complete model record"
+        ) from error
+
+
+def validate_qwen38_27b_dspark_cuda_graph_candidate(model: Any) -> None:
+    """Require the complete exact source clone plus its one graph-arm delta."""
+
+    candidate = _coerce_qwen38_27b_dspark_cuda_graph_model(model)
+    if candidate.id not in QWEN38_27B_DSPARK_CUDA_GRAPH_PROFILE_IDS:
+        raise ManifestError("model is not a reviewed Qwen3.8 27B graph profile")
+    expected = qwen38_27b_dspark_cuda_graph_expected_model(candidate.id)
+    candidate_json = json.dumps(
+        asdict(candidate), ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    )
+    expected_json = json.dumps(
+        asdict(expected), ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    )
+    if candidate_json != expected_json:
+        raise ManifestError(
+            f"{candidate.id!r} changed beyond its exact graph bundle"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -619,6 +937,74 @@ def varied_context_needle_spec(case_id: str) -> VariedContextNeedleSpec | None:
         depth=match.group("depth"),
         seed=match.group("seed"),
     )
+
+
+def matched_prompt_graph_study(
+    *,
+    case_id: str | None = None,
+    suite_id: str | None = None,
+    profile_id: str | None = None,
+) -> MatchedPromptGraphStudy | None:
+    """Resolve exactly one graph study identity without fuzzy matching."""
+
+    selectors = tuple(
+        value for value in (case_id, suite_id, profile_id) if value is not None
+    )
+    if len(selectors) != 1:
+        raise ValueError("exactly one matched-prompt graph selector is required")
+    for study in MATCHED_PROMPT_GRAPH_STUDIES:
+        if case_id is not None and case_id == study.case_id:
+            return study
+        if suite_id is not None and suite_id == study.suite_id:
+            return study
+        if profile_id is not None and profile_id in study.profile_ids:
+            return study
+    return None
+
+
+def validate_matched_prompt_graph_model(
+    model: Any,
+    *,
+    context: str = "model",
+) -> None:
+    """Dispatch a graph arm only to its exact pair-specific profile contract."""
+
+    model_id = (
+        model.get("id") if isinstance(model, Mapping) else getattr(model, "id", None)
+    )
+    study = matched_prompt_graph_study(profile_id=model_id)
+    if study is None:
+        raise ManifestError(f"{context}.id is not a matched-prompt graph profile")
+    if study.suite_id == QWEN38_27B_DSPARK_CUDA_GRAPH_SUITE_ID:
+        try:
+            validate_qwen38_27b_dspark_cuda_graph_candidate(model)
+        except ManifestError as error:
+            raise ManifestError(f"{context}: {error}") from error
+        return
+    if study.suite_id != SM121_CUDA_GRAPH_SUITE_ID:
+        raise ManifestError(f"{context}.id is not a reviewed graph profile")
+    try:
+        validate_sm121_cuda_graph_candidate(model)
+    except SM121CudaGraphError as error:
+        raise ManifestError(f"{context}: {error}") from error
+
+
+def matched_prompt_protocol(case_id: str) -> str | None:
+    """Return the exact matched-prompt protocol selected by ``case_id``.
+
+    The reserved prefix is fail-closed: a typo or an unreviewed protocol
+    variant cannot silently fall back to the generic model-bound, clock-based
+    nonce schedule.
+    """
+
+    if not case_id.startswith(MATCHED_PROMPT_CASE_PREFIX):
+        return None
+    if matched_prompt_graph_study(case_id=case_id) is None:
+        raise ValueError(
+            "matched-prompt IDs must use one of the exact reviewed "
+            "CUDA-graph v1 case identities"
+        )
+    return MATCHED_REQUEST_UNIQUE_PROTOCOL
 
 
 @dataclass(frozen=True, slots=True)
@@ -742,6 +1128,15 @@ def load_models(path: str | Path) -> dict[str, ModelSpec]:
             ),
             draft_model_size_bytes=_optional_int(
                 row, "draft_model_size_bytes", context, default=None
+            ),
+            densespark_pq_file=_optional_string(
+                row, "densespark_pq_file", context
+            ),
+            densespark_pq_digest=_optional_string(
+                row, "densespark_pq_digest", context
+            ),
+            densespark_pq_size_bytes=_optional_int(
+                row, "densespark_pq_size_bytes", context, default=None
             ),
             sglang_allow_hf_metadata_probe=_optional_bool(
                 row, "sglang_allow_hf_metadata_probe", context, default=False
@@ -905,6 +1300,21 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
         raise ManifestError(f"{context}.startup_timeout_s must be positive")
     if model.estimated_ram_gib is not None and model.estimated_ram_gib <= 0:
         raise ManifestError(f"{context}.estimated_ram_gib must be positive")
+    densespark_fields = (
+        model.densespark_pq_file,
+        model.densespark_pq_digest,
+        model.densespark_pq_size_bytes,
+    )
+    densespark_candidate = is_densespark_profile(model) or any(
+        value is not None for value in densespark_fields
+    )
+    if densespark_candidate:
+        try:
+            validate_densespark_profile(model)
+        except DenseSparkContractError as error:
+            raise ManifestError(f"{context}: {error}") from error
+    if model.id in MATCHED_PROMPT_GRAPH_PROFILE_IDS:
+        validate_matched_prompt_graph_model(model, context=context)
     host_safety_fields = {
         "host_safety_min_memavailable_gib": (
             model.host_safety_min_memavailable_gib
@@ -1680,10 +2090,17 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
         name: value for name, value in storage_fields.items() if value is not None
     }
     if model.sglang_storage_mode is None:
-        if configured_storage_fields:
+        native_storage_fields = {
+            name: value
+            for name, value in configured_storage_fields.items()
+            if name != "local_image_id"
+        }
+        if native_storage_fields or (
+            model.local_image_id is not None and not densespark_candidate
+        ):
             raise ManifestError(
                 f"{context}.local_image_id and native PLE fields require "
-                "sglang_storage_mode"
+                "sglang_storage_mode or the exact managed DenseSpark profile"
             )
     else:
         if model.sglang_storage_mode != SM121_STORAGE_MODE:
@@ -1703,6 +2120,8 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
         try:
             if is_sm121_agent_admission_candidate(model):
                 validate_sm121_agent_admission_profile(model)
+            elif is_sm121_cuda_graph_candidate(model):
+                validate_sm121_cuda_graph_candidate(model)
             elif is_sm121_cache_semantic_candidate(model):
                 validate_sm121_cache_semantic_candidate(model)
             elif is_sm121_cache_performance_candidate(model):
@@ -1714,6 +2133,7 @@ def validate_model(model: ModelSpec, *, context: str = "model") -> None:
         except (
             SM121StorageCandidateError,
             SM121AgentAdmissionError,
+            SM121CudaGraphError,
             SM121CacheSemanticError,
             SM121CachePerformanceError,
             SM121ChunkedPrefillPerformanceError,
@@ -1773,6 +2193,28 @@ def validate_case(case: CaseSpec, *, context: str = "case") -> None:
         raise ManifestError(f"{context}.max_turns must be positive")
     if not 0 <= case.temperature <= 2:
         raise ManifestError(f"{context}.temperature must be between 0 and 2")
+    try:
+        matched_prompt = matched_prompt_protocol(case.id)
+    except ValueError as error:
+        raise ManifestError(f"{context}.id {error}") from error
+    if matched_prompt is not None:
+        expected = {
+            "kind": "decode",
+            "requires": ("chat",),
+            "warmups": 1,
+            "repetitions": 5,
+            "max_output_tokens": 256,
+            "temperature": 0.0,
+            "concurrency": 1,
+            "prompt_repetitions": 0,
+            "max_turns": 1,
+        }
+        for field, wanted in expected.items():
+            if getattr(case, field) != wanted:
+                raise ManifestError(
+                    f"{context}.{field} must be {wanted!r} for "
+                    f"{matched_prompt!r}"
+                )
     try:
         varied_context = case.varied_context_needle
     except ValueError as error:
@@ -1931,6 +2373,80 @@ def validate_case(case: CaseSpec, *, context: str = "case") -> None:
             )
 
 
+def validate_qwen38_27b_dspark_cuda_graph_suite(
+    suite: SuiteSpec,
+    *,
+    context: str = "suite",
+) -> None:
+    """Require the exact matched-request-unique C1 D256 screen."""
+
+    if getattr(suite, "id", None) != QWEN38_27B_DSPARK_CUDA_GRAPH_SUITE_ID:
+        raise ManifestError(
+            f"{context}.id must be {QWEN38_27B_DSPARK_CUDA_GRAPH_SUITE_ID!r}"
+        )
+    if (
+        getattr(suite, "description", None)
+        != QWEN38_27B_DSPARK_CUDA_GRAPH_SUITE_DESCRIPTION
+    ):
+        raise ManifestError(f"{context}.description changed")
+    if getattr(suite, "schema_version", None) != SCHEMA_VERSION:
+        raise ManifestError(f"{context}.schema_version changed")
+    if getattr(suite, "protocol_digest", None) is not None:
+        raise ManifestError(f"{context}.protocol_digest must be omitted")
+    cases = getattr(suite, "cases", None)
+    if (
+        not isinstance(cases, (list, tuple))
+        or len(cases) != 1
+        or getattr(cases[0], "id", None)
+        != QWEN38_27B_DSPARK_CUDA_GRAPH_CASE_ID
+    ):
+        raise ManifestError(
+            f"{context}.cases must contain only the exact matched-prompt "
+            "Qwen3.8 27B CUDA-graph case"
+        )
+    expected = {
+        "kind": "decode",
+        "requires": ("chat",),
+        "warmups": 1,
+        "repetitions": 5,
+        "max_output_tokens": 256,
+        "temperature": 0.0,
+        "concurrency": 1,
+        "prompt_repetitions": 0,
+        "max_turns": 1,
+    }
+    case = cases[0]
+    for field, wanted in expected.items():
+        actual = getattr(case, field, None)
+        if field == "requires" and isinstance(actual, (list, tuple)):
+            actual = tuple(actual)
+        if actual != wanted:
+            raise ManifestError(f"{context}.cases[0].{field} changed")
+
+
+def validate_matched_prompt_graph_suite(
+    suite: SuiteSpec,
+    *,
+    context: str = "suite",
+) -> None:
+    """Dispatch an exact graph suite only to its pair-specific validator."""
+
+    study = matched_prompt_graph_study(
+        suite_id=getattr(suite, "id", None)
+    )
+    if study is None:
+        raise ManifestError(f"{context}.id is not a matched-prompt graph suite")
+    if study.suite_id == QWEN38_27B_DSPARK_CUDA_GRAPH_SUITE_ID:
+        validate_qwen38_27b_dspark_cuda_graph_suite(suite, context=context)
+        return
+    if study.suite_id != SM121_CUDA_GRAPH_SUITE_ID:
+        raise ManifestError(f"{context}.id is not a reviewed graph suite")
+    try:
+        validate_sm121_cuda_graph_suite(suite)
+    except SM121CudaGraphError as error:
+        raise ManifestError(f"{context}: {error}") from error
+
+
 def validate_suite(suite: SuiteSpec, *, context: str = "suite") -> None:
     """Validate suite-level identity and case uniqueness."""
 
@@ -1953,6 +2469,32 @@ def validate_suite(suite: SuiteSpec, *, context: str = "suite") -> None:
         if case.id in seen:
             raise ManifestError(f"{context}: duplicate case id {case.id!r}")
         seen.add(case.id)
+    matched_prompt_studies = tuple(
+        matched_prompt_graph_study(case_id=case.id)
+        for case in suite.cases
+        if matched_prompt_protocol(case.id) is not None
+    )
+    if matched_prompt_studies and (
+        len(set(matched_prompt_studies)) != 1
+        or matched_prompt_studies[0] is None
+        or suite.id != matched_prompt_studies[0].suite_id
+    ):
+        expected_suite_ids = sorted(
+            study.suite_id
+            for study in matched_prompt_studies
+            if study is not None
+        )
+        raise ManifestError(
+            f"{context}.id must match its exact paired matched-prompt suite "
+            f"{expected_suite_ids!r}"
+        )
+    if suite.id in MATCHED_PROMPT_GRAPH_SUITE_IDS:
+        validate_matched_prompt_graph_suite(suite, context=context)
+    if suite.id == DENSESPARK_SUITE_ID:
+        try:
+            validate_densespark_suite(suite)
+        except DenseSparkContractError as error:
+            raise ManifestError(f"{context}: {error}") from error
     if suite.id == _SM121_STORAGE_SUITE_ID:
         try:
             validate_sm121_storage_suite(suite)
@@ -2058,6 +2600,27 @@ def validate_benchmark_selection(
             "prefix_cache_mode profile"
         )
     model_id = getattr(model, "id", None)
+    if model_id in MATCHED_PROMPT_GRAPH_PROFILE_IDS:
+        validate_matched_prompt_graph_model(model, context=f"{context}.model")
+    densespark_profile = is_densespark_profile(model)
+    densespark_suite = suite.id == DENSESPARK_SUITE_ID
+    densespark_tool_suite = suite.id == DENSESPARK_TOOL_SUITE_ID
+    if densespark_profile and not (densespark_suite or densespark_tool_suite):
+        raise ManifestError(
+            f"{context}: managed DenseSpark profiles require the "
+            f"{DENSESPARK_SUITE_ID!r} or {DENSESPARK_TOOL_SUITE_ID!r} suite"
+        )
+    if densespark_suite and not densespark_profile:
+        raise ManifestError(
+            f"{context}: the {DENSESPARK_SUITE_ID!r} suite requires the "
+            f"managed DenseSpark profiles {sorted(DENSESPARK_PROFILE_IDS)!r}"
+        )
+    if densespark_profile and (densespark_suite or densespark_tool_suite):
+        try:
+            validate_densespark_profile(model)
+            validate_densespark_suite(suite)
+        except DenseSparkContractError as error:
+            raise ManifestError(f"{context}: {error}") from error
     tps_suite_profiles = _TPS_PROFILE_IDS_BY_SUITE.get(suite.id)
     tps_profile_suite = _TPS_SUITE_BY_PROFILE_ID.get(model_id)
     if tps_suite_profiles is not None and model_id not in tps_suite_profiles:
@@ -2094,6 +2657,26 @@ def validate_benchmark_selection(
             f"{context}: the {_FLASH_NEXT_AGENT64K_SUITE_ID!r} suite requires "
             "one of its exact dedicated agent64k profiles"
         )
+    qwen38_27b_graph_profile = (
+        model_id in QWEN38_27B_DSPARK_CUDA_GRAPH_PROFILE_IDS
+    )
+    qwen38_27b_graph_suite = (
+        suite.id == QWEN38_27B_DSPARK_CUDA_GRAPH_SUITE_ID
+    )
+    if qwen38_27b_graph_profile and not qwen38_27b_graph_suite:
+        raise ManifestError(
+            f"{context}: the {model.id!r} profile requires "
+            f"{QWEN38_27B_DSPARK_CUDA_GRAPH_SUITE_ID!r}"
+        )
+    if qwen38_27b_graph_suite and not qwen38_27b_graph_profile:
+        raise ManifestError(
+            f"{context}: the {QWEN38_27B_DSPARK_CUDA_GRAPH_SUITE_ID!r} "
+            "suite requires one of its exact paired CUDA-graph profiles"
+        )
+    if qwen38_27b_graph_suite:
+        validate_qwen38_27b_dspark_cuda_graph_suite(
+            suite, context=f"{context}.suite"
+        )
     sm121_agent_admission_profile = (
         model_id == SM121_AGENT_ADMISSION_PROFILE_ID
     )
@@ -2118,6 +2701,23 @@ def validate_benchmark_selection(
             f"{context}: the {SM121_AGENT_ADMISSION_SUITE_ID!r} suite requires "
             f"the {SM121_AGENT_ADMISSION_PROFILE_ID!r} profile"
         )
+    sm121_cuda_graph_profile = model_id in SM121_CUDA_GRAPH_PROFILE_IDS
+    sm121_cuda_graph_suite = suite.id == SM121_CUDA_GRAPH_SUITE_ID
+    if sm121_cuda_graph_profile and not sm121_cuda_graph_suite:
+        raise ManifestError(
+            f"{context}: the {model.id!r} profile requires "
+            f"{SM121_CUDA_GRAPH_SUITE_ID!r}"
+        )
+    if sm121_cuda_graph_suite and not sm121_cuda_graph_profile:
+        raise ManifestError(
+            f"{context}: the {SM121_CUDA_GRAPH_SUITE_ID!r} suite requires "
+            "one of its exact paired CUDA-graph profiles"
+        )
+    if sm121_cuda_graph_suite:
+        try:
+            validate_sm121_cuda_graph_suite(suite)
+        except SM121CudaGraphError as error:
+            raise ManifestError(f"{context}: {error}") from error
     sm121_storage_profile = model_id == _SM121_STORAGE_PROFILE_ID
     sm121_storage_suite = suite.id in _SM121_STORAGE_SUITE_IDS
     if sm121_storage_profile and not sm121_storage_suite:

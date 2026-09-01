@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import statistics
 from collections.abc import Callable
 from pathlib import Path
 import subprocess
@@ -25,7 +26,9 @@ from bench.evidence import (
     _NINFER_TOP_FIELDS,
     SCHEMA_VERSION,
     _assert_source_tree,
+    _export_run,
     _load_json,
+    _project_model,
     _project_case,
     _project_ninfer_report,
     _project_request_result,
@@ -39,6 +42,17 @@ from bench.evidence import (
     verify_evidence,
     verify_staged_evidence,
 )
+from bench.densespark import (
+    DENSESPARK_LOCAL_IMAGE_ID,
+    DENSESPARK_MODEL_REVISION,
+    DENSESPARK_PQ_SHA256,
+    DENSESPARK_PROFILE_ID,
+    DENSESPARK_WARMUP_SYNC_LOCAL_IMAGE_ID,
+    DENSESPARK_WARMUP_SYNC_MODE,
+    DENSESPARK_WARMUP_SYNC_PROFILE_ID,
+    densespark_expected_launch_policy,
+    densespark_expected_resolved_provenance,
+)
 from bench.memory_ops import (
     MEMORY_OPERATION_CONTEXT_TOKENS,
     MEMORY_OPERATION_LLAMACPP_DIGEST,
@@ -49,7 +63,16 @@ from bench.memory_ops import (
     MEMORY_OPERATION_SERVER_TIMING_TOLERANCE_S,
     memory_operation_llamacpp_args,
 )
-from bench.manifest import load_suite
+from bench.manifest import (
+    MATCHED_PROMPT_GRAPH_STUDIES,
+    MATCHED_REQUEST_UNIQUE_PROTOCOL,
+    QWEN38_27B_DSPARK_CUDA_GRAPH_DISABLED_PROFILE_ID,
+    QWEN38_27B_DSPARK_CUDA_GRAPH_FULL_PROFILE_ID,
+    load_models,
+    load_suite,
+    model_spec_to_dict,
+)
+from bench.sglang_sm121_cuda_graph import SM121_CUDA_GRAPH_BREAKABLE_PROFILE_ID
 from bench.report import summarize_run
 from bench.harbor_campaign_lifecycle import (
     CleanupStatus,
@@ -852,6 +875,238 @@ class EvidenceFixture:
             ],
         )
 
+    def write_matched_graph_run(self, profile_id: str) -> None:
+        """Replace the generic run with one complete synthetic graph screen."""
+
+        repository = Path(__file__).resolve().parents[1]
+        models = load_models(repository / "manifests" / "models.toml")
+        study = next(
+            item
+            for item in MATCHED_PROMPT_GRAPH_STUDIES
+            if profile_id in item.profile_ids
+        )
+        suite_filename = {
+            "qwen38-27b-dspark-c1-cuda-graph": (
+                "qwen38_27b_dspark_c1_cuda_graph.toml"
+            ),
+            "qwen38-flash-next-sm121-triton-storage-c1-cuda-graph": (
+                "qwen38_flash_next_sm121_triton_storage_c1_cuda_graph.toml"
+            ),
+        }[study.suite_id]
+        model = json.loads(json.dumps(model_spec_to_dict(models[profile_id])))
+        suite_spec = load_suite(
+            repository / "manifests" / "suites" / suite_filename
+        )
+        suite = json.loads(json.dumps(asdict(suite_spec)))
+        suite.pop("protocol_digest", None)
+        case = suite["cases"][0]
+        identity_case = {key: value for key, value in case.items() if key != "case_id"}
+        case_digest = _synthetic_content_hash(
+            {"model": model, "case": identity_case}, length=12
+        )
+        case_id = f"{study.case_id}--{case_digest}"
+        case["case_id"] = case_id
+
+        shutil.rmtree(self.run_dir)
+        self.run_id = (
+            f"20260817T000000Z-{profile_id}-{study.suite_id}-00000000"
+        )
+        self.run_dir = self.results / self.run_id
+        self.run_dir.mkdir()
+        self.write_json(
+            self.run_dir / "plan.json",
+            {
+                "schema_version": 2,
+                "host_at_plan": {
+                    "git_commit": "d" * 40,
+                    "git_status": "",
+                    "memtotal_kib": 128 * 1024 * 1024,
+                    "nvidia_smi": "NVIDIA GB10, 580.126.09, 12.1",
+                },
+                "model": model,
+                "suite": suite,
+            },
+        )
+
+        def result(
+            request_id: str,
+            *,
+            completion_tokens: int,
+            prompt_tokens: int,
+            ttft_s: float,
+            decode_s: float,
+        ) -> dict[str, object]:
+            elapsed_s = ttft_s + decode_s
+            return {
+                "cached_prompt_tokens": None,
+                "completion_tokens": completion_tokens,
+                "content": "synthetic",
+                "decode_metric_source": "client_estimate",
+                "decode_s": decode_s,
+                "decode_tps": max(completion_tokens - 1, 0) / decode_s,
+                "elapsed_s": elapsed_s,
+                "emission_events": min(completion_tokens, 100),
+                "finish_reason": "length",
+                "load_s": None,
+                "output_tps": completion_tokens / elapsed_s,
+                "prompt_tokens": prompt_tokens,
+                "reasoning": "",
+                "reasoning_tokens": 0,
+                "request_id": request_id,
+                "response_model": model["served_name"],
+                "server_cached_prompt_tokens": None,
+                "server_decode_s": None,
+                "server_decode_tokens": None,
+                "server_prompt_s": None,
+                "server_prompt_tokens": None,
+                "started_at_ns": 1,
+                "tool_calls": [],
+                "ttft_s": ttft_s,
+            }
+
+        first_result = result(
+            "first-request-after-start-1000",
+            completion_tokens=8,
+            prompt_tokens=10,
+            ttft_s=0.2,
+            decode_s=0.8,
+        )
+        measured_results = [
+            result(
+                f"{study.case_id}-r{repetition}-w0",
+                completion_tokens=256,
+                prompt_tokens=100,
+                ttft_s=0.2,
+                decode_s=9.8,
+            )
+            for repetition in range(5)
+        ]
+        attempt_id = "private-matched-attempt"
+        events: list[dict[str, object]] = []
+
+        def append(event: dict[str, object]) -> None:
+            ordinal = len(events)
+            events.append(
+                {
+                    "timestamp": f"2026-08-17T00:00:{ordinal:02d}Z",
+                    **event,
+                }
+            )
+
+        append({"event": "run_start"})
+        append({"event": "measurement_started"})
+        append({"event": "server_ready", "backend": "sglang"})
+        append(
+            {
+                "event": "first_request_complete",
+                "backend": "sglang",
+                "result": first_result,
+            }
+        )
+        append(
+            {
+                "event": "case_start",
+                "case_id": case_id,
+                "attempt_id": attempt_id,
+                "kind": "decode",
+                "concurrency": 1,
+            }
+        )
+        for repetition, measured in enumerate(measured_results):
+            append(
+                {
+                    "event": "request_complete",
+                    "case_id": case_id,
+                    "attempt_id": attempt_id,
+                    "kind": "decode",
+                    "repetition": repetition,
+                    "burst_elapsed_s": float(measured["elapsed_s"]) + 0.01,
+                    "result": measured,
+                    "validation": {"passed": True, "reason": None},
+                }
+            )
+        case_elapsed_s = sum(
+            float(item["elapsed_s"]) + 0.01 for item in measured_results
+        ) + 0.1
+        append(
+            {
+                "event": "case_complete",
+                "case_id": case_id,
+                "attempt_id": attempt_id,
+                "kind": "decode",
+                "concurrency": 1,
+                "elapsed_s": case_elapsed_s,
+                "validation_passed": True,
+            }
+        )
+        append({"event": "measurement_complete"})
+        append({"event": "server_stopped", "backend": "sglang"})
+        append({"event": "run_complete", "status": "completed"})
+        self.write_jsonl(self.run_dir / "events.jsonl", events)
+
+        decode_rates = [float(item["decode_tps"]) for item in measured_results]
+        elapsed = [float(item["elapsed_s"]) for item in measured_results]
+        ttfts = [float(item["ttft_s"]) for item in measured_results]
+        case_telemetry = {"sampled_energy_j": 100.0}
+        self.write_json(
+            self.run_dir / "summary.json",
+            {
+                "artifact_validation": None,
+                "artifact_validation_telemetry": None,
+                "cases": [
+                    {
+                        "aggregate_output_tps": 1280 / case_elapsed_s,
+                        "attempt_id": attempt_id,
+                        "case_id": case_id,
+                        "completion_tokens": 1280,
+                        "concurrency": 1,
+                        "decode_estimate_one_token_chunks": False,
+                        "decode_metric_source": "client_estimate",
+                        "elapsed_s": case_elapsed_s,
+                        "kind": "decode",
+                        "measurement_annotations": [],
+                        "measurement_valid": True,
+                        "median_decode_tps": statistics.median(decode_rates),
+                        "median_e2e_s": statistics.median(elapsed),
+                        "median_estimated_decode_tps": statistics.median(
+                            decode_rates
+                        ),
+                        "median_ttft_s": statistics.median(ttfts),
+                        "output_tokens_per_sampled_joule": 12.8,
+                        "p95_e2e_s": None,
+                        "p95_ttft_s": None,
+                        "prompt_tokens": 500,
+                        "reasoning_tokens": 0,
+                        "request_tps": 5 / case_elapsed_s,
+                        "requests": 5,
+                        "telemetry": case_telemetry,
+                        "validation_passed": True,
+                    }
+                ],
+                "completed_cases": 1,
+                "context_limited_cases": [],
+                "failed_cases": [],
+                "first_request_after_start": first_result,
+                "first_request_telemetry": {},
+                "llamacpp_dflash_evidence": None,
+                "llamacpp_mtp_evidence": None,
+                "measurement_annotations": [],
+                "measurement_invalid_cases": [],
+                "run_completion_status": "completed",
+                "shutdown_telemetry": {},
+                "speculative_decoding": None,
+                "startup_measurement_annotations": [],
+                "startup_measurement_valid": True,
+                "startup_safety_gates": [],
+                "startup_telemetry": {},
+                "status": "complete",
+                "suite": study.suite_id,
+                "unimplemented_cases": [],
+                "unsupported_cases": [],
+                "validation_failed_cases": [],
+            },
+        )
+
     def write_autoresearch_campaign(
         self, *, mixed_suite: bool = False
     ) -> tuple[Path, list[Path]]:
@@ -1276,6 +1531,117 @@ class EvidenceExportTests(unittest.TestCase):
             },
         )
 
+    def bind_densespark_provenance(
+        self, profile_id: str = DENSESPARK_PROFILE_ID
+    ) -> dict[str, object]:
+        """Bind the fixture to the exact C1 model, suite, and local receipt."""
+
+        plan_path = self.fixture.run_dir / "plan.json"
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        model = load_models(REPOSITORY / "manifests" / "models.toml")[
+            profile_id
+        ]
+        model_record = model_spec_to_dict(model)
+        suite = asdict(
+            load_suite(
+                REPOSITORY
+                / "manifests"
+                / "suites"
+                / "qwen38_27b_densespark_c1.toml"
+            )
+        )
+        suite.pop("protocol_digest", None)
+        case = suite["cases"][0]
+        case_id = (
+            f"{case['id']}--"
+            f"{_synthetic_content_hash({'model': model_record, 'case': case}, length=12)}"
+        )
+        suite["cases"] = [{**case, "case_id": case_id}]
+        plan["model"] = model_record
+        plan["suite"] = suite
+        plan["resolved"] = {
+            "densespark": densespark_expected_resolved_provenance(profile_id),
+            "densespark_launch_policy": densespark_expected_launch_policy(),
+            "image_digest": None,
+        }
+        plan["schema_version"] = 2
+        suite_without_case_ids = {
+            **suite,
+            "cases": [
+                {key: value for key, value in item.items() if key != "case_id"}
+                for item in suite["cases"]
+            ],
+        }
+        plan["fingerprint"] = _synthetic_content_hash(
+            {
+                "model": model_record,
+                "suite": suite_without_case_ids,
+                "resolved": plan["resolved"],
+            },
+            length=16,
+        )
+        plan.pop("integrity_hash", None)
+        plan["integrity_hash"] = _synthetic_content_hash(plan)
+        self.fixture.write_json(plan_path, plan)
+
+        events_path = self.fixture.run_dir / "events.jsonl"
+        events = [
+            json.loads(line)
+            for line in events_path.read_text(encoding="utf-8").splitlines()
+        ]
+        for event in events:
+            if event.get("case_id") == "chat-case":
+                event["case_id"] = case_id
+            if event.get("kind") == "chat":
+                event["kind"] = "decode"
+        self.fixture.write_jsonl(events_path, events)
+
+        summary_path = self.fixture.run_dir / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary_case = summary["cases"][0]
+        summary_case["case_id"] = case_id
+        summary_case["kind"] = "decode"
+        self.fixture.write_json(summary_path, summary)
+
+        telemetry_path = self.fixture.run_dir / "telemetry.jsonl"
+        telemetry = [
+            json.loads(line)
+            for line in telemetry_path.read_text(encoding="utf-8").splitlines()
+        ]
+        for sample in telemetry:
+            phase = sample.get("phase")
+            if isinstance(phase, str):
+                sample["phase"] = phase.replace("chat-case", case_id)
+        self.fixture.write_jsonl(telemetry_path, telemetry)
+        return plan
+
+    @staticmethod
+    def reseal_densespark_plan(plan: dict[str, object]) -> None:
+        model = plan["model"]
+        suite = plan["suite"]
+        resolved = plan["resolved"]
+        assert isinstance(suite, dict)
+        cases = suite["cases"]
+        assert isinstance(cases, list)
+        suite_without_case_ids = {
+            **suite,
+            "cases": [
+                {key: value for key, value in case.items() if key != "case_id"}
+                for case in cases
+                if isinstance(case, dict)
+            ],
+        }
+        plan["fingerprint"] = _synthetic_content_hash(
+            {
+                "model": model,
+                "suite": suite_without_case_ids,
+                "resolved": resolved,
+            },
+            length=16,
+        )
+        plan.pop("integrity_hash", None)
+        plan["integrity_hash"] = _synthetic_content_hash(plan)
+
     @staticmethod
     def fake_campaign_export(
         campaign: Path,
@@ -1518,6 +1884,894 @@ class EvidenceExportTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, all_keys)
         self.assertFalse(any(key.endswith("_path") for key in all_keys))
+
+    def test_verifier_rejects_text_in_rechecksummed_telemetry_rows(self) -> None:
+        self.export()
+        target = Path(self.temporary.name) / "telemetry-text-tamper"
+        shutil.copytree(self.fixture.output, target)
+        run = target / "runs" / self.fixture.run_id
+        chunk_path = next(run.glob("telemetry-*.json"))
+        chunk = json.loads(chunk_path.read_text(encoding="utf-8"))
+        chunk["segments"][0]["rows"][0][2] = "Synthetic captured prompt text"
+        self.fixture.write_json(chunk_path, chunk)
+        self.refresh_run_checksums(self.fixture.run_id, evidence_root=target)
+        with self.assertRaisesRegex(EvidenceError, "telemetry numeric scalar changed"):
+            verify_evidence(target)
+
+    def test_matched_graph_export_rejects_tampered_args_for_both_pairs(self) -> None:
+        for profile_id in (
+            QWEN38_27B_DSPARK_CUDA_GRAPH_FULL_PROFILE_ID,
+            SM121_CUDA_GRAPH_BREAKABLE_PROFILE_ID,
+        ):
+            with self.subTest(profile_id=profile_id):
+                self.fixture.write_matched_graph_run(profile_id)
+                plan_path = self.fixture.run_dir / "plan.json"
+                plan = json.loads(plan_path.read_text(encoding="utf-8"))
+                plan["model"]["args"].extend(
+                    ["--cuda-graph-max-bs", "8"]
+                )
+                self.fixture.write_json(plan_path, plan)
+                output = Path(self.temporary.name) / f"tampered-{profile_id}"
+                output.mkdir()
+                with self.assertRaisesRegex(
+                    EvidenceError, "graph model contract changed"
+                ):
+                    _export_run(
+                        self.fixture.run_dir,
+                        self.fixture.results.resolve(),
+                        output,
+                        None,
+                    )
+
+    def test_matched_graph_export_authenticates_raw_request_schedule(self) -> None:
+        self.fixture.write_matched_graph_run(
+            QWEN38_27B_DSPARK_CUDA_GRAPH_FULL_PROFILE_ID
+        )
+        events_path = self.fixture.run_dir / "events.jsonl"
+        events = [
+            json.loads(line)
+            for line in events_path.read_text(encoding="utf-8").splitlines()
+        ]
+        measured = next(
+            event for event in events if event.get("event") == "request_complete"
+        )
+        measured["result"]["request_id"] = "forged-request-id"
+        self.fixture.write_jsonl(events_path, events)
+        output = Path(self.temporary.name) / "tampered-request-schedule"
+        output.mkdir()
+        with self.assertRaisesRegex(EvidenceError, "request schedule changed"):
+            _export_run(
+                self.fixture.run_dir,
+                self.fixture.results.resolve(),
+                output,
+                None,
+            )
+
+    def test_matched_graph_export_reconciles_model_and_prompt_token_shape(self) -> None:
+        profile_id = QWEN38_27B_DSPARK_CUDA_GRAPH_FULL_PROFILE_ID
+
+        def response_model() -> None:
+            events_path = self.fixture.run_dir / "events.jsonl"
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+            ]
+            measured = next(
+                event for event in events if event.get("event") == "request_complete"
+            )
+            measured["result"]["response_model"] = "other-model"
+            self.fixture.write_jsonl(events_path, events)
+
+        def unequal_prompt_tokens() -> None:
+            events_path = self.fixture.run_dir / "events.jsonl"
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+            ]
+            measured = next(
+                event for event in events if event.get("event") == "request_complete"
+            )
+            measured["result"]["prompt_tokens"] += 1
+            self.fixture.write_jsonl(events_path, events)
+
+        def summary_prompt_total() -> None:
+            summary_path = self.fixture.run_dir / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["cases"][0]["prompt_tokens"] += 1
+            self.fixture.write_json(summary_path, summary)
+
+        for mutation in (
+            response_model,
+            unequal_prompt_tokens,
+            summary_prompt_total,
+        ):
+            with self.subTest(mutation=mutation.__name__):
+                self.fixture.write_matched_graph_run(profile_id)
+                mutation()
+                output = Path(self.temporary.name) / f"source-{mutation.__name__}"
+                output.mkdir()
+                with self.assertRaisesRegex(EvidenceError, "matched-prompt"):
+                    _export_run(
+                        self.fixture.run_dir,
+                        self.fixture.results.resolve(),
+                        output,
+                        None,
+                    )
+
+    def test_matched_graph_verifier_rejects_refreshed_checksum_tampering(
+        self,
+    ) -> None:
+        self.fixture.write_matched_graph_run(
+            QWEN38_27B_DSPARK_CUDA_GRAPH_DISABLED_PROFILE_ID
+        )
+        self.export()
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+
+        def samples_decode_tps(root: Path) -> None:
+            path = root / "runs" / self.fixture.run_id / "samples.json"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["samples"][1]["decode_tps"] += 1.0
+            self.fixture.write_json(path, value)
+
+        def samples_prompt_text(root: Path) -> None:
+            path = root / "runs" / self.fixture.run_id / "samples.json"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["samples"][1]["prompt_text"] = "synthetic"
+            self.fixture.write_json(path, value)
+
+        def samples_request_id_alias(root: Path) -> None:
+            path = root / "runs" / self.fixture.run_id / "samples.json"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["samples"][1]["requestId"] = "synthetic"
+            self.fixture.write_json(path, value)
+
+        def manifest_extra_text(root: Path) -> None:
+            path = root / "runs" / self.fixture.run_id / "manifest.json"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["prompt_text"] = "synthetic"
+            self.fixture.write_json(path, value)
+
+        def manifest_hardware_prompt(root: Path) -> None:
+            path = root / "runs" / self.fixture.run_id / "manifest.json"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["hardware"]["gpu"] = "Synthetic captured prompt text"
+            self.fixture.write_json(path, value)
+
+        def manifest_run_date_prompt(root: Path) -> None:
+            path = root / "runs" / self.fixture.run_id / "manifest.json"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["run_date_utc"] = "Synthetic captured prompt text"
+            self.fixture.write_json(path, value)
+
+        def summary_payload_alias(root: Path) -> None:
+            path = root / "runs" / self.fixture.run_id / "summary.json"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["aggregates"]["artifact_validation"] = {
+                "toolPayload": "synthetic"
+            }
+            self.fixture.write_json(path, value)
+
+        def coordinated_case_suffix(root: Path) -> None:
+            run = root / "runs" / self.fixture.run_id
+            manifest_path = run / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            forged = (
+                "matched-prompt-qwen38-27b-dspark-cuda-graph-d256-c1-v1"
+                "--ffffffffffff"
+            )
+            manifest["suite"]["cases"][0]["case_id"] = forged
+            self.fixture.write_json(manifest_path, manifest)
+            samples_path = run / "samples.json"
+            samples = json.loads(samples_path.read_text(encoding="utf-8"))
+            for sample in samples["samples"][1:]:
+                sample["case_id"] = forged
+            self.fixture.write_json(samples_path, samples)
+            summary_path = run / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["aggregates"]["cases"][0]["case_id"] = forged
+            self.fixture.write_json(summary_path, summary)
+
+        def coordinated_runtime_image(root: Path) -> None:
+            path = root / "runs" / self.fixture.run_id / "manifest.json"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            forged = "0" * 64
+            value["runtime"]["image"] = f"example/sglang@sha256:{forged}"
+            value["runtime"]["image_sha256"] = forged
+            value["artifacts"][0]["sha256"] = forged
+            self.fixture.write_json(path, value)
+
+        def coordinated_disabled_to_full_relabel(root: Path) -> None:
+            run = root / "runs" / self.fixture.run_id
+            repository = Path(__file__).resolve().parents[1]
+            full_source = json.loads(
+                json.dumps(
+                    model_spec_to_dict(
+                        load_models(repository / "manifests" / "models.toml")[
+                            QWEN38_27B_DSPARK_CUDA_GRAPH_FULL_PROFILE_ID
+                        ]
+                    )
+                )
+            )
+            full_model = _project_model({"model": full_source}, None)
+            full_case_id = (
+                "matched-prompt-qwen38-27b-dspark-cuda-graph-d256-c1-v1"
+                "--e10754a3fc1a"
+            )
+            manifest_path = run / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["model"] = full_model
+            manifest["suite"]["cases"][0]["case_id"] = full_case_id
+            self.fixture.write_json(manifest_path, manifest)
+            samples_path = run / "samples.json"
+            samples = json.loads(samples_path.read_text(encoding="utf-8"))
+            for sample in samples["samples"][1:]:
+                sample["case_id"] = full_case_id
+            self.fixture.write_json(samples_path, samples)
+            summary_path = run / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["aggregates"]["cases"][0]["case_id"] = full_case_id
+            self.fixture.write_json(summary_path, summary)
+
+        mutations = (
+            samples_decode_tps,
+            samples_prompt_text,
+            samples_request_id_alias,
+            manifest_extra_text,
+            manifest_hardware_prompt,
+            manifest_run_date_prompt,
+            summary_payload_alias,
+            coordinated_case_suffix,
+            coordinated_runtime_image,
+            coordinated_disabled_to_full_relabel,
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation.__name__):
+                target = Path(self.temporary.name) / mutation.__name__
+                shutil.copytree(self.fixture.output, target)
+                mutation(target)
+                self.refresh_run_checksums(
+                    self.fixture.run_id, evidence_root=target
+                )
+                with self.assertRaises(EvidenceError):
+                    verify_evidence(target)
+
+    def test_historical_graph_run_id_cannot_be_downgraded(self) -> None:
+        profile_id = QWEN38_27B_DSPARK_CUDA_GRAPH_DISABLED_PROFILE_ID
+        self.fixture.write_matched_graph_run(profile_id)
+        self.export()
+        run_id = self.fixture.run_id
+        baseline_index = json.loads(
+            (self.fixture.output / "index.json").read_text(encoding="utf-8")
+        )
+        baseline_entry = next(
+            entry for entry in baseline_index["runs"] if entry["run_id"] == run_id
+        )
+        baseline_manifest = json.loads(
+            (
+                self.fixture.output / "runs" / run_id / "manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        contract = {
+            "bundle_sha256": baseline_entry["bundle_sha256"],
+            "first_prompt_tokens": 10,
+            "hardware": baseline_manifest["hardware"],
+            "measured_prompt_tokens": 100,
+            "profile_id": profile_id,
+            "suite_id": "qwen38-27b-dspark-c1-cuda-graph",
+        }
+
+        target = Path(self.temporary.name) / "graph-protocol-downgrade"
+        shutil.copytree(self.fixture.output, target)
+        run = target / "runs" / run_id
+        manifest_path = run / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["model"]["id"] = "ordinary-sglang-model"
+        manifest["suite"]["id"] = "ordinary-suite"
+        case = manifest["suite"]["cases"][0]
+        case["id"] = "ordinary-decode"
+        case["case_id"] = "ordinary-decode--53e714d98e94"
+        case.pop("prompt_schedule")
+        self.fixture.write_json(manifest_path, manifest)
+        samples_path = run / "samples.json"
+        samples = json.loads(samples_path.read_text(encoding="utf-8"))
+        for sample in samples["samples"][1:]:
+            sample["case_id"] = "ordinary-decode--53e714d98e94"
+        self.fixture.write_json(samples_path, samples)
+        summary_path = run / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["aggregates"]["suite"] = "ordinary-suite"
+        summary["aggregates"]["cases"][0]["case_id"] = (
+            "ordinary-decode--53e714d98e94"
+        )
+        self.fixture.write_json(summary_path, summary)
+        self.refresh_run_checksums(run_id, evidence_root=target)
+
+        with patch.dict(
+            "bench.evidence._MATCHED_PROMPT_GRAPH_PUBLISHED_RUN_CONTRACTS",
+            {run_id: contract},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(
+                EvidenceError, "matched-prompt historical bundle identity changed"
+            ):
+                verify_evidence(target)
+
+        changed_index = json.loads(
+            (target / "index.json").read_text(encoding="utf-8")
+        )
+        changed_entry = next(
+            entry for entry in changed_index["runs"] if entry["run_id"] == run_id
+        )
+        marker_contract = {**contract, "bundle_sha256": changed_entry["bundle_sha256"]}
+        with patch.dict(
+            "bench.evidence._MATCHED_PROMPT_GRAPH_PUBLISHED_RUN_CONTRACTS",
+            {run_id: marker_contract},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(EvidenceError, "matched-prompt"):
+                verify_evidence(target)
+
+    def test_densespark_receipts_export_deterministically_and_verify(self) -> None:
+        source = densespark_expected_resolved_provenance()
+        launch_policy = densespark_expected_launch_policy()
+        self.bind_densespark_provenance()
+
+        first = self.export()
+        self.assertTrue(first["changed"])
+        original = self.exported_bytes()
+        manifest_path = (
+            self.fixture.output
+            / "runs"
+            / self.fixture.run_id
+            / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual("qwen38-27b-densespark-c1", manifest["suite"]["id"])
+        self.assertEqual(1, len(manifest["suite"]["cases"]))
+        self.assertEqual("decode", manifest["suite"]["cases"][0]["kind"])
+        self.assertEqual(
+            {
+                "cache_namespace": source["cache_namespace"],
+                "configuration_sha256": str(
+                    source["configuration_sha256"]
+                ).removeprefix("sha256:"),
+                "docker_image_sha256": DENSESPARK_LOCAL_IMAGE_ID.removeprefix(
+                    "sha256:"
+                ),
+                "model_revision": DENSESPARK_MODEL_REVISION,
+                "pq_artifact_sha256": DENSESPARK_PQ_SHA256.removeprefix(
+                    "sha256:"
+                ),
+                "pq_artifact_size_bytes": source["pq_artifact_size_bytes"],
+                "weight_file_count": source["weight_file_count"],
+                "weight_size_bytes": source["weight_size_bytes"],
+                "launch_policy_binding": "frozen-v1",
+                "launch_policy": {
+                    **launch_policy,
+                    "sha256": str(launch_policy["sha256"]).removeprefix(
+                        "sha256:"
+                    ),
+                },
+            },
+            manifest["runtime"]["densespark"],
+        )
+        self.assertEqual(
+            manifest["runtime"]["densespark"]["launch_policy"][
+                "docker_network_egress"
+            ],
+            "capable",
+        )
+        self.assertEqual(
+            manifest["runtime"]["densespark"]["launch_policy"][
+                "docker_network_isolation"
+            ],
+            "none",
+        )
+        self.assertNotIn("docker_image_id", manifest["runtime"]["densespark"])
+        self.assertFalse(
+            any(key.endswith("_path") for key in json_keys(manifest))
+        )
+
+        second = self.export()
+        self.assertFalse(second["changed"])
+        self.assertEqual(original, self.exported_bytes())
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+
+    def test_warmup_sync_receipt_is_path_free_exact_and_deterministic(self) -> None:
+        source = densespark_expected_resolved_provenance(
+            DENSESPARK_WARMUP_SYNC_PROFILE_ID
+        )
+        self.bind_densespark_provenance(DENSESPARK_WARMUP_SYNC_PROFILE_ID)
+
+        self.export()
+        original = self.exported_bytes()
+        manifest_path = (
+            self.fixture.output
+            / "runs"
+            / self.fixture.run_id
+            / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        receipt = manifest["runtime"]["densespark"]
+        self.assertEqual(DENSESPARK_WARMUP_SYNC_MODE, receipt["mode"])
+        self.assertEqual(
+            DENSESPARK_WARMUP_SYNC_LOCAL_IMAGE_ID.removeprefix("sha256:"),
+            receipt["docker_image_sha256"],
+        )
+        for key in (
+            "dockerignore_sha256",
+            "fused_sigmoid_source_sha256",
+            "image_recipe_sha256",
+            "kernel_warmup_source_sha256",
+            "mamba_utils_source_sha256",
+            "probe_sha256",
+            "qwen_gdn_source_sha256",
+            "qwen_warmup_source_sha256",
+            "vllm_entrypoint_sha256",
+        ):
+            self.assertEqual(
+                str(source[key]).removeprefix("sha256:"), receipt[key]
+            )
+        self.assertFalse(any(key.endswith("_path") for key in json_keys(manifest)))
+
+        second = self.export()
+        self.assertFalse(second["changed"])
+        self.assertEqual(original, self.exported_bytes())
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+
+    def test_exact_allowlisted_legacy_plan_publishes_no_policy_claim(self) -> None:
+        plan = self.bind_densespark_provenance()
+        resolved = plan["resolved"]
+        self.assertIsInstance(resolved, dict)
+        del resolved["densespark_launch_policy"]
+        self.reseal_densespark_plan(plan)
+        integrity = plan["integrity_hash"]
+        self.assertIsInstance(integrity, str)
+        self.fixture.write_json(self.fixture.run_dir / "plan.json", plan)
+
+        with (
+            patch(
+                "bench.evidence._DENSESPARK_LEGACY_LAUNCH_POLICY_PLAN_INTEGRITIES",
+                frozenset({integrity}),
+            ),
+            patch.dict(
+                "bench.evidence._DENSESPARK_LEGACY_LAUNCH_POLICY_PLAN_INTEGRITY_BY_RUN_ID",
+                {self.fixture.run_id: integrity},
+                clear=False,
+            ),
+        ):
+            self.export()
+            manifest = json.loads(
+                (
+                    self.fixture.output
+                    / "runs"
+                    / self.fixture.run_id
+                    / "manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+            receipt = manifest["runtime"]["densespark"]
+            self.assertEqual(receipt["launch_policy_binding"], "legacy-unbound")
+            self.assertEqual(receipt["legacy_plan_integrity_sha256"], integrity)
+            self.assertNotIn("launch_policy", receipt)
+            self.assertEqual(
+                "verified", verify_evidence(self.fixture.output)["status"]
+            )
+
+    def test_unallowlisted_legacy_plan_is_rejected(self) -> None:
+        plan = self.bind_densespark_provenance()
+        resolved = plan["resolved"]
+        self.assertIsInstance(resolved, dict)
+        del resolved["densespark_launch_policy"]
+        self.reseal_densespark_plan(plan)
+        self.fixture.write_json(self.fixture.run_dir / "plan.json", plan)
+        with self.assertRaisesRegex(EvidenceError, "legacy launch policy"):
+            self.export()
+
+    def test_densespark_failed_run_projects_only_host_safety_scalars(self) -> None:
+        self.bind_densespark_provenance()
+        events = [
+            {
+                "completed_cases_at_resume": [],
+                "event": "run_start",
+                "timestamp": "2026-08-17T00:00:00Z",
+            },
+            {
+                "event": "measurement_started",
+                "timestamp": "2026-08-17T00:00:01Z",
+            },
+            {
+                "code": "swap_growth_above_maximum",
+                "event": "host_safety_breach",
+                "limit_kib": 524_288,
+                "memavailable_kib": 33_823_156,
+                "observed_kib": 582_000,
+                "stage": "server_start",
+                "starting_swap_used_kib": 259_564,
+                "swap_used_kib": 841_564,
+                "timestamp": "2026-08-17T00:00:02Z",
+            },
+            {
+                "error": "synthetic safety failure at /private/source/path",
+                "error_type": "HostSafetyError",
+                "event": "run_aborted",
+                "stage": "server_start",
+                "timestamp": "2026-08-17T00:00:03Z",
+            },
+        ]
+        self.fixture.write_jsonl(self.fixture.run_dir / "events.jsonl", events)
+        summary_path = self.fixture.run_dir / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary.update(
+            {
+                "cases": [],
+                "completed_cases": 0,
+                "failed_cases": [],
+                "first_request_after_start": None,
+                "first_request_telemetry": None,
+                "measurement_invalid_cases": [],
+                "run_completion_status": None,
+                "run_error": {
+                    "error": "synthetic safety failure at /private/source/path",
+                    "error_type": "HostSafetyError",
+                    "stage": "server_start",
+                },
+                "status": "aborted",
+                "validation_failed_cases": [],
+            }
+        )
+        self.fixture.write_json(summary_path, summary)
+
+        self.export()
+        manifest_path = (
+            self.fixture.output
+            / "runs"
+            / self.fixture.run_id
+            / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        lifecycle = manifest["lifecycle"]
+        self.assertEqual("run_aborted", lifecycle["terminal_event"])
+        self.assertEqual(
+            {"exception_type": "HostSafetyError", "stage": "server_start"},
+            lifecycle["failure"],
+        )
+        self.assertEqual(
+            {
+                "code": "swap_growth_above_maximum",
+                "limit_bytes": 536_870_912,
+                "memavailable_bytes": 34_634_911_744,
+                "observed_bytes": 595_968_000,
+                "stage": "server_start",
+                "starting_swap_used_bytes": 265_793_536,
+                "swap_used_bytes": 861_761_536,
+            },
+            lifecycle["host_safety_breach"],
+        )
+        serialized = json.dumps(manifest, sort_keys=True)
+        self.assertNotIn("private/source/path", serialized)
+        self.assertNotIn("error", json_keys(manifest))
+        self.assertFalse(any(key.endswith("_kib") for key in json_keys(manifest)))
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+
+        lifecycle["host_safety_breach"]["limit_bytes"] = 1
+        self.fixture.write_json(manifest_path, manifest)
+        self.refresh_run_checksums(self.fixture.run_id)
+        with self.assertRaisesRegex(EvidenceError, "host-safety limit changed"):
+            verify_evidence(self.fixture.output)
+
+    def test_densespark_host_safety_source_schema_rejects_extra_payload(self) -> None:
+        self.bind_densespark_provenance()
+        events_path = self.fixture.run_dir / "events.jsonl"
+        events = [
+            {
+                "event": "run_start",
+                "timestamp": "2026-08-17T00:00:00Z",
+            },
+            {
+                "code": "swap_growth_above_maximum",
+                "command": ["private", "command"],
+                "event": "host_safety_breach",
+                "limit_kib": 524_288,
+                "memavailable_kib": 33_823_156,
+                "observed_kib": 582_000,
+                "stage": "server_start",
+                "starting_swap_used_kib": 259_564,
+                "swap_used_kib": 841_564,
+                "timestamp": "2026-08-17T00:00:02Z",
+            },
+            {
+                "event": "run_complete",
+                "timestamp": "2026-08-17T00:00:03Z",
+            },
+        ]
+        self.fixture.write_jsonl(events_path, events)
+        with self.assertRaisesRegex(
+            EvidenceError, "host-safety source schema changed"
+        ):
+            self.export()
+
+    def test_densespark_source_receipt_tampering_fails_closed(self) -> None:
+        mutations = {
+            "cache_namespace": "densespark-v1-" + "0" * 64,
+            "configuration_sha256": "sha256:" + "0" * 64,
+            "docker_image_id": "sha256:" + "0" * 64,
+            "model_revision": "0" * 40,
+            "pq_artifact_sha256": "sha256:" + "0" * 64,
+            "pq_artifact_size_bytes": 1,
+            "weight_file_count": 7,
+            "weight_size_bytes": 1,
+        }
+        for key, value in mutations.items():
+            with self.subTest(key=key):
+                plan = self.bind_densespark_provenance()
+                resolved = plan["resolved"]
+                self.assertIsInstance(resolved, dict)
+                receipt = resolved["densespark"]
+                self.assertIsInstance(receipt, dict)
+                receipt[key] = value
+                self.reseal_densespark_plan(plan)
+                self.fixture.write_json(self.fixture.run_dir / "plan.json", plan)
+                with self.assertRaisesRegex(
+                    EvidenceError, "DenseSpark resolved provenance changed"
+                ):
+                    self.export()
+
+    def test_densespark_source_launch_policy_tampering_fails_closed(self) -> None:
+        mutations = {
+            "host_safety_min_memavailable_bytes": 1,
+            "environment_hf_hub_offline": "0",
+            "docker_pull_policy": "always",
+            "publish_host": "0.0.0.0",
+            "label_managed": "ai.sparkbench.managed=false",
+            "docker_network": "none",
+            "sha256": "sha256:" + "0" * 64,
+        }
+        for key, value in mutations.items():
+            with self.subTest(key=key):
+                plan = self.bind_densespark_provenance()
+                resolved = plan["resolved"]
+                self.assertIsInstance(resolved, dict)
+                launch_policy = resolved["densespark_launch_policy"]
+                self.assertIsInstance(launch_policy, dict)
+                launch_policy[key] = value
+                self.reseal_densespark_plan(plan)
+                self.fixture.write_json(self.fixture.run_dir / "plan.json", plan)
+                with self.assertRaisesRegex(
+                    EvidenceError, "DenseSpark resolved launch policy changed"
+                ):
+                    self.export()
+
+    def test_densespark_plan_integrity_and_fingerprint_fail_closed(self) -> None:
+        plan = self.bind_densespark_provenance()
+        plan["integrity_hash"] = "0" * 64
+        self.fixture.write_json(self.fixture.run_dir / "plan.json", plan)
+        with self.assertRaisesRegex(EvidenceError, "source plan integrity changed"):
+            self.export()
+
+        plan = self.bind_densespark_provenance()
+        plan["fingerprint"] = "0" * 16
+        plan.pop("integrity_hash", None)
+        plan["integrity_hash"] = _synthetic_content_hash(plan)
+        self.fixture.write_json(self.fixture.run_dir / "plan.json", plan)
+        with self.assertRaisesRegex(EvidenceError, "source plan fingerprint changed"):
+            self.export()
+
+    def test_published_densespark_receipt_tampering_fails_closed(self) -> None:
+        self.bind_densespark_provenance()
+        self.export()
+        manifest_path = (
+            self.fixture.output
+            / "runs"
+            / self.fixture.run_id
+            / "manifest.json"
+        )
+        original = json.loads(manifest_path.read_text(encoding="utf-8"))
+        mutations = {
+            "cache_namespace": "densespark-v1-" + "0" * 64,
+            "configuration_sha256": "0" * 64,
+            "docker_image_sha256": "0" * 64,
+            "model_revision": "0" * 40,
+            "pq_artifact_sha256": "0" * 64,
+            "pq_artifact_size_bytes": 1,
+            "weight_file_count": 7,
+            "weight_size_bytes": 1,
+        }
+        for key, value in mutations.items():
+            with self.subTest(key=key):
+                manifest = json.loads(json.dumps(original))
+                manifest["runtime"]["densespark"][key] = value
+                self.fixture.write_json(manifest_path, manifest)
+                self.refresh_run_checksums(self.fixture.run_id)
+                with self.assertRaisesRegex(
+                    EvidenceError, "published DenseSpark provenance changed"
+                ):
+                    verify_evidence(self.fixture.output)
+
+        for key, value in (
+            ("host_safety_min_memavailable_bytes", 1),
+            ("environment_vllm_no_usage_stats", "0"),
+            ("docker_network_egress", "blocked"),
+            ("publish_host_port", 8001),
+            ("label_run_binding", "ai.sparkbench.run=other"),
+            ("sha256", "0" * 64),
+        ):
+            with self.subTest(launch_policy_key=key):
+                manifest = json.loads(json.dumps(original))
+                manifest["runtime"]["densespark"]["launch_policy"][key] = value
+                self.fixture.write_json(manifest_path, manifest)
+                self.refresh_run_checksums(self.fixture.run_id)
+                with self.assertRaisesRegex(
+                    EvidenceError, "published DenseSpark provenance changed"
+                ):
+                    verify_evidence(self.fixture.output)
+
+        manifest = json.loads(json.dumps(original))
+        receipt = manifest["runtime"]["densespark"]
+        receipt.pop("launch_policy")
+        receipt["launch_policy_binding"] = "legacy-unbound"
+        receipt["legacy_plan_integrity_sha256"] = (
+            "7f3f69e09b180a1a532979e8383b20cdedc25eeb40731713303d75bae7bdc80b"
+        )
+        self.fixture.write_json(manifest_path, manifest)
+        self.refresh_run_checksums(self.fixture.run_id)
+        with self.assertRaisesRegex(EvidenceError, "legacy binding is not allowlisted"):
+            verify_evidence(self.fixture.output)
+
+        manifest = json.loads(json.dumps(original))
+        del manifest["runtime"]["densespark"]
+        self.fixture.write_json(manifest_path, manifest)
+        self.refresh_run_checksums(self.fixture.run_id)
+        with self.assertRaisesRegex(
+            EvidenceError, "published DenseSpark provenance changed"
+        ):
+            verify_evidence(self.fixture.output)
+
+    def test_exact_legacy_densespark_bundle_rejects_rechecksummed_tampering(
+        self,
+    ) -> None:
+        self.bind_densespark_provenance()
+        self.export()
+        run_id = self.fixture.run_id
+        run = self.fixture.output / "runs" / run_id
+        index = json.loads(
+            (self.fixture.output / "index.json").read_text(encoding="utf-8")
+        )
+        entry = next(item for item in index["runs"] if item["run_id"] == run_id)
+        baseline_contract = {
+            "bundle_sha256": entry["bundle_sha256"],
+            "manifest": json.loads(
+                (run / "manifest.json").read_text(encoding="utf-8")
+            ),
+            "samples": json.loads(
+                (run / "samples.json").read_text(encoding="utf-8")
+            ),
+            "summary": json.loads(
+                (run / "summary.json").read_text(encoding="utf-8")
+            ),
+        }
+        plan_map = {run_id: "0" * 64}
+
+        with (
+            patch.dict(
+                "bench.evidence._DENSESPARK_LEGACY_PUBLISHED_BUNDLE_CONTRACTS",
+                {run_id: baseline_contract},
+                clear=True,
+            ),
+            patch.dict(
+                "bench.evidence._DENSESPARK_LEGACY_LAUNCH_POLICY_PLAN_INTEGRITY_BY_RUN_ID",
+                plan_map,
+                clear=True,
+            ),
+        ):
+            self.assertEqual(
+                "verified", verify_evidence(self.fixture.output)["status"]
+            )
+
+        def manifest_payload(root: Path) -> None:
+            path = root / "runs" / run_id / "manifest.json"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["trace_excerpt"] = "Synthetic captured prompt text"
+            self.fixture.write_json(path, value)
+
+        def suite_scalar(root: Path) -> None:
+            path = root / "runs" / run_id / "manifest.json"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["suite"]["cases"][0]["max_output_tokens"] = 999
+            self.fixture.write_json(path, value)
+
+        def samples_payload(root: Path) -> None:
+            path = root / "runs" / run_id / "samples.json"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["samples"].append(
+                {
+                    "sample_index": len(value["samples"]) + 1,
+                    "trace_excerpt": "Synthetic captured prompt text",
+                }
+            )
+            value["sample_count"] = len(value["samples"])
+            self.fixture.write_json(path, value)
+
+        def summary_scalar(root: Path) -> None:
+            path = root / "runs" / run_id / "summary.json"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["aggregates"]["claimed_decode_tps"] = 999.0
+            self.fixture.write_json(path, value)
+
+        def coordinated_status(root: Path) -> None:
+            manifest_path = root / "runs" / run_id / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["status"] = "aborted"
+            self.fixture.write_json(manifest_path, manifest)
+            index_path = root / "index.json"
+            changed_index = json.loads(index_path.read_text(encoding="utf-8"))
+            changed_entry = next(
+                item for item in changed_index["runs"] if item["run_id"] == run_id
+            )
+            changed_entry["status"] = "aborted"
+            changed_index["run_status_counts"] = {"aborted": 1}
+            self.fixture.write_json(index_path, changed_index)
+
+        mutations = (
+            (manifest_payload, "manifest"),
+            (suite_scalar, "manifest"),
+            (samples_payload, "samples"),
+            (summary_scalar, "summary"),
+            (coordinated_status, "manifest"),
+        )
+        for mutation, document in mutations:
+            with self.subTest(mutation=mutation.__name__):
+                target = Path(self.temporary.name) / f"legacy-{mutation.__name__}"
+                shutil.copytree(self.fixture.output, target)
+                mutation(target)
+                self.refresh_run_checksums(run_id, evidence_root=target)
+                changed_index = json.loads(
+                    (target / "index.json").read_text(encoding="utf-8")
+                )
+                changed_entry = next(
+                    item for item in changed_index["runs"] if item["run_id"] == run_id
+                )
+                semantic_contract = json.loads(json.dumps(baseline_contract))
+                # Let the test reach the exact document comparison even if an
+                # attacker has refreshed every checksum after editing it.
+                semantic_contract["bundle_sha256"] = changed_entry["bundle_sha256"]
+                with (
+                    patch.dict(
+                        "bench.evidence._DENSESPARK_LEGACY_PUBLISHED_BUNDLE_CONTRACTS",
+                        {run_id: semantic_contract},
+                        clear=True,
+                    ),
+                    patch.dict(
+                        "bench.evidence._DENSESPARK_LEGACY_LAUNCH_POLICY_PLAN_INTEGRITY_BY_RUN_ID",
+                        plan_map,
+                        clear=True,
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        EvidenceError,
+                        rf"legacy DenseSpark published {document} contract changed",
+                    ):
+                        verify_evidence(target)
+
+        target = Path(self.temporary.name) / "legacy-bundle-identity"
+        shutil.copytree(self.fixture.output, target)
+        summary_scalar(target)
+        self.refresh_run_checksums(run_id, evidence_root=target)
+        with (
+            patch.dict(
+                "bench.evidence._DENSESPARK_LEGACY_PUBLISHED_BUNDLE_CONTRACTS",
+                {run_id: baseline_contract},
+                clear=True,
+            ),
+            patch.dict(
+                "bench.evidence._DENSESPARK_LEGACY_LAUNCH_POLICY_PLAN_INTEGRITY_BY_RUN_ID",
+                plan_map,
+                clear=True,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                EvidenceError, "legacy DenseSpark published bundle identity changed"
+            ):
+                verify_evidence(target)
 
     def test_sglang_runtime_overlays_export_only_pinned_basenames_and_hashes(
         self,
@@ -3350,6 +4604,97 @@ class EvidenceValidationTests(unittest.TestCase):
             {"reasoning_tokens": None},
         )
 
+    def test_matched_prompt_suite_projects_only_its_versioned_schedule(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        models = load_models(repository / "manifests" / "models.toml")
+        sources: list[tuple[dict[str, object], dict[str, object]]] = []
+        for study in MATCHED_PROMPT_GRAPH_STUDIES:
+            with self.subTest(suite=study.suite_id):
+                model = json.loads(
+                    json.dumps(
+                        model_spec_to_dict(models[sorted(study.profile_ids)[0]])
+                    )
+                )
+                case = {
+                    "concurrency": 1,
+                    "id": study.case_id,
+                    "kind": "decode",
+                    "max_output_tokens": 256,
+                    "max_turns": 1,
+                    "prompt_repetitions": 0,
+                    "repetitions": 5,
+                    "requires": ["chat"],
+                    "temperature": 0.0,
+                    "warmups": 1,
+                }
+                digest = _synthetic_content_hash(
+                    {"model": model, "case": case}, length=12
+                )
+                source = {
+                    "cases": [
+                        {
+                            **case,
+                            "case_id": f"{study.case_id}--{digest}",
+                        }
+                    ],
+                    "description": study.suite_description,
+                    "id": study.suite_id,
+                    "schema_version": 1,
+                }
+                sources.append((model, source))
+
+                projected = _project_suite({"model": model, "suite": source})
+                published_model = _project_model({"model": model}, None)
+
+                self.assertEqual(
+                    projected["cases"][0]["prompt_schedule"],
+                    MATCHED_REQUEST_UNIQUE_PROTOCOL,
+                )
+                self.assertEqual(projected["cases"][0]["id"], study.case_id)
+                self.assertNotIn("description", projected)
+                serialized = json.dumps(projected, sort_keys=True)
+                for forbidden in (
+                    "request_id",
+                    "nonce",
+                    "prompt_text",
+                    RAW_REQUEST_ID,
+                ):
+                    self.assertNotIn(forbidden, serialized)
+                self.assertEqual(
+                    _project_suite(
+                        {
+                            "model": published_model,
+                            "suite": projected,
+                        }
+                    ),
+                    projected,
+                )
+
+                forged_schedule = json.loads(json.dumps(projected))
+                forged_schedule["cases"][0]["prompt_schedule"] = "unreviewed-v2"
+                with self.assertRaisesRegex(EvidenceError, "schedule changed"):
+                    _project_suite(
+                        {"model": published_model, "suite": forged_schedule}
+                    )
+
+                unbound_source = json.loads(json.dumps(source))
+                unbound_source["cases"][0]["case_id"] = (
+                    f"{study.case_id}--ffffffffffff"
+                )
+                with self.assertRaisesRegex(EvidenceError, "identifier changed"):
+                    _project_suite({"model": model, "suite": unbound_source})
+
+                legacy_case = json.loads(json.dumps(source))
+                legacy_case["cases"][0]["id"] = "decode-256-c1"
+                with self.assertRaisesRegex(EvidenceError, "case changed"):
+                    _project_suite({"model": model, "suite": legacy_case})
+
+        self.assertEqual(len(sources), 2)
+        with self.assertRaisesRegex(EvidenceError, "wrong profile"):
+            _project_suite(
+                {"model": sources[1][0], "suite": sources[0][1]}
+            )
+
     def test_agentic_suite_projection_is_an_exact_four_case_contract(self) -> None:
         suite = _agentic_suite()
         scenarios = tuple(case["id"] for case in suite["cases"])
@@ -3750,6 +5095,13 @@ class EvidenceValidationTests(unittest.TestCase):
     def test_output_validator_rejects_forbidden_keys_paths_and_credentials(self) -> None:
         invalid_values = (
             {"request-id": "opaque"},
+            {"requestId": "opaque"},
+            {"requestIdentifier": "opaque"},
+            {"promptText": "opaque"},
+            {"completion_text": "opaque"},
+            {"reasoningText": "opaque"},
+            {"payload": "opaque"},
+            {"toolPayload": "opaque"},
             {"nested": {"prompt": "opaque"}},
             {"artifact_path": "relative/model.gguf"},
             {"safe_metric": RAW_HOST_PATH},

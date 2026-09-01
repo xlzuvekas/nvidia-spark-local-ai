@@ -15,6 +15,16 @@ from typing import Any, Mapping
 import urllib.error
 import urllib.request
 
+from .densespark import (
+    DENSESPARK_PQ_SHA256,
+    DENSESPARK_PQ_SIZE_BYTES,
+    DenseSparkContractError,
+    densespark_pq_artifact_path,
+    is_densespark_profile,
+    validate_densespark_pq_artifact,
+    validate_densespark_profile,
+    validate_densespark_snapshot,
+)
 from .manifest import ModelSpec
 
 
@@ -364,6 +374,14 @@ def assess_model_availability(
             if not runtime_available:
                 details.append("pinned llama-server binary is unavailable")
         else:
+            densespark_candidate = is_densespark_profile(model)
+            target_snapshot = (
+                hf_snapshots.get(
+                    (model.cache_dir, model.source, str(model.revision))
+                )
+                if model.revision
+                else None
+            )
             target_available = (
                 (model.cache_dir, model.source, model.revision) in hf_keys
                 if model.revision
@@ -374,14 +392,37 @@ def assess_model_availability(
                 model.draft_source,
                 model.draft_revision,
             ) in hf_keys
-            source_available = target_available and draft_available
+            densespark_artifacts_available = True
+            if densespark_candidate:
+                try:
+                    validate_densespark_profile(model)
+                    if target_snapshot is None:
+                        raise DenseSparkContractError(
+                            "DenseSpark exact snapshot is unavailable"
+                        )
+                    validate_densespark_snapshot(
+                        target_snapshot,
+                        repository_root=target_snapshot.parents[1],
+                    )
+                    validate_densespark_pq_artifact(
+                        densespark_pq_artifact_path(),
+                        expected_size_bytes=DENSESPARK_PQ_SIZE_BYTES,
+                        expected_sha256=DENSESPARK_PQ_SHA256,
+                    )
+                except (DenseSparkContractError, IndexError):
+                    densespark_artifacts_available = False
+            source_available = (
+                target_available
+                and draft_available
+                and densespark_artifacts_available
+            )
             if model.backend == "transformers":
                 runtime_available = bool(
                     model.runtime_python and Path(model.runtime_python).is_file()
                 )
                 if not runtime_available:
                     details.append("certified Transformers runtime is unavailable")
-            elif model.image and model.sglang_storage_mode is not None:
+            elif model.image and model.local_image_id is not None:
                 runtime_available = any(
                     image.reference == model.image
                     and image.image_id == model.local_image_id
@@ -402,6 +443,8 @@ def assess_model_availability(
                 details.append("checkpoint revision is not cached")
             if not draft_available:
                 details.append("draft checkpoint revision is not cached")
+            if densespark_candidate and not densespark_artifacts_available:
+                details.append("exact DenseSpark snapshot or PQ artifact is unavailable")
             if not runtime_available and model.backend != "transformers":
                 details.append("container image or digest is not cached")
         availability[model.id] = ModelAvailability(

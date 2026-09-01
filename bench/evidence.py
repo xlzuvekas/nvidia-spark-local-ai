@@ -24,6 +24,7 @@ import stat
 import statistics
 import subprocess
 import tempfile
+from types import SimpleNamespace
 from typing import Any, Sequence
 import unicodedata
 
@@ -36,7 +37,41 @@ from .annotations import (
     startup_safety_gate_annotations_from_annotations,
     startup_safety_gates_from_annotations,
 )
-from .manifest import KNOWN_AGENTIC_CASE_IDS
+from .densespark import (
+    DENSESPARK_IMAGE,
+    DENSESPARK_MAX_CONTEXT,
+    DENSESPARK_MODEL_REVISION,
+    DENSESPARK_MODEL_SOURCE,
+    DENSESPARK_NATIVE_CONTEXT,
+    DENSESPARK_PROFILE_ID,
+    DENSESPARK_PROFILE_IDS,
+    DENSESPARK_RECIPE_REVISION,
+    DENSESPARK_STARTUP_MAX_STARTING_SWAP_MIB,
+    DENSESPARK_STARTUP_MAX_SWAP_GROWTH_MIB,
+    DENSESPARK_STARTUP_MIN_MEMAVAILABLE_GIB,
+    DENSESPARK_WEIGHT_FILE_COUNT,
+    DENSESPARK_WEIGHT_SIZE_BYTES,
+    DENSESPARK_WARMUP_SYNC_IMAGE,
+    DENSESPARK_WARMUP_SYNC_PROFILE_ID,
+    DenseSparkContractError,
+    densespark_expected_launch_policy,
+    densespark_expected_resolved_provenance,
+    densespark_image_for_profile,
+    validate_densespark_profile,
+)
+from .manifest import (
+    KNOWN_AGENTIC_CASE_IDS,
+    MATCHED_PROMPT_CASE_PREFIX,
+    MATCHED_PROMPT_GRAPH_PROFILE_IDS,
+    MATCHED_PROMPT_GRAPH_SUITE_IDS,
+    MATCHED_REQUEST_UNIQUE_PROTOCOL,
+    QWEN38_27B_DSPARK_CUDA_GRAPH_DISABLED_PROFILE_ID,
+    QWEN38_27B_DSPARK_CUDA_GRAPH_FULL_PROFILE_ID,
+    QWEN38_27B_DSPARK_CUDA_GRAPH_SUITE_ID,
+    matched_prompt_graph_study,
+    matched_prompt_protocol,
+    validate_matched_prompt_graph_model,
+)
 from .memory_ops import (
     MEMORY_OPERATION_CONTEXT_TOKENS,
     MEMORY_OPERATION_LLAMACPP_DIGEST,
@@ -94,6 +129,10 @@ from .sglang_sm121_storage import (
     validate_sm121_storage_candidate,
     validate_sm121_storage_runtime_provenance_event,
     validate_sm121_storage_suite,
+)
+from .sglang_sm121_cuda_graph import (
+    SM121_CUDA_GRAPH_BREAKABLE_PROFILE_ID,
+    SM121_CUDA_GRAPH_DISABLED_PROFILE_ID,
 )
 from .sglang_sm121_cache_observability import (
     SM121_CACHE_OBSERVABILITY_EXECUTION_MODE,
@@ -1176,8 +1215,13 @@ _FORBIDDEN_OUTPUT_KEYS = {
     "completion",
     "output",
     "output_text",
+    "prompt_text",
+    "completion_text",
+    "reasoning_text",
     "raw",
     "request_id",
+    "request_identifier",
+    "requestid",
     "request_tag",
     "token_ids",
     "transcription",
@@ -1192,6 +1236,8 @@ _FORBIDDEN_OUTPUT_KEYS = {
     "args",
     "argv",
     "command",
+    "payload",
+    "tool_payload",
     "environment",
     "env",
     "error",
@@ -1215,6 +1261,7 @@ _KNOWN_EVENTS = {
     "case_skipped_unsupported",
     "case_start",
     "first_request_complete",
+    "host_safety_breach",
     "llamacpp_spec_decode_metrics_snapshot",
     "measurement_complete",
     "measurement_started",
@@ -3170,10 +3217,25 @@ def _sm121_singleton_lane(plan: dict[str, Any]) -> str | None:
 
     model = plan.get("model")
     suite = plan.get("suite")
+    model_id = model.get("id") if isinstance(model, dict) else None
+    suite_id = suite.get("id") if isinstance(suite, dict) else None
+    graph_model_study = (
+        matched_prompt_graph_study(profile_id=model_id)
+        if isinstance(model_id, str)
+        else None
+    )
+    graph_suite_study = (
+        matched_prompt_graph_study(suite_id=suite_id)
+        if isinstance(suite_id, str)
+        else None
+    )
+    if graph_model_study is not None or graph_suite_study is not None:
+        if graph_model_study is None or graph_model_study != graph_suite_study:
+            raise EvidenceError("matched-prompt graph profile binding is incomplete")
+        return None
     semantic_model_marker = bool(
         isinstance(model, dict) and is_sm121_cache_semantic_candidate(model)
     )
-    suite_id = suite.get("id") if isinstance(suite, dict) else None
     semantic_suite_marker = suite_id == SM121_CACHE_SEMANTIC_SUITE_ID
     if semantic_model_marker or semantic_suite_marker:
         if not semantic_model_marker or not semantic_suite_marker:
@@ -4589,12 +4651,213 @@ def _project_sm121_cache_semantic_summary(
     }
 
 
+_MATCHED_PROMPT_GRAPH_MODEL_CONTRACTS = {
+    QWEN38_27B_DSPARK_CUDA_GRAPH_FULL_PROFILE_ID: {
+        "cuda_graph_decode_backend": "full",
+        "case_id": (
+            "matched-prompt-qwen38-27b-dspark-cuda-graph-d256-c1-v1"
+            "--e10754a3fc1a"
+        ),
+        "cuda_graph_model_contract_sha256": (
+            "49063e3d06db8f3e5f608a5dc31ed126bc0b356e0e7fc7da083e3a2173d36487"
+        ),
+    },
+    QWEN38_27B_DSPARK_CUDA_GRAPH_DISABLED_PROFILE_ID: {
+        "cuda_graph_decode_backend": "disabled",
+        "case_id": (
+            "matched-prompt-qwen38-27b-dspark-cuda-graph-d256-c1-v1"
+            "--53e714d98e94"
+        ),
+        "cuda_graph_model_contract_sha256": (
+            "2cfe400ce1dd9a670d60aca09d2777e160520afe26231947bc02ad57665e9aff"
+        ),
+    },
+    SM121_CUDA_GRAPH_BREAKABLE_PROFILE_ID: {
+        "cuda_graph_decode_backend": "breakable",
+        "case_id": (
+            "matched-prompt-qwen38-flash-next-sm121-triton-storage-"
+            "cuda-graph-d256-c1-v1--c4e54246c826"
+        ),
+        "cuda_graph_model_contract_sha256": (
+            "59517ffc672dcb04ca9086ce662b7605180ed0a080b25b255fdc433f40d47cc6"
+        ),
+    },
+    SM121_CUDA_GRAPH_DISABLED_PROFILE_ID: {
+        "cuda_graph_decode_backend": "disabled",
+        "case_id": (
+            "matched-prompt-qwen38-flash-next-sm121-triton-storage-"
+            "cuda-graph-d256-c1-v1--f1834a540858"
+        ),
+        "cuda_graph_model_contract_sha256": (
+            "a0f3cd87cc0e901d98126cf9df6973c8b87a4b60ff053ba1eb2b7795e388cf51"
+        ),
+    },
+}
+
+_MATCHED_PROMPT_GRAPH_PUBLISHED_RUN_CONTRACTS = {
+    (
+        "20260831T232106Z-qwen38-27b-nvfp4-dspark-c1-cuda-graph-disabled-"
+        "sglang-qwen38-27b-dspark-c1-cuda-graph-2d35736f"
+    ): {
+        "bundle_sha256": (
+            "a7a291ea4833e640dbe37ea3f6c6492b5648b8a0bb1ae01ed0472abc457becb1"
+        ),
+        "first_prompt_tokens": 103,
+        "hardware": {
+            "compute_capability": "12.1",
+            "driver_version": "580.142",
+            "gpu": "NVIDIA GB10",
+            "harness_revision": "645407473391eeee6c0c30c9753b4602c566d443",
+            "harness_worktree_dirty": True,
+            "platform": "NVIDIA DGX Spark",
+            "unified_memory_bytes": 128_520_445_952,
+        },
+        "measured_prompt_tokens": 107,
+        "profile_id": QWEN38_27B_DSPARK_CUDA_GRAPH_DISABLED_PROFILE_ID,
+        "suite_id": QWEN38_27B_DSPARK_CUDA_GRAPH_SUITE_ID,
+    },
+    (
+        "20260831T232549Z-qwen38-27b-nvfp4-dspark-c1-cuda-graph-full-"
+        "sglang-qwen38-27b-dspark-c1-cuda-graph-a07ce0e8"
+    ): {
+        "bundle_sha256": (
+            "db74e4877af511198c5050a4e4b7f56c695651f012d375b9b06bd114f5346352"
+        ),
+        "first_prompt_tokens": 103,
+        "hardware": {
+            "compute_capability": "12.1",
+            "driver_version": "580.142",
+            "gpu": "NVIDIA GB10",
+            "harness_revision": "645407473391eeee6c0c30c9753b4602c566d443",
+            "harness_worktree_dirty": True,
+            "platform": "NVIDIA DGX Spark",
+            "unified_memory_bytes": 128_520_445_952,
+        },
+        "measured_prompt_tokens": 107,
+        "profile_id": QWEN38_27B_DSPARK_CUDA_GRAPH_FULL_PROFILE_ID,
+        "suite_id": QWEN38_27B_DSPARK_CUDA_GRAPH_SUITE_ID,
+    },
+}
+
+
+def _matched_prompt_graph_model_contract_sha256(model: dict[str, Any]) -> str:
+    payload = {
+        "schema": "sparkbench.matched-graph-model.v1",
+        "model": model,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+    ).hexdigest()
+
+
+def _expected_matched_prompt_graph_model(profile_id: str) -> dict[str, Any]:
+    contract = _MATCHED_PROMPT_GRAPH_MODEL_CONTRACTS.get(profile_id)
+    if contract is None:
+        raise EvidenceError("matched-prompt graph model identity changed")
+    if profile_id in {
+        QWEN38_27B_DSPARK_CUDA_GRAPH_FULL_PROFILE_ID,
+        QWEN38_27B_DSPARK_CUDA_GRAPH_DISABLED_PROFILE_ID,
+    }:
+        result: dict[str, Any] = {
+            "architecture": "dense+dspark-draft",
+            "backend": "sglang",
+            "estimated_ram_gib": 92.0,
+            "id": profile_id,
+            "lifecycle": "docker",
+            "max_context": 262_144,
+            "native_context": 262_144,
+            "quantization": "nvfp4+unquant-dspark",
+            "revision": "52d1adc5f38aa5ebf099c29ed7025ba34cfbb854",
+            "source": "RadixArk/Qwen3.8-27B-NVFP4",
+            "startup_timeout_s": 1_800,
+            "support_status": "spark_other_backend",
+            "tasks": ["chat", "json", "thinking", "tools"],
+            "weight_file_count": 3,
+            "weight_size_bytes": 21_921_697_280,
+        }
+    else:
+        result = {
+            "architecture": "moe+qsa+gdn",
+            "backend": "sglang",
+            "estimated_ram_gib": 101.0,
+            "id": profile_id,
+            "lifecycle": "docker",
+            "max_context": 65_536,
+            "native_context": 262_144,
+            "quantization": "nvfp4+ple-fp8-nvme-io-uring",
+            "revision": "7b719225242aacd3dbd3f9407468c2ee9a9d2594",
+            "source": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+            "startup_timeout_s": 1_200,
+            "support_status": "exploratory",
+            "tasks": ["chat", "json", "thinking", "tools"],
+            "weight_file_count": 206,
+            "weight_size_bytes": 135_195_303_851,
+        }
+    result.update(
+        {
+            "cuda_graph_batch_size": 1,
+            "cuda_graph_decode_backend": contract["cuda_graph_decode_backend"],
+            "cuda_graph_model_contract_sha256": contract[
+                "cuda_graph_model_contract_sha256"
+            ],
+            "cuda_graph_prefill_backend": "disabled",
+        }
+    )
+    return result
+
+
+def _validate_source_matched_prompt_graph_model(
+    model: dict[str, Any],
+) -> dict[str, Any]:
+    profile_id = model.get("id")
+    contract = _MATCHED_PROMPT_GRAPH_MODEL_CONTRACTS.get(profile_id)
+    if contract is None:
+        raise EvidenceError("matched-prompt graph model identity changed")
+    try:
+        validate_matched_prompt_graph_model(
+            model, context="matched-prompt source model"
+        )
+    except ValueError as error:
+        raise EvidenceError("matched-prompt graph model contract changed") from error
+    observed = _matched_prompt_graph_model_contract_sha256(model)
+    if observed != contract["cuda_graph_model_contract_sha256"]:
+        raise EvidenceError("matched-prompt graph model serialization changed")
+    return _expected_matched_prompt_graph_model(str(profile_id))
+
+
+def _validate_projected_matched_prompt_graph_model(
+    model: Any,
+) -> dict[str, Any]:
+    if not isinstance(model, dict):
+        raise EvidenceError("matched-prompt graph evidence model is missing")
+    profile_id = model.get("id")
+    if not isinstance(profile_id, str):
+        raise EvidenceError("matched-prompt graph evidence model identity changed")
+    expected = _expected_matched_prompt_graph_model(profile_id)
+    if not _json_strict_equal(model, expected):
+        raise EvidenceError("matched-prompt graph evidence model contract changed")
+    return expected
+
+
 def _project_model(plan: dict[str, Any], summary: dict[str, Any] | None) -> dict[str, Any]:
     model = plan.get("model")
     if not isinstance(model, dict):
         model = summary.get("model") if summary else None
     if not isinstance(model, dict):
         return {}
+    graph_profile = model.get("id") in MATCHED_PROMPT_GRAPH_PROFILE_IDS
+    if graph_profile and "cuda_graph_model_contract_sha256" in model:
+        return _validate_projected_matched_prompt_graph_model(model)
+    expected_graph_model = (
+        _validate_source_matched_prompt_graph_model(model)
+        if graph_profile
+        else None
+    )
     result: dict[str, Any] = {}
     for key in (
         "id",
@@ -4630,6 +4893,23 @@ def _project_model(plan: dict[str, Any], summary: dict[str, Any] | None) -> dict
         result["tasks"] = [_safe_id(item, name="model.task") for item in tasks]
     if result.get("prefix_cache_mode") is not None:
         return _project_prefix_cache_model(result)
+    if expected_graph_model is not None:
+        if not _json_strict_equal(
+            result,
+            {
+                key: value
+                for key, value in expected_graph_model.items()
+                if not key.startswith("cuda_graph_")
+            },
+        ):
+            raise EvidenceError("matched-prompt graph model projection changed")
+        result.update(
+            {
+                key: value
+                for key, value in expected_graph_model.items()
+                if key.startswith("cuda_graph_")
+            }
+        )
     return result
 
 
@@ -5066,6 +5346,895 @@ def _project_autoresearch_suite(
     }
 
 
+def _project_matched_prompt_graph_suite(
+    suite: Any,
+    *,
+    model: Any,
+) -> dict[str, Any]:
+    """Project one exact pair-specific matched-request-unique graph screen.
+
+    Source plans include the frozen description and a case identifier bound to
+    the complete source model. Published evidence omits the description and
+    adds only the derived, scalar-safe prompt-schedule label. Neither form may
+    carry prompt text, request identifiers, nonces, or an unreviewed schedule.
+    """
+
+    if not isinstance(suite, dict) or not isinstance(model, dict):
+        raise EvidenceError("matched-prompt suite lacks its frozen model")
+    try:
+        suite_study = matched_prompt_graph_study(suite_id=suite.get("id"))
+        model_study = matched_prompt_graph_study(profile_id=model.get("id"))
+    except ValueError as error:
+        raise EvidenceError("matched-prompt suite identity changed") from error
+    if suite_study is None or model_study != suite_study:
+        raise EvidenceError("matched-prompt suite is bound to the wrong profile")
+    study = suite_study
+    fields = frozenset(suite)
+    source_fields = frozenset(
+        {"cases", "description", "id", "schema_version"}
+    )
+    published_fields = frozenset({"cases", "id", "schema_version"})
+    if fields == source_fields:
+        source = True
+    elif fields == published_fields:
+        source = False
+    else:
+        raise EvidenceError("matched-prompt suite does not match its exact schema")
+    if source:
+        _validate_source_matched_prompt_graph_model(model)
+    else:
+        _validate_projected_matched_prompt_graph_model(model)
+    if (
+        suite.get("id") != study.suite_id
+        or type(suite.get("schema_version")) is not int
+        or suite.get("schema_version") != 1
+        or (
+            source
+            and suite.get("description")
+            != study.suite_description
+        )
+    ):
+        raise EvidenceError("matched-prompt suite identity changed")
+    cases = suite.get("cases")
+    if (
+        not isinstance(cases, list)
+        or len(cases) != 1
+        or not isinstance(cases[0], dict)
+    ):
+        raise EvidenceError("matched-prompt suite cases changed")
+    expected_case: dict[str, Any] = {
+        "concurrency": 1,
+        "id": study.case_id,
+        "kind": "decode",
+        "max_output_tokens": 256,
+        "max_turns": 1,
+        "prompt_repetitions": 0,
+        "repetitions": 5,
+        "requires": ["chat"],
+        "temperature": 0.0,
+        "warmups": 1,
+    }
+    case = cases[0]
+    expected_fields = set(expected_case) | {"case_id"}
+    if not source:
+        expected_fields.add("prompt_schedule")
+    if set(case) != expected_fields:
+        raise EvidenceError("matched-prompt suite case schema changed")
+    case_id = _safe_id(case.get("case_id"), name="matched-prompt case ID")
+    contract = _MATCHED_PROMPT_GRAPH_MODEL_CONTRACTS.get(model.get("id"))
+    if contract is None or case_id != contract["case_id"]:
+        raise EvidenceError("matched-prompt case identifier changed")
+    try:
+        protocol = matched_prompt_protocol(str(case.get("id")))
+    except ValueError as error:
+        raise EvidenceError("matched-prompt case identity changed") from error
+    if (
+        protocol != MATCHED_REQUEST_UNIQUE_PROTOCOL
+        or re.fullmatch(
+            rf"{re.escape(study.case_id)}--[0-9a-f]{{12}}",
+            case_id,
+        )
+        is None
+        or not _json_strict_equal(
+            {key: case.get(key) for key in expected_case}, expected_case
+        )
+    ):
+        raise EvidenceError("matched-prompt suite case changed")
+    if source:
+        identity = {"model": model, "case": expected_case}
+        digest = hashlib.sha256(
+            json.dumps(
+                identity,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+        ).hexdigest()[:12]
+        if case_id != f"{study.case_id}--{digest}":
+            raise EvidenceError(
+                "matched-prompt case identifier is not bound to its source model"
+            )
+    elif case.get("prompt_schedule") != MATCHED_REQUEST_UNIQUE_PROTOCOL:
+        raise EvidenceError("matched-prompt evidence schedule changed")
+    return {
+        "cases": [
+            {
+                **expected_case,
+                "case_id": case_id,
+                "prompt_schedule": MATCHED_REQUEST_UNIQUE_PROTOCOL,
+            }
+        ],
+        "id": study.suite_id,
+        "schema_version": 1,
+    }
+
+
+_MATCHED_PROMPT_GRAPH_RAW_RESULT_FIELDS = frozenset(
+    {
+        "cached_prompt_tokens",
+        "completion_tokens",
+        "content",
+        "decode_metric_source",
+        "decode_s",
+        "decode_tps",
+        "elapsed_s",
+        "emission_events",
+        "finish_reason",
+        "load_s",
+        "output_tps",
+        "prompt_tokens",
+        "reasoning",
+        "reasoning_tokens",
+        "request_id",
+        "response_model",
+        "server_cached_prompt_tokens",
+        "server_decode_s",
+        "server_decode_tokens",
+        "server_prompt_s",
+        "server_prompt_tokens",
+        "started_at_ns",
+        "tool_calls",
+        "ttft_s",
+    }
+)
+_MATCHED_PROMPT_GRAPH_RESULT_FIELDS = frozenset(
+    {
+        "cached_prompt_tokens",
+        "completion_tokens",
+        "decode_metric_source",
+        "decode_s",
+        "decode_tps",
+        "elapsed_s",
+        "emission_event_count",
+        "finish_reason",
+        "load_s",
+        "output_tps",
+        "prompt_tokens",
+        "reasoning_tokens",
+        "server_cached_prompt_tokens",
+        "server_decode_s",
+        "server_decode_tokens",
+        "server_prompt_s",
+        "server_prompt_tokens",
+        "ttft_s",
+    }
+)
+_MATCHED_PROMPT_GRAPH_FIRST_SAMPLE_FIELDS = frozenset(
+    _MATCHED_PROMPT_GRAPH_RESULT_FIELDS | {"sample_index", "sample_type"}
+)
+_MATCHED_PROMPT_GRAPH_MEASURED_SAMPLE_FIELDS = frozenset(
+    _MATCHED_PROMPT_GRAPH_RESULT_FIELDS
+    | {
+        "burst_elapsed_s",
+        "case_attempt",
+        "case_id",
+        "case_sample_index",
+        "kind",
+        "repetition",
+        "sample_index",
+        "sample_type",
+        "selected_attempt",
+        "validation_passed",
+    }
+)
+
+
+def _validate_matched_prompt_graph_source_requests(
+    plan: dict[str, Any],
+    events: list[dict[str, Any]],
+    summary: dict[str, Any] | None,
+    *,
+    source_run_id: str,
+) -> None:
+    """Authenticate the fixed measured request schedule before ID redaction."""
+
+    model = plan.get("model")
+    suite = plan.get("suite")
+    if not isinstance(model, dict) or not isinstance(suite, dict):
+        raise EvidenceError("matched-prompt source run lacks its frozen plan")
+    profile_id = model.get("id")
+    contract = _MATCHED_PROMPT_GRAPH_MODEL_CONTRACTS.get(profile_id)
+    if contract is None:
+        raise EvidenceError("matched-prompt source model identity changed")
+    _validate_source_matched_prompt_graph_model(model)
+    _project_matched_prompt_graph_suite(suite, model=model)
+    expected_case_id = contract["case_id"]
+    study = matched_prompt_graph_study(profile_id=str(profile_id))
+    if study is None:
+        raise EvidenceError("matched-prompt source study identity changed")
+    historical_contract = _MATCHED_PROMPT_GRAPH_PUBLISHED_RUN_CONTRACTS.get(
+        source_run_id
+    )
+    if historical_contract is not None and (
+        historical_contract.get("profile_id") != profile_id
+        or historical_contract.get("suite_id") != study.suite_id
+    ):
+        raise EvidenceError("matched-prompt historical run binding changed")
+    served_name = model.get("served_name")
+    if not isinstance(served_name, str) or not served_name:
+        raise EvidenceError("matched-prompt served model identity changed")
+
+    case_starts = [event for event in events if event.get("event") == "case_start"]
+    case_completes = [
+        event for event in events if event.get("event") == "case_complete"
+    ]
+    requests = [
+        event for event in events if event.get("event") == "request_complete"
+    ]
+    first_requests = [
+        event for event in events if event.get("event") == "first_request_complete"
+    ]
+    if not (
+        len(case_starts) == 1
+        and len(case_completes) == 1
+        and len(requests) == 5
+        and len(first_requests) == 1
+    ):
+        raise EvidenceError(
+            "matched-prompt source must contain one warmup-configured case and "
+            "exactly five measured requests"
+        )
+    attempt_id = case_starts[0].get("attempt_id")
+    if (
+        not isinstance(attempt_id, str)
+        or not attempt_id
+        or case_starts[0].get("case_id") != expected_case_id
+        or case_completes[0].get("case_id") != expected_case_id
+        or case_completes[0].get("attempt_id") != attempt_id
+    ):
+        raise EvidenceError("matched-prompt source attempt binding changed")
+    first_result = first_requests[0].get("result")
+    if (
+        not isinstance(first_result, dict)
+        or set(first_result) != _MATCHED_PROMPT_GRAPH_RAW_RESULT_FIELDS
+        or not isinstance(first_result.get("request_id"), str)
+        or re.fullmatch(
+            r"first-request-after-start-[0-9]+", first_result["request_id"]
+        )
+        is None
+        or first_result.get("response_model") != served_name
+    ):
+        raise EvidenceError("matched-prompt first-request identity changed")
+    measured_prompt_tokens: list[int] = []
+    for repetition, event in enumerate(requests):
+        result = event.get("result")
+        expected_request_id = f"{study.case_id}-r{repetition}-w0"
+        if (
+            set(event)
+            != {
+                "attempt_id",
+                "burst_elapsed_s",
+                "case_id",
+                "event",
+                "kind",
+                "repetition",
+                "result",
+                "timestamp",
+                "validation",
+            }
+            or event.get("case_id") != expected_case_id
+            or event.get("attempt_id") != attempt_id
+            or event.get("kind") != "decode"
+            or event.get("repetition") != repetition
+            or not isinstance(result, dict)
+            or set(result) != _MATCHED_PROMPT_GRAPH_RAW_RESULT_FIELDS
+            or result.get("request_id") != expected_request_id
+            or result.get("response_model") != served_name
+            or type(result.get("prompt_tokens")) is not int
+            or result["prompt_tokens"] <= 0
+            or event.get("validation") != {"passed": True, "reason": None}
+        ):
+            raise EvidenceError("matched-prompt measured request schedule changed")
+        measured_prompt_tokens.append(result["prompt_tokens"])
+    if len(set(measured_prompt_tokens)) != 1:
+        raise EvidenceError("matched-prompt measured prompt token shape changed")
+    if not isinstance(summary, dict):
+        raise EvidenceError("matched-prompt source summary is missing")
+    summary_cases = summary.get("cases")
+    summary_first = summary.get("first_request_after_start")
+    if (
+        not isinstance(summary_cases, list)
+        or len(summary_cases) != 1
+        or not isinstance(summary_cases[0], dict)
+        or summary_cases[0].get("case_id") != expected_case_id
+        or summary_cases[0].get("attempt_id") != attempt_id
+        or summary.get("status") != "complete"
+        or summary.get("run_completion_status") != "completed"
+        or summary.get("completed_cases") != 1
+        or summary.get("suite") != study.suite_id
+        or not isinstance(summary_first, dict)
+        or summary_first.get("request_id") != first_result["request_id"]
+        or summary_cases[0].get("prompt_tokens") != sum(measured_prompt_tokens)
+    ):
+        raise EvidenceError("matched-prompt source summary binding changed")
+    if historical_contract is not None and (
+        first_result.get("prompt_tokens")
+        != historical_contract["first_prompt_tokens"]
+        or measured_prompt_tokens
+        != [historical_contract["measured_prompt_tokens"]] * 5
+    ):
+        raise EvidenceError("matched-prompt historical prompt token shape changed")
+
+
+def _matched_prompt_graph_integer(
+    value: Any,
+    *,
+    name: str,
+    positive: bool = False,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise EvidenceError(f"matched-prompt {name} must be an integer")
+    if value < 0 or (positive and value <= 0):
+        raise EvidenceError(f"matched-prompt {name} is outside its range")
+    return value
+
+
+def _matched_prompt_graph_number(
+    value: Any,
+    *,
+    name: str,
+    positive: bool = False,
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise EvidenceError(f"matched-prompt {name} must be numeric")
+    number = float(value)
+    if not math.isfinite(number) or number < 0 or (positive and number <= 0):
+        raise EvidenceError(f"matched-prompt {name} is outside its range")
+    return number
+
+
+def _validate_matched_prompt_graph_result(
+    sample: dict[str, Any],
+    *,
+    measured: bool,
+) -> None:
+    completion_tokens = _matched_prompt_graph_integer(
+        sample.get("completion_tokens"),
+        name="sample completion_tokens",
+        positive=True,
+    )
+    if measured and completion_tokens != 256:
+        raise EvidenceError("matched-prompt measured output length changed")
+    _matched_prompt_graph_integer(
+        sample.get("prompt_tokens"), name="sample prompt_tokens", positive=True
+    )
+    _matched_prompt_graph_integer(
+        sample.get("emission_event_count"),
+        name="sample emission_event_count",
+        positive=True,
+    )
+    reasoning_tokens = sample.get("reasoning_tokens")
+    if reasoning_tokens is not None:
+        _matched_prompt_graph_integer(
+            reasoning_tokens, name="sample reasoning_tokens"
+        )
+    decode_s = _matched_prompt_graph_number(
+        sample.get("decode_s"), name="sample decode_s", positive=True
+    )
+    elapsed_s = _matched_prompt_graph_number(
+        sample.get("elapsed_s"), name="sample elapsed_s", positive=True
+    )
+    ttft_s = _matched_prompt_graph_number(
+        sample.get("ttft_s"), name="sample ttft_s"
+    )
+    decode_tps = _matched_prompt_graph_number(
+        sample.get("decode_tps"), name="sample decode_tps"
+    )
+    output_tps = _matched_prompt_graph_number(
+        sample.get("output_tps"), name="sample output_tps", positive=True
+    )
+    expected_decode_tps = max(completion_tokens - 1, 0) / decode_s
+    if not math.isclose(
+        decode_tps, expected_decode_tps, rel_tol=1e-12, abs_tol=1e-12
+    ):
+        raise EvidenceError("matched-prompt sample decode_tps is inconsistent")
+    if not math.isclose(
+        output_tps,
+        completion_tokens / elapsed_s,
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ):
+        raise EvidenceError("matched-prompt sample output_tps is inconsistent")
+    if not math.isclose(
+        elapsed_s, decode_s + ttft_s, rel_tol=1e-9, abs_tol=1e-9
+    ):
+        raise EvidenceError("matched-prompt sample timing is inconsistent")
+    if (
+        sample.get("decode_metric_source") != "client_estimate"
+        or sample.get("finish_reason") != "length"
+        or sample.get("load_s") is not None
+        or sample.get("cached_prompt_tokens") is not None
+    ):
+        raise EvidenceError("matched-prompt sample metric source changed")
+    for key in (
+        "server_cached_prompt_tokens",
+        "server_decode_s",
+        "server_decode_tokens",
+        "server_prompt_s",
+        "server_prompt_tokens",
+    ):
+        if sample.get(key) is not None:
+            raise EvidenceError("matched-prompt sample gained native timing fields")
+
+
+def _validate_matched_prompt_graph_samples(
+    samples: Any,
+    *,
+    profile_id: str,
+) -> list[dict[str, Any]]:
+    contract = _MATCHED_PROMPT_GRAPH_MODEL_CONTRACTS.get(profile_id)
+    if contract is None or not isinstance(samples, list) or len(samples) != 6:
+        raise EvidenceError("matched-prompt evidence requires exactly six samples")
+    first = samples[0]
+    if (
+        not isinstance(first, dict)
+        or set(first) != _MATCHED_PROMPT_GRAPH_FIRST_SAMPLE_FIELDS
+        or first.get("sample_index") != 1
+        or first.get("sample_type") != "first_request"
+    ):
+        raise EvidenceError("matched-prompt first sample schema changed")
+    _validate_matched_prompt_graph_result(first, measured=False)
+    for repetition, sample in enumerate(samples[1:]):
+        if (
+            not isinstance(sample, dict)
+            or set(sample) != _MATCHED_PROMPT_GRAPH_MEASURED_SAMPLE_FIELDS
+            or sample.get("sample_index") != repetition + 2
+            or sample.get("sample_type") != "measured_request"
+            or sample.get("case_id") != contract["case_id"]
+            or sample.get("case_attempt") != 1
+            or sample.get("case_sample_index") != repetition + 1
+            or sample.get("repetition") != repetition
+            or sample.get("kind") != "decode"
+            or sample.get("selected_attempt") is not True
+            or sample.get("validation_passed") is not True
+        ):
+            raise EvidenceError("matched-prompt measured sample schema changed")
+        _validate_matched_prompt_graph_result(sample, measured=True)
+        burst_s = _matched_prompt_graph_number(
+            sample.get("burst_elapsed_s"),
+            name="sample burst_elapsed_s",
+            positive=True,
+        )
+        if burst_s < float(sample["elapsed_s"]):
+            raise EvidenceError("matched-prompt burst timing is inconsistent")
+    return samples
+
+
+_MATCHED_PROMPT_GRAPH_CASE_FIELDS = frozenset(
+    {
+        "aggregate_output_tps",
+        "case_id",
+        "completion_tokens",
+        "concurrency",
+        "decode_estimate_one_token_chunks",
+        "decode_metric_source",
+        "elapsed_s",
+        "kind",
+        "measurement_annotation_count",
+        "measurement_valid",
+        "median_decode_tps",
+        "median_e2e_s",
+        "median_estimated_decode_tps",
+        "median_ttft_s",
+        "output_tokens_per_sampled_joule",
+        "p95_e2e_s",
+        "p95_ttft_s",
+        "prompt_tokens",
+        "reasoning_tokens",
+        "request_tps",
+        "requests",
+        "telemetry",
+        "validation_passed",
+    }
+)
+_MATCHED_PROMPT_GRAPH_AGGREGATE_FIELDS = frozenset(
+    {
+        "artifact_validation",
+        "artifact_validation_telemetry",
+        "cases",
+        "completed_cases",
+        "context_limited_cases",
+        "failed_cases",
+        "first_request",
+        "first_request_telemetry",
+        "llamacpp_dflash_evidence",
+        "llamacpp_mtp_evidence",
+        "measurement_annotations_count",
+        "measurement_invalid_cases",
+        "run_completion_status",
+        "shutdown_telemetry",
+        "speculative_decoding",
+        "startup_measurement_annotations_count",
+        "startup_measurement_valid",
+        "startup_safety_gates",
+        "startup_telemetry",
+        "status",
+        "suite",
+        "unimplemented_cases",
+        "unsupported_cases",
+        "validation_failed_cases",
+    }
+)
+
+
+def _validate_matched_prompt_graph_aggregates(
+    aggregates: Any,
+    *,
+    samples: list[dict[str, Any]],
+    profile_id: str,
+    suite_id: str,
+) -> None:
+    contract = _MATCHED_PROMPT_GRAPH_MODEL_CONTRACTS[profile_id]
+    if (
+        not isinstance(aggregates, dict)
+        or set(aggregates) != _MATCHED_PROMPT_GRAPH_AGGREGATE_FIELDS
+        or aggregates.get("completed_cases") != 1
+        or aggregates.get("status") != "complete"
+        or aggregates.get("run_completion_status") != "completed"
+        or aggregates.get("suite") != suite_id
+        or aggregates.get("startup_measurement_valid") is not True
+        or aggregates.get("startup_safety_gates") != []
+        or aggregates.get("measurement_annotations_count") != 0
+        or aggregates.get("startup_measurement_annotations_count") != 0
+    ):
+        raise EvidenceError("matched-prompt aggregate schema changed")
+    for key in (
+        "context_limited_cases",
+        "failed_cases",
+        "measurement_invalid_cases",
+        "unimplemented_cases",
+        "unsupported_cases",
+        "validation_failed_cases",
+    ):
+        if aggregates.get(key) != []:
+            raise EvidenceError("matched-prompt aggregate outcome changed")
+    for key in (
+        "artifact_validation",
+        "artifact_validation_telemetry",
+        "llamacpp_dflash_evidence",
+        "llamacpp_mtp_evidence",
+        "speculative_decoding",
+    ):
+        if aggregates.get(key) is not None:
+            raise EvidenceError("matched-prompt aggregate nonprotocol root changed")
+    for key in (
+        "first_request_telemetry",
+        "shutdown_telemetry",
+        "startup_telemetry",
+    ):
+        telemetry_root = aggregates.get(key)
+        projected_root = _project_telemetry_summary(
+            telemetry_root, name=f"matched-prompt {key}"
+        )
+        if not _json_strict_equal(projected_root, telemetry_root):
+            raise EvidenceError("matched-prompt aggregate telemetry schema changed")
+    expected_first = {
+        key: value
+        for key, value in samples[0].items()
+        if key not in {"sample_index", "sample_type"}
+    }
+    if not _json_strict_equal(aggregates.get("first_request"), expected_first):
+        raise EvidenceError("matched-prompt first-request aggregate changed")
+    cases = aggregates.get("cases")
+    if (
+        not isinstance(cases, list)
+        or len(cases) != 1
+        or not isinstance(cases[0], dict)
+        or set(cases[0]) != _MATCHED_PROMPT_GRAPH_CASE_FIELDS
+    ):
+        raise EvidenceError("matched-prompt case aggregate schema changed")
+    case = cases[0]
+    measured = samples[1:]
+    completion_tokens = sum(int(sample["completion_tokens"]) for sample in measured)
+    prompt_tokens = sum(int(sample["prompt_tokens"]) for sample in measured)
+    reported_reasoning = [sample["reasoning_tokens"] for sample in measured]
+    reasoning_tokens = (
+        sum(int(value) for value in reported_reasoning)
+        if all(value is not None for value in reported_reasoning)
+        else None
+    )
+    elapsed_s = _matched_prompt_graph_number(
+        case.get("elapsed_s"), name="aggregate elapsed_s", positive=True
+    )
+    summed_burst_s = sum(float(sample["burst_elapsed_s"]) for sample in measured)
+    if not summed_burst_s <= elapsed_s <= summed_burst_s + 5.0:
+        raise EvidenceError("matched-prompt aggregate wall time is inconsistent")
+    expected_scalars = {
+        "aggregate_output_tps": completion_tokens / elapsed_s,
+        "completion_tokens": completion_tokens,
+        "concurrency": 1,
+        "decode_estimate_one_token_chunks": all(
+            sample["emission_event_count"] == sample["completion_tokens"]
+            for sample in measured
+        ),
+        "decode_metric_source": "client_estimate",
+        "kind": "decode",
+        "measurement_annotation_count": 0,
+        "measurement_valid": True,
+        "median_decode_tps": statistics.median(
+            float(sample["decode_tps"]) for sample in measured
+        ),
+        "median_e2e_s": statistics.median(
+            float(sample["elapsed_s"]) for sample in measured
+        ),
+        "median_estimated_decode_tps": statistics.median(
+            float(sample["decode_tps"]) for sample in measured
+        ),
+        "median_ttft_s": statistics.median(
+            float(sample["ttft_s"]) for sample in measured
+        ),
+        "p95_e2e_s": None,
+        "p95_ttft_s": None,
+        "prompt_tokens": prompt_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "requests": 5,
+        "request_tps": 5 / elapsed_s,
+        "validation_passed": True,
+    }
+    if case.get("case_id") != contract["case_id"]:
+        raise EvidenceError("matched-prompt aggregate case binding changed")
+    for key, expected in expected_scalars.items():
+        actual = case.get(key)
+        if isinstance(expected, float):
+            if (
+                isinstance(actual, bool)
+                or not isinstance(actual, (int, float))
+                or not math.isclose(
+                    float(actual), expected, rel_tol=1e-9, abs_tol=1e-9
+                )
+            ):
+                raise EvidenceError(
+                    f"matched-prompt aggregate {key} is inconsistent"
+                )
+        elif not _json_strict_equal(actual, expected):
+            raise EvidenceError(f"matched-prompt aggregate {key} is inconsistent")
+    telemetry = case.get("telemetry")
+    projected_telemetry = _project_telemetry_summary(
+        telemetry, name="matched-prompt case.telemetry"
+    )
+    if not _json_strict_equal(projected_telemetry, telemetry):
+        raise EvidenceError("matched-prompt case telemetry schema changed")
+    sampled_energy = telemetry.get("sampled_energy_j")
+    if (
+        isinstance(sampled_energy, bool)
+        or not isinstance(sampled_energy, (int, float))
+        or not math.isfinite(float(sampled_energy))
+        or sampled_energy <= 0
+        or not isinstance(case.get("output_tokens_per_sampled_joule"), (int, float))
+        or not math.isclose(
+            float(case["output_tokens_per_sampled_joule"]),
+            completion_tokens / float(sampled_energy),
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        )
+    ):
+        raise EvidenceError("matched-prompt sampled-energy aggregate is inconsistent")
+
+
+def _validate_matched_prompt_graph_published_bundle(
+    manifest: Any,
+    samples: Any,
+    aggregates: Any,
+) -> None:
+    if not isinstance(manifest, dict):
+        return
+    model = manifest.get("model")
+    suite = manifest.get("suite")
+    model_id = model.get("id") if isinstance(model, dict) else None
+    suite_id = suite.get("id") if isinstance(suite, dict) else None
+    source_run_id = manifest.get("source_run_id")
+    historical_contract = (
+        _MATCHED_PROMPT_GRAPH_PUBLISHED_RUN_CONTRACTS.get(source_run_id)
+        if isinstance(source_run_id, str)
+        else None
+    )
+    marked = (
+        model_id in MATCHED_PROMPT_GRAPH_PROFILE_IDS
+        or suite_id in MATCHED_PROMPT_GRAPH_SUITE_IDS
+        or historical_contract is not None
+    )
+    if not marked:
+        return
+    if set(manifest) != {
+        "artifacts",
+        "evidence_kind",
+        "hardware",
+        "lifecycle",
+        "model",
+        "run_date_utc",
+        "runtime",
+        "sanitization",
+        "schema_version",
+        "source_run_id",
+        "status",
+        "suite",
+    }:
+        raise EvidenceError("matched-prompt manifest schema changed")
+    if (
+        manifest.get("evidence_kind") != "serving"
+        or manifest.get("schema_version") != SCHEMA_VERSION
+        or manifest.get("sanitization")
+        != {
+            "free_form_text_included": False,
+            "payloads_included": False,
+            "policy": SANITIZATION_POLICY,
+            "raw_identifiers_included": False,
+        }
+    ):
+        raise EvidenceError("matched-prompt manifest classification changed")
+    lifecycle = manifest.get("lifecycle")
+    expected_event_counts = {
+        "case_complete": 1,
+        "case_start": 1,
+        "first_request_complete": 1,
+        "measurement_complete": 1,
+        "measurement_started": 1,
+        "request_complete": 5,
+        "run_complete": 1,
+        "run_start": 1,
+        "server_ready": 1,
+        "server_stopped": 1,
+    }
+    if (
+        not isinstance(lifecycle, dict)
+        or set(lifecycle)
+        != {
+            "event_count",
+            "event_counts",
+            "journal_elapsed_s",
+            "terminal",
+            "terminal_event",
+        }
+        or lifecycle.get("event_counts") != expected_event_counts
+        or lifecycle.get("event_count") != sum(expected_event_counts.values())
+        or lifecycle.get("terminal") is not True
+        or lifecycle.get("terminal_event") != "run_complete"
+    ):
+        raise EvidenceError("matched-prompt lifecycle changed")
+    _matched_prompt_graph_number(
+        lifecycle.get("journal_elapsed_s"), name="lifecycle journal_elapsed_s"
+    )
+    hardware = manifest.get("hardware")
+    if not isinstance(hardware, dict) or set(hardware) != {
+        "compute_capability",
+        "driver_version",
+        "gpu",
+        "harness_revision",
+        "harness_worktree_dirty",
+        "platform",
+        "unified_memory_bytes",
+    }:
+        raise EvidenceError("matched-prompt hardware schema changed")
+    if historical_contract is not None:
+        if not _json_strict_equal(hardware, historical_contract["hardware"]):
+            raise EvidenceError("matched-prompt historical hardware changed")
+    else:
+        driver = hardware.get("driver_version")
+        unified_memory_bytes = _matched_prompt_graph_integer(
+            hardware.get("unified_memory_bytes"),
+            name="hardware unified_memory_bytes",
+            positive=True,
+        )
+        if (
+            hardware.get("compute_capability") != "12.1"
+            or not isinstance(driver, str)
+            or re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}", driver) is None
+            or hardware.get("gpu") != "NVIDIA GB10"
+            or hardware.get("platform") != "NVIDIA DGX Spark"
+            or not (
+                120_000_000_000
+                <= unified_memory_bytes
+                <= 140_000_000_000
+            )
+        ):
+            raise EvidenceError("matched-prompt hardware identity changed")
+        _revision(hardware.get("harness_revision"), name="graph harness revision")
+        if not isinstance(hardware.get("harness_worktree_dirty"), bool):
+            raise EvidenceError("matched-prompt harness dirty state changed")
+    projected_model = _validate_projected_matched_prompt_graph_model(model)
+    projected_suite = _project_matched_prompt_graph_suite(suite, model=model)
+    if not _json_strict_equal(projected_suite, suite):
+        raise EvidenceError("matched-prompt published suite changed")
+    assert isinstance(model_id, str)
+    assert isinstance(suite_id, str)
+    if (
+        not isinstance(source_run_id, str)
+        or f"-{model_id}-{suite_id}-" not in source_run_id
+        or manifest.get("run_date_utc") != _date_from_run_id(source_run_id)
+        or (
+            historical_contract is not None
+            and (
+                historical_contract.get("profile_id") != model_id
+                or historical_contract.get("suite_id") != suite_id
+            )
+        )
+    ):
+        raise EvidenceError("matched-prompt run identity binding changed")
+    runtime = manifest.get("runtime")
+    qwen27 = model_id in {
+        QWEN38_27B_DSPARK_CUDA_GRAPH_FULL_PROFILE_ID,
+        QWEN38_27B_DSPARK_CUDA_GRAPH_DISABLED_PROFILE_ID,
+    }
+    common_runtime = {
+        "backend": "sglang",
+        "lifecycle": "docker",
+        "sglang_ple_cache_mode": "disabled",
+        "sglang_ple_mmap": False,
+        "sglang_ple_omitted": False,
+        "sglang_provenance_version": _SGLANG_PROVENANCE_CURRENT_VERSION,
+        "sglang_source_overlay_artifacts": [],
+    }
+    if qwen27:
+        image_sha256 = (
+            "febfb971c7352570fc445c466ebd6ffc9d896024958e544a60f2137fd85856b1"
+        )
+        expected_runtime = {
+            **common_runtime,
+            "image": f"lmsysorg/sglang@sha256:{image_sha256}",
+            "image_sha256": image_sha256,
+            "recipe_revision": "3590fb29296b1babd85405daad1eef1c4a3ebe0f",
+        }
+        expected_artifacts: list[dict[str, Any]] = [
+            {
+                "role": "container_image",
+                "sha256": image_sha256,
+                "target": "container-image",
+            }
+        ]
+    else:
+        expected_runtime = {
+            **common_runtime,
+            "image": "local/sglang:sm121-storage-274ee330-runtime",
+        }
+        expected_artifacts = []
+    if not _json_strict_equal(runtime, expected_runtime):
+        raise EvidenceError("matched-prompt runtime identity changed")
+    artifacts = manifest.get("artifacts")
+    if not _json_strict_equal(artifacts, expected_artifacts):
+        raise EvidenceError("matched-prompt artifact identity changed")
+    validated_samples = _validate_matched_prompt_graph_samples(
+        samples, profile_id=model_id
+    )
+    if historical_contract is not None and (
+        validated_samples[0].get("prompt_tokens")
+        != historical_contract["first_prompt_tokens"]
+        or any(
+            sample.get("prompt_tokens")
+            != historical_contract["measured_prompt_tokens"]
+            for sample in validated_samples[1:]
+        )
+    ):
+        raise EvidenceError("matched-prompt historical prompt token shape changed")
+    _validate_matched_prompt_graph_aggregates(
+        aggregates,
+        samples=validated_samples,
+        profile_id=projected_model["id"],
+        suite_id=suite_id,
+    )
+    if manifest.get("status") != "complete":
+        raise EvidenceError("matched-prompt manifest status changed")
+
+
 def _project_suite(plan: dict[str, Any]) -> dict[str, Any] | None:
     suite = plan.get("suite")
     if not isinstance(suite, dict):
@@ -5081,6 +6250,25 @@ def _project_suite(plan: dict[str, Any]) -> dict[str, Any] | None:
             }
         return None
     raw_cases = suite.get("cases")
+    model = plan.get("model")
+    model_id = model.get("id") if isinstance(model, dict) else None
+    matched_prompt_marked = (
+        suite.get("id") in MATCHED_PROMPT_GRAPH_SUITE_IDS
+        or model_id in MATCHED_PROMPT_GRAPH_PROFILE_IDS
+        or (
+            isinstance(raw_cases, list)
+            and any(
+                isinstance(case, dict)
+                and isinstance(case.get("id"), str)
+                and case["id"].startswith(MATCHED_PROMPT_CASE_PREFIX)
+                for case in raw_cases
+            )
+        )
+    )
+    if matched_prompt_marked:
+        return _project_matched_prompt_graph_suite(
+            suite, model=model
+        )
     if suite.get("id") in {
         SM121_STORAGE_SUITE_ID,
         SM121_CACHE_OBSERVABILITY_SUITE_ID,
@@ -5750,6 +6938,609 @@ def _validate_projected_sglang_provenance(
     return overlays
 
 
+_DENSESPARK_LEGACY_LAUNCH_POLICY_PLAN_INTEGRITY_BY_RUN_ID = {
+    (
+        "20260831T225950Z-qwen38-27b-int4-autoround-densespark-c1-"
+        "qwen38-27b-densespark-c1-7ded7b69"
+    ): "7f3f69e09b180a1a532979e8383b20cdedc25eeb40731713303d75bae7bdc80b",
+    (
+        "20260831T230649Z-qwen38-27b-int4-autoround-densespark-c1-"
+        "qwen38-27b-densespark-c1-7ded7b69"
+    ): "18cc7929c6f30c358378c67a10e5d101fc1d9833280fdab174f3cfb1dd82e800",
+}
+_DENSESPARK_LEGACY_LAUNCH_POLICY_PLAN_INTEGRITIES = frozenset(
+    _DENSESPARK_LEGACY_LAUNCH_POLICY_PLAN_INTEGRITY_BY_RUN_ID.values()
+)
+
+
+def _validate_densespark_source_plan_integrity(plan: dict[str, Any]) -> str:
+    """Authenticate a DenseSpark plan before examining either receipt shape."""
+
+    if plan.get("schema_version") != 2:
+        raise EvidenceError("DenseSpark source plan schema changed")
+    integrity = plan.get("integrity_hash")
+    if (
+        type(integrity) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", integrity) is None
+        or content_hash(
+            {key: value for key, value in plan.items() if key != "integrity_hash"},
+            64,
+        )
+        != integrity
+    ):
+        raise EvidenceError("DenseSpark source plan integrity changed")
+    model = plan.get("model")
+    suite = plan.get("suite")
+    resolved = plan.get("resolved")
+    cases = suite.get("cases") if isinstance(suite, dict) else None
+    if (
+        not isinstance(model, dict)
+        or not isinstance(suite, dict)
+        or not isinstance(resolved, dict)
+        or not isinstance(cases, list)
+        or not all(isinstance(case, dict) for case in cases)
+    ):
+        raise EvidenceError("DenseSpark source plan topology changed")
+    suite_without_case_ids = {
+        **suite,
+        "cases": [
+            {key: value for key, value in case.items() if key != "case_id"}
+            for case in cases
+        ],
+    }
+    fingerprint = plan.get("fingerprint")
+    if (
+        type(fingerprint) is not str
+        or re.fullmatch(r"[0-9a-f]{16}", fingerprint) is None
+        or content_hash(
+            {
+                "model": model,
+                "suite": suite_without_case_ids,
+                "resolved": resolved,
+            }
+        )
+        != fingerprint
+    ):
+        raise EvidenceError("DenseSpark source plan fingerprint changed")
+    return integrity
+
+
+def _expected_projected_densespark_launch_policy() -> dict[str, Any]:
+    """Return the exact public form of the frozen managed-launch receipt."""
+
+    source = densespark_expected_launch_policy()
+    projected: dict[str, Any] = {}
+    for key, value in source.items():
+        if key == "sha256":
+            projected[key] = _sha256(value, name="DenseSpark launch policy")
+        elif type(value) is int:
+            projected[key] = value
+        else:
+            projected[key] = _safe_text(
+                value, name=f"DenseSpark launch policy {key}"
+            )
+    return projected
+
+
+def _expected_projected_densespark_provenance(
+    profile_id: str = DENSESPARK_PROFILE_ID,
+    *,
+    launch_policy_binding: str = "frozen-v1",
+    legacy_plan_integrity: str | None = None,
+) -> dict[str, Any]:
+    """Return the public, path-free form of the exact local C1 receipt."""
+
+    source = densespark_expected_resolved_provenance(profile_id)
+    projected: dict[str, Any] = {
+        "cache_namespace": _safe_id(
+            source["cache_namespace"], name="DenseSpark cache namespace"
+        ),
+        "configuration_sha256": _sha256(
+            source["configuration_sha256"],
+            name="DenseSpark configuration",
+        ),
+        "docker_image_sha256": _sha256(
+            source["docker_image_id"], name="DenseSpark local image"
+        ),
+        "model_revision": _revision(
+            source["model_revision"], name="DenseSpark model revision"
+        ),
+        "pq_artifact_sha256": _sha256(
+            source["pq_artifact_sha256"], name="DenseSpark PQ artifact"
+        ),
+        "pq_artifact_size_bytes": source["pq_artifact_size_bytes"],
+        "weight_file_count": source["weight_file_count"],
+        "weight_size_bytes": source["weight_size_bytes"],
+    }
+    if launch_policy_binding == "frozen-v1" and legacy_plan_integrity is None:
+        projected.update(
+            {
+                "launch_policy": _expected_projected_densespark_launch_policy(),
+                "launch_policy_binding": "frozen-v1",
+            }
+        )
+    elif (
+        launch_policy_binding == "legacy-unbound"
+        and legacy_plan_integrity
+        in _DENSESPARK_LEGACY_LAUNCH_POLICY_PLAN_INTEGRITIES
+    ):
+        projected.update(
+            {
+                "launch_policy_binding": "legacy-unbound",
+                "legacy_plan_integrity_sha256": legacy_plan_integrity,
+            }
+        )
+    else:
+        raise EvidenceError("DenseSpark launch-policy binding is invalid")
+    if profile_id == DENSESPARK_WARMUP_SYNC_PROFILE_ID:
+        projected.update(
+            {
+                "base_docker_image_sha256": _sha256(
+                    source["base_docker_image_id"],
+                    name="DenseSpark warmup-sync base image",
+                ),
+                "dockerignore_sha256": _sha256(
+                    source["dockerignore_sha256"],
+                    name="DenseSpark warmup-sync build context policy",
+                ),
+                "fused_sigmoid_source_sha256": _sha256(
+                    source["fused_sigmoid_source_sha256"],
+                    name="DenseSpark warmup-sync fused sigmoid source",
+                ),
+                "image_recipe_sha256": _sha256(
+                    source["image_recipe_sha256"],
+                    name="DenseSpark warmup-sync image recipe",
+                ),
+                "kernel_warmup_source_sha256": _sha256(
+                    source["kernel_warmup_source_sha256"],
+                    name="DenseSpark warmup-sync kernel warmup source",
+                ),
+                "mamba_utils_source_sha256": _sha256(
+                    source["mamba_utils_source_sha256"],
+                    name="DenseSpark warmup-sync mamba utilities source",
+                ),
+                "mode": _safe_id(
+                    source["mode"], name="DenseSpark warmup-sync mode"
+                ),
+                "probe_sha256": _sha256(
+                    source["probe_sha256"],
+                    name="DenseSpark warmup-sync probe",
+                ),
+                "qwen_gdn_source_sha256": _sha256(
+                    source["qwen_gdn_source_sha256"],
+                    name="DenseSpark warmup-sync Qwen GDN source",
+                ),
+                "qwen_warmup_source_sha256": _sha256(
+                    source["qwen_warmup_source_sha256"],
+                    name="DenseSpark warmup-sync Qwen warmup source",
+                ),
+                "vllm_entrypoint_sha256": _sha256(
+                    source["vllm_entrypoint_sha256"],
+                    name="DenseSpark warmup-sync vLLM entrypoint",
+                ),
+            }
+        )
+    return projected
+
+
+def _expected_projected_densespark_model(
+    profile_id: str = DENSESPARK_PROFILE_ID,
+) -> dict[str, Any]:
+    """Return the exact model identity retained by the generic projector."""
+
+    return {
+        "architecture": "dense+gdn",
+        "backend": "vllm",
+        "estimated_ram_gib": 92.0,
+        "id": profile_id,
+        "lifecycle": "docker",
+        "max_context": DENSESPARK_MAX_CONTEXT,
+        "native_context": DENSESPARK_NATIVE_CONTEXT,
+        "quantization": "int4-autoround+densespark-pq",
+        "revision": DENSESPARK_MODEL_REVISION,
+        "source": DENSESPARK_MODEL_SOURCE,
+        "startup_timeout_s": 1_800,
+        "support_status": (
+            "exploratory"
+            if profile_id == DENSESPARK_WARMUP_SYNC_PROFILE_ID
+            else "spark_vllm_recipe"
+        ),
+        "tasks": ["chat", "thinking", "tools"],
+        "weight_file_count": DENSESPARK_WEIGHT_FILE_COUNT,
+        "weight_size_bytes": DENSESPARK_WEIGHT_SIZE_BYTES,
+    }
+
+
+def _densespark_legacy_published_contract(
+    run_id: str,
+    *,
+    bundle_sha256: str,
+    lifecycle: dict[str, Any],
+    startup_telemetry: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the exact public contract for one historical legacy receipt.
+
+    These two runs predate the frozen managed-launch policy.  Their plans are
+    individually allowlisted above; their published evidence must be equally
+    narrow.  Keeping the complete projected documents here prevents refreshed
+    checksums from turning an edited scalar or an added free-form field into a
+    valid historical claim.  The bundle digest additionally binds every
+    telemetry row, which would be impractical and error-prone to duplicate as
+    Python literals.
+    """
+
+    integrity = _DENSESPARK_LEGACY_LAUNCH_POLICY_PLAN_INTEGRITY_BY_RUN_ID[run_id]
+    runtime = {
+        "backend": "vllm",
+        "densespark": _expected_projected_densespark_provenance(
+            DENSESPARK_PROFILE_ID,
+            launch_policy_binding="legacy-unbound",
+            legacy_plan_integrity=integrity,
+        ),
+        "image": densespark_image_for_profile(DENSESPARK_PROFILE_ID),
+        "lifecycle": "docker",
+        "recipe_revision": DENSESPARK_RECIPE_REVISION,
+    }
+    suite = {
+        "cases": [
+            {
+                "case_id": "densespark-c1-decode-256--55705f2e3f60",
+                "concurrency": 1,
+                "id": "densespark-c1-decode-256",
+                "kind": "decode",
+                "max_output_tokens": 256,
+                "max_turns": 1,
+                "prompt_repetitions": 0,
+                "repetitions": 3,
+                "requires": ["chat"],
+                "temperature": 0.0,
+                "warmups": 1,
+            }
+        ],
+        "id": "qwen38-27b-densespark-c1",
+        "schema_version": 1,
+    }
+    manifest = {
+        "artifacts": [],
+        "evidence_kind": "serving",
+        "hardware": {
+            "compute_capability": "12.1",
+            "driver_version": "580.142",
+            "gpu": "NVIDIA GB10",
+            "harness_revision": "645407473391eeee6c0c30c9753b4602c566d443",
+            "harness_worktree_dirty": True,
+            "platform": "NVIDIA DGX Spark",
+            "unified_memory_bytes": 128_520_445_952,
+        },
+        "lifecycle": lifecycle,
+        "model": _expected_projected_densespark_model(DENSESPARK_PROFILE_ID),
+        "run_date_utc": "2026-08-31",
+        "runtime": runtime,
+        "sanitization": {
+            "free_form_text_included": False,
+            "payloads_included": False,
+            "policy": SANITIZATION_POLICY,
+            "raw_identifiers_included": False,
+        },
+        "schema_version": SCHEMA_VERSION,
+        "source_run_id": run_id,
+        "status": "aborted",
+        "suite": suite,
+    }
+    summary = {
+        "aggregates": {
+            "artifact_validation": None,
+            "artifact_validation_telemetry": None,
+            "cases": [],
+            "completed_cases": 0,
+            "context_limited_cases": [],
+            "failed_cases": [],
+            "first_request_telemetry": None,
+            "llamacpp_dflash_evidence": None,
+            "llamacpp_mtp_evidence": None,
+            "measurement_annotations_count": 0,
+            "measurement_invalid_cases": [],
+            "run_completion_status": None,
+            "shutdown_telemetry": None,
+            "speculative_decoding": None,
+            "startup_measurement_annotations_count": 0,
+            "startup_measurement_valid": True,
+            "startup_safety_gates": [],
+            "startup_telemetry": startup_telemetry,
+            "status": "aborted",
+            "suite": "qwen38-27b-densespark-c1",
+            "unimplemented_cases": [],
+            "unsupported_cases": [],
+            "validation_failed_cases": [],
+        },
+        "schema_version": SCHEMA_VERSION,
+    }
+    return {
+        "bundle_sha256": bundle_sha256,
+        "manifest": manifest,
+        "samples": {
+            "sample_count": 0,
+            "samples": [],
+            "schema_version": SCHEMA_VERSION,
+        },
+        "summary": summary,
+    }
+
+
+_DENSESPARK_LEGACY_PUBLISHED_BUNDLE_CONTRACTS = {
+    run_id: _densespark_legacy_published_contract(
+        run_id,
+        bundle_sha256=bundle_sha256,
+        lifecycle=lifecycle,
+        startup_telemetry=startup_telemetry,
+    )
+    for run_id, bundle_sha256, lifecycle, startup_telemetry in (
+        (
+            (
+                "20260831T225950Z-qwen38-27b-int4-autoround-densespark-c1-"
+                "qwen38-27b-densespark-c1-7ded7b69"
+            ),
+            "a230f4a52746a6d0df0c04cd737bed9ca8d101749a65ce0a850fc5f6900528a1",
+            {
+                "event_count": 4,
+                "event_counts": {
+                    "host_safety_breach": 1,
+                    "measurement_started": 1,
+                    "run_aborted": 1,
+                    "run_start": 1,
+                },
+                "failure": {
+                    "exception_type": "HostSafetyError",
+                    "stage": "server_start",
+                },
+                "host_safety_breach": {
+                    "code": "swap_growth_above_maximum",
+                    "limit_bytes": 536_870_912,
+                    "memavailable_bytes": 35_466_149_888,
+                    "observed_bytes": 595_968_000,
+                    "stage": "server_start",
+                    "starting_swap_used_bytes": 265_793_536,
+                    "swap_used_bytes": 861_761_536,
+                },
+                "journal_elapsed_s": 370.906,
+                "terminal": True,
+                "terminal_event": "run_aborted",
+            },
+            {
+                "average_gpu_util_pct": 10.027932960893855,
+                "average_power_w": 15.706145251396649,
+                "gpu_error_samples": 0,
+                "gpu_power_missing_samples": 0,
+                "gpu_power_samples": 358,
+                "minimum_memavailable_gib": 34.19093704223633,
+                "peak_power_w": 76.86,
+                "peak_sm_clock_mhz": 2535.0,
+                "peak_temperature_c": 76.0,
+                "sampled_energy_intervals": 357,
+                "sampled_energy_j": 5820.689885000002,
+                "samples": 358,
+            },
+        ),
+        (
+            (
+                "20260831T230649Z-qwen38-27b-int4-autoround-densespark-c1-"
+                "qwen38-27b-densespark-c1-7ded7b69"
+            ),
+            "ffc0af0560813eadc14d6bb02bda745b8930e58b2166bc3322395531a9957d13",
+            {
+                "event_count": 3,
+                "event_counts": {
+                    "measurement_started": 1,
+                    "run_aborted": 1,
+                    "run_start": 1,
+                },
+                "failure": {
+                    "exception_type": "KeyboardInterrupt",
+                    "stage": "server_start",
+                },
+                "journal_elapsed_s": 411.507,
+                "terminal": True,
+                "terminal_event": "run_aborted",
+            },
+            {
+                "average_gpu_util_pct": 7.238095238095238,
+                "average_power_w": 14.112255639097745,
+                "gpu_error_samples": 1,
+                "gpu_power_missing_samples": 1,
+                "gpu_power_samples": 399,
+                "minimum_memavailable_gib": 22.00365447998047,
+                "peak_power_w": 65.59,
+                "peak_sm_clock_mhz": 2548.0,
+                "peak_temperature_c": 70.0,
+                "sampled_energy_intervals": 397,
+                "sampled_energy_j": 5785.598980000003,
+                "samples": 400,
+            },
+        ),
+    )
+}
+
+
+def _validate_densespark_legacy_published_bundle(
+    *,
+    run_id: str,
+    bundle_sha256: str,
+    manifest: Any,
+    samples: Any,
+    summary: Any,
+) -> None:
+    """Authenticate the complete public projection of the two legacy runs."""
+
+    contract = _DENSESPARK_LEGACY_PUBLISHED_BUNDLE_CONTRACTS.get(run_id)
+    if contract is None:
+        return
+    if set(_DENSESPARK_LEGACY_PUBLISHED_BUNDLE_CONTRACTS) != set(
+        _DENSESPARK_LEGACY_LAUNCH_POLICY_PLAN_INTEGRITY_BY_RUN_ID
+    ):
+        raise EvidenceError("legacy DenseSpark published contract set changed")
+    if bundle_sha256 != contract["bundle_sha256"]:
+        raise EvidenceError("legacy DenseSpark published bundle identity changed")
+    for name, actual in (
+        ("manifest", manifest),
+        ("samples", samples),
+        ("summary", summary),
+    ):
+        if not _json_strict_equal(actual, contract[name]):
+            raise EvidenceError(
+                f"legacy DenseSpark published {name} contract changed"
+            )
+
+
+def _project_densespark_provenance(plan: dict[str, Any]) -> dict[str, Any] | None:
+    """Authenticate and project the exact DenseSpark plan receipt.
+
+    The source receipt deliberately contains no host paths.  Requiring its
+    complete schema here prevents a partially edited plan from publishing a
+    plausible-looking local image, PQ, or cache identity.
+    """
+
+    model = plan.get("model")
+    resolved = plan.get("resolved")
+    model_record = model if isinstance(model, dict) else {}
+    resolved_record = resolved if isinstance(resolved, dict) else {}
+    raw_profile_id = model_record.get("id")
+    raw_image = model_record.get("image")
+    marked = (
+        (type(raw_profile_id) is str and raw_profile_id in DENSESPARK_PROFILE_IDS)
+        or model_record.get("source") == DENSESPARK_MODEL_SOURCE
+        or (
+            type(raw_image) is str
+            and raw_image in {DENSESPARK_IMAGE, DENSESPARK_WARMUP_SYNC_IMAGE}
+        )
+        or "densespark" in resolved_record
+    )
+    if not marked:
+        return None
+    profile_id = model_record.get("id")
+    if type(profile_id) is not str or profile_id not in DENSESPARK_PROFILE_IDS:
+        raise EvidenceError("DenseSpark provenance is bound to the wrong profile")
+    try:
+        validate_densespark_profile(SimpleNamespace(**model_record))
+    except (DenseSparkContractError, TypeError) as error:
+        raise EvidenceError("DenseSpark source profile contract changed") from error
+    plan_integrity = _validate_densespark_source_plan_integrity(plan)
+    if (
+        not isinstance(resolved, dict)
+        or resolved.get("image_digest") is not None
+        or not _json_strict_equal(
+            resolved.get("densespark"),
+            densespark_expected_resolved_provenance(profile_id),
+        )
+    ):
+        raise EvidenceError("DenseSpark resolved provenance changed")
+    resolved_fields = set(resolved)
+    if resolved_fields == {
+        "densespark",
+        "densespark_launch_policy",
+        "image_digest",
+    }:
+        if not _json_strict_equal(
+            resolved.get("densespark_launch_policy"),
+            densespark_expected_launch_policy(),
+        ):
+            raise EvidenceError("DenseSpark resolved launch policy changed")
+        return _expected_projected_densespark_provenance(profile_id)
+    if resolved_fields == {"densespark", "image_digest"}:
+        if plan_integrity not in _DENSESPARK_LEGACY_LAUNCH_POLICY_PLAN_INTEGRITIES:
+            raise EvidenceError("DenseSpark legacy launch policy is not allowlisted")
+        return _expected_projected_densespark_provenance(
+            profile_id,
+            launch_policy_binding="legacy-unbound",
+            legacy_plan_integrity=plan_integrity,
+        )
+    raise EvidenceError("DenseSpark resolved launch-policy topology changed")
+
+
+def _validate_projected_densespark_provenance(
+    runtime: Any,
+    model: Any,
+    *,
+    run_id: str | None = None,
+) -> None:
+    """Re-authenticate a published DenseSpark runtime receipt."""
+
+    runtime_record = runtime if isinstance(runtime, dict) else {}
+    model_record = model if isinstance(model, dict) else {}
+    raw_profile_id = model_record.get("id")
+    raw_image = runtime_record.get("image")
+    marked = (
+        (type(raw_profile_id) is str and raw_profile_id in DENSESPARK_PROFILE_IDS)
+        or model_record.get("source") == DENSESPARK_MODEL_SOURCE
+        or (
+            type(raw_image) is str
+            and raw_image in {DENSESPARK_IMAGE, DENSESPARK_WARMUP_SYNC_IMAGE}
+        )
+        or any(
+            key == "densespark" or key.startswith("densespark_")
+            for key in runtime_record
+        )
+        or (
+            isinstance(run_id, str)
+            and any(profile_id in run_id for profile_id in DENSESPARK_PROFILE_IDS)
+        )
+    )
+    if not marked:
+        return
+    if not isinstance(runtime, dict) or not isinstance(model, dict):
+        raise EvidenceError("published DenseSpark provenance is missing")
+    profile_id = model_record.get("id")
+    if type(profile_id) is not str or profile_id not in DENSESPARK_PROFILE_IDS:
+        raise EvidenceError("published DenseSpark model identity changed")
+    if not _json_strict_equal(
+        model, _expected_projected_densespark_model(profile_id)
+    ):
+        raise EvidenceError("published DenseSpark model identity changed")
+    allowed_runtime_fields = {
+        "backend",
+        "densespark",
+        "image",
+        "lifecycle",
+        "recipe_revision",
+        "versions",
+    }
+    if set(runtime) - allowed_runtime_fields:
+        raise EvidenceError("published DenseSpark runtime schema changed")
+    expected_runtime_identity = {
+        "backend": "vllm",
+        "image": densespark_image_for_profile(profile_id),
+        "lifecycle": "docker",
+        "recipe_revision": DENSESPARK_RECIPE_REVISION,
+    }
+    for key, expected in expected_runtime_identity.items():
+        if not _json_strict_equal(runtime.get(key), expected):
+            raise EvidenceError("published DenseSpark runtime identity changed")
+    if "versions" in runtime and not isinstance(runtime["versions"], dict):
+        raise EvidenceError("published DenseSpark runtime versions changed")
+    receipt = runtime.get("densespark")
+    if not isinstance(receipt, dict):
+        raise EvidenceError("published DenseSpark provenance changed")
+    binding = receipt.get("launch_policy_binding")
+    if binding == "frozen-v1":
+        expected_provenance = _expected_projected_densespark_provenance(profile_id)
+    elif binding == "legacy-unbound":
+        expected_integrity = (
+            _DENSESPARK_LEGACY_LAUNCH_POLICY_PLAN_INTEGRITY_BY_RUN_ID.get(run_id)
+            if isinstance(run_id, str)
+            else None
+        )
+        if expected_integrity is None:
+            raise EvidenceError("published DenseSpark legacy binding is not allowlisted")
+        expected_provenance = _expected_projected_densespark_provenance(
+            profile_id,
+            launch_policy_binding="legacy-unbound",
+            legacy_plan_integrity=expected_integrity,
+        )
+    else:
+        raise EvidenceError("published DenseSpark launch-policy binding changed")
+    if not _json_strict_equal(receipt, expected_provenance):
+        raise EvidenceError("published DenseSpark provenance changed")
+
+
 def _project_runtime(plan: dict[str, Any], summary: dict[str, Any] | None) -> dict[str, Any]:
     model = plan.get("model") if isinstance(plan.get("model"), dict) else {}
     result: dict[str, Any] = {}
@@ -5767,6 +7558,9 @@ def _project_runtime(plan: dict[str, Any], summary: dict[str, Any] | None) -> di
             if model.get(key) is not None:
                 result[key] = _revision(model[key], name=f"runtime.{key}")
         result.update(_project_sglang_provenance(model))
+    densespark = _project_densespark_provenance(plan)
+    if densespark is not None:
+        result["densespark"] = densespark
     resolved = plan.get("resolved")
     if isinstance(resolved, dict) and isinstance(resolved.get("llamacpp"), dict):
         llama = resolved["llamacpp"]
@@ -11580,6 +13374,196 @@ def _project_telemetry(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return projected
 
 
+_DENSESPARK_HOST_SAFETY_SOURCE_FIELDS = frozenset(
+    {
+        "code",
+        "event",
+        "limit_kib",
+        "memavailable_kib",
+        "observed_kib",
+        "stage",
+        "starting_swap_used_kib",
+        "swap_used_kib",
+        "timestamp",
+    }
+)
+_DENSESPARK_RUN_ABORTED_SOURCE_FIELDS = frozenset(
+    {"error", "error_type", "event", "stage", "timestamp"}
+)
+_DENSESPARK_HOST_SAFETY_CODES = frozenset(
+    {
+        "memavailable_below_minimum",
+        "meminfo_inconsistent",
+        "meminfo_malformed",
+        "meminfo_missing",
+        "meminfo_read_failed",
+        "monitor_thread_failed",
+        "starting_swap_above_maximum",
+        "swap_growth_above_maximum",
+        "swap_total_changed",
+    }
+)
+_DENSESPARK_HOST_SAFETY_PROJECTED_FIELDS = frozenset(
+    {
+        "code",
+        "limit_bytes",
+        "memavailable_bytes",
+        "observed_bytes",
+        "stage",
+        "starting_swap_used_bytes",
+        "swap_used_bytes",
+    }
+)
+
+
+def _densespark_kib_value(value: Any, *, name: str) -> int | None:
+    if value is None:
+        return None
+    if (
+        type(value) is not int
+        or value < 0
+        or value > (2**63 - 1) // 1024
+    ):
+        raise EvidenceError(f"DenseSpark host-safety {name} is invalid")
+    return value
+
+
+def _validate_projected_densespark_host_safety(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != set(
+        _DENSESPARK_HOST_SAFETY_PROJECTED_FIELDS
+    ):
+        raise EvidenceError("published DenseSpark host-safety schema changed")
+    code = _safe_id(value.get("code"), name="DenseSpark host-safety code")
+    stage = _safe_id(value.get("stage"), name="DenseSpark host-safety stage")
+    if code not in _DENSESPARK_HOST_SAFETY_CODES or stage != "server_start":
+        raise EvidenceError("published DenseSpark host-safety identity changed")
+    for key in _DENSESPARK_HOST_SAFETY_PROJECTED_FIELDS - {"code", "stage"}:
+        item = value.get(key)
+        if item is not None and (
+            type(item) is not int or item < 0 or item > 2**63 - 1
+        ):
+            raise EvidenceError("published DenseSpark host-safety scalar changed")
+    expected_limits = {
+        "memavailable_below_minimum": (
+            DENSESPARK_STARTUP_MIN_MEMAVAILABLE_GIB * 1024**3
+        ),
+        "starting_swap_above_maximum": (
+            DENSESPARK_STARTUP_MAX_STARTING_SWAP_MIB * 1024**2
+        ),
+        "swap_growth_above_maximum": (
+            DENSESPARK_STARTUP_MAX_SWAP_GROWTH_MIB * 1024**2
+        ),
+    }
+    expected_limit = expected_limits.get(code)
+    if expected_limit is not None and (
+        value.get("limit_bytes") != expected_limit
+        or value.get("observed_bytes") is None
+    ):
+        raise EvidenceError("published DenseSpark host-safety limit changed")
+
+
+def _project_densespark_failure_events(
+    plan: dict[str, Any], events: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Validate managed DenseSpark failure events and retain only safe scalars."""
+
+    model = plan.get("model")
+    model_id = model.get("id") if isinstance(model, dict) else None
+    managed = type(model_id) is str and model_id in DENSESPARK_PROFILE_IDS
+    breaches = [event for event in events if event.get("event") == "host_safety_breach"]
+    if breaches and not managed:
+        raise EvidenceError(
+            "host_safety_breach is exportable only for managed DenseSpark"
+        )
+    if not managed:
+        return None
+
+    aborted = [event for event in events if event.get("event") == "run_aborted"]
+    for event in aborted:
+        if set(event) != set(_DENSESPARK_RUN_ABORTED_SOURCE_FIELDS):
+            raise EvidenceError("DenseSpark run_aborted source schema changed")
+        if (
+            event.get("stage") != "server_start"
+            or not isinstance(event.get("error"), str)
+            or not isinstance(event.get("error_type"), str)
+        ):
+            raise EvidenceError("DenseSpark run_aborted source identity changed")
+        _safe_id(event["error_type"], name="DenseSpark failure exception type")
+        _parse_timestamp(event.get("timestamp"), name="DenseSpark run_aborted timestamp")
+    if len(aborted) > 1:
+        raise EvidenceError("DenseSpark run has multiple abort records")
+    if not breaches:
+        return None
+    if len(breaches) != 1:
+        raise EvidenceError("DenseSpark host-safety terminal topology changed")
+    breach = breaches[0]
+    if set(breach) != set(_DENSESPARK_HOST_SAFETY_SOURCE_FIELDS):
+        raise EvidenceError("DenseSpark host-safety source schema changed")
+    if len(aborted) != 1:
+        raise EvidenceError("DenseSpark host-safety terminal topology changed")
+    code = _safe_id(breach.get("code"), name="DenseSpark host-safety code")
+    if code not in _DENSESPARK_HOST_SAFETY_CODES:
+        raise EvidenceError("DenseSpark host-safety code changed")
+    if breach.get("stage") != "server_start":
+        raise EvidenceError("DenseSpark host-safety stage changed")
+    _parse_timestamp(breach.get("timestamp"), name="DenseSpark host-safety timestamp")
+    if aborted[0].get("error_type") != "HostSafetyError":
+        raise EvidenceError("DenseSpark host-safety abort type changed")
+    breach_index = events.index(breach)
+    abort_index = events.index(aborted[0])
+    if breach_index >= abort_index or abort_index != len(events) - 1:
+        raise EvidenceError("DenseSpark host-safety terminal ordering changed")
+
+    projected: dict[str, Any] = {"code": code, "stage": "server_start"}
+    for source in (
+        "limit_kib",
+        "memavailable_kib",
+        "observed_kib",
+        "starting_swap_used_kib",
+        "swap_used_kib",
+    ):
+        value = _densespark_kib_value(
+            breach.get(source), name=source
+        )
+        projected[source.removesuffix("_kib") + "_bytes"] = (
+            None if value is None else value * 1024
+        )
+    _validate_projected_densespark_host_safety(projected)
+    return projected
+
+
+def _validate_projected_densespark_lifecycle(
+    lifecycle: Any, model: Any
+) -> None:
+    """Keep the public host-safety receipt scoped to managed DenseSpark."""
+
+    if not isinstance(lifecycle, dict):
+        raise EvidenceError("published DenseSpark lifecycle is missing")
+    model_id = model.get("id") if isinstance(model, dict) else None
+    managed = type(model_id) is str and model_id in DENSESPARK_PROFILE_IDS
+    counts = lifecycle.get("event_counts")
+    safety_count = counts.get("host_safety_breach", 0) if isinstance(counts, dict) else 0
+    safety = lifecycle.get("host_safety_breach")
+    if not managed:
+        if safety_count or safety is not None:
+            raise EvidenceError("published non-DenseSpark host-safety receipt changed")
+        return
+    if safety_count == 0 and safety is None:
+        return
+    if safety_count != 1 or safety is None:
+        raise EvidenceError("published DenseSpark host-safety count changed")
+    _validate_projected_densespark_host_safety(safety)
+    failure = lifecycle.get("failure")
+    if (
+        lifecycle.get("terminal") is not True
+        or lifecycle.get("terminal_event") != "run_aborted"
+        or not isinstance(failure, dict)
+        or failure.get("stage") != "server_start"
+        or failure.get("exception_type") != "HostSafetyError"
+    ):
+        raise EvidenceError("published DenseSpark host-safety terminal changed")
+
+
 def _lifecycle(
     events: list[dict[str, Any]], *, include_elapsed: bool = True
 ) -> dict[str, Any]:
@@ -11965,9 +13949,12 @@ def _export_run(
     kind = _run_kind(plan)
     status = _normalize_status(summary, events)
     sm121_cache_semantic_selected = _selects_sm121_cache_semantic(plan)
+    densespark_host_safety = _project_densespark_failure_events(plan, events)
     lifecycle = _lifecycle(
         events, include_elapsed=not sm121_cache_semantic_selected
     )
+    if densespark_host_safety is not None:
+        lifecycle["host_safety_breach"] = densespark_host_safety
     sm121_storage_runtime = _validate_sm121_storage_source(
         plan,
         events,
@@ -12028,6 +14015,10 @@ def _export_run(
     cache_protocol = (
         projected_model.get("prefix_cache_mode") is not None
         or (isinstance(suite, dict) and suite.get("id") == PREFIX_CACHE_SUITE_ID)
+    )
+    matched_prompt_graph_protocol = bool(
+        isinstance(suite, dict)
+        and suite.get("id") in MATCHED_PROMPT_GRAPH_SUITE_IDS
     )
     artifacts = _collect_artifacts(plan, summary)
     runtime = _project_runtime(plan, summary)
@@ -12097,6 +14088,13 @@ def _export_run(
         # broader serving manifest.  This is also the export-side counterpart
         # to the verifier's strict re-projection below.
         manifest = _project_prefix_cache_manifest(manifest, source=True)
+    if matched_prompt_graph_protocol:
+        _validate_matched_prompt_graph_source_requests(
+            plan,
+            events,
+            summary,
+            source_run_id=source_run_id,
+        )
     requests = _project_requests(events, summary, evidence_kind=kind)
     if memory_protocol:
         unexpected = [
@@ -12199,6 +14197,10 @@ def _export_run(
         projected_summary.get("startup_safety_gates", []),
     ):
         raise EvidenceError("startup safety gates disagree between journal and summary")
+    if matched_prompt_graph_protocol:
+        _validate_matched_prompt_graph_published_bundle(
+            manifest, requests, projected_summary
+        )
     if memory_protocol:
         requests, projected_summary = _translate_memory_case_ids(
             requests,
@@ -14679,11 +16681,24 @@ def _validate_output_value(value: Any, *, pointer: str = "") -> None:
             _validate_output_value(item, pointer=f"{pointer}/{index}")
         return
     if isinstance(value, dict):
+        forbidden_compact = {
+            re.sub(r"[^a-z0-9]", "", name)
+            for name in _FORBIDDEN_OUTPUT_KEYS
+        }
         for key, item in value.items():
             if not isinstance(key, str):
                 raise EvidenceError(f"non-string key at {pointer}")
-            normalized = key.lower().replace("-", "_")
-            if normalized in _FORBIDDEN_OUTPUT_KEYS or normalized.endswith("_path"):
+            normalized_key = unicodedata.normalize("NFKC", key)
+            snake = re.sub(
+                r"(?<=[a-z0-9])(?=[A-Z])", "_", normalized_key
+            ).lower().replace("-", "_")
+            compact = re.sub(r"[^a-z0-9]", "", snake)
+            if (
+                snake in _FORBIDDEN_OUTPUT_KEYS
+                or compact in forbidden_compact
+                or snake.endswith("_path")
+                or compact.endswith("path")
+            ):
                 raise EvidenceError(f"forbidden key at {pointer}/{key}")
             _scan_string(key, pointer=f"{pointer}/<key>")
             _validate_output_value(item, pointer=f"{pointer}/{key}")
@@ -14730,6 +16745,46 @@ def _verify_bundle(directory: Path, root: Path) -> str:
     )
 
 
+_TELEMETRY_BYTE_COLUMNS = frozenset(
+    {
+        "cached_bytes",
+        "memavailable_bytes",
+        "memfree_bytes",
+        "swapfree_bytes",
+        "swaptotal_bytes",
+    }
+)
+
+
+def _validate_published_telemetry_row(row: Any, *, run_id: str) -> None:
+    """Require the generic columnar telemetry projection to stay scalar-only."""
+
+    if not isinstance(row, list) or len(row) != len(TELEMETRY_COLUMNS):
+        raise EvidenceError(f"telemetry row width mismatch: {run_id}")
+    for column, value in zip(TELEMETRY_COLUMNS, row, strict=True):
+        if column == "gpu_error_present":
+            if type(value) is not bool:
+                raise EvidenceError(f"telemetry error flag type changed: {run_id}")
+            continue
+        if column in _TELEMETRY_BYTE_COLUMNS:
+            if value is not None and (
+                type(value) is not int or value < 0
+            ):
+                raise EvidenceError(f"telemetry byte scalar changed: {run_id}")
+            continue
+        if value is None:
+            if column == "elapsed_s":
+                raise EvidenceError(f"telemetry elapsed scalar changed: {run_id}")
+            continue
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value < 0
+        ):
+            raise EvidenceError(f"telemetry numeric scalar changed: {run_id}")
+
+
 def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     _expect_object_keys(
         entry,
@@ -14747,6 +16802,14 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     run_id = _safe_id(entry["run_id"], name="run index ID")
     directory = root / "runs" / run_id
     bundle_sha256 = _sha256(entry["bundle_sha256"], name="run bundle")
+    historical_graph_contract = (
+        _MATCHED_PROMPT_GRAPH_PUBLISHED_RUN_CONTRACTS.get(run_id)
+    )
+    if (
+        historical_graph_contract is not None
+        and bundle_sha256 != historical_graph_contract["bundle_sha256"]
+    ):
+        raise EvidenceError("matched-prompt historical bundle identity changed")
     if _verify_bundle(directory, root) != bundle_sha256:
         raise EvidenceError(f"run bundle digest mismatch: {run_id}")
     expected_manifest = f"runs/{run_id}/manifest.json"
@@ -14765,6 +16828,11 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
         manifest_runtime.get("backend")
         if isinstance(manifest_runtime, dict)
         else None
+    )
+    _validate_projected_densespark_provenance(
+        manifest_runtime,
+        manifest_model,
+        run_id=run_id,
     )
     if (
         model_backend == "sglang" or runtime_backend == "sglang"
@@ -14852,6 +16920,7 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     lifecycle = manifest.get("lifecycle")
     if not isinstance(lifecycle, dict):
         raise EvidenceError(f"run lifecycle is missing: {run_id}")
+    _validate_projected_densespark_lifecycle(lifecycle, manifest_model)
     if bool(entry["measurement_terminal"]) != (
         lifecycle.get("terminal_event") == "run_complete"
     ):
@@ -14860,6 +16929,36 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     agentic_suite: dict[str, Any] | None = None
     memory_suite: dict[str, Any] | None = None
     manifest_cases = suite.get("cases") if isinstance(suite, dict) else None
+    matched_prompt_manifest = (
+        historical_graph_contract is not None
+        or (
+            isinstance(suite, dict)
+            and suite.get("id") in MATCHED_PROMPT_GRAPH_SUITE_IDS
+        )
+        or (
+            isinstance(manifest_model, dict)
+            and manifest_model.get("id") in MATCHED_PROMPT_GRAPH_PROFILE_IDS
+        )
+        or (
+            isinstance(manifest_cases, list)
+            and any(
+                isinstance(case, dict)
+                and isinstance(case.get("id"), str)
+                and case["id"].startswith(MATCHED_PROMPT_CASE_PREFIX)
+                for case in manifest_cases
+            )
+        )
+    )
+    if matched_prompt_manifest:
+        projected_matched_suite = (
+            _project_matched_prompt_graph_suite(
+                suite, model=manifest_model
+            )
+        )
+        if not _json_strict_equal(projected_matched_suite, suite):
+            raise EvidenceError(
+                f"matched-prompt suite projection mismatch: {run_id}"
+            )
     if isinstance(suite, dict) and suite.get("id") == AUTORESEARCH_SUITE_ID:
         agentic_suite = _project_autoresearch_suite(suite)
         if agentic_suite != suite:
@@ -14928,6 +17027,16 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     aggregates = summary["aggregates"]
     if not isinstance(aggregates, dict):
         raise EvidenceError(f"run aggregates must be an object: {run_id}")
+    _validate_densespark_legacy_published_bundle(
+        run_id=run_id,
+        bundle_sha256=bundle_sha256,
+        manifest=manifest,
+        samples=samples,
+        summary=summary,
+    )
+    _validate_matched_prompt_graph_published_bundle(
+        manifest, samples["samples"], aggregates
+    )
     _validate_sm121_storage_published_bundle(
         manifest, samples["samples"], aggregates
     )
@@ -15017,6 +17126,12 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
         telemetry["schema_version"] != SCHEMA_VERSION
         or telemetry["columns"] != list(TELEMETRY_COLUMNS)
         or not isinstance(chunks, list)
+        or type(telemetry["chunk_count"]) is not int
+        or type(telemetry["sample_count"]) is not int
+        or type(telemetry["segment_count"]) is not int
+        or telemetry["chunk_count"] < 0
+        or telemetry["sample_count"] < 0
+        or telemetry["segment_count"] < 0
         or telemetry["chunk_count"] != len(chunks)
         or chunks != [f"telemetry-{index:04d}.json" for index in range(1, len(chunks) + 1)]
     ):
@@ -15059,6 +17174,10 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     sample_count = 0
     segment_count = 0
     expected_sample_index = 1
+    previous_phase: str | None = None
+    previous_phase_sample_index = 0
+    previous_phase_segment = 0
+    previous_segment_rows = 0
     telemetry_chunks: list[dict[str, Any]] = []
     for chunk_name in chunks:
         chunk = _load_json(directory / chunk_name, root)
@@ -15067,8 +17186,12 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
             {"sample_count", "schema_version", "segments"},
             name="telemetry chunk",
         )
-        if chunk["schema_version"] != SCHEMA_VERSION or not isinstance(
-            chunk["segments"], list
+        if (
+            chunk["schema_version"] != SCHEMA_VERSION
+            or type(chunk["sample_count"]) is not int
+            or chunk["sample_count"] <= 0
+            or not isinstance(chunk["segments"], list)
+            or not chunk["segments"]
         ):
             raise EvidenceError(f"telemetry chunk schema mismatch: {run_id}")
         telemetry_chunks.append(chunk)
@@ -15085,17 +17208,50 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
                 },
                 name="telemetry segment",
             )
+            phase = segment["phase"]
+            phase_segment = segment["phase_segment"]
+            first_phase_sample_index = segment["first_phase_sample_index"]
+            if (
+                type(segment["first_sample_index"]) is not int
+                or type(first_phase_sample_index) is not int
+                or type(phase_segment) is not int
+                or segment["first_sample_index"] <= 0
+                or first_phase_sample_index <= 0
+                or phase_segment <= 0
+                or not isinstance(phase, str)
+                or _normalize_phase(phase) != phase
+            ):
+                raise EvidenceError(f"telemetry segment identity changed: {run_id}")
             if segment["first_sample_index"] != expected_sample_index:
                 raise EvidenceError(f"telemetry sample order mismatch: {run_id}")
-            if not isinstance(segment["rows"], list):
+            if not isinstance(segment["rows"], list) or not segment["rows"]:
                 raise EvidenceError(f"telemetry rows are invalid: {run_id}")
+            if previous_phase is None:
+                if phase_segment != 1 or first_phase_sample_index != 1:
+                    raise EvidenceError(f"telemetry phase order mismatch: {run_id}")
+            elif phase_segment == previous_phase_segment:
+                if (
+                    phase != previous_phase
+                    or first_phase_sample_index
+                    != previous_phase_sample_index + previous_segment_rows
+                ):
+                    raise EvidenceError(f"telemetry phase order mismatch: {run_id}")
+            elif (
+                phase_segment != previous_phase_segment + 1
+                or phase == previous_phase
+                or first_phase_sample_index != 1
+            ):
+                raise EvidenceError(f"telemetry phase order mismatch: {run_id}")
             for row in segment["rows"]:
-                if not isinstance(row, list) or len(row) != len(TELEMETRY_COLUMNS):
-                    raise EvidenceError(f"telemetry row width mismatch: {run_id}")
+                _validate_published_telemetry_row(row, run_id=run_id)
             rows = len(segment["rows"])
             expected_sample_index += rows
             rows_in_chunk += rows
             segment_count += 1
+            previous_phase = phase
+            previous_phase_sample_index = first_phase_sample_index
+            previous_phase_segment = phase_segment
+            previous_segment_rows = rows
         if chunk["sample_count"] != rows_in_chunk:
             raise EvidenceError(f"telemetry chunk count mismatch: {run_id}")
         sample_count += rows_in_chunk

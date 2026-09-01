@@ -1969,6 +1969,116 @@ args = [
 ]
 
 [[models]]
+id = "qwen38-27b-nvfp4-dspark-c1-cuda-graph-full-sglang"
+description = "Matched C1 D256 CUDA-graph-on arm cloned from the pinned RadixArk/DSpark profile, with an explicit batch-one full decode graph, eager prefill, and metrics."
+support_status = "spark_other_backend"
+backend = "sglang"
+recipe_source = "hasso5703/dgx-spark-qwen38"
+recipe_revision = "3590fb29296b1babd85405daad1eef1c4a3ebe0f"
+source = "RadixArk/Qwen3.8-27B-NVFP4"
+revision = "52d1adc5f38aa5ebf099c29ed7025ba34cfbb854"
+weight_file_count = 3
+weight_size_bytes = 21921697280
+draft_source = "RadixArk/Qwen3.8-27B-DSpark"
+draft_revision = "923ed3a8572615643f0137e424e4ce4edd7f1cda"
+draft_weight_size_bytes = 2718576122
+served_name = "qwen3.8-27b"
+tasks = ["chat", "json", "thinking", "tools"]
+architecture = "dense+dspark-draft"
+quantization = "nvfp4+unquant-dspark"
+lifecycle = "docker"
+image = "lmsysorg/sglang@sha256:febfb971c7352570fc445c466ebd6ffc9d896024958e544a60f2137fd85856b1"
+image_digest = "sha256:febfb971c7352570fc445c466ebd6ffc9d896024958e544a60f2137fd85856b1"
+cache_dir = "user"
+max_context = 262144
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 92.0
+endpoint = "http://127.0.0.1:30000/v1"
+sglang_allow_hf_metadata_probe = true
+args = [
+  "--trust-remote-code",
+  "--tp-size", "1",
+  "--served-model-name", "qwen3.8-27b",
+  "--mem-fraction-static", "0.50",
+  "--attention-backend", "flashinfer",
+  "--chunked-prefill-size", "8192",
+  "--cuda-graph-backend-decode", "full",
+  "--cuda-graph-bs-decode", "1",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--enable-metrics",
+  "--speculative-algorithm", "DSPARK",
+  "--speculative-dspark-block-size", "7",
+  "--speculative-draft-model-quantization", "unquant",
+  "--mamba-radix-cache-strategy", "extra_buffer_lazy",
+  "--mamba-ssm-dtype", "bfloat16",
+  "--max-mamba-cache-size", "96",
+  "--max-running-requests", "8",
+  "--enable-torch-compile",
+  "--torch-compile-max-bs", "4",
+  "--num-continuous-decode-steps", "2",
+  "--reasoning-parser", "qwen3",
+  "--tool-call-parser", "qwen3_coder",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]
+
+[[models]]
+id = "qwen38-27b-nvfp4-dspark-c1-cuda-graph-disabled-sglang"
+description = "Matched C1 D256 CUDA-graph-off arm cloned from the pinned RadixArk/DSpark profile, with explicit batch-one decode geometry, eager prefill, and metrics."
+support_status = "spark_other_backend"
+backend = "sglang"
+recipe_source = "hasso5703/dgx-spark-qwen38"
+recipe_revision = "3590fb29296b1babd85405daad1eef1c4a3ebe0f"
+source = "RadixArk/Qwen3.8-27B-NVFP4"
+revision = "52d1adc5f38aa5ebf099c29ed7025ba34cfbb854"
+weight_file_count = 3
+weight_size_bytes = 21921697280
+draft_source = "RadixArk/Qwen3.8-27B-DSpark"
+draft_revision = "923ed3a8572615643f0137e424e4ce4edd7f1cda"
+draft_weight_size_bytes = 2718576122
+served_name = "qwen3.8-27b"
+tasks = ["chat", "json", "thinking", "tools"]
+architecture = "dense+dspark-draft"
+quantization = "nvfp4+unquant-dspark"
+lifecycle = "docker"
+image = "lmsysorg/sglang@sha256:febfb971c7352570fc445c466ebd6ffc9d896024958e544a60f2137fd85856b1"
+image_digest = "sha256:febfb971c7352570fc445c466ebd6ffc9d896024958e544a60f2137fd85856b1"
+cache_dir = "user"
+max_context = 262144
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 92.0
+endpoint = "http://127.0.0.1:30000/v1"
+sglang_allow_hf_metadata_probe = true
+args = [
+  "--trust-remote-code",
+  "--tp-size", "1",
+  "--served-model-name", "qwen3.8-27b",
+  "--mem-fraction-static", "0.50",
+  "--attention-backend", "flashinfer",
+  "--chunked-prefill-size", "8192",
+  "--cuda-graph-backend-decode", "disabled",
+  "--cuda-graph-bs-decode", "1",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--enable-metrics",
+  "--speculative-algorithm", "DSPARK",
+  "--speculative-dspark-block-size", "7",
+  "--speculative-draft-model-quantization", "unquant",
+  "--mamba-radix-cache-strategy", "extra_buffer_lazy",
+  "--mamba-ssm-dtype", "bfloat16",
+  "--max-mamba-cache-size", "96",
+  "--max-running-requests", "8",
+  "--enable-torch-compile",
+  "--torch-compile-max-bs", "4",
+  "--num-continuous-decode-steps", "2",
+  "--reasoning-parser", "qwen3",
+  "--tool-call-parser", "qwen3_coder",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]
+
+[[models]]
 id = "qwen38-flash-next-nvfp4-mtp-sglang"
 description = "Pinned one-DGX-Spark Qwen3.8-Flash-Next NVFP4 recipe with digest-verified SGLang SM121 QSA and a completed read-only persistent PLE cache."
 support_status = "exploratory"
@@ -4521,6 +4631,122 @@ args = [
 ]
 
 [[models]]
+id = "qwen38-flash-next-nvfp4-sm121-triton-storage-c1-cuda-graph-breakable-sglang"
+description = "Matched C1 D256 decode CUDA-graph candidate cloned from the prospective current-SM121 agent profile, with explicit batch-one breakable decode graphs, eager prefill, and metrics."
+support_status = "exploratory"
+backend = "sglang"
+source = "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+revision = "7b719225242aacd3dbd3f9407468c2ee9a9d2594"
+weight_file_count = 206
+weight_size_bytes = 135195303851
+served_name = "qwen38-flash-next-nvfp4-sm121-storage-agent-admission"
+tasks = ["chat", "json", "thinking", "tools"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":true,"reasoning_effort":"low"}}'
+architecture = "moe+qsa+gdn"
+quantization = "nvfp4+ple-fp8-nvme-io-uring"
+lifecycle = "docker"
+image = "local/sglang:sm121-storage-274ee330-runtime"
+local_image_id = "sha256:b14c39fb7cb2e0b82f2f8cae1e115a55f2bb69b5ec6fd7ccc4099b219d1096b0"
+cache_dir = "user"
+max_context = 65536
+native_context = 262144
+startup_timeout_s = 1200
+estimated_ram_gib = 101.0
+host_safety_min_memavailable_gib = 14
+host_safety_max_swap_growth_mib = 64
+host_safety_max_starting_swap_mib = 64
+endpoint = "http://127.0.0.1:30000/v1"
+sglang_storage_mode = "qwen4_ple_nvme_io_uring"
+sglang_ple_nvme_queue_depth = 512
+sglang_ple_nvme_max_batch_pages = 4096
+sglang_ple_nvme_cache_pages = 0
+args = [
+  "--served-model-name", "qwen38-flash-next-nvfp4-sm121-storage-agent-admission",
+  "--tp-size", "1",
+  "--attention-backend", "triton",
+  "--moe-runner-backend", "flashinfer_cutlass",
+  "--quantization", "modelopt_fp4",
+  "--load-format", "auto",
+  "--no-ple-offload-embedding",
+  "--weight-loader-drop-cache-after-load",
+  "--language-only",
+  "--mamba-radix-cache-strategy", "extra_buffer_lazy",
+  "--max-mamba-cache-size", "4",
+  "--page-size", "64",
+  "--mem-fraction-static", "0.85",
+  "--max-total-tokens", "65536",
+  "--context-length", "65536",
+  "--chunked-prefill-size", "4096",
+  "--max-running-requests", "1",
+  "--cuda-graph-backend-decode", "breakable",
+  "--cuda-graph-bs-decode", "1",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--enable-metrics",
+  "--reasoning-parser", "qwen3",
+  "--tool-call-parser", "qwen3_coder",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]
+
+[[models]]
+id = "qwen38-flash-next-nvfp4-sm121-triton-storage-c1-cuda-graph-disabled-sglang"
+description = "Matched C1 D256 decode CUDA-graph control cloned from the prospective current-SM121 agent profile, with explicit batch-one disabled decode graphs, eager prefill, and metrics."
+support_status = "exploratory"
+backend = "sglang"
+source = "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+revision = "7b719225242aacd3dbd3f9407468c2ee9a9d2594"
+weight_file_count = 206
+weight_size_bytes = 135195303851
+served_name = "qwen38-flash-next-nvfp4-sm121-storage-agent-admission"
+tasks = ["chat", "json", "thinking", "tools"]
+request_body_json = '{"chat_template_kwargs":{"enable_thinking":true,"reasoning_effort":"low"}}'
+architecture = "moe+qsa+gdn"
+quantization = "nvfp4+ple-fp8-nvme-io-uring"
+lifecycle = "docker"
+image = "local/sglang:sm121-storage-274ee330-runtime"
+local_image_id = "sha256:b14c39fb7cb2e0b82f2f8cae1e115a55f2bb69b5ec6fd7ccc4099b219d1096b0"
+cache_dir = "user"
+max_context = 65536
+native_context = 262144
+startup_timeout_s = 1200
+estimated_ram_gib = 101.0
+host_safety_min_memavailable_gib = 14
+host_safety_max_swap_growth_mib = 64
+host_safety_max_starting_swap_mib = 64
+endpoint = "http://127.0.0.1:30000/v1"
+sglang_storage_mode = "qwen4_ple_nvme_io_uring"
+sglang_ple_nvme_queue_depth = 512
+sglang_ple_nvme_max_batch_pages = 4096
+sglang_ple_nvme_cache_pages = 0
+args = [
+  "--served-model-name", "qwen38-flash-next-nvfp4-sm121-storage-agent-admission",
+  "--tp-size", "1",
+  "--attention-backend", "triton",
+  "--moe-runner-backend", "flashinfer_cutlass",
+  "--quantization", "modelopt_fp4",
+  "--load-format", "auto",
+  "--no-ple-offload-embedding",
+  "--weight-loader-drop-cache-after-load",
+  "--language-only",
+  "--mamba-radix-cache-strategy", "extra_buffer_lazy",
+  "--max-mamba-cache-size", "4",
+  "--page-size", "64",
+  "--mem-fraction-static", "0.85",
+  "--max-total-tokens", "65536",
+  "--context-length", "65536",
+  "--chunked-prefill-size", "4096",
+  "--max-running-requests", "1",
+  "--cuda-graph-backend-decode", "disabled",
+  "--cuda-graph-bs-decode", "1",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--enable-metrics",
+  "--reasoning-parser", "qwen3",
+  "--tool-call-parser", "qwen3_coder",
+  "--host", "0.0.0.0",
+  "--port", "30000",
+]
+
+[[models]]
 id = "qwen38-flash-next-nvfp4-sm121-triton-storage-cache-policy-off-sglang"
 description = "Paired SM121 cache-policy semantic canary B: cache-off control. Only the dedicated B-then-A semantic canary may execute this profile."
 support_status = "exploratory"
@@ -5070,4 +5296,90 @@ args = [
   "--enable-metrics",
   "--host", "0.0.0.0",
   "--port", "30000",
+]
+
+[[models]]
+id = "qwen38-27b-int4-autoround-densespark-c1"
+description = "Exact local albond DenseSpark v1.2 C1 adapter for Frozenlock Qwen3.8 27B INT4 AutoRound at 64K with MTP8 probabilistic drafting, fixed qwen3_xml automatic tool handling, prefix caching disabled, and a MemAvailable-focused 0.90-to-0.86 GPU-memory-utilization reduction."
+support_status = "spark_vllm_recipe"
+backend = "vllm"
+recipe_source = "albond/DenseSpark-Qwen3.8-27B"
+recipe_revision = "0abecc3005cebe6f5e1e0c0e1f16552f95fe0228"
+source = "Frozenlock/Qwen3.8-27B-int4-AutoRound"
+revision = "b4c61732c4f2d8af323d75ba5702b5c7f3361539"
+weight_file_count = 8
+weight_size_bytes = 18996706072
+served_name = "densespark-qwen3.8-27b"
+tasks = ["chat", "thinking", "tools"]
+architecture = "dense+gdn"
+quantization = "int4-autoround+densespark-pq"
+lifecycle = "docker"
+image = "local/densespark:qwen38-27b-v1.2-0abecc3"
+local_image_id = "sha256:d8d02859a49ebf452d9e20b5fbc0790cd4c38fe9a1f5184096b06e3cc6a751d1"
+cache_dir = "user"
+max_context = 65536
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 92.0
+endpoint = "http://127.0.0.1:8000/v1"
+densespark_pq_file = "densespark-repro-b4c61732/pq_head_m128.pt"
+densespark_pq_digest = "sha256:4e794c398d700002479b914e2c5d530ead57ca5861862ab4230bc470cf95cea9"
+densespark_pq_size_bytes = 34906281
+args = [
+  "--max-model-len", "65536",
+  "--tool-call-parser", "qwen3_xml",
+  "--enable-auto-tool-choice",
+  "--gpu-memory-utilization", "0.86",
+  "--limit-mm-per-prompt", '{"image":0,"video":0}',
+  "--no-enable-prefix-caching",
+  "--mamba-cache-mode", "none",
+  "--max-num-batched-tokens", "8192",
+  "--mamba-ssm-cache-dtype", "bfloat16",
+  "--linear-backend", "humming",
+  "--gdn-prefill-backend", "flashinfer",
+  "--reasoning-parser", "qwen3",
+  "--speculative-config", '{"method":"mtp","num_speculative_tokens":8,"draft_sample_method":"probabilistic"}',
+]
+
+[[models]]
+id = "qwen38-27b-int4-autoround-densespark-c1-experimental-warmup-sync"
+description = "Managed experimental clone of the exact DenseSpark v1.2 C1 profile using the immutable instrumentation-only Qwen warmup image. The probe adds synchronization and timing boundaries around all three original helpers; it does not skip a helper or substitute the rank-four state arm."
+support_status = "exploratory"
+backend = "vllm"
+recipe_source = "albond/DenseSpark-Qwen3.8-27B"
+recipe_revision = "0abecc3005cebe6f5e1e0c0e1f16552f95fe0228"
+source = "Frozenlock/Qwen3.8-27B-int4-AutoRound"
+revision = "b4c61732c4f2d8af323d75ba5702b5c7f3361539"
+weight_file_count = 8
+weight_size_bytes = 18996706072
+served_name = "densespark-qwen3.8-27b"
+tasks = ["chat", "thinking", "tools"]
+architecture = "dense+gdn"
+quantization = "int4-autoround+densespark-pq"
+lifecycle = "docker"
+image = "local/densespark:qwen38-27b-v1.2-warmup-probe-hardened-572e66d5"
+local_image_id = "sha256:c7adf2163f7dd04b52eb5ec91f373bf8fcd1cc63a51f61c2d457ad2976564153"
+cache_dir = "user"
+max_context = 65536
+native_context = 262144
+startup_timeout_s = 1800
+estimated_ram_gib = 92.0
+endpoint = "http://127.0.0.1:8000/v1"
+densespark_pq_file = "densespark-repro-b4c61732/pq_head_m128.pt"
+densespark_pq_digest = "sha256:4e794c398d700002479b914e2c5d530ead57ca5861862ab4230bc470cf95cea9"
+densespark_pq_size_bytes = 34906281
+args = [
+  "--max-model-len", "65536",
+  "--tool-call-parser", "qwen3_xml",
+  "--enable-auto-tool-choice",
+  "--gpu-memory-utilization", "0.86",
+  "--limit-mm-per-prompt", '{"image":0,"video":0}',
+  "--no-enable-prefix-caching",
+  "--mamba-cache-mode", "none",
+  "--max-num-batched-tokens", "8192",
+  "--mamba-ssm-cache-dtype", "bfloat16",
+  "--linear-backend", "humming",
+  "--gdn-prefill-backend", "flashinfer",
+  "--reasoning-parser", "qwen3",
+  "--speculative-config", '{"method":"mtp","num_speculative_tokens":8,"draft_sample_method":"probabilistic"}',
 ]
