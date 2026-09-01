@@ -220,8 +220,10 @@ warmup in 0.164382 s. Full graph capture then completed in about 30 seconds; its
 actual graph pool was 1.28 GiB versus a 1.70 GiB estimate, and the server reached
 ready.
 
-After one unscored JIT warm pass, three identical temperature-zero D256 coding
-requests each recorded 43 prompt and 256 completion tokens:
+After one unscored JIT warm pass, three identical temperature-zero D256
+numbered-phrase continuation requests each recorded 43 prompt and 256
+completion tokens. This is the low-entropy synthetic prompt preserved by
+[`benchmark.py`](../benchmark.py), not a coding task:
 
 | Request | Elapsed | Output tok/s |
 |---|---:|---:|
@@ -229,8 +231,9 @@ requests each recorded 43 prompt and 256 completion tokens:
 | 2 | 4.133956 s | 61.926148 |
 | 3 | 4.141409 s | 61.814716 |
 
-The manual median was 61.814716 output tok/s. A separate synthetic
-`add_numbers` request returned one valid tool call in 0.831975 s. These are
+The manual synthetic-continuation ceiling was 61.814716 output tok/s. A
+separate synthetic `add_numbers` request returned one valid tool call in
+0.831975 s. These are
 functional and repeatability diagnostics, not a managed throughput or agentic
 quality result.
 

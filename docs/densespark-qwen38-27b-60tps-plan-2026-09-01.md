@@ -42,10 +42,11 @@ credited as a decode-speed improvement.
 ## The clue and the controlled diagnosis
 
 The historical synchronization-only diagnostic reached a 61.814716 tok/s
-median on three D256 coding requests. Its server-lifetime MTP counters showed
-58.59% draft-token acceptance and a 5.6875 mean accepted length. It was not an
-admitted result because the lifetime crossed the swap policy and its receipt
-was manual. See
+median on three D256 numbered-phrase continuation requests from the preserved
+original `benchmark.py` path. It was not a coding workload. Its server-lifetime
+MTP counters showed 58.59% draft-token acceptance and a 5.6875 mean accepted
+length. It was not an admitted result because the lifetime crossed the swap
+policy and its receipt was manual. See
 [the DenseSpark analysis](densespark-qwen38-27b-2026-08-31.md#sync-only-manual-diagnostic-non-publishable).
 
 The first managed native-262K run instead measured 34.463345 median client
@@ -54,9 +55,9 @@ acceptance and a 2.9741 mean accepted length. All three 256-token completions
 contained reasoning and no answer content. That made it a reasoning-trace
 throughput test, not a like-for-like reproduction of the coding diagnostic.
 
-A same-process, one-variable diagnostic on the safe 0.70/262K server then
-separated mode and workload. These values are local diagnostic observations,
-not tracked evidence:
+A same-process controlled mode/workload matrix on the safe 0.70/262K server
+then separated mode and workload. These values are local diagnostic
+observations, not tracked evidence:
 
 | Request lane | Median client decode | Median output | MTP acceptance | Mean accepted length |
 |---|---:|---:|---:|---:|
@@ -89,12 +90,23 @@ prefix. `none` still moved median first visible code from roughly 1.97 seconds
 to 0.25 seconds and emitted zero reasoning characters, but it did not make the
 already predictable continuation's raw token execution faster.
 
-The causal accounting is unusually clean. The slow managed lane implied
-`2.9741 / 34.4633 = 86.30 ms` per target verification step; the longer fast
-lane implied `6.8830 / 78.2519 = 87.96 ms`. Target-step cost stayed within two
-percent while accepted length rose 2.31x and TPS rose 2.27x. The measured
-speedup is therefore almost entirely more accepted MTP tokens per target pass,
-not a hidden CUDA-graph, quantization, memory-utilization, or endpoint change.
+The approximate causal accounting is unusually clean. At fixed MTP depth
+eight, mean output tokens per speculative cycle are
+`L = 1 + 8 * draft_acceptance`; draft acceptance and mean accepted length are
+therefore two views of the same counters, not independent signals. The slow
+managed lane implied `2.9741 / 34.4633 = 86.30 ms` per complete speculative
+cycle. The repetitive D1024 code lane implied
+`6.8244 / 79.3277 = 86.03 ms` per cycle. This cycle includes drafting, target
+verification, and serving overhead; it is not a target-kernel timing.
+
+Accepted length rose 2.2946x and TPS rose 2.3018x while the inferred cycle
+cost differed by only 0.31%. Holding the slow cycle cost fixed predicts
+`6.8244 / 0.08630 = 79.08 tok/s`, within 0.31% of the observed 79.33 tok/s. In
+this fixed-K8 diagnostic, the measured speedup is therefore almost entirely
+more accepted MTP tokens per expensive cycle, not a hidden CUDA-graph,
+quantization, memory-utilization, or endpoint change. The slow counters are
+lifetime-scoped while its TPS is a case median, so this is strong causal
+diagnosis rather than request-matched publishable evidence.
 
 The unchanged server produced both the slow and fast regimes. This rules out
 0.70 GPU-memory utilization, native 262K capacity, or a generally degraded
