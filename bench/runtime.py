@@ -24,7 +24,6 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from .densespark import (
-    DENSESPARK_C1_ARGS,
     DENSESPARK_C1_ENVIRONMENT,
     DENSESPARK_CONTAINER_SNAPSHOT,
     DENSESPARK_LAUNCH_CONTAINER_PORT,
@@ -32,6 +31,7 @@ from .densespark import (
     DENSESPARK_LAUNCH_HOST,
     DENSESPARK_LAUNCH_HOST_PORT,
     DENSESPARK_MODEL_REVISION,
+    DENSESPARK_NATIVE_CONTEXT,
     DENSESPARK_PQ_CONTAINER_PATH,
     DENSESPARK_PQ_SHA256,
     DENSESPARK_PQ_SIZE_BYTES,
@@ -43,6 +43,7 @@ from .densespark import (
     DENSESPARK_STARTUP_MIN_MEMAVAILABLE_GIB,
     DENSESPARK_TOOL_CALL_PARSER,
     DenseSparkContractError,
+    densespark_args_for_profile,
     densespark_c1_cache_config,
     densespark_c1_environment,
     densespark_cache_namespace,
@@ -51,7 +52,9 @@ from .densespark import (
     densespark_expected_launch_policy,
     densespark_expected_resolved_provenance,
     densespark_local_image_id_for_profile,
+    densespark_max_context_for_profile,
     densespark_pq_artifact_path,
+    densespark_speculative_depth_for_profile,
     is_densespark_profile,
     is_densespark_warmup_sync_profile,
     validate_densespark_local_image,
@@ -4122,6 +4125,7 @@ def _validate_densespark_launch_command(
     repository: Path,
     pq_artifact: Path,
     compile_cache: Path,
+    profile_id: str = DENSESPARK_PROFILE_ID,
 ) -> None:
     """Reject any managed launch that differs from the complete expected argv."""
 
@@ -4156,6 +4160,7 @@ def _validate_densespark_launch_command(
         f"{policy['publish_host']}:{policy['publish_host_port']}:"
         f"{policy['publish_container_port']}"
     )
+    expected_args = densespark_args_for_profile(profile_id)
     expected = [
         "docker",
         "run",
@@ -4194,12 +4199,67 @@ def _validate_densespark_launch_command(
         DENSESPARK_CONTAINER_SNAPSHOT,
         "--served-model-name",
         DENSESPARK_SERVED_NAME,
-        *DENSESPARK_C1_ARGS,
+        *expected_args,
     ]
     if list(command) != expected:
         raise DenseSparkContractError(
             "DenseSpark launch command does not match its frozen policy"
         )
+
+
+def _densespark_gpu_memory_provenance(
+    profile_id: str,
+    serve_args: Sequence[str],
+) -> dict[str, float | str]:
+    """Derive the exact profile's GPU-memory provenance from its frozen argv."""
+
+    expected_args = densespark_args_for_profile(profile_id)
+    observed_args = tuple(serve_args)
+    if observed_args != expected_args:
+        raise DenseSparkContractError(
+            "DenseSpark GPU-memory provenance requires the exact profile arguments"
+        )
+
+    option = "--gpu-memory-utilization"
+    positions = [
+        index for index, argument in enumerate(observed_args) if argument == option
+    ]
+    if len(positions) != 1 or positions[0] + 1 >= len(observed_args):
+        raise DenseSparkContractError(
+            "DenseSpark profile must set GPU-memory utilization exactly once"
+        )
+    raw_value = observed_args[positions[0] + 1]
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as error:
+        raise DenseSparkContractError(
+            "DenseSpark GPU-memory utilization must be numeric"
+        ) from error
+    if not math.isfinite(value) or value <= 0.0 or value > 1.0:
+        raise DenseSparkContractError(
+            "DenseSpark GPU-memory utilization must be in (0, 1]"
+        )
+
+    config_value = densespark_c1_cache_config(profile_id).get(
+        "DENSESPARK_GPU_MEMORY_UTILIZATION"
+    )
+    if config_value != raw_value:
+        raise DenseSparkContractError(
+            "DenseSpark GPU-memory utilization differs from its cache contract"
+        )
+
+    reason = (
+        "native_context_headroom"
+        if densespark_max_context_for_profile(profile_id)
+        == DENSESPARK_NATIVE_CONTEXT
+        else "memavailable_margin"
+    )
+    return {
+        "gpu_memory_utilization": value,
+        "gpu_memory_configuration_reduction": (
+            f"upstream_0.90_to_{raw_value}_{reason}"
+        ),
+    }
 
 
 def _densespark_startup_watchdog() -> HostSafetyWatchdog:
@@ -4272,6 +4332,11 @@ def _start_densespark_vllm(
             "DenseSpark managed serving requires its frozen loopback port"
         )
     profile_id = str(model.id)
+    serve_args = densespark_args_for_profile(profile_id)
+    gpu_memory_provenance = _densespark_gpu_memory_provenance(
+        profile_id,
+        serve_args,
+    )
     expected_image_id = densespark_local_image_id_for_profile(profile_id)
     if is_densespark_warmup_sync_profile(model):
         try:
@@ -4350,7 +4415,7 @@ def _start_densespark_vllm(
             DENSESPARK_CONTAINER_SNAPSHOT,
             "--served-model-name",
             DENSESPARK_SERVED_NAME,
-            *DENSESPARK_C1_ARGS,
+            *serve_args,
         )
     )
     try:
@@ -4361,6 +4426,7 @@ def _start_densespark_vllm(
             repository=repository_resolved,
             pq_artifact=pq_artifact,
             compile_cache=compile_cache,
+            profile_id=profile_id,
         )
     except DenseSparkContractError as error:
         raise RuntimeErrorWithContext(
@@ -4438,11 +4504,10 @@ def _start_densespark_vllm(
             "pq_artifact_size_bytes": pq_receipt.size_bytes,
             "configuration_sha256": densespark_configuration_digest(config),
             "compile_cache_namespace": densespark_cache_namespace(config),
-            "gpu_memory_utilization": 0.86,
-            "gpu_memory_configuration_reduction": (
-                "upstream_0.90_to_0.86_memavailable_margin"
+            **gpu_memory_provenance,
+            "speculative_depth": densespark_speculative_depth_for_profile(
+                profile_id
             ),
-            "speculative_depth": 8,
             "draft_sample_method": "probabilistic",
             "prefix_caching": False,
             "tool_calling": True,
@@ -4473,6 +4538,17 @@ def _start_densespark_vllm(
                     "densespark_warmup_qwen_source_sha256": expected_receipt[
                         "qwen_warmup_source_sha256"
                     ],
+                }
+            )
+        if (
+            densespark_max_context_for_profile(profile_id)
+            == DENSESPARK_NATIVE_CONTEXT
+        ):
+            server.native_provenance.update(
+                {
+                    "kv_cache_dtype": "auto",
+                    "max_model_len": DENSESPARK_NATIVE_CONTEXT,
+                    "mamba_ssm_cache_dtype": "bfloat16",
                 }
             )
         server.startup_s = wait_for_endpoint(

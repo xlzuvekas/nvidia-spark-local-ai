@@ -11,12 +11,14 @@ from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit
 
 from .densespark import (
+    DENSESPARK_FAST_CODING_SUITE_ID,
     DENSESPARK_PROFILE_IDS,
     DENSESPARK_SUITE_ID,
     DENSESPARK_TOOL_SUITE_ID,
     DenseSparkContractError,
     is_densespark_profile,
     validate_densespark_profile,
+    validate_densespark_selection,
     validate_densespark_suite,
 )
 from .memory_ops import (
@@ -2604,21 +2606,25 @@ def validate_benchmark_selection(
         validate_matched_prompt_graph_model(model, context=f"{context}.model")
     densespark_profile = is_densespark_profile(model)
     densespark_suite = suite.id == DENSESPARK_SUITE_ID
+    densespark_fast_suite = suite.id == DENSESPARK_FAST_CODING_SUITE_ID
     densespark_tool_suite = suite.id == DENSESPARK_TOOL_SUITE_ID
-    if densespark_profile and not (densespark_suite or densespark_tool_suite):
+    densespark_known_suite = (
+        densespark_suite or densespark_fast_suite or densespark_tool_suite
+    )
+    if densespark_profile and not densespark_known_suite:
         raise ManifestError(
             f"{context}: managed DenseSpark profiles require the "
-            f"{DENSESPARK_SUITE_ID!r} or {DENSESPARK_TOOL_SUITE_ID!r} suite"
+            f"{DENSESPARK_SUITE_ID!r}, {DENSESPARK_FAST_CODING_SUITE_ID!r}, "
+            f"or {DENSESPARK_TOOL_SUITE_ID!r} suite"
         )
-    if densespark_suite and not densespark_profile:
+    if (densespark_suite or densespark_fast_suite) and not densespark_profile:
         raise ManifestError(
-            f"{context}: the {DENSESPARK_SUITE_ID!r} suite requires the "
+            f"{context}: the {suite.id!r} suite requires the "
             f"managed DenseSpark profiles {sorted(DENSESPARK_PROFILE_IDS)!r}"
         )
-    if densespark_profile and (densespark_suite or densespark_tool_suite):
+    if densespark_profile and densespark_known_suite:
         try:
-            validate_densespark_profile(model)
-            validate_densespark_suite(suite)
+            validate_densespark_selection(model, suite)
         except DenseSparkContractError as error:
             raise ManifestError(f"{context}: {error}") from error
     tps_suite_profiles = _TPS_PROFILE_IDS_BY_SUITE.get(suite.id)

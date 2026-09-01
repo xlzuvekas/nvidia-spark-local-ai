@@ -30,10 +30,34 @@ DENSESPARK_PROFILE_ID = "qwen38-27b-int4-autoround-densespark-c1"
 DENSESPARK_WARMUP_SYNC_PROFILE_ID = (
     "qwen38-27b-int4-autoround-densespark-c1-experimental-warmup-sync"
 )
+DENSESPARK_NATIVE_262K_PROFILE_ID = (
+    "qwen38-27b-int4-autoround-densespark-c1-native-262k-warmup-sync"
+)
+DENSESPARK_FAST_MTP_DEPTHS = (4, 6, 7, 8)
+DENSESPARK_NATIVE_262K_FAST_PROFILE_BY_DEPTH = {
+    depth: (
+        "qwen38-27b-int4-autoround-densespark-c1-native-262k-"
+        f"fast-mtp{depth}-warmup-sync"
+    )
+    for depth in DENSESPARK_FAST_MTP_DEPTHS
+}
+DENSESPARK_NATIVE_262K_FAST_PROFILE_IDS = frozenset(
+    DENSESPARK_NATIVE_262K_FAST_PROFILE_BY_DEPTH.values()
+)
+DENSESPARK_NATIVE_262K_PROFILE_IDS = frozenset(
+    {DENSESPARK_NATIVE_262K_PROFILE_ID, *DENSESPARK_NATIVE_262K_FAST_PROFILE_IDS}
+)
+DENSESPARK_WARMUP_SYNC_PROFILE_IDS = frozenset(
+    {
+        DENSESPARK_WARMUP_SYNC_PROFILE_ID,
+        *DENSESPARK_NATIVE_262K_PROFILE_IDS,
+    }
+)
 DENSESPARK_PROFILE_IDS = frozenset(
-    {DENSESPARK_PROFILE_ID, DENSESPARK_WARMUP_SYNC_PROFILE_ID}
+    {DENSESPARK_PROFILE_ID, *DENSESPARK_WARMUP_SYNC_PROFILE_IDS}
 )
 DENSESPARK_SUITE_ID = "qwen38-27b-densespark-c1"
+DENSESPARK_FAST_CODING_SUITE_ID = "qwen38-27b-densespark-fast-coding"
 DENSESPARK_TOOL_SUITE_ID = "agentic-tools"
 DENSESPARK_IMAGE = "local/densespark:qwen38-27b-v1.2-0abecc3"
 DENSESPARK_LOCAL_IMAGE_ID = (
@@ -95,6 +119,9 @@ DENSESPARK_WARMUP_SYNC_DOCKERIGNORE_RELATIVE_PATH = PurePosixPath(
 )
 DENSESPARK_SERVED_NAME = "densespark-qwen3.8-27b"
 DENSESPARK_TOOL_CALL_PARSER = "qwen3_xml"
+DENSESPARK_FAST_REQUEST_BODY_JSON = (
+    '{"chat_template_kwargs":{"enable_thinking":false}}'
+)
 DENSESPARK_MAX_CONTEXT = 65_536
 DENSESPARK_NATIVE_CONTEXT = 262_144
 DENSESPARK_WEIGHT_FILE_COUNT = 8
@@ -286,6 +313,10 @@ DENSESPARK_C1_ENVIRONMENT = (
 # Upstream C1 used 0.90. The Spark reproduction reduced this to 0.86 to retain
 # more MemAvailable on unified memory. This is a focused configuration change,
 # not a substitute for the separate memory and swap watchdog.
+DENSESPARK_C1_GPU_MEMORY_UTILIZATION = "0.86"
+# The native-context single-user arm reserves more unified-memory headroom;
+# its separate cache identity prevents reuse of graphs sized for the 0.86 arms.
+DENSESPARK_NATIVE_262K_GPU_MEMORY_UTILIZATION = "0.70"
 DENSESPARK_C1_ARGS = (
     "--max-model-len",
     "65536",
@@ -293,7 +324,7 @@ DENSESPARK_C1_ARGS = (
     DENSESPARK_TOOL_CALL_PARSER,
     "--enable-auto-tool-choice",
     "--gpu-memory-utilization",
-    "0.86",
+    DENSESPARK_C1_GPU_MEMORY_UTILIZATION,
     "--limit-mm-per-prompt",
     '{"image":0,"video":0}',
     "--no-enable-prefix-caching",
@@ -313,6 +344,31 @@ DENSESPARK_C1_ARGS = (
     '{"method":"mtp","num_speculative_tokens":8,'
     '"draft_sample_method":"probabilistic"}',
 )
+DENSESPARK_NATIVE_262K_ARGS = (
+    "--max-model-len",
+    str(DENSESPARK_NATIVE_CONTEXT),
+    "--kv-cache-dtype",
+    "auto",
+    *DENSESPARK_C1_ARGS[2:6],
+    DENSESPARK_NATIVE_262K_GPU_MEMORY_UTILIZATION,
+    *DENSESPARK_C1_ARGS[7:],
+)
+
+
+def _densespark_speculative_config(depth: int) -> str:
+    if type(depth) is not int or depth not in DENSESPARK_FAST_MTP_DEPTHS:
+        raise DenseSparkContractError("DenseSpark speculative depth is not admitted")
+    return (
+        '{"method":"mtp","num_speculative_tokens":'
+        f"{depth},\"draft_sample_method\":\"probabilistic\"}}"
+    )
+
+
+def _densespark_native_args_for_depth(depth: int) -> tuple[str, ...]:
+    args = list(DENSESPARK_NATIVE_262K_ARGS)
+    index = args.index("--speculative-config") + 1
+    args[index] = _densespark_speculative_config(depth)
+    return tuple(args)
 
 DENSESPARK_C1_CASES = (
     {
@@ -322,6 +378,39 @@ DENSESPARK_C1_CASES = (
         "warmups": 1,
         "repetitions": 3,
         "max_output_tokens": 256,
+        "temperature": 0.0,
+        "concurrency": 1,
+        "prompt_repetitions": 0,
+        "max_turns": 1,
+    },
+)
+DENSESPARK_FAST_CODING_SUITE_DESCRIPTION = (
+    "Matched concurrency-one native-262K DenseSpark synthetic repetitive-code "
+    "continuation throughput ceiling with explicit no-thinking request policy, "
+    "unique deterministic variants, a five-request D256 screen, and a "
+    "three-request D1024 confirmation. This is not a representative coding-agent "
+    "workload."
+)
+DENSESPARK_FAST_CODING_CASES = (
+    {
+        "id": "densespark-fast-code-tests-d256",
+        "kind": "decode",
+        "requires": ("chat",),
+        "warmups": 1,
+        "repetitions": 5,
+        "max_output_tokens": 256,
+        "temperature": 0.0,
+        "concurrency": 1,
+        "prompt_repetitions": 0,
+        "max_turns": 1,
+    },
+    {
+        "id": "densespark-fast-code-tests-d1024",
+        "kind": "decode",
+        "requires": ("chat",),
+        "warmups": 0,
+        "repetitions": 3,
+        "max_output_tokens": 1_024,
         "temperature": 0.0,
         "concurrency": 1,
         "prompt_repetitions": 0,
@@ -379,6 +468,7 @@ DENSESPARK_CONFIG_KEYS = frozenset(
         "DENSESPARK_MARLIN_NSPLIT_MIN_M",
         "DENSESPARK_LINEAR_BACKEND",
         "DENSESPARK_LIMIT_MM",
+        "DENSESPARK_KV_CACHE_DTYPE",
         "DENSESPARK_MAMBA_CACHE_MODE",
         "DENSESPARK_MAMBA_SSM_CACHE_DTYPE",
         "DENSESPARK_MAX_MODEL_LEN",
@@ -483,8 +573,89 @@ def is_densespark_warmup_sync_profile(model: object) -> bool:
     """Return whether an object selects the instrumentation-only sync arm."""
 
     return type(getattr(model, "id", None)) is str and (
-        getattr(model, "id") == DENSESPARK_WARMUP_SYNC_PROFILE_ID
+        getattr(model, "id") in DENSESPARK_WARMUP_SYNC_PROFILE_IDS
     )
+
+
+def is_densespark_native_262k_profile(model: object) -> bool:
+    """Return whether an object selects a native-context managed profile."""
+
+    return type(getattr(model, "id", None)) is str and (
+        getattr(model, "id") in DENSESPARK_NATIVE_262K_PROFILE_IDS
+    )
+
+
+def densespark_speculative_depth_for_profile(profile_id: str) -> int:
+    """Return the exact admitted MTP depth for one managed profile."""
+
+    if type(profile_id) is not str or profile_id not in DENSESPARK_PROFILE_IDS:
+        raise DenseSparkContractError("DenseSpark managed profile ID does not match")
+    for depth, candidate_id in DENSESPARK_NATIVE_262K_FAST_PROFILE_BY_DEPTH.items():
+        if profile_id == candidate_id:
+            return depth
+    return 8
+
+
+def is_densespark_fast_coding_case_id(case_id: object) -> bool:
+    """Return whether a case belongs to the frozen no-thinking coding lane."""
+
+    return type(case_id) is str and case_id in {
+        case["id"] for case in DENSESPARK_FAST_CODING_CASES
+    }
+
+
+def is_densespark_fast_profile(model: object) -> bool:
+    """Return whether an object selects an explicit no-thinking MTP arm."""
+
+    return type(getattr(model, "id", None)) is str and (
+        getattr(model, "id") in DENSESPARK_NATIVE_262K_FAST_PROFILE_IDS
+    )
+
+
+def densespark_fast_coding_output_passes(content: object) -> bool:
+    """Apply the small semantic oracle required by the throughput ceiling."""
+
+    return type(content) is str and all(
+        marker in content for marker in ("def merge_sort", "test_merge_000")
+    )
+
+
+def densespark_fast_coding_prompt(variant: str) -> str:
+    """Render one synthetic, non-secret coding prompt with a matched variant."""
+
+    if type(variant) is not str or not variant or len(variant) > 256:
+        raise DenseSparkContractError("DenseSpark coding prompt variant is invalid")
+    if re.fullmatch(r"[A-Za-z0-9._-]+", variant) is None:
+        raise DenseSparkContractError("DenseSpark coding prompt variant is invalid")
+    return (
+        f"Variant {variant}. Return only Python code. Implement merge_sort with "
+        "type hints, then define an unbroken sequence of distinctly numbered "
+        "pytest test functions named test_merge_000, test_merge_001, and so on. "
+        "Each function must contain a deterministic assertion. Continue defining "
+        "new tests until the output limit; do not conclude or summarize."
+    )
+
+
+def densespark_max_context_for_profile(profile_id: str) -> int:
+    """Return the exact served context limit for one managed profile."""
+
+    if type(profile_id) is not str or profile_id not in DENSESPARK_PROFILE_IDS:
+        raise DenseSparkContractError("DenseSpark managed profile ID does not match")
+    if profile_id in DENSESPARK_NATIVE_262K_PROFILE_IDS:
+        return DENSESPARK_NATIVE_CONTEXT
+    return DENSESPARK_MAX_CONTEXT
+
+
+def densespark_args_for_profile(profile_id: str) -> tuple[str, ...]:
+    """Return the exact vLLM serving arguments for one managed profile."""
+
+    if type(profile_id) is not str or profile_id not in DENSESPARK_PROFILE_IDS:
+        raise DenseSparkContractError("DenseSpark managed profile ID does not match")
+    if profile_id in DENSESPARK_NATIVE_262K_PROFILE_IDS:
+        return _densespark_native_args_for_depth(
+            densespark_speculative_depth_for_profile(profile_id)
+        )
+    return DENSESPARK_C1_ARGS
 
 
 def densespark_image_for_profile(profile_id: str) -> str:
@@ -492,7 +663,7 @@ def densespark_image_for_profile(profile_id: str) -> str:
 
     if type(profile_id) is not str or profile_id not in DENSESPARK_PROFILE_IDS:
         raise DenseSparkContractError("DenseSpark managed profile ID does not match")
-    if profile_id == DENSESPARK_WARMUP_SYNC_PROFILE_ID:
+    if profile_id in DENSESPARK_WARMUP_SYNC_PROFILE_IDS:
         return DENSESPARK_WARMUP_SYNC_IMAGE
     return DENSESPARK_IMAGE
 
@@ -502,7 +673,7 @@ def densespark_local_image_id_for_profile(profile_id: str) -> str:
 
     if type(profile_id) is not str or profile_id not in DENSESPARK_PROFILE_IDS:
         raise DenseSparkContractError("DenseSpark managed profile ID does not match")
-    if profile_id == DENSESPARK_WARMUP_SYNC_PROFILE_ID:
+    if profile_id in DENSESPARK_WARMUP_SYNC_PROFILE_IDS:
         return DENSESPARK_WARMUP_SYNC_LOCAL_IMAGE_ID
     return DENSESPARK_LOCAL_IMAGE_ID
 
@@ -519,6 +690,7 @@ def validate_densespark_profile(model: object) -> None:
     if not is_densespark_profile(model):
         raise DenseSparkContractError("DenseSpark managed profile ID does not match")
     profile_id = getattr(model, "id")
+    fast_profile = profile_id in DENSESPARK_NATIVE_262K_FAST_PROFILE_IDS
     require_densespark_profile_identity(
         recipe_source=getattr(model, "recipe_source", None),
         recipe_revision=getattr(model, "recipe_revision", None),
@@ -538,16 +710,18 @@ def validate_densespark_profile(model: object) -> None:
         "image_digest": None,
         "lifecycle": "docker",
         "local_image_id": densespark_local_image_id_for_profile(profile_id),
-        "max_context": DENSESPARK_MAX_CONTEXT,
+        "max_context": densespark_max_context_for_profile(profile_id),
         "native_context": DENSESPARK_NATIVE_CONTEXT,
         "prefix_cache_mode": None,
         "quantization": "int4-autoround+densespark-pq",
-        "request_body_json": None,
+        "request_body_json": (
+            DENSESPARK_FAST_REQUEST_BODY_JSON if fast_profile else None
+        ),
         "served_name": DENSESPARK_SERVED_NAME,
         "startup_timeout_s": 1_800,
         "support_status": (
             "exploratory"
-            if profile_id == DENSESPARK_WARMUP_SYNC_PROFILE_ID
+            if profile_id in DENSESPARK_WARMUP_SYNC_PROFILE_IDS
             else "spark_vllm_recipe"
         ),
         "weight_file_count": DENSESPARK_WEIGHT_FILE_COUNT,
@@ -567,7 +741,9 @@ def validate_densespark_profile(model: object) -> None:
         raise DenseSparkContractError(
             "DenseSpark managed profile capabilities do not match v1.2"
         )
-    if _exact_sequence(getattr(model, "args", None)) != DENSESPARK_C1_ARGS:
+    if _exact_sequence(getattr(model, "args", None)) != densespark_args_for_profile(
+        profile_id
+    ):
         raise DenseSparkContractError("DenseSpark managed profile arguments do not match")
 
 
@@ -577,20 +753,24 @@ def validate_densespark_suite(suite: object) -> None:
     suite_id = getattr(suite, "id", None)
     if type(suite_id) is not str or suite_id not in {
         DENSESPARK_SUITE_ID,
+        DENSESPARK_FAST_CODING_SUITE_ID,
         DENSESPARK_TOOL_SUITE_ID,
     }:
         raise DenseSparkContractError("DenseSpark suite ID does not match")
-    if suite_id == DENSESPARK_TOOL_SUITE_ID and getattr(
+    descriptions = {
+        DENSESPARK_FAST_CODING_SUITE_ID: DENSESPARK_FAST_CODING_SUITE_DESCRIPTION,
+        DENSESPARK_TOOL_SUITE_ID: DENSESPARK_TOOL_SUITE_DESCRIPTION,
+    }
+    expected_description = descriptions.get(suite_id)
+    if expected_description is not None and getattr(
         suite, "description", None
-    ) != DENSESPARK_TOOL_SUITE_DESCRIPTION:
-        raise DenseSparkContractError(
-            "DenseSpark tool suite description does not match"
-        )
-    expected_cases = (
-        DENSESPARK_C1_CASES
-        if suite_id == DENSESPARK_SUITE_ID
-        else DENSESPARK_TOOL_CASES
-    )
+    ) != expected_description:
+        raise DenseSparkContractError("DenseSpark suite description does not match")
+    expected_cases = {
+        DENSESPARK_SUITE_ID: DENSESPARK_C1_CASES,
+        DENSESPARK_FAST_CODING_SUITE_ID: DENSESPARK_FAST_CODING_CASES,
+        DENSESPARK_TOOL_SUITE_ID: DENSESPARK_TOOL_CASES,
+    }[suite_id]
     cases = _exact_sequence(getattr(suite, "cases", None))
     if cases is None or len(cases) != len(expected_cases):
         raise DenseSparkContractError(
@@ -605,6 +785,29 @@ def validate_densespark_suite(suite: object) -> None:
                 raise DenseSparkContractError(
                     f"DenseSpark C1 suite field {name} does not match"
                 )
+
+
+def validate_densespark_selection(model: object, suite: object) -> None:
+    """Require an exact managed profile/suite pair at every trust boundary."""
+
+    validate_densespark_profile(model)
+    validate_densespark_suite(suite)
+    profile_id = getattr(model, "id")
+    suite_id = getattr(suite, "id")
+    fast_profile = profile_id in DENSESPARK_NATIVE_262K_FAST_PROFILE_IDS
+    if suite_id == DENSESPARK_FAST_CODING_SUITE_ID and not fast_profile:
+        raise DenseSparkContractError(
+            "DenseSpark synthetic repetitive-code continuation suite requires "
+            "an explicit native-262K no-thinking profile"
+        )
+    if fast_profile and suite_id not in {
+        DENSESPARK_FAST_CODING_SUITE_ID,
+        DENSESPARK_TOOL_SUITE_ID,
+    }:
+        raise DenseSparkContractError(
+            "DenseSpark native-262K no-thinking profiles require the synthetic "
+            "repetitive-code continuation or agentic-tools suite"
+        )
 
 
 def validate_densespark_snapshot_receipt(
@@ -647,24 +850,34 @@ def densespark_c1_cache_config(
             "DENSESPARK_CONCURRENCY": 1,
             "DENSESPARK_DRAFT_SAMPLE_METHOD": "probabilistic",
             "DENSESPARK_GDN_PREFILL_BACKEND": "flashinfer",
-            "DENSESPARK_GPU_MEMORY_UTILIZATION": "0.86",
+            "DENSESPARK_GPU_MEMORY_UTILIZATION": (
+                DENSESPARK_NATIVE_262K_GPU_MEMORY_UTILIZATION
+                if profile_id in DENSESPARK_NATIVE_262K_PROFILE_IDS
+                else DENSESPARK_C1_GPU_MEMORY_UTILIZATION
+            ),
             "DENSESPARK_IMAGE_ID": image_id,
             "DENSESPARK_LIMIT_MM": '{"image":0,"video":0}',
             "DENSESPARK_LINEAR_BACKEND": "humming",
             "DENSESPARK_MAMBA_CACHE_MODE": "none",
             "DENSESPARK_MAMBA_SSM_CACHE_DTYPE": "bfloat16",
-            "DENSESPARK_MAX_MODEL_LEN": DENSESPARK_MAX_CONTEXT,
+            "DENSESPARK_MAX_MODEL_LEN": densespark_max_context_for_profile(
+                profile_id
+            ),
             "DENSESPARK_MAX_NUM_BATCHED_TOKENS": 8_192,
             "DENSESPARK_MODEL_REVISION": DENSESPARK_MODEL_REVISION,
             "DENSESPARK_PQ_ARTIFACT_SHA256": DENSESPARK_PQ_SHA256,
             "DENSESPARK_PREFIX_CACHING": False,
             "DENSESPARK_REASONING_PARSER": "qwen3",
-            "DENSESPARK_SPEC_TOKENS": 8,
+            "DENSESPARK_SPEC_TOKENS": densespark_speculative_depth_for_profile(
+                profile_id
+            ),
             "DENSESPARK_TOOL_CALL_PARSER": DENSESPARK_TOOL_CALL_PARSER,
         }
     )
-    if profile_id == DENSESPARK_WARMUP_SYNC_PROFILE_ID:
+    if profile_id in DENSESPARK_WARMUP_SYNC_PROFILE_IDS:
         config["DENSESPARK_WARMUP_MODE"] = DENSESPARK_WARMUP_SYNC_MODE
+    if profile_id in DENSESPARK_NATIVE_262K_PROFILE_IDS:
+        config["DENSESPARK_KV_CACHE_DTYPE"] = "auto"
     return config
 
 
@@ -1263,7 +1476,7 @@ def densespark_expected_resolved_provenance(
         "weight_file_count": DENSESPARK_WEIGHT_FILE_COUNT,
         "weight_size_bytes": DENSESPARK_WEIGHT_SIZE_BYTES,
     }
-    if profile_id == DENSESPARK_WARMUP_SYNC_PROFILE_ID:
+    if profile_id in DENSESPARK_WARMUP_SYNC_PROFILE_IDS:
         receipt.update(
             {
                 "base_docker_image_id": DENSESPARK_LOCAL_IMAGE_ID,

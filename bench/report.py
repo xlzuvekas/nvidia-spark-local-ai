@@ -49,7 +49,10 @@ from .sglang_sm121_cache_semantic import (
     sm121_cache_semantic_arm,
     sm121_cache_semantic_lifecycle_issues,
 )
-from .vllm_metrics import aggregate_vllm_spec_decode_metrics
+from .vllm_metrics import (
+    aggregate_vllm_spec_decode_metric_deltas,
+    aggregate_vllm_spec_decode_metrics,
+)
 
 
 def _is_diffusion_architecture(value: Any) -> bool:
@@ -384,6 +387,11 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         plan = {}
     planned_model = plan.get("model") or {}
     planned_suite = plan.get("suite") or {}
+    planned_case_records = {
+        str(case["case_id"]): case
+        for case in planned_suite.get("cases", [])
+        if isinstance(case, dict) and isinstance(case.get("case_id"), str)
+    }
     sm121_storage_lifecycle_issues: tuple[dict[str, object], ...] = ()
     sm121_cache_observability_issues: tuple[dict[str, object], ...] = ()
     sm121_cache_semantic_issues: tuple[dict[str, object], ...] = ()
@@ -551,12 +559,32 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     )
     completed: dict[str, str] = {}
     case_events: dict[tuple[str, str], dict[str, Any]] = {}
+    case_vllm_speculative_decoding: dict[
+        tuple[str, str], dict[int, dict[str, Any]]
+    ] = {}
     for event in events:
         if event.get("event") == "case_complete":
             case_id = str(event["case_id"])
             attempt_id = str(event["attempt_id"])
             completed[case_id] = attempt_id
             case_events[(case_id, attempt_id)] = event
+        elif (
+            event.get("event") == "vllm_spec_decode_metrics_delta"
+            and isinstance(event.get("case_id"), str)
+            and isinstance(event.get("attempt_id"), str)
+            and isinstance(event.get("repetition"), int)
+            and not isinstance(event.get("repetition"), bool)
+            and isinstance(event.get("metrics"), dict)
+        ):
+            key = (str(event["case_id"]), str(event["attempt_id"]))
+            repetition = int(event["repetition"])
+            by_repetition = case_vllm_speculative_decoding.setdefault(key, {})
+            if repetition < 0 or repetition in by_repetition:
+                raise ValueError(
+                    "vLLM speculative request deltas must have unique canonical "
+                    "repetitions"
+                )
+            by_repetition[repetition] = event["metrics"]
 
     completed_items = sorted(completed.items())
     planned_case_ids: list[str] = []
@@ -709,6 +737,27 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
             "elapsed_s": wall_s,
             "validation_passed": case_event.get("validation_passed"),
         }
+        request_scoped_speculation = case_vllm_speculative_decoding.get(
+            (case_id, attempt_id)
+        )
+        if request_scoped_speculation is not None:
+            planned_case = planned_case_records.get(case_id)
+            if planned_case is None:
+                raise ValueError(
+                    "vLLM speculative request deltas require a frozen case record"
+                )
+            expected_repetitions = int(planned_case.get("repetitions", 0))
+            if set(request_scoped_speculation) != set(range(expected_repetitions)):
+                raise ValueError(
+                    "vLLM speculative request deltas do not cover the complete "
+                    "measured case"
+                )
+            row["speculative_decoding"] = (
+                aggregate_vllm_spec_decode_metric_deltas(
+                    request_scoped_speculation[repetition]
+                    for repetition in range(expected_repetitions)
+                )
+            )
         if kind == "cache":
             # Cache conditions have deliberately different semantics.  Do not
             # present a mixed cold/warm average as a generic TTFT, E2E, or TPS

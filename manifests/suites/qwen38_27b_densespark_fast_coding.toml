@@ -1,0 +1,29 @@
+schema_version = 1
+
+[suite]
+id = "qwen38-27b-densespark-fast-coding"
+description = "Matched concurrency-one native-262K DenseSpark synthetic repetitive-code continuation throughput ceiling with explicit no-thinking request policy, unique deterministic variants, a five-request D256 screen, and a three-request D1024 confirmation. This is not a representative coding-agent workload."
+
+[[cases]]
+id = "densespark-fast-code-tests-d256"
+kind = "decode"
+requires = ["chat"]
+warmups = 1
+repetitions = 5
+max_output_tokens = 256
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+max_turns = 1
+
+[[cases]]
+id = "densespark-fast-code-tests-d1024"
+kind = "decode"
+requires = ["chat"]
+warmups = 0
+repetitions = 3
+max_output_tokens = 1024
+temperature = 0.0
+concurrency = 1
+prompt_repetitions = 0
+max_turns = 1

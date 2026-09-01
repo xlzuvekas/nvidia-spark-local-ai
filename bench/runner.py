@@ -27,17 +27,21 @@ from .densespark import (
     DENSESPARK_PQ_SHA256,
     DENSESPARK_PQ_SIZE_BYTES,
     DenseSparkContractError,
+    densespark_fast_coding_prompt,
     densespark_expected_launch_policy,
     densespark_expected_resolved_provenance,
+    densespark_fast_coding_output_passes,
     densespark_local_image_id_for_profile,
     densespark_pq_artifact_path,
     is_densespark_profile,
+    is_densespark_fast_coding_case_id,
+    is_densespark_fast_profile,
     is_densespark_warmup_sync_profile,
     validate_densespark_local_image,
     validate_densespark_pq_artifact,
     validate_densespark_profile,
+    validate_densespark_selection,
     validate_densespark_snapshot,
-    validate_densespark_suite,
     validate_densespark_warmup_sync_sources,
 )
 from .agentic_tools import estimate_agentic_context_tokens, run_agentic_scenario
@@ -247,7 +251,10 @@ from .sglang_sm121_cache_observability import (
     validate_sm121_cache_zero_hit_event,
 )
 from .telemetry import TelemetrySampler
-from .vllm_metrics import snapshot_vllm_spec_decode_metrics
+from .vllm_metrics import (
+    delta_vllm_spec_decode_metrics,
+    snapshot_vllm_spec_decode_metrics,
+)
 
 
 class PreflightError(RuntimeError):
@@ -437,16 +444,18 @@ def _require_frozen_densespark_contract(
 
 
 def _require_frozen_densespark_suite(model: Any, suite: object) -> None:
-    """Revalidate the exact C1 case topology at every execution boundary."""
+    """Revalidate the exact managed profile/suite pair before execution."""
 
     if not is_densespark_profile(model):
         return
     if type(suite) is not dict:
         raise PreflightError("Frozen DenseSpark suite contract is invalid")
     try:
-        validate_densespark_suite(_namespace(suite))
+        validate_densespark_selection(model, _namespace(suite))
     except DenseSparkContractError as error:
-        raise PreflightError("Frozen DenseSpark suite contract is invalid") from error
+        raise PreflightError(
+            "Frozen DenseSpark profile/suite contract is invalid"
+        ) from error
 
 
 def _require_frozen_matched_prompt_suite(model: Any, suite: object) -> None:
@@ -2502,10 +2511,16 @@ def _validate_quality_item(item: QualityItem, result: Any) -> dict[str, Any]:
     }
 
 
-def _prompt(case: SimpleNamespace, nonce: str) -> str:
+def _prompt(
+    case: SimpleNamespace, nonce: str, *, model: object | None = None
+) -> str:
     kind = str(case.kind)
     prompt_repetitions = int(case.prompt_repetitions)
     prefix = f"Benchmark nonce {nonce}. "
+    if is_densespark_fast_profile(model) and is_densespark_fast_coding_case_id(
+        getattr(case, "id", None)
+    ):
+        return densespark_fast_coding_prompt(nonce)
     if kind == "prefill":
         return prefix + "Read all text and reply with exactly one word. " + (
             "measurement " * prompt_repetitions
@@ -2721,7 +2736,7 @@ def _request_arguments(
             if audio_case
             else _OCR_PROMPT
             if "ocr" in case.requires
-            else _prompt(case, request_id)
+            else _prompt(case, request_id, model=model)
         ),
         "max_tokens": max_tokens,
         "temperature": float(case.temperature),
@@ -2851,6 +2866,26 @@ def _validate_capability(
             and actual_tokens == expected_tokens
             and (rate_valid or not diffusion_generation)
         )
+        fast_coding_case = is_densespark_fast_profile(
+            model
+        ) and is_densespark_fast_coding_case_id(
+            getattr(case, "id", None)
+        )
+        positive_reasoning_tokens = (
+            isinstance(getattr(result, "reasoning_tokens", None), (int, float))
+            and not isinstance(getattr(result, "reasoning_tokens", None), bool)
+            and float(result.reasoning_tokens) > 0
+        )
+        content_oracle_passed = densespark_fast_coding_output_passes(
+            getattr(result, "content", None)
+        )
+        if fast_coding_case:
+            passed = (
+                passed
+                and content_oracle_passed
+                and not bool(result.reasoning)
+                and not positive_reasoning_tokens
+            )
         if result.finish_reason != "length":
             reason = f"generation ended with {result.finish_reason!r}"
         elif actual_tokens != expected_tokens:
@@ -2860,6 +2895,12 @@ def _validate_capability(
             )
         elif diffusion_generation and not rate_valid:
             reason = "end-to-end block-generation output rate was not positive and finite"
+        elif fast_coding_case and not content_oracle_passed:
+            reason = "synthetic continuation response failed its code-marker oracle"
+        elif fast_coding_case and result.reasoning:
+            reason = "synthetic continuation response unexpectedly contained reasoning"
+        elif fast_coding_case and positive_reasoning_tokens:
+            reason = "synthetic continuation response reported reasoning tokens"
         else:
             reason = None
         validation = {
@@ -3267,6 +3308,24 @@ def _execute_case(
         measured_started = time.perf_counter()
         validation_results: list[dict[str, Any]] = []
         for repetition in range(int(case.repetitions)):
+            vllm_metrics_before = None
+            fast_coding_measurement = is_densespark_fast_profile(
+                model
+            ) and is_densespark_fast_coding_case_id(getattr(case, "id", None))
+            if fast_coding_measurement:
+                if server.backend != "vllm" or int(case.concurrency) != 1:
+                    raise RuntimeError(
+                        "DenseSpark synthetic continuation metrics require one "
+                        "managed vLLM request"
+                    )
+                vllm_metrics_before = snapshot_vllm_spec_decode_metrics(
+                    server.base_url
+                )
+                if vllm_metrics_before is None:
+                    raise RuntimeError(
+                        "DenseSpark synthetic continuation metrics were unavailable "
+                        "before measurement"
+                    )
             quality_items_by_request_id: dict[str, QualityItem] = {}
             quality_bursts_by_request_id: dict[str, float] = {}
             if str(case.kind) == "agentic":
@@ -3414,7 +3473,10 @@ def _execute_case(
                         case=case,
                         request_id=(
                             f"{case.id}-r{repetition}-w{worker}"
-                            if _uses_matched_prompt_protocol(case)
+                            if (
+                                _uses_matched_prompt_protocol(case)
+                                or fast_coding_measurement
+                            )
                             else (
                                 f"{case.case_id}-r{repetition}-w{worker}-"
                                 f"{time.time_ns()}"
@@ -3461,6 +3523,33 @@ def _execute_case(
                             else _request_result_payload(model, result)
                         ),
                         "validation": validation,
+                    }
+                )
+            if vllm_metrics_before is not None:
+                if len(results) != 1:
+                    raise RuntimeError(
+                        "DenseSpark synthetic continuation metric window contained "
+                        "more than one request"
+                    )
+                vllm_metrics_after = snapshot_vllm_spec_decode_metrics(
+                    server.base_url
+                )
+                if vllm_metrics_after is None:
+                    raise RuntimeError(
+                        "DenseSpark synthetic continuation metrics were unavailable "
+                        "after measurement"
+                    )
+                journal.append(
+                    {
+                        "event": "vllm_spec_decode_metrics_delta",
+                        "backend": server.backend,
+                        "case_id": case.case_id,
+                        "attempt_id": attempt_id,
+                        "repetition": repetition,
+                        "metrics": delta_vllm_spec_decode_metrics(
+                            vllm_metrics_before,
+                            vllm_metrics_after,
+                        ),
                     }
                 )
         elapsed_s = time.perf_counter() - measured_started

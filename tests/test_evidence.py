@@ -45,6 +45,7 @@ from bench.evidence import (
 from bench.densespark import (
     DENSESPARK_LOCAL_IMAGE_ID,
     DENSESPARK_MODEL_REVISION,
+    DENSESPARK_NATIVE_262K_PROFILE_ID,
     DENSESPARK_PQ_SHA256,
     DENSESPARK_PROFILE_ID,
     DENSESPARK_WARMUP_SYNC_LOCAL_IMAGE_ID,
@@ -74,6 +75,11 @@ from bench.manifest import (
 )
 from bench.sglang_sm121_cuda_graph import SM121_CUDA_GRAPH_BREAKABLE_PROFILE_ID
 from bench.report import summarize_run
+from bench.vllm_metrics import (
+    VLLM_SPEC_DECODE_CASE_AGGREGATE_SCOPE,
+    VLLM_SPEC_DECODE_REQUEST_DELTA_SCOPE,
+    VLLM_SPEC_DECODE_SOURCE,
+)
 from bench.harbor_campaign_lifecycle import (
     CleanupStatus,
     ModelAdmission,
@@ -104,6 +110,43 @@ REPOSITORY = Path(__file__).resolve().parents[1]
 HARBOR_CAMPAIGN_PATH = (
     REPOSITORY / "manifests" / "campaigns" / "harbor_terminal_coder_next.toml"
 )
+
+
+def _synthetic_vllm_request_delta() -> dict[str, object]:
+    return {
+        "accepted_tokens_per_position": {
+            "0": 2,
+            "1": 2,
+            "2": 1,
+            "3": 1,
+        },
+        "draft_acceptance_rate": 0.375,
+        "mean_accepted_length": 4.0,
+        "num_accepted_tokens": 6,
+        "num_draft_tokens": 16,
+        "num_drafts": 2,
+        "scope": VLLM_SPEC_DECODE_REQUEST_DELTA_SCOPE,
+        "source": VLLM_SPEC_DECODE_SOURCE,
+    }
+
+
+def _synthetic_vllm_case_speculation() -> dict[str, object]:
+    return {
+        "accepted_tokens_per_position": {
+            "0": 4,
+            "1": 4,
+            "2": 2,
+            "3": 2,
+        },
+        "draft_acceptance_rate": 0.375,
+        "mean_accepted_length": 4.0,
+        "num_accepted_tokens": 12,
+        "num_draft_tokens": 32,
+        "num_drafts": 4,
+        "request_count": 2,
+        "scope": VLLM_SPEC_DECODE_CASE_AGGREGATE_SCOPE,
+        "source": VLLM_SPEC_DECODE_SOURCE,
+    }
 
 
 def _synthetic_content_hash(value: object, *, length: int = 64) -> str:
@@ -1701,6 +1744,50 @@ class EvidenceExportTests(unittest.TestCase):
                 require_existing_output=require_existing_output,
             )
 
+    def add_vllm_case_speculation(
+        self,
+        *,
+        event_metrics: dict[str, object] | None = None,
+        summary_metrics: dict[str, object] | None = None,
+        include_event: bool = True,
+        duplicate_event: bool = False,
+    ) -> None:
+        plan_path = self.fixture.run_dir / "plan.json"
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["suite"]["cases"][0]["repetitions"] = 2
+        self.fixture.write_json(plan_path, plan)
+
+        if include_event:
+            events_path = self.fixture.run_dir / "events.jsonl"
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+            ]
+            delta_events = [
+                {
+                    "timestamp": f"2026-08-17T00:00:06.{500 + repetition:03d}Z",
+                    "event": "vllm_spec_decode_metrics_delta",
+                    "backend": "vllm",
+                    "case_id": "chat-case",
+                    "attempt_id": "private-attempt-b",
+                    "repetition": repetition,
+                    "metrics": event_metrics or _synthetic_vllm_request_delta(),
+                }
+                for repetition in range(2)
+            ]
+            events[-1:-1] = delta_events
+            if duplicate_event:
+                events.insert(-1, dict(delta_events[-1]))
+            self.fixture.write_jsonl(events_path, events)
+
+        summary_path = self.fixture.run_dir / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["cases"][0]["speculative_decoding"] = (
+            summary_metrics or _synthetic_vllm_case_speculation()
+        )
+        summary["cases"][0]["requests"] = 2
+        self.fixture.write_json(summary_path, summary)
+
     def add_typed_startup_safety_gates(
         self,
         gates: list[dict[str, object]],
@@ -1884,6 +1971,87 @@ class EvidenceExportTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, all_keys)
         self.assertFalse(any(key.endswith("_path") for key in all_keys))
+
+    def test_vllm_request_deltas_are_bound_exported_and_verified(self) -> None:
+        self.add_vllm_case_speculation()
+
+        first = self.export()
+        self.assertTrue(first["changed"])
+        original = self.exported_bytes()
+        run = self.fixture.output / "runs" / self.fixture.run_id
+        manifest = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
+        summary = json.loads((run / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            2,
+            manifest["lifecycle"]["event_counts"][
+                "vllm_spec_decode_metrics_delta"
+            ],
+        )
+        self.assertEqual(
+            _synthetic_vllm_case_speculation(),
+            summary["aggregates"]["cases"][0]["speculative_decoding"],
+        )
+
+        second = self.export()
+        self.assertFalse(second["changed"])
+        self.assertEqual(original, self.exported_bytes())
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+
+        tampered = Path(self.temporary.name) / "tampered-vllm-case-speculation"
+        shutil.copytree(self.fixture.output, tampered)
+        tampered_summary_path = (
+            tampered / "runs" / self.fixture.run_id / "summary.json"
+        )
+        tampered_summary = json.loads(
+            tampered_summary_path.read_text(encoding="utf-8")
+        )
+        tampered_summary["aggregates"]["cases"][0]["speculative_decoding"][
+            "scope"
+        ] = "global"
+        self.fixture.write_json(tampered_summary_path, tampered_summary)
+        self.refresh_run_checksums(self.fixture.run_id, evidence_root=tampered)
+
+        with self.assertRaisesRegex(EvidenceError, "scope changed"):
+            verify_evidence(tampered)
+
+    def test_vllm_case_speculation_rejects_missing_mismatched_and_duplicate_deltas(
+        self,
+    ) -> None:
+        mutations = (
+            ("missing", {"include_event": False}),
+            (
+                "mismatched",
+                {
+                    "summary_metrics": {
+                        **_synthetic_vllm_case_speculation(),
+                        "accepted_tokens_per_position": {
+                            "0": 4,
+                            "1": 2,
+                            "2": 1,
+                            "3": 1,
+                        },
+                        "draft_acceptance_rate": 0.25,
+                        "mean_accepted_length": 3.0,
+                        "num_accepted_tokens": 8,
+                    }
+                },
+            ),
+            ("duplicate", {"duplicate_event": True}),
+        )
+        for label, arguments in mutations:
+            with (
+                self.subTest(label=label),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                fixture = EvidenceFixture(Path(temporary))
+                original_fixture = self.fixture
+                self.fixture = fixture
+                try:
+                    self.add_vllm_case_speculation(**arguments)
+                    with self.assertRaises(EvidenceError):
+                        self.export()
+                finally:
+                    self.fixture = original_fixture
 
     def test_verifier_rejects_text_in_rechecksummed_telemetry_rows(self) -> None:
         self.export()
@@ -2313,6 +2481,30 @@ class EvidenceExportTests(unittest.TestCase):
                 str(source[key]).removeprefix("sha256:"), receipt[key]
             )
         self.assertFalse(any(key.endswith("_path") for key in json_keys(manifest)))
+
+        second = self.export()
+        self.assertFalse(second["changed"])
+        self.assertEqual(original, self.exported_bytes())
+        self.assertEqual("verified", verify_evidence(self.fixture.output)["status"])
+
+    def test_native_262k_receipt_binds_reduced_memory_configuration(self) -> None:
+        self.bind_densespark_provenance(DENSESPARK_NATIVE_262K_PROFILE_ID)
+
+        self.export()
+        original = self.exported_bytes()
+        manifest_path = (
+            self.fixture.output
+            / "runs"
+            / self.fixture.run_id
+            / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(DENSESPARK_NATIVE_262K_PROFILE_ID, manifest["model"]["id"])
+        self.assertEqual(262_144, manifest["model"]["max_context"])
+        self.assertEqual(
+            "87eee0e35d5377d9d9f4067932fe27496c3625e3071cd80ba119497ce039c4d7",
+            manifest["runtime"]["densespark"]["configuration_sha256"],
+        )
 
         second = self.export()
         self.assertFalse(second["changed"])
@@ -5210,6 +5402,76 @@ class EvidenceValidationTests(unittest.TestCase):
             with self.subTest(root=next(iter(summary))):
                 with self.assertRaises(EvidenceError):
                     _project_summary(summary)
+
+    def test_case_vllm_speculation_requires_exact_counter_invariants(self) -> None:
+        valid = _synthetic_vllm_case_speculation()
+        projected = _project_case(
+            {
+                "case_id": "decode-case",
+                "kind": "decode",
+                "speculative_decoding": valid,
+            }
+        )
+        self.assertEqual(valid, projected["speculative_decoding"])
+
+        invalid: list[dict[str, object]] = []
+        for key, value in (
+            ("source", "other_source"),
+            ("scope", VLLM_SPEC_DECODE_REQUEST_DELTA_SCOPE),
+            ("request_count", 0),
+            ("num_drafts", 2.5),
+            ("draft_acceptance_rate", 0.5),
+            ("mean_accepted_length", 3.0),
+        ):
+            candidate = json.loads(json.dumps(valid))
+            candidate[key] = value
+            invalid.append(candidate)
+
+        missing = json.loads(json.dumps(valid))
+        missing.pop("request_count")
+        invalid.append(missing)
+
+        extra = json.loads(json.dumps(valid))
+        extra["snapshot_count"] = 1
+        invalid.append(extra)
+
+        negative_position = json.loads(json.dumps(valid))
+        negative_position["accepted_tokens_per_position"]["0"] = -1
+        invalid.append(negative_position)
+
+        noncanonical_position = json.loads(json.dumps(valid))
+        noncanonical_position["accepted_tokens_per_position"]["04"] = (
+            noncanonical_position["accepted_tokens_per_position"].pop("3")
+        )
+        invalid.append(noncanonical_position)
+
+        gapped_positions = json.loads(json.dumps(valid))
+        gapped_positions["accepted_tokens_per_position"].pop("1")
+        invalid.append(gapped_positions)
+
+        increasing_positions = json.loads(json.dumps(valid))
+        increasing_positions["accepted_tokens_per_position"] = {
+            "0": 1,
+            "1": 2,
+            "2": 2,
+            "3": 1,
+        }
+        invalid.append(increasing_positions)
+
+        wrong_sum = json.loads(json.dumps(valid))
+        wrong_sum["num_accepted_tokens"] = 5
+        invalid.append(wrong_sum)
+
+        for candidate in invalid:
+            with self.subTest(candidate=candidate):
+                with self.assertRaises(EvidenceError):
+                    _project_case(
+                        {
+                            "case_id": "decode-case",
+                            "kind": "decode",
+                            "speculative_decoding": candidate,
+                        }
+                    )
 
     def test_summary_case_preserves_allowlisted_nullables(self) -> None:
         projected = _project_case(

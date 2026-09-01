@@ -39,7 +39,6 @@ from .annotations import (
 )
 from .densespark import (
     DENSESPARK_IMAGE,
-    DENSESPARK_MAX_CONTEXT,
     DENSESPARK_MODEL_REVISION,
     DENSESPARK_MODEL_SOURCE,
     DENSESPARK_NATIVE_CONTEXT,
@@ -52,11 +51,12 @@ from .densespark import (
     DENSESPARK_WEIGHT_FILE_COUNT,
     DENSESPARK_WEIGHT_SIZE_BYTES,
     DENSESPARK_WARMUP_SYNC_IMAGE,
-    DENSESPARK_WARMUP_SYNC_PROFILE_ID,
+    DENSESPARK_WARMUP_SYNC_PROFILE_IDS,
     DenseSparkContractError,
     densespark_expected_launch_policy,
     densespark_expected_resolved_provenance,
     densespark_image_for_profile,
+    densespark_max_context_for_profile,
     validate_densespark_profile,
 )
 from .manifest import (
@@ -218,6 +218,13 @@ from .sglang_sm121_cache_performance import (
     validate_sm121_cache_performance_turn_event,
 )
 from . import sm121_chunked_prefill_evidence as chunked_prefill_evidence
+from .vllm_metrics import (
+    VLLM_SPEC_DECODE_CASE_AGGREGATE_SCOPE,
+    VLLM_SPEC_DECODE_REQUEST_DELTA_SCOPE,
+    VLLM_SPEC_DECODE_SOURCE,
+    VLLMSpecDecodeMetricsDeltaError,
+    aggregate_vllm_spec_decode_metric_deltas,
+)
 
 
 SCHEMA_VERSION = "sparkbench-evidence-v1"
@@ -1286,6 +1293,7 @@ _KNOWN_EVENTS = {
     SM121_CACHE_SEMANTIC_TURN_OBSERVATION_EVENT,
     SM121_STORAGE_RUNTIME_PROVENANCE_EVENT,
     "sglang_spec_decode_metrics_snapshot",
+    "vllm_spec_decode_metrics_delta",
     "vllm_spec_decode_metrics_snapshot",
     "worker_cleanup",
     "worker_start",
@@ -2055,6 +2063,7 @@ _CASE_FIELDS = {
     "rerank_scores_finite",
     "rerank_top_index",
     "rerank_validation_passed",
+    "speculative_decoding",
     "synthetic_memory_extension_operations",
     "telemetry",
     "validation_passed",
@@ -2085,6 +2094,7 @@ _CASE_OBJECT_FIELDS = {
     "graphiti_resolver_confusion",
     "prefix_cache",
     "quality_accuracy_by_category",
+    "speculative_decoding",
     "telemetry",
 }
 _CASE_NULLABLE_FIELDS = {
@@ -2112,6 +2122,34 @@ _CASE_NULLABLE_FIELDS = {
     "request_tps",
     "validation_passed",
 }
+
+_VLLM_SPEC_DECODE_COUNTER_FIELDS = frozenset(
+    {
+        "accepted_tokens_per_position",
+        "draft_acceptance_rate",
+        "mean_accepted_length",
+        "num_accepted_tokens",
+        "num_draft_tokens",
+        "num_drafts",
+        "scope",
+        "source",
+    }
+)
+_VLLM_CASE_SPEC_DECODE_FIELDS = frozenset(
+    _VLLM_SPEC_DECODE_COUNTER_FIELDS | {"request_count"}
+)
+_VLLM_SPEC_DECODE_DELTA_EVENT_FIELDS = frozenset(
+    {
+        "attempt_id",
+        "backend",
+        "case_id",
+        "event",
+        "metrics",
+        "repetition",
+        "timestamp",
+    }
+)
+_VLLM_SPEC_DECODE_POSITION_RE = re.compile(r"(?:0|[1-9][0-9]*)\Z", re.ASCII)
 _AGENTIC_CASE_FIELDS = frozenset(
     {
         "agentic_expected_tool_calls",
@@ -7072,7 +7110,7 @@ def _expected_projected_densespark_provenance(
         )
     else:
         raise EvidenceError("DenseSpark launch-policy binding is invalid")
-    if profile_id == DENSESPARK_WARMUP_SYNC_PROFILE_ID:
+    if profile_id in DENSESPARK_WARMUP_SYNC_PROFILE_IDS:
         projected.update(
             {
                 "base_docker_image_sha256": _sha256(
@@ -7134,7 +7172,7 @@ def _expected_projected_densespark_model(
         "estimated_ram_gib": 92.0,
         "id": profile_id,
         "lifecycle": "docker",
-        "max_context": DENSESPARK_MAX_CONTEXT,
+        "max_context": densespark_max_context_for_profile(profile_id),
         "native_context": DENSESPARK_NATIVE_CONTEXT,
         "quantization": "int4-autoround+densespark-pq",
         "revision": DENSESPARK_MODEL_REVISION,
@@ -7142,7 +7180,7 @@ def _expected_projected_densespark_model(
         "startup_timeout_s": 1_800,
         "support_status": (
             "exploratory"
-            if profile_id == DENSESPARK_WARMUP_SYNC_PROFILE_ID
+            if profile_id in DENSESPARK_WARMUP_SYNC_PROFILE_IDS
             else "spark_vllm_recipe"
         ),
         "tasks": ["chat", "thinking", "tools"],
@@ -12042,6 +12080,311 @@ def _validate_memory_case(case: dict[str, Any]) -> None:
         raise EvidenceError("memory case has an energy metric without sampled energy")
 
 
+def _vllm_spec_decode_count(value: Any, *, name: str) -> int:
+    if type(value) is not int or value < 0:
+        raise EvidenceError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _vllm_spec_decode_rate(
+    value: Any,
+    *,
+    expected: float | None,
+    name: str,
+) -> float | None:
+    if expected is None:
+        if value is not None:
+            raise EvidenceError(f"{name} must be null when no drafts were observed")
+        return None
+    if (
+        type(value) is not float
+        or not math.isfinite(value)
+        or not math.isclose(value, expected, rel_tol=1e-9, abs_tol=1e-12)
+    ):
+        raise EvidenceError(f"{name} is inconsistent with its counters")
+    return value
+
+
+def _project_vllm_spec_decode_counter_record(
+    value: Any,
+    *,
+    aggregate: bool,
+) -> dict[str, Any]:
+    expected_fields = (
+        _VLLM_CASE_SPEC_DECODE_FIELDS
+        if aggregate
+        else _VLLM_SPEC_DECODE_COUNTER_FIELDS
+    )
+    expected_scope = (
+        VLLM_SPEC_DECODE_CASE_AGGREGATE_SCOPE
+        if aggregate
+        else VLLM_SPEC_DECODE_REQUEST_DELTA_SCOPE
+    )
+    name = (
+        "case speculative decoding"
+        if aggregate
+        else "request speculative decoding"
+    )
+    if not isinstance(value, dict) or set(value) != expected_fields:
+        raise EvidenceError(f"{name} does not match its exact schema")
+    if value.get("source") != VLLM_SPEC_DECODE_SOURCE:
+        raise EvidenceError(f"{name} source changed")
+    if value.get("scope") != expected_scope:
+        raise EvidenceError(f"{name} scope changed")
+
+    request_count: int | None = None
+    if aggregate:
+        request_count = _vllm_spec_decode_count(
+            value.get("request_count"), name=f"{name}.request_count"
+        )
+        if request_count == 0:
+            raise EvidenceError(f"{name}.request_count must be positive")
+
+    drafts = _vllm_spec_decode_count(
+        value.get("num_drafts"), name=f"{name}.num_drafts"
+    )
+    draft_tokens = _vllm_spec_decode_count(
+        value.get("num_draft_tokens"), name=f"{name}.num_draft_tokens"
+    )
+    accepted_tokens = _vllm_spec_decode_count(
+        value.get("num_accepted_tokens"),
+        name=f"{name}.num_accepted_tokens",
+    )
+    if (
+        (drafts == 0) != (draft_tokens == 0)
+        or draft_tokens < drafts
+        or accepted_tokens > draft_tokens
+    ):
+        raise EvidenceError(f"{name} core counters are inconsistent")
+
+    raw_positions = value.get("accepted_tokens_per_position")
+    if not isinstance(raw_positions, dict):
+        raise EvidenceError(f"{name}.accepted_tokens_per_position must be an object")
+    positions: dict[int, int] = {}
+    for raw_position, raw_count in raw_positions.items():
+        if (
+            not isinstance(raw_position, str)
+            or _VLLM_SPEC_DECODE_POSITION_RE.fullmatch(raw_position) is None
+        ):
+            raise EvidenceError(f"{name} position is not a canonical index")
+        position = int(raw_position)
+        positions[position] = _vllm_spec_decode_count(
+            raw_count,
+            name=f"{name}.accepted_tokens_per_position[{raw_position}]",
+        )
+    if positions and set(positions) != set(range(max(positions) + 1)):
+        raise EvidenceError(f"{name} positions are not contiguous")
+    ordered_counts = [positions[position] for position in sorted(positions)]
+    if (
+        (drafts > 0 and not ordered_counts)
+        or any(count > drafts for count in ordered_counts)
+        or any(
+            left < right
+            for left, right in zip(ordered_counts, ordered_counts[1:])
+        )
+        or sum(ordered_counts) != accepted_tokens
+    ):
+        raise EvidenceError(f"{name} position counters are inconsistent")
+
+    draft_acceptance_rate = _vllm_spec_decode_rate(
+        value.get("draft_acceptance_rate"),
+        expected=(accepted_tokens / draft_tokens if draft_tokens else None),
+        name=f"{name}.draft_acceptance_rate",
+    )
+    mean_accepted_length = _vllm_spec_decode_rate(
+        value.get("mean_accepted_length"),
+        expected=(1.0 + accepted_tokens / drafts if drafts else None),
+        name=f"{name}.mean_accepted_length",
+    )
+    projected: dict[str, Any] = {
+        "accepted_tokens_per_position": {
+            str(position): positions[position] for position in sorted(positions)
+        },
+        "draft_acceptance_rate": draft_acceptance_rate,
+        "mean_accepted_length": mean_accepted_length,
+        "num_accepted_tokens": accepted_tokens,
+        "num_draft_tokens": draft_tokens,
+        "num_drafts": drafts,
+    }
+    if request_count is not None:
+        projected["request_count"] = request_count
+    projected.update(
+        {
+            "scope": expected_scope,
+            "source": VLLM_SPEC_DECODE_SOURCE,
+        }
+    )
+    return projected
+
+
+def _aggregate_vllm_request_spec_decode_deltas(
+    deltas: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    if not deltas:
+        raise EvidenceError("case speculative decoding requires request deltas")
+    projected = [
+        _project_vllm_spec_decode_counter_record(delta, aggregate=False)
+        for delta in deltas
+    ]
+    try:
+        aggregate = aggregate_vllm_spec_decode_metric_deltas(projected)
+    except VLLMSpecDecodeMetricsDeltaError as error:
+        raise EvidenceError(
+            "vLLM request speculative-decoding deltas cannot be aggregated"
+        ) from error
+    return _project_vllm_spec_decode_counter_record(aggregate, aggregate=True)
+
+
+def _planned_case_repetitions(plan: dict[str, Any]) -> dict[str, int]:
+    suite = plan.get("suite")
+    cases = suite.get("cases") if isinstance(suite, dict) else None
+    if not isinstance(cases, list):
+        return {}
+    result: dict[str, int] = {}
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        case_id = case.get("case_id", case.get("id"))
+        repetitions = case.get("repetitions")
+        if not isinstance(case_id, str) or type(repetitions) is not int:
+            continue
+        if case_id in result:
+            raise EvidenceError("planned case identifiers are not unique")
+        result[case_id] = repetitions
+    return result
+
+
+def _validate_vllm_case_spec_decode_source(
+    plan: dict[str, Any],
+    events: list[dict[str, Any]],
+    summary: dict[str, Any] | None,
+) -> None:
+    delta_events = [
+        event
+        for event in events
+        if event.get("event") == "vllm_spec_decode_metrics_delta"
+    ]
+    summary_cases = summary.get("cases") if isinstance(summary, dict) else None
+    cases_with_metrics = (
+        [
+            case
+            for case in summary_cases
+            if isinstance(case, dict) and "speculative_decoding" in case
+        ]
+        if isinstance(summary_cases, list)
+        else []
+    )
+    if not delta_events and not cases_with_metrics:
+        return
+    if not isinstance(summary_cases, list):
+        raise EvidenceError("vLLM request deltas require summary cases")
+
+    planned_repetitions = _planned_case_repetitions(plan)
+    if not planned_repetitions:
+        raise EvidenceError("vLLM request deltas require frozen planned cases")
+
+    deltas_by_attempt: dict[tuple[str, str], dict[int, dict[str, Any]]] = {}
+    for event in delta_events:
+        if (
+            not isinstance(event, dict)
+            or set(event) != _VLLM_SPEC_DECODE_DELTA_EVENT_FIELDS
+        ):
+            raise EvidenceError(
+                "vLLM speculative-decoding delta event does not match its exact schema"
+            )
+        if not isinstance(event.get("timestamp"), str):
+            raise EvidenceError(
+                "vLLM speculative-decoding delta timestamp is missing"
+            )
+        if event.get("backend") != "vllm":
+            raise EvidenceError("vLLM speculative-decoding delta backend changed")
+        case_id = _safe_id(
+            event.get("case_id"), name="vLLM speculative-decoding case ID"
+        )
+        attempt_id = _safe_id(
+            event.get("attempt_id"), name="vLLM speculative-decoding attempt ID"
+        )
+        if case_id not in planned_repetitions:
+            raise EvidenceError("vLLM speculative-decoding delta case is not planned")
+        repetition = event.get("repetition")
+        if (
+            type(repetition) is not int
+            or repetition < 0
+            or repetition >= planned_repetitions[case_id]
+        ):
+            raise EvidenceError("vLLM speculative-decoding repetition is invalid")
+        metrics = _project_vllm_spec_decode_counter_record(
+            event.get("metrics"), aggregate=False
+        )
+        repetitions = deltas_by_attempt.setdefault((case_id, attempt_id), {})
+        if repetition in repetitions:
+            raise EvidenceError(
+                "duplicate vLLM speculative-decoding request delta"
+            )
+        repetitions[repetition] = metrics
+
+    summary_by_case: dict[str, dict[str, Any]] = {}
+    for case in summary_cases:
+        if not isinstance(case, dict) or not isinstance(case.get("case_id"), str):
+            continue
+        case_id = str(case["case_id"])
+        if case_id in summary_by_case:
+            raise EvidenceError("summary case identifiers are not unique")
+        summary_by_case[case_id] = case
+
+    for case_id, case in summary_by_case.items():
+        attempt_id = case.get("attempt_id")
+        selected_deltas = (
+            deltas_by_attempt.get((case_id, attempt_id), {})
+            if isinstance(attempt_id, str)
+            else {}
+        )
+        reported = case.get("speculative_decoding")
+        if not selected_deltas and reported is None:
+            continue
+        if not isinstance(attempt_id, str):
+            raise EvidenceError(
+                "vLLM speculative-decoding summary attempt is missing"
+            )
+        repetitions = planned_repetitions.get(case_id)
+        if type(repetitions) is not int or repetitions <= 0:
+            raise EvidenceError(
+                "vLLM speculative-decoding summary case is not planned"
+            )
+        if set(selected_deltas) != set(range(repetitions)):
+            raise EvidenceError(
+                "vLLM speculative-decoding request repetitions are incomplete"
+            )
+        if (
+            type(case.get("requests")) is not int
+            or case.get("requests") != repetitions
+        ):
+            raise EvidenceError(
+                "vLLM speculative-decoding request count disagrees with the plan"
+            )
+        expected = _aggregate_vllm_request_spec_decode_deltas(
+            [selected_deltas[index] for index in range(repetitions)]
+        )
+        projected_reported = _project_vllm_spec_decode_counter_record(
+            reported, aggregate=True
+        )
+        if not _json_strict_equal(projected_reported, expected):
+            raise EvidenceError(
+                "vLLM speculative-decoding summary disagrees with request deltas"
+            )
+
+    for case_id, attempt_id in deltas_by_attempt:
+        selected = summary_by_case.get(case_id)
+        if (
+            isinstance(selected, dict)
+            and selected.get("attempt_id") == attempt_id
+            and "speculative_decoding" not in selected
+        ):
+            raise EvidenceError(
+                "vLLM speculative-decoding summary omitted selected request deltas"
+            )
+
+
 def _project_case(case: Any) -> dict[str, Any]:
     if not isinstance(case, dict):
         raise EvidenceError("summary case must be an object")
@@ -12094,6 +12437,10 @@ def _project_case(case: Any) -> dict[str, Any]:
             projected[key] = _project_memory_resolver_confusion(value)
         elif key == "quality_accuracy_by_category":
             projected[key] = _project_quality_accuracy(value)
+        elif key == "speculative_decoding":
+            projected[key] = _project_vllm_spec_decode_counter_record(
+                value, aggregate=True
+            )
         elif key in _CASE_FIELDS - _CASE_STRING_FIELDS - _CASE_BOOLEAN_FIELDS - _CASE_OBJECT_FIELDS:
             projected[key] = _finite(value, name=f"case.{key}")
         else:
@@ -14095,6 +14442,7 @@ def _export_run(
             summary,
             source_run_id=source_run_id,
         )
+    _validate_vllm_case_spec_decode_source(plan, events, summary)
     requests = _project_requests(events, summary, evidence_kind=kind)
     if memory_protocol:
         unexpected = [
@@ -17027,6 +17375,13 @@ def _verify_run_bundle(root: Path, entry: dict[str, Any]) -> None:
     aggregates = summary["aggregates"]
     if not isinstance(aggregates, dict):
         raise EvidenceError(f"run aggregates must be an object: {run_id}")
+    published_cases = aggregates.get("cases")
+    if published_cases is not None:
+        if not isinstance(published_cases, list):
+            raise EvidenceError(f"run aggregate cases must be a list: {run_id}")
+        projected_cases = [_project_case(case) for case in published_cases]
+        if not _json_strict_equal(projected_cases, published_cases):
+            raise EvidenceError(f"run aggregate case projection changed: {run_id}")
     _validate_densespark_legacy_published_bundle(
         run_id=run_id,
         bundle_sha256=bundle_sha256,
